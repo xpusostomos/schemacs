@@ -32,6 +32,8 @@
           define-command current-prefix-arg uarg->integer *last-command-event*)
     (only (schemacs editor subr) kbd user-error)
     (only (schemacs editor buffer) transient-mark-mode mark-active)
+    (only (schemacs editor editfns)
+          narrow-to-region point-max save-restriction)
     (only (schemacs editor character) event-basic-type)
     (only (schemacs editor simple)
           push-mark mark set-mark kill-region use-region-p
@@ -280,12 +282,15 @@ move backward but still to a less deep spot."
             (up-list-default-function arg escape-strings no-syntax-crossing))))
 
     (define (up-list-default-function arg escape-strings no-syntax-crossing)
-      ;; GNU Emacs's `up-list-default-function' (`lisp.el:275').
+      ;; GNU Emacs's `up-list-default-function' (`lisp.el:271').
       ;;
-      ;; The C's `narrow-to-region' arm is not carried: this tree has no
-      ;; narrowing. NO-SYNTAX-CROSSING still means what it says - point
-      ;; simply does not cross a string boundary - but the preference is
-      ;; the error arm below rather than a narrowed scan.
+      ;; **The `no-syntax-crossing` narrowing is the C's**: when point is
+      ;; inside a string or comment and the caller has asked not to cross
+      ;; a boundary, the scan is restricted to that string or comment, so
+      ;; `scan-lists` cannot pair a parenthesis with one outside it. It
+      ;; was the error arm alone until 2026-11-17, which reaches the same
+      ;; answer by a different route; the C's route is the one here now
+      ;; that `narrow-to-region` exists.
       ;;--------------------------------------------------------------
       (if (not arg) (set! arg 1))
       (let ((inc (if (> arg 0) 1 -1))
@@ -306,6 +311,11 @@ move backward but still to a less deep spot."
                                    (goto-char (list-ref syntax 8))
                                    (begin (when (> inc 0) (forward-sexp))
                                           #t))
+                              ;; "If we narrowed to a comment above and
+                              ;; failed to escape it, the error might be
+                              ;; our fault, not an indication that we're
+                              ;; out of syntax. Try again from beginning
+                              ;; or end of the comment."
                               (and no-syntax-crossing
                                    (set! syntax (syntax-ppss))
                                    (list-ref syntax 4)
@@ -316,25 +326,43 @@ move backward but still to a less deep spot."
                               (if no-syntax-crossing
                                   (user-error "At top level")
                                   (raise e))))))
-                (if (or (not (*forward-sexp-function*))
-                        (eq? (*forward-sexp-function*)
-                             forward-sexp-default-function))
-                    (goto-char (or (scan-lists (point) inc 1)
-                                   (buffer-end arg)))
-                    (begin
-                      (guard (e ((scan-error? e)
-                                 (goto-char (if (> arg 0)
-                                                (scan-error-end e)
-                                                (scan-error-start e)))))
-                        (let spin ()
-                          (set! pos (point))
-                          (forward-sexp inc)
-                          (if (not (= (point) pos)) (spin))))
-                      (if (= (point) pos)
-                          (raise (make-scan-error "Unbalanced parentheses"
-                                                  (point) (point))))))
+                  (save-restriction
+                    ;; "If we've been asked not to cross string boundaries
+                    ;; and we're inside a string, narrow to that string so
+                    ;; that scan-lists doesn't find a match in a different
+                    ;; string."
+                    (when no-syntax-crossing
+                      (let* ((syntax (syntax-ppss))
+                             (string-comment-start (list-ref syntax 8)))
+                        (when string-comment-start
+                          (save-excursion
+                            (goto-char string-comment-start)
+                            (narrow-to-region
+                             (point)
+                             (if (list-ref syntax 3)   ; in string
+                                 (guard (e2 ((scan-error? e2) (point-max)))
+                                   (forward-sexp 1)
+                                   (point))
+                                 (begin (forward-comment 1) (point))))))))
+                    (if (or (not (*forward-sexp-function*))
+                            (eq? (*forward-sexp-function*)
+                                 forward-sexp-default-function))
+                        (goto-char (or (scan-lists (point) inc 1)
+                                       (buffer-end arg)))
+                        (begin
+                          (guard (e ((scan-error? e)
+                                     (goto-char (if (> arg 0)
+                                                    (scan-error-end e)
+                                                    (scan-error-start e)))))
+                            (let spin ()
+                              (set! pos (point))
+                              (forward-sexp inc)
+                              (if (not (= (point) pos)) (spin))))
+                          (if (= (point) pos)
+                              (raise (make-scan-error "Unbalanced parentheses"
+                                                      (point) (point))))))))
                 (set! arg (- arg inc))
-                (loop)))))
+                (loop))))
         #f))
 
     (define-command (kill-sexp . rest)

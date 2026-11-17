@@ -120,7 +120,8 @@
           insert
           insert-buffer-substring
           line-beginning-position line-end-position message
-          point point-marker point-max point-min preceding-char save-excursion)
+          point point-marker point-max point-min preceding-char save-excursion
+          widen)
     (only (schemacs editor search)
           looking-at looking-at-p match-beginning match-end match-string
           re-search-backward re-search-forward regexp-quote replace-match
@@ -1359,10 +1360,12 @@ With a prefix arg, mark files on the next ARG lines."
       ;; Not ported: `file-name-coding-system' (no file-name coding system
       ;; here), `set-visited-file-modtime' (which belongs to the
       ;; auto-revert staleness `dired-buffer-stale-p' reports - not
-      ;; ported), `dired--make-directory-clickable', and the `widen',
-      ;; there being no narrowing to undo.
+      ;; ported) and `dired--make-directory-clickable'.
       ;;--------------------------------------------------------------
       (save-excursion
+        ;; The C's first form: whatever restriction the old listing was
+        ;; read under is undone before the new one is inserted.
+        (widen)
         ;; "This hook which may want to modify `dired-actual-switches'
         ;; based on `dired-directory'"
         (run-hooks *dired-before-readin-hook*)

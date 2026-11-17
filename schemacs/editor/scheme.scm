@@ -40,9 +40,10 @@
           parse-partial-sexp skip-chars-forward skip-chars-backward
           forward-comment backward-prefix-chars syntax-ppss string-to-syntax)
     (only (schemacs editor lisp) forward-sexp)
+    (only (schemacs editor syntax) scan-error?)
     (only (schemacs editor editfns)
           goto-char point point-max buffer-substring forward-line char-after
-          save-excursion)
+          save-excursion save-restriction narrow-to-region point-min)
     ;; `beginning-of-line' is the *command* (`cmds.c'), as it is in
     ;; lisp-mode's own import
     (only (schemacs editor cmds) beginning-of-line backward-char)
@@ -212,11 +213,9 @@
     ;; comment-close one, and a `#/.../' regexp's closing `/` becomes a
     ;; string delimiter.
     ;;
-    ;; **`save-restriction' and `narrow-to-region' are not ported**
-    ;; (there is no narrowing in this tree), so where the C narrows to
-    ;; END around `forward-sexp' the port looks at where that sexp
-    ;; landed: one that runs past END is the C's `scan-error' at the
-    ;; narrowing, and takes the same branch.
+    ;; **The C narrows to END around `forward-sexp`** so that a sexp
+    ;; running past END is a `scan-error`; this is that narrowing, since
+    ;; 2026-11-17 the primitive is here.
     (define (scheme-syntax-propertize-sexp-comment end)
       ;; The C's `while' has a recursion inside its body - a nested `#;'
       ;; restarts the whole scan after marking itself - so a continued
@@ -230,13 +229,26 @@
           ;; "It's a sexp-comment. Tell parse-partial-sexp where it ends."
           (let loop ((startpos (+ 2 (list-ref state 8))))
             (define (iterate)
-              (let ((found (guard (e (#t (goto-char end) #f))
-                             (goto-char startpos)
-                             (forward-sexp 1)
-                             (let ((p (point)))
-                               (if (> p end)
-                                   (begin (goto-char end) #f)
-                                   p)))))
+              (let ((found
+                     ;; The C's
+                     ;;
+                     ;;   (condition-case nil
+                     ;;       (save-restriction
+                     ;;         (narrow-to-region (point-min) end)
+                     ;;         (goto-char startpos)
+                     ;;         (forward-sexp 1)
+                     ;;         (setq found (point)))
+                     ;;     (scan-error (goto-char end)))
+                     ;;
+                     ;; - the narrowing is what turns "the sexp runs past
+                     ;; END" into the `scan-error` this catches, and it is
+                     ;; the primitive's whole job here.
+                     (guard (e ((scan-error? e) (goto-char end) #f))
+                       (save-restriction
+                         (narrow-to-region (point-min) end)
+                         (goto-char startpos)
+                         (forward-sexp 1)
+                         (point)))))
                 (let ((limit (min end (or found end))))
                   (if (< checked limit)
                       (begin

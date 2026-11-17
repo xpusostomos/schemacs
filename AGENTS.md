@@ -10396,6 +10396,23 @@ when that map is consulted; `fill-region` and `unfill-paragraph` are
 M-x-only in Emacs, and the `M-g M-q` this pass briefly bound was invented
 and is gone.
 
+## The narrowing call-site audit, closed (2026-11-17)
+
+The list DEPARTURES.md carried ("still waiting on narrowing") is worked
+through. Three were real and are ported - `dired-readin`'s `widen`,
+`scheme-syntax-propertize-sexp-comment`'s narrow-to-END (which is what
+turns "the sexp runs past END" into the `scan-error` the C catches), and
+`up-list-default-function`'s `no-syntax-crossing` arm, verified against
+Emacs on four cases including one inside a string and one inside a
+comment. **Three were not narrowing issues at all** -
+`elisp--preceding-sexp`, `lisp-comment-indent` and
+`lisp--el-funcall-position-p` do not narrow in Emacs either; the audit
+note that named them was a guess, and correcting it matters as much as
+the work (a gap note that overstates stops the next person asking).
+`replace-string-in-region`/`replace-regexp-in-region` are blocked on
+`replace-buffer-contents` (`insdel.c`), which is not ported - they are
+not a narrowing job.
+
 ## Still to do
 
 * `auto-fill-mode` / `do-auto-fill` (`simple.el`) - Emacs's `auto-fill-function`

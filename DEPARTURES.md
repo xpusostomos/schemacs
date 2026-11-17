@@ -4308,22 +4308,42 @@ in `editfns.scm` because `subr.scm` is below it) and `widen-automatically`
 
 ## Found, and still open
 
-Each of these says in its own comment that it is waiting for narrowing,
-and each is now portable:
+Each of these said in its own comment that it was waiting for narrowing.
+The audit's verdict, one by one (2026-11-17):
 
-* **`scheme-syntax-propertize` / `elisp-mode-syntax-propertize`** -
-  Emacs narrows around the sexp it scans; this tree checks where
-  `forward-sexp` landed instead.
-* **`dired`**'s widen, and `elisp--preceding-sexp`,
-  `lisp-comment-indent`, `lisp--el-funcall-position-p`.
-* **`simple.el`'s `count-lines`** - the Lisp one, which is written over
-  `narrow-to-region` and `re-search-forward` and is a *different function*
-  from the `xdisp.c` helper this tree already has under that name.
+* **`scheme-syntax-propertize-sexp-comment`** - ported: the C narrows to
+  END around `forward-sexp` so that a sexp running past END is a
+  `scan-error`, and that is what the code does now.
+* **`up-list-default-function`**'s `no-syntax-crossing` arm - ported: the
+  scan is restricted to the string or comment point is in. Measured
+  against Emacs 31.1 on four cases (inside a string, an ordinary list,
+  after a string, inside a comment): identical answers.
+* **`dired-readin`**'s `widen` - ported.
+* **`fill.el`** itself - ported (see the section below).
+* **`elisp--preceding-sexp`, `lisp-comment-indent`,
+  `lisp--el-funcall-position-p`** - **not narrowing issues after all**:
+  none of the three narrows in Emacs either. The note that named them was
+  a guess that came with the audit, and the guesses were not all right;
+  this is the correction.
+* **`simple.el`'s `count-lines`** - still not ported. It is a different
+  function from the `xdisp.c` helper this tree has under that name (which
+  Emacs calls `count_lines` and which has no Lisp name - the tree should
+  probably spell it `%count-lines`), its default branch is
+  `line-number-at-pos`, and the two branches this tree could not run are
+  `selective-display` and `ignore-invisible-lines`. Nothing calls it:
+  `count-lines-region` is not ported either. It is listed rather than
+  done because it is the last item and nothing waits on it.
 * **`eval-region`** reads the region as a string where the C narrows and
-  reads from point.
-* **`replace-string-in-region` / `replace-regexp-in-region`** (`subr.el`)
-  are not ported; both are built on narrowing.
-* **`fill.el`** itself, which is what started this.
+  reads from point. The docstring's "This function does not move point"
+  comes free that way and the narrowing is not observable; left as it
+  is.
+* **`replace-string-in-region` / `replace-regexp-in-region`**
+  (`subr.el:4961`, `:4990`) are not ported. They are small, but the
+  first calls `replace-region-contents`, whose engine is the C's
+  `replace-buffer-contents` - a diff-based replacement in `insdel.c`
+  that is not ported. Porting them on `replace-match` instead would be
+  the "paper over a missing primitive" this tree forbids, so they wait
+  for that function.
 
 # Window states: the size registers, and the pixel/total split
 (2026-11-16)
