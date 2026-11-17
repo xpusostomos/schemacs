@@ -6202,3 +6202,105 @@ One expectation in the suite is Emacs's *default* invisibility spec
 (`t`) rather than a measured varietal: the suite measures it through
 the port, and Emacs's own default was measured separately
 (`(with-temp-buffer buffer-invisibility-spec)` is `t`).
+
+# Labeled restrictions (2026-11-18)
+
+`with-restriction` / `without-restriction` and the `editfns.c` stack
+under them are ported. The AGENTS.md list that named this work also
+named `narrowing-locked`, **which does not exist in Emacs 31.1**: `(fboundp
+'narrowing-locked)` and `(boundp 'narrowing-locked)` are both nil, and
+nothing in `lisp/` or `src/` mentions it. The claim was wrong in the
+overstating direction the earlier gap notes were wrong in, and the note
+is corrected rather than ported.
+
+## What the C does, and where each piece lives
+
+`editfns.c:2716-2900` keeps `static Lisp_Object labeled_restrictions`:
+an alist of `(BUFFER . TRIPLETS)`, each triplet `(LABEL BEGV-MARKER
+ZV-MARKER)`, innermost first. The last triplet is always labelled with
+the uninterned `Qoutermost_restriction` and records the bounds that were
+current when the first labeled restriction was entered - so leaving the
+last one goes back to the user's own narrowing, not to nothing.
+
+Ported into `editfns.scm` beside `widen`, under the C's names:
+`%labeled-restrictions-add`, `-remove`, `-get-bound`, `-peek-label`,
+`-push`, `-pop`, `-save`, `-restore`, `%unwind-reset-outermost-restriction`.
+
+- **`widen`** (`editfns.c:2901`): no label means the whole text, as
+  before; a label means the innermost label's bounds, and popping the
+  stack when the label *is* the outermost's.
+- **`narrow-to-region`** (`:2974`): when a label is in effect, START and
+  END are clipped to its bounds - *after* the `BEG..Z` validation, so a
+  range outside the text is still args-out-of-range (measured; the
+  position of the block in the C is the reason).
+- **`internal--labeled-narrow-to-region`** (`:3008`) and
+  **`internal--labeled-widen`** (`:3023`), under Emacs's names. The
+  outermost triplet is built *before* the narrow, so its markers hold
+  the pre-narrowing bounds.
+- **`save-restriction`** (`:3150`) saves and restores the labels beside
+  the bounds - `save_restriction_save` is now the pair, and
+  `save_restriction_restore` puts the labels back first, then the
+  bounds, in the C's two-statement order.
+- **`point-min-marker` / `point-max-marker`** (`:887`, `:906`), which
+  the internals need and the tree did not have.
+
+## The redisplay bracket
+
+`reset_outermost_restrictions` (`editfns.c:2840`, called from
+`xdisp.c:17440`) makes every active labeled restriction invisible for
+the duration of a redisplay - "if a Lisp function executed during
+redisplay calls (redisplay) while labeled restrictions are in effect,
+these restrictions will not become visible on display". The C bounds it
+with a specpdl unwind; the port is `%with-outermost-restrictions`, a
+`dynamic-wind` around `redisplay-frames!`'s body, and it restores from
+the *current* innermost markers on the way out (a hook run during the
+redisplay may have pushed or popped one), not from what was saved.
+
+## The two macros are a placement departure
+
+`with-restriction` and `without-restriction` are `subr.el:4571`/`:4590`,
+but their bodies call `editfns.c`'s two `internal--labeled-*` DEFUNs and
+`subr.scm` is *below* `editfns.scm`. They live in `editfns.scm`, beside
+the functions they call, with the departure named in the source. The
+`:label` keyword is a `syntax-rules` literal, matching the Elisp macro's
+`(eq (car rest) :label)` test.
+
+## The cleanup seam
+
+`Ferase_buffer` calls `labeled_restrictions_remove_in_current_buffer`
+*before* `Fwiden` (`buffer.c:2490`) - the labels must go first, because
+with one in effect "widen" means the label's bounds, not the text's.
+`erase-buffer` is `buffer.scm`, below `editfns.scm`, so the call comes
+through `*labeled-restrictions-remove-function*`, a seam `editfns.scm`
+installs at load. Its default does nothing: a session that never loads
+`editfns` has no labeled restrictions either, so the default is the
+right answer rather than a silenced failure.
+
+**The other C call sites are not applicable here**: `fileio.c:5601` is
+`write-region` (this tree writes a buffer's whole text and never widens
+to do it), `lread.c:2250` is `readevalloop` (this tree's `eval-region`
+reads from a string), `indent.c:2130` is `display-line-numbers`' widened
+count (not carried), and `callproc.c`/`treesit.c` have no counterpart.
+
+## The measured table
+
+Every row is `emacs -Q --batch`'s answer on `"a\nb\nc"` (point-max 6):
+
+| | Emacs 31.1 | port |
+|---|---|---|
+| `(with-restriction 2 6 ...)`, then after | (2 6), (1 6) | same |
+| `narrow-to-region 1 5` inside a 2..6 label | (2 5) | same |
+| `narrow-to-region 1 7` inside it | args-out-of-range | same |
+| `(widen)` inside the label | (2 6) | same |
+| `without-restriction` same label / other label | (1 6) / (2 6) | same |
+| nested 3..5 inside 2..6, inside then after | (3 5), (2 6) | same |
+| `save-restriction` + `widen` inside, inside/after | (2 6), (2 6) | same |
+| `erase-buffer` inside, then min/max/narrowed-p | (1 1 nil) | same |
+| point at 6 pulled into 2..4 | (4 2 4) | same |
+| plain form + `widen` | (1 6) | same |
+| label inside a user narrowing | (3 5), (2 6) | same |
+| after `without-restriction` pops the outermost, `widen` | (1 6) | same |
+
+`editfns-tests.scm` has all of them (`schemacs_editor_editfns_labeled`,
+15 tests), plus the redisplay bracket's contract - which has no
+Emacs-level test because only redisplay runs the C.

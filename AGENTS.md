@@ -10739,12 +10739,15 @@ small statics. `replace-string-in-region`/`replace-regexp-in-region`
 (`subr.el`) call it. That is a project-sized port, not a small one, and
 it is the honest size to plan against.
 
-The rest of the list stands: the disabled-command machinery
+What is left of the named list is the disabled-command machinery
 (`C-x n n`'s "Use this command?" prompt, which needs
-`substitute-command-keys` - `doc.c`'s ~1000-line walk) and labeled
-restrictions (`with-restriction`/`without-restriction`,
-`narrowing-locked`). `simple.el`'s Lisp `count-lines` is done - see the
-section below.
+`substitute-command-keys` - `doc.c`'s ~1000-line walk). The other two
+entries are done - `simple.el`'s Lisp `count-lines` and the labeled
+restrictions, in the two sections below. The list also carried
+`narrowing-locked`, **which does not exist in Emacs 31.1** (measured:
+`fboundp` and `boundp` are both nil, and nothing in `lisp/` or `src/`
+mentions it) - a gap note that overstates, corrected here for the same
+reason `pages.scm`'s was.
 
 # `count-lines`, and the `assq` that could not keep its name (2026-11-18)
 
@@ -10778,3 +10781,38 @@ Emacs 31.1's own, including the invisible-line table and the
 improper-tail `assq` error. Also corrected: `pages.scm`'s note that said
 `count-lines-page` waited on `count-lines` - what it waits on is
 `ngettext`.
+
+# Labeled restrictions (2026-11-18)
+
+`with-restriction` / `without-restriction`, `internal--labeled-narrow-to-region`,
+`internal--labeled-widen`, `point-min-marker` / `point-max-marker`, and the
+`editfns.c` stack under them are in `editfns.scm`. DEPARTURES.md has the
+C and the measured table; what the next session needs:
+
+* **`narrowing-locked` was never real.** The list carried it; Emacs 31.1
+  has no such function or variable (measured). Corrected in place.
+* **`widen` and `narrow-to-region` changed behaviour only when a label
+  is active** - with none, both are byte-identical to before, which is
+  why the existing narrowing tests and the pty `narrow` check needed no
+  change.
+* **The two macros live in `editfns.scm`, not `subr.scm`** (a named
+  placement departure): their bodies call `editfns.c`'s internals, and
+  `subr.scm` is below this library. `:label` is a `syntax-rules`
+  literal.
+* **The redisplay brackets every draw in `%with-outermost-restrictions`**
+  (`reset_outermost_restrictions`, `xdisp.c:17440`): a labeled
+  restriction must not become visible on display, and the restore uses
+  the *current* innermost markers, not a saved value.
+* **`erase-buffer` drops a buffer's labels first** (`buffer.c:2490`),
+  through `*labeled-restrictions-remove-function*` - a seam because
+  `buffer.scm` is below `editfns.scm`. `editfns.scm` installs it at
+  load. The C's other cleanup sites (write-region, readevalloop,
+  display-line-numbers) have no counterpart here, each named in
+  DEPARTURES.md.
+* **`save-restriction` now saves labels beside the bounds**; its save
+  helper returns `(BOUNDS LABELED)` and the restore puts the labels
+  back first, the C's order.
+
+Tests: `editfns-tests.scm`'s `schemacs_editor_editfns_labeled` (15),
+every expectation Emacs 31.1's own; the redisplay bracket is pinned by
+its C contract, since no Emacs-level call can reach it.

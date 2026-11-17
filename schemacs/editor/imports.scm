@@ -156,6 +156,7 @@
     %window-start-at-line-beg
     %window-start-set!
     %window-suspend-auto-hscroll?
+    %with-outermost-restrictions
     *Buffer-menu-del-char*
     *Buffer-menu-marker-char*
     *Buffer-menu-mode-width*
@@ -413,6 +414,7 @@
     *kill-ring-max*
     *kill-ring-yank-pointer*
     *kill-whole-line*
+    *labeled-restrictions-remove-function*
     *last-change-was-undo*
     *last-coding-system-used*
     *last-command*
@@ -1734,6 +1736,8 @@
     install-ls-lisp-files!
     intern
     intern-soft
+    internal--labeled-narrow-to-region
+    internal--labeled-widen
     internal-auto-fill
     internal-complete-buffer
     internal-complete-buffer-except
@@ -2244,7 +2248,9 @@
     point
     point-marker
     point-max
+    point-max-marker
     point-min
+    point-min-marker
     pop-mark
     pop-to-buffer
     pop-to-buffer-same-window
@@ -3380,12 +3386,14 @@
     with-buffer-unmodified-if-unchanged
     with-current-buffer
     with-current-buffer-window
+    with-restriction
     with-selected-frame
     with-selected-window
     with-silent-modifications
     with-syntax-table
     with-temp-buffer
     with-temp-file
+    without-restriction
     word-char?
     word-run-end
     word-run-start

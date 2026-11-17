@@ -18,6 +18,9 @@
        ;; the restriction
        narrow-to-region widen save-restriction buffer-size delete-region
        buffer-substring char-after
+       ;; the labeled restrictions over it, and the redisplay's bracket
+       with-restriction without-restriction buffer-narrowed-p
+       point-min-marker point-max-marker %with-outermost-restrictions
        char-equal subst-char-in-region insert-before-markers-and-inherit)
  (only (schemacs editor undo)
        text-editor-undo-enable! text-editor-undo-list
@@ -653,6 +656,153 @@
       (narrow-to-region 1 99))))
 
 (test-end "schemacs_editor_editfns_narrowing")
+
+;;--------------------------------------------------------------------
+;; Labeled restrictions - `with-restriction` / `without-restriction`
+;;
+;; `editfns.c`'s stack of `(LABEL BEGV-MARKER ZV-MARKER)` triplets, the
+;; two `internal--labeled-*` DEFUNs and the two `subr.el` macros over
+;; them. **Every expectation below is `emacs -Q --batch`'s own answer**
+;; on "a\nb\nc" (point-max 6), measured before the port.
+;;--------------------------------------------------------------------
+
+(define (label-buffer)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "a\nb\nc")
+    b))
+
+(test-begin "schemacs_editor_editfns_labeled")
+
+;; The plain form narrows, and leaving it restores the whole text.
+(test-equal '((2 6) (1 6))
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (list (with-restriction 2 6 (list (point-min) (point-max)))
+          (list (point-min) (point-max)))))
+
+;; `narrow-to-region` inside a label is clamped to the label's bounds:
+;; measured, 1..5 inside 2..6 gives 2..5.
+(test-equal '(2 5)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (narrow-to-region 1 5)
+      (list (point-min) (point-max)))))
+
+;; ...while a range outside the *text* is still args-out-of-range: the
+;; C validates before it clamps (`editfns.c:2974` follows the check).
+(test-equal "Args out of range"
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (guard (e (#t (exception-message e)))
+      (with-restriction 2 6 :label 'x (narrow-to-region 1 7)))))
+
+;; `widen` inside a label restores the label's bounds, not the text's.
+(test-equal '(2 6)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (widen)
+      (list (point-min) (point-max)))))
+
+;; `without-restriction` with the same label lifts it - the bounds go
+;; back to the outermost restriction's, so the whole text; with a
+;; different label it does not, and `widen` stays inside the label.
+(test-equal '(1 6)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (without-restriction :label 'x
+        (list (point-min) (point-max))))))
+(test-equal '(2 6)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (without-restriction :label 'y
+        (list (point-min) (point-max))))))
+
+;; Nested labels: the inner one wins inside, the outer one after.
+(test-equal '((3 5) (2 6))
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (list (with-restriction 3 5 :label 'y
+              (list (point-min) (point-max)))
+            (list (point-min) (point-max))))))
+
+;; `save-restriction` saves the labels beside the bounds: measured, the
+;; widen inside stays at (2 6) and so does the state after the restore.
+(test-equal '((2 6) (2 6))
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (list (save-restriction (widen) (list (point-min) (point-max)))
+            (list (point-min) (point-max))))))
+
+;; `erase-buffer` drops the labels before it widens (`buffer.c:2490`) -
+;; measured (1 1 nil): the text is gone, the buffer is not narrowed, and
+;; nothing is left to widen to.
+(test-equal '(1 1 #f)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (erase-buffer)
+      (list (point-min) (point-max) (buffer-narrowed-p)))))
+
+;; Point is pulled inside the labeled range, as `narrow-to-region` pulls.
+(test-equal '(4 2 4)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (goto-char 6)
+    (with-restriction 2 4 :label 'x
+      (list (point) (point-min) (point-max)))))
+
+;; The plain form leaves *no* label, so a `widen` inside it is full.
+(test-equal '(1 6)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 (widen) (list (point-min) (point-max)))))
+
+;; A label inside a user's own narrowing widens only to its own bounds.
+(test-equal '((3 5) (2 6))
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (narrow-to-region 2 6)
+    (list (with-restriction 3 5 :label 'x (list (point-min) (point-max)))
+          (list (point-min) (point-max)))))
+
+;; After `without-restriction` pops the outermost triplet, `widen` is
+;; the whole text.
+(test-equal '(1 6)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (without-restriction :label 'x
+        (begin (widen) (list (point-min) (point-max)))))))
+
+;; `point-min-marker` / `point-max-marker` are the accessible bounds.
+(test-equal '(2 6)
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (narrow-to-region 2 6)
+    (list (marker-position (point-min-marker))
+          (marker-position (point-max-marker)))))
+
+;; The redisplay's bracket (`reset_outermost_restrictions`,
+;; `xdisp.c:17440`): the buffer is widened to the outermost bounds while
+;; it runs, and the innermost labeled bounds are back afterwards. No
+;; Emacs-level expectation exists - only redisplay runs the C - so this
+;; pins the C's contract.
+(test-equal '((1 6) (2 6))
+  (let ((b (label-buffer)))
+    (set-buffer b)
+    (with-restriction 2 6 :label 'x
+      (list (%with-outermost-restrictions
+             (lambda () (list (point-min) (point-max))))
+            (list (point-min) (point-max))))))
+
+(test-end "schemacs_editor_editfns_labeled")
 
 ;;--------------------------------------------------------------------
 ;; `subst-char-in-region`, `char-equal` and `insert-before-markers`

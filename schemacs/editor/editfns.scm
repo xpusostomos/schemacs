@@ -37,6 +37,12 @@
           exact->inexact string-index)
     (only (schemacs editor buffer) bufferp current-buffer set-buffer
           *inhibit-read-only*
+          ;; `BUFFER_LIVE_P` - the labeled-restriction lookups answer nil
+          ;; for a buffer that has been killed (`editfns.c:2748`).
+          buffer-live-p
+          ;; the seam `erase-buffer` drops a dead restriction's stack
+          ;; through; installed at the bottom of this file.
+          *labeled-restrictions-remove-function*
           ;; `get-pos-property` asks the overlays whether one would cover
           ;; a character inserted at POSITION.
           overlay-front-advance overlay-get overlay-rear-advance
@@ -72,7 +78,7 @@
     ;; the flag `dispnew.scm` carries.
     (only (schemacs editor dispnew) set-windows-or-buffers-changed!)
     (only (schemacs editor marker)
-          build-marker markerp marker-position set-marker
+          build-marker copy-marker markerp marker-position set-marker
           set-marker-insertion-type marker-buffer)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
@@ -207,10 +213,17 @@ point-marker
    line-number-at-pos
    point-max
    point-min
+   point-min-marker point-max-marker
    point
    save-excursion
    ;; the restriction, `narrow-to-region` and its friends
    narrow-to-region widen narrow-map save-restriction buffer-narrowed-p
+   ;; the labeled restrictions those three understand, the two internal
+   ;; DEFUNs and the two `subr.el` macros over them
+   internal--labeled-narrow-to-region internal--labeled-widen
+   with-restriction without-restriction
+   ;; the redisplay's bracket around them (`reset_outermost_restrictions`)
+   %with-outermost-restrictions
    region-beginning
    region-end
    region-limit
@@ -1258,6 +1271,20 @@ moved."
       (build-marker (current-buffer)
                    (buffer-pt (current-buffer))))
 
+    (define (point-min-marker)
+      ;; GNU Emacs's `point-min-marker' (`editfns.c:887'): "Return a new
+      ;; marker pointing to the same place as `point-min', with no buffer
+      ;; position info." The C's whole body is `build_marker
+      ;; (current_buffer, BEGV, BEGV_BYTE)'.
+      ;;--------------------------------------------------------------
+      (build-marker (current-buffer) (buffer-begv (current-buffer))))
+
+    (define (point-max-marker)
+      ;; GNU Emacs's `point-max-marker' (`editfns.c:906'): the same for
+      ;; `point-max' - `build_marker (current_buffer, ZV, ZV_BYTE)'.
+      ;;--------------------------------------------------------------
+      (build-marker (current-buffer) (buffer-zv (current-buffer))))
+
     (define (%whole-beg buffer)
       ;; `BEG' - the start of the buffer text, which narrowing does not
       ;; move. `buffer-beg' answers `BEGV'.
@@ -1269,32 +1296,224 @@ moved."
       ;;--------------------------------------------------------------
       (buffer-text-z (text-editor-text buffer)))
 
+    ;;----------------------------------------------------------------
+    ;; Labeled restrictions - `editfns.c:2716-2900'
+    ;;
+    ;; A `with-restriction' narrows *and names* the restriction. While it
+    ;; is in effect, `narrow-to-region' and `widen' may not leave its
+    ;; bounds; `without-restriction' with the same label is the way out.
+    ;; The C keeps an alist of buffers to a stack of `(LABEL BEGV-MARKER
+    ;; ZV-MARKER)' triplets, the last of which is the uninterned
+    ;; `Qoutermost_restriction' recording the bounds that were current
+    ;; when the first labeled restriction was entered.
+    ;;
+    ;; Every function below is a static of `editfns.c' except the two
+    ;; `internal--labeled-*' DEFUNs, which are named as Emacs names them.
+    ;;----------------------------------------------------------------
+
+    (define %outermost-restriction (list 'outermost-restriction))
+    ;; ^ `Qoutermost_restriction' (`editfns.c:2718'): a fresh cons stands
+    ;; for the C's uninterned symbol - nothing a caller can name compares
+    ;; `eq?` to it, which is all the C's `BASE_EQ` test needs.
+
+    (define *labeled-restrictions* '())
+    ;; ^ `static Lisp_Object labeled_restrictions' (`editfns.c:2716'):
+    ;; an alist of `(BUFFER . TRIPLETS)`, triplets innermost first. A
+    ;; plain variable, as the C's static is: process state, never
+    ;; `let`-bound. The C's comment says why an alist rather than a
+    ;; buffer-local - `reset_outermost_restrictions` runs every
+    ;; redisplay and would otherwise walk every live buffer.
+
+    (define (%labeled-restrictions-entry buffer)
+      ;; The `(BUFFER . TRIPLETS)` cell for BUFFER - the C's
+      ;; `assq_no_quit (buf, labeled_restrictions)`.
+      ;;--------------------------------------------------------------
+      (let loop ((rest *labeled-restrictions*))
+        (cond ((null? rest) #f)
+              ((eq? (car (car rest)) buffer) (car rest))
+              (else (loop (cdr rest))))))
+
+    (define (%labeled-restrictions-add buffer restrictions)
+      ;; `labeled_restrictions_add` (`editfns.c:2721').
+      ;;--------------------------------------------------------------
+      (set! *labeled-restrictions*
+            (cons (cons buffer restrictions) *labeled-restrictions*)))
+
+    (define (%labeled-restrictions-remove buffer)
+      ;; `labeled_restrictions_remove` (`editfns.c:2731`).
+      ;;--------------------------------------------------------------
+      (set! *labeled-restrictions*
+            (let loop ((rest *labeled-restrictions*) (acc '()))
+              (cond ((null? rest) (reverse acc))
+                    ((eq? (car (car rest)) buffer)
+                     (append (reverse acc) (cdr rest)))
+                    (else (loop (cdr rest) (cons (car rest) acc)))))))
+
+    (define (%labeled-restrictions-get-bound buffer begv? outermost?)
+      ;; `labeled_restrictions_get_bound` (`editfns.c:2744`): the BEGV
+      ;; marker (or the ZV one), of the outermost or innermost labeled
+      ;; restriction, or #f when BUFFER is not live or has none.
+      ;;--------------------------------------------------------------
+      (if (not (buffer-live-p buffer))
+          #f
+          (let ((entry (%labeled-restrictions-entry buffer)))
+            (if (not entry)
+                #f
+                (let* ((restrictions (cdr entry))
+                       (triplet (if outermost?
+                                    (let loop ((r restrictions))
+                                      (if (eq? (car (car r))
+                                               %outermost-restriction)
+                                          (car r)
+                                          (loop (cdr r))))
+                                    (car restrictions)))
+                       (bounds (cdr triplet)))
+                  (if begv? (car bounds) (car (cdr bounds))))))))
+
+    (define (%labeled-restrictions-peek-label buffer)
+      ;; `labeled_restrictions_peek_label` (`editfns.c:2766`).
+      ;;--------------------------------------------------------------
+      (if (not (buffer-live-p buffer))
+          #f
+          (let ((entry (%labeled-restrictions-entry buffer)))
+            (and entry (car (car (cdr entry)))))))
+
+    (define (%labeled-restrictions-push buffer restriction)
+      ;; `labeled_restrictions_push` (`editfns.c:2781`).
+      ;;--------------------------------------------------------------
+      (let ((entry (%labeled-restrictions-entry buffer)))
+        (if (not entry)
+            (%labeled-restrictions-add buffer (list restriction))
+            (set-cdr! entry (cons restriction (cdr entry))))))
+
+    (define (%labeled-restrictions-pop buffer)
+      ;; `labeled_restrictions_pop` (`editfns.c:2795`): drop the
+      ;; innermost, and when that one was the outermost's triplet, drop
+      ;; the buffer's entry entirely - no labeled restriction is in
+      ;; effect any more.
+      ;;--------------------------------------------------------------
+      (let ((entry (%labeled-restrictions-entry buffer)))
+        (when entry
+          (if (eq? (%labeled-restrictions-peek-label buffer)
+                   %outermost-restriction)
+              (%labeled-restrictions-remove buffer)
+              (set-cdr! entry (cdr (cdr entry)))))))
+
+    (define (%labeled-restrictions-save)
+      ;; `labeled_restrictions_save` (`editfns.c:2874`): what
+      ;; `save-restriction' puts back - `(BUFFER . TRIPLETS)`, with the
+      ;; triplets copied so that a push inside the body is not saved.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (current-buffer))
+             (entry (%labeled-restrictions-entry buffer)))
+        (cons buffer (if entry (list-copy (cdr entry)) '()))))
+
+    (define (%labeled-restrictions-restore buf-and-restrictions)
+      ;; `labeled_restrictions_restore` (`editfns.c:2885`).
+      ;;--------------------------------------------------------------
+      (let ((buffer (car buf-and-restrictions))
+            (restrictions (cdr buf-and-restrictions)))
+        (%labeled-restrictions-remove buffer)
+        (unless (null? restrictions)
+          (%labeled-restrictions-add buffer restrictions))))
+
+    (define (%unwind-reset-outermost-restriction buffer)
+      ;; `unwind_reset_outermost_restriction` (`editfns.c:2814'):
+      ;; restore the innermost labeled bounds, or drop the entry if the
+      ;; triplets went away while the caller was inside.
+      ;;--------------------------------------------------------------
+      (let ((begv (%labeled-restrictions-get-bound buffer #t #f))
+            (zv (%labeled-restrictions-get-bound buffer #f #f)))
+        (if (and begv zv)
+            (begin (set!buffer-begv buffer (marker-position begv))
+                   (set!buffer-zv buffer (marker-position zv)))
+            (%labeled-restrictions-remove buffer))))
+
+    (define (%with-outermost-restrictions thunk)
+      ;; `reset_outermost_restrictions` (`editfns.c:2840') and the
+      ;; unwind it records, as one bracket: "called when redisplay
+      ;; starts, so that if a Lisp function executed during redisplay
+      ;; calls (redisplay) while labeled restrictions are in effect,
+      ;; these restrictions will not become visible on display."
+      ;;
+      ;; The C records a specpdl unwind per buffer; this is the same
+      ;; pair around THUNK, restoring from the markers rather than from
+      ;; what was saved, because a hook run during the redisplay may
+      ;; have pushed or popped a restriction.
+      ;;--------------------------------------------------------------
+      (let ((buffers '()))
+        (for-each
+         (lambda (entry)
+           (let* ((buffer (car entry))
+                  (begv (%labeled-restrictions-get-bound buffer #t #t))
+                  (zv (%labeled-restrictions-get-bound buffer #f #t)))
+             (if (and begv zv)
+                 (begin (set!buffer-begv buffer (marker-position begv))
+                        (set!buffer-zv buffer (marker-position zv))
+                        (set! buffers (cons buffer buffers)))
+                 (%labeled-restrictions-remove buffer))))
+         *labeled-restrictions*)
+        (dynamic-wind
+          (lambda () #f)
+          thunk
+          (lambda ()
+            (for-each %unwind-reset-outermost-restriction buffers)
+            #f))))
+
     (define-command (widen)
       ;; GNU Emacs's `widen' (`editfns.c:2901'): "Remove restrictions
       ;; (narrowing) from current buffer. ... This allows the buffer's
-      ;; full text to be seen and edited."
+      ;; full text to be seen and edited.
       ;;
-      ;; **Not carried**: labeled restrictions (`with-restriction' /
-      ;; `without-restriction', `editfns.c:3190'), which need a stack of
-      ;; labeled markers per buffer. `narrow-to-region' here has no label
-      ;; to limit it to.
+      ;; However, when restrictions have been set by `with-restriction'
+      ;; with a label, `widen' restores the narrowing limits set by
+      ;; `with-restriction'. To gain access to other portions of the
+      ;; buffer, use `without-restriction' with the same label."
+      ;;
+      ;; The C's two branches: no label means the whole text, as before;
+      ;; a label means the innermost labeled bounds, and when the label
+      ;; *is* the outermost restriction's, the stack entry is popped so
+      ;; no labeled restriction is in effect afterwards.
       ;;
       ;; The C's interactive spec is `(interactive)', so it is a command:
       ;; `C-x n w' (`bindings.el:1214', `narrow-map') reaches it.
       ;;--------------------------------------------------------------
       "Remove restrictions (narrowing) from current buffer.
-This allows the buffer's full text to be seen and edited."
+This allows the buffer's full text to be seen and edited.
+
+However, when restrictions have been set by `with-restriction' with a
+label, `widen' restores the narrowing limits set by `with-restriction'.
+To gain access to other portions of the buffer, use
+`without-restriction' with the same label."
       (interactive)
-      (let ((buffer (current-buffer)))
-        (unless (and (= (buffer-begv buffer) (%whole-beg buffer))
-                     (= (buffer-zv buffer) (%whole-z buffer)))
-          (set!buffer-begv buffer (%whole-beg buffer))
-          (set!buffer-zv buffer (%whole-z buffer))
-          ;; `buf->clip_changed = 1': "Changing the buffer bounds
-          ;; invalidates any recorded current column" and tells the
-          ;; redisplay the window's start position may now be invisible.
-          (%clip-changed! buffer)))
-      #f)
+      (let* ((buffer (current-buffer))
+             (label (%labeled-restrictions-peek-label buffer)))
+        (if (not label)
+            (unless (and (= (buffer-begv buffer) (%whole-beg buffer))
+                         (= (buffer-zv buffer) (%whole-z buffer)))
+              (set!buffer-begv buffer (%whole-beg buffer))
+              (set!buffer-zv buffer (%whole-z buffer))
+              ;; `buf->clip_changed = 1': "Changing the buffer bounds
+              ;; invalidates any recorded current column" and tells the
+              ;; redisplay the window's start position may now be
+              ;; invisible.
+              (%clip-changed! buffer))
+            (let ((begv (%labeled-restrictions-get-bound buffer #t #f))
+                  (zv (%labeled-restrictions-get-bound buffer #f #f)))
+              (let ((s (marker-position begv))
+                    (e (marker-position zv)))
+                (unless (and (= (buffer-begv buffer) s)
+                             (= (buffer-zv buffer) e))
+                  (set!buffer-begv buffer s)
+                  (set!buffer-zv buffer e)
+                  (%clip-changed! buffer)))
+              ;; "If the only remaining bounds in labeled_restrictions
+              ;; for current_buffer are the bounds that were set by the
+              ;; user, no labeled restriction is in effect any more:
+              ;; remove it from the labeled_restrictions alist."
+              (when (eq? label %outermost-restriction)
+                (%labeled-restrictions-pop buffer))))
+        #f))
 
     (define-command (narrow-to-region start end)
       ;; GNU Emacs's `narrow-to-region' (`editfns.c:2948'): "Restrict
@@ -1320,7 +1539,14 @@ See also `save-restriction'.
 
 When calling from Lisp, pass two arguments START and END:
 positions (integers or markers) bounding the text that should
-remain visible."
+remain visible.
+
+However, when restrictions have been set by `with-restriction' with a
+label, `narrow-to-region' can be used only within the limits of these
+restrictions.  If the START or END arguments are outside these limits,
+the corresponding limit set by `with-restriction' is used instead of the
+argument.  To gain access to other portions of the buffer, use
+`without-restriction' with the same label."
       (interactive "r")
       (let* ((buffer (current-buffer))
              (s (cond ((markerp start) (marker-position start)) (else start)))
@@ -1332,6 +1558,15 @@ remain visible."
                      (<= s e)
                      (<= e (%whole-z buffer)))
           (error "Args out of range" start end))
+        ;; "Limit the start and end positions to those of the innermost
+        ;; labeled restriction." (`editfns.c:2974')
+        (when (%labeled-restrictions-peek-label buffer)
+          (let ((begv (marker-position
+                       (%labeled-restrictions-get-bound buffer #t #f)))
+                (zv (marker-position
+                     (%labeled-restrictions-get-bound buffer #f #f))))
+            (set! s (min (max s begv) zv))
+            (set! e (min (max e begv) zv))))
         (unless (and (= (buffer-begv buffer) s) (= (buffer-zv buffer) e))
           (set!buffer-begv buffer s)
           (set!buffer-zv buffer e)
@@ -1341,6 +1576,75 @@ remain visible."
         (let ((pt (buffer-pt buffer)))
           (when (> pt e) (set-point buffer e)))
         #f))
+
+    (define (internal--labeled-narrow-to-region start end label)
+      ;; GNU Emacs's `internal--labeled-narrow-to-region'
+      ;; (`editfns.c:3008'): "Restrict this buffer to START-END, and
+      ;; label the restriction with LABEL."
+      ;;
+      ;; The C makes the outermost triplet *first*, from the bounds in
+      ;; effect now, so that leaving the last labeled restriction goes
+      ;; back to the user's own narrowing; then narrows; then records
+      ;; the outermost (once) and the new labeled restriction.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (current-buffer))
+             (outermost (list %outermost-restriction
+                              (point-min-marker)
+                              (copy-marker (point-max) #t))))
+        (narrow-to-region start end)
+        (unless (%labeled-restrictions-peek-label buffer)
+          (%labeled-restrictions-push buffer outermost))
+        (%labeled-restrictions-push
+         buffer
+         (list label (point-min-marker) (copy-marker (point-max) #t))))
+      #f)
+
+    (define (internal--labeled-widen label)
+      ;; GNU Emacs's `internal--labeled-widen' (`editfns.c:3023'): "Remove
+      ;; the current restriction if it is labeled with LABEL, and widen."
+      ;; The pop comes *before* the widen, because `widen' with the label
+      ;; still in effect would narrow to that label's own bounds.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (when (eq? (%labeled-restrictions-peek-label buffer) label)
+          (%labeled-restrictions-pop buffer)))
+      (widen)
+      #f)
+
+    (define-syntax with-restriction
+      ;; GNU Emacs's `with-restriction' (`subr.el:4571'): "Execute BODY
+      ;; with restrictions set to START and END. ... When the optional
+      ;; LABEL argument, which is evaluated to get the label to use and
+      ;; must yield a non-nil value, is present, inside BODY,
+      ;; `narrow-to-region' and `widen' can be used only within the
+      ;; START and END limits."
+      ;;
+      ;; **A placement departure**: this macro is `subr.el`'s, and its
+      ;; body calls `editfns.c`'s two `internal--labeled-*` DEFUNs -
+      ;; `subr.scm` is below this library, so it lives here beside them.
+      ;; The same is true of `without-restriction` below. The `:label`
+      ;; keyword is matched as a `syntax-rules` literal, the way the
+      ;; Elisp macro tests `(eq (car rest) :label)`.
+      ;;--------------------------------------------------------------
+      (syntax-rules (:label)
+        ((with-restriction start end :label label body ...)
+         (save-restriction
+           (internal--labeled-narrow-to-region start end label)
+           body ...))
+        ((with-restriction start end body ...)
+         (save-restriction (narrow-to-region start end) body ...))))
+
+    (define-syntax without-restriction
+      ;; GNU Emacs's `without-restriction' (`subr.el:4590'): "Execute
+      ;; BODY without restrictions. ... When the optional LABEL argument
+      ;; is present, the restrictions set by `with-restriction' with the
+      ;; same LABEL argument are lifted."
+      ;;--------------------------------------------------------------
+      (syntax-rules (:label)
+        ((without-restriction :label label body ...)
+         (save-restriction (internal--labeled-widen label) body ...))
+        ((without-restriction body ...)
+         (save-restriction (widen) body ...))))
 
     (define narrow-map
       ;; GNU Emacs's `narrow-map' (`bindings.el:1214'): "Keymap for
@@ -1399,6 +1703,13 @@ remain visible."
              (lambda () (%save-restriction-restore saved)))))))
 
     (define (%save-restriction-save)
+      ;; `save_restriction_save` (`editfns.c:3060'): the bounds pair, and
+      ;; beside it "the current buffer's restrictions, including those
+      ;; that were set by `with-restriction' with a label argument".
+      ;;--------------------------------------------------------------
+      (list (%save-restriction-save-1) (%labeled-restrictions-save)))
+
+    (define (%save-restriction-save-1)
       ;; `save_restriction_save_1' (`editfns.c:3043'): a pair of markers
       ;; bounding the accessible portion - the end one advancing on an
       ;; insertion at its own position.
@@ -1410,6 +1721,14 @@ remain visible."
                 end))))
 
     (define (%save-restriction-restore saved)
+      ;; `save_restriction_restore` (`editfns.c:3071'): the labeled
+      ;; restrictions go back first, then the bounds - the C's two
+      ;; statements in its own order.
+      ;;--------------------------------------------------------------
+      (%labeled-restrictions-restore (cadr saved))
+      (%save-restriction-restore-1 (car saved)))
+
+    (define (%save-restriction-restore-1 saved)
       ;; `save_restriction_restore_1' (`editfns.c:3067'), less the
       ;; labeled-restriction stack.
       ;;--------------------------------------------------------------
@@ -2025,5 +2344,11 @@ remain visible."
     ;; ^ `callint.c:448`'s `Fformat_message`, which turns a
     ;; specification's prompt into the string a code reads with - "the
     ;; arguments read so far" substituted into it.
+
+    ;; The seam `buffer.scm`'s `erase-buffer` drops a buffer's labeled
+    ;; restrictions through (`buffer.c:2490'). Installed here, where the
+    ;; stack is; a library's own function is installed after its
+    ;; definition, the same rule a `define-key` follows.
+    (*labeled-restrictions-remove-function* %labeled-restrictions-remove)
 
     ))

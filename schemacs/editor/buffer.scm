@@ -115,6 +115,7 @@
    *set-marker-function*
    *set-marker-insertion-type-function*
    *get-text-property-function*
+   *labeled-restrictions-remove-function*
    *run-hooks-function*
    *make-marker-function*
    *del-range-function*
@@ -435,6 +436,17 @@
       ;; *and* `inhibit-read-only' is nil. `textprop.scm` installs it.
       ;;--------------------------------------------------------------
       (make-parameter #f))
+    (define *labeled-restrictions-remove-function*
+      ;; GNU Emacs's `labeled_restrictions_remove_in_current_buffer`
+      ;; (`editfns.c:2808'), which `Ferase_buffer` calls before it
+      ;; widens (`buffer.c:2490`): a labeled restriction's markers would
+      ;; otherwise outlive the text they bound. The stack is
+      ;; `editfns.scm`'s and that library is above this one, so the call
+      ;; comes through a seam; `editfns.scm` installs it at load, and
+      ;; the default does nothing - a session that never loads `editfns`
+      ;; has no labeled restrictions to drop either.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda (buffer) #f)))
     (define *del-range-function*
       ;; GNU Emacs's `del_range' (`insdel.c`), which is what
       ;; `Ferase_buffer' calls to empty a buffer (`buffer.c:2472'). It is
@@ -2005,18 +2017,20 @@
       ;; effect is removed, so the buffer is truly empty after this."
       ;; The read-only check is the `*' of its interactive spec, which
       ;; `barf-if-buffer-read-only' makes - the same function
-      ;; `prepare_to_modify_buffer_1` calls before any change. There is
-      ;; no narrowing, so the widen is a no-op, and the `save_length' is
-      ;; nothing - no auto saving machinery.
+      ;; `prepare_to_modify_buffer_1` calls before any change. The
+      ;; `save_length' is nothing - no auto saving machinery.
       ;;--------------------------------------------------------------
       (barf-if-buffer-read-only)
       (let* ((ed (current-buffer))
              (beg (buffer-text-base (text-editor-text ed)))
              (z (buffer-text-z (text-editor-text ed))))
-        ;; "Any narrowing restriction in effect is removed": the C is
-        ;; `Fwiden ()' then `del_range (BEG, Z)'. `widen` is
-        ;; `editfns.scm`'s and this library is below it, so the two
-        ;; writes are here.
+        ;; The C's order is `labeled_restrictions_remove_in_current_buffer
+        ;; (); Fwiden (); del_range (BEG, Z);' - the labels go *first*,
+        ;; because with one in effect `Fwiden' means "widen to the label's
+        ;; bounds", not to the whole text. `widen` is `editfns.scm`'s and
+        ;; this library is below it, so the two bound-writes are here and
+        ;; the label stack is reached through the seam.
+        ((*labeled-restrictions-remove-function*) ed)
         (set!buffer-begv ed beg)
         (set!buffer-zv ed z)
         ((*del-range-function*) beg z))

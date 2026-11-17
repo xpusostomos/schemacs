@@ -84,6 +84,9 @@
          point point-max point-min
          ;; `%n`, the narrowing indicator (`decode_mode_spec`'s `'n'`)
          buffer-narrowed-p
+         ;; `reset_outermost_restrictions` and its unwind, as one
+         ;; bracket around every redisplay (`xdisp.c:17440`).
+         %with-outermost-restrictions
          ;; `:propertize' in the mode line is Emacs's `propertize',
          ;; `editfns.c:3296'.
          propertize
@@ -3705,7 +3708,15 @@
       ;;--------------------------------------------------------------
       (if (*inhibit-redisplay*)
           #f
-          (begin
+          ;; `reset_outermost_restrictions` (`xdisp.c:17440'): "called
+          ;; when redisplay starts, so that if a Lisp function executed
+          ;; during redisplay calls (redisplay) while labeled
+          ;; restrictions are in effect, these restrictions will not
+          ;; become visible on display." `editfns.scm` carries the
+          ;; pair; the wind is the C's specpdl unwind.
+          (%with-outermost-restrictions
+           (lambda ()
+            (begin
             ;; **`run_window_change_functions`** (`xdisp.c:17588`): "Run
             ;; window change functions for each live frame. This function
             ;; must be called from a 'safe' position in
@@ -3748,7 +3759,7 @@
             ;; returns - and the terminal front end has no queue to
             ;; drain, so the hook is #f there and costs one test.
             (when (*after-redisplay-hook*)
-              ((*after-redisplay-hook*))))))
+              ((*after-redisplay-hook*))))))))
 
     (define *after-redisplay-hook* (make-parameter #f))
     ;; ^ A thunk run after every redisplay has finished, for a front end
