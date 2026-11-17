@@ -34,6 +34,7 @@ SUITES = [
     'schemacs/editor/itree-tests.scm',
     'schemacs/editor/engine-tests.scm',
     'schemacs/editor/derived-tests.scm',
+    'schemacs/editor/diffseq-tests.scm',
     'schemacs/editor/dired-tests.scm',
     'schemacs/editor/dired-mode-tests.scm',
     'schemacs/editor/font-lock-tests.scm',

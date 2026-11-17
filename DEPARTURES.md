@@ -6306,3 +6306,68 @@ Every row is `emacs -Q --batch`'s answer on `"a\nb\nc"` (point-max 6):
 `editfns-tests.scm` has all of them (`schemacs_editor_editfns_labeled`,
 15 tests), plus the redisplay bracket's contract - which has no
 Emacs-level test because only redisplay runs the C.
+
+# The difference engine, `lib/diffseq.h' (2026-11-18)
+
+`schemacs/editor/diffseq.scm` ports gnulib's `lib/diffseq.h` - the Myers
+O(ND) engine `editfns.c` includes for `replace-region-contents`. **This
+is the engine only**; the DEFUN over it, the `replace_range` extension
+it needs and the `subr.el` callers are the next step (AGENTS.md has
+their recon).
+
+## The shape, and the one representation decision
+
+`diffseq.h` is a header parameterised by seven macros. Each becomes an
+explicit parameter:
+
+| the C | here |
+|---|---|
+| `ELEMENT`/`EQUAL` | `equal` field: a procedure `(x y) -> boolean` |
+| `NOTE_DELETE`/`NOTE_INSERT` | `note-delete`/`note-insert` procedures |
+| `EARLY_ABORT` | `early-abort`: a thunk |
+| `OFFSET`/`OFFSET_MAX` | exact integers (`offset-max` is `PTRDIFF_MAX`) |
+| `EXTRA_CONTEXT_FIELDS` | not in the engine: the caller closes over its own state in the four procedures |
+| `fdiag`/`bdiag` arrays | scheme vectors plus the index of diagonal 0, since the C indexes the middle of an allocation with negative diagonal numbers |
+
+**The C's `sys_setjmp`/`sys_longjmp` early abort is the caller's
+`call/cc`.** `editfns.c`'s `buffer_chars_equal` escapes to it when the
+time limit passes; the engine only observes that EQUAL did not return.
+`%diag` also uses a one-shot continuation for the C's `return` from
+inside its two nested loops - once per partition, not per character.
+
+Character equality that is **not** `equal?`-shaped (Emacs compares
+already-extracted code points) stays the caller's business: the engine
+never looks into the vectors itself.
+
+## The trap, recorded before it could be repeated
+
+The C's two "best diagonal" searches declare `fxybest`/`fxbest` and
+`bxybest`/`bxbest` in the *same* enclosing block, and the final `if`
+reads all four. In Scheme that is one `let` with four bindings. Three
+attempts failed on this: two `let`s read as siblings still leave the
+second's `let`-bound names invisible to the `if`, and the parens of the
+first version were laid out for the wrong nesting. The method that
+worked, and the one the next session should use for anything of this
+size: **write the two functions to a scratch file with stub accessors,
+compile and run them there, and only then assemble the library** - the
+library file is the verified block plus the record definitions, joined
+by script, not retyped.
+
+## Verification
+
+The engine's contract is checked without Emacs, because it has no Lisp
+interface:
+
+- **apply-equality**: the recorded script, applied exactly as
+  `replace-region-contents`' loop applies it (walk backwards, replace
+  each run, keep every unmatched character - including the one the C's
+  post-run `--i; --j` steps past), rebuilds the second vector.
+- **minimality**: with the default `too-expensive` no heuristic fires
+  at these sizes, so the script's cost must equal the textbook DP
+  edit distance.
+
+Eight fixed pairs and **400 seeded random pairs** over a three-letter
+alphabet pass both. Two further cases force the heuristic paths: a
+`too-expensive` of 5, and a 250-character pair sharing a 40-character
+tail (the `big_snake` search); both must still apply. `diffseq-tests.scm`
+is in `tools/run-suites.py`.

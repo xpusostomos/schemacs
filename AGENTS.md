@@ -10821,20 +10821,21 @@ Tests: `editfns-tests.scm`'s `schemacs_editor_editfns_labeled` (15),
 every expectation Emacs 31.1's own; the redisplay bracket is pinned by
 its C contract, since no Emacs-level call can reach it.
 
-# `replace-region-contents`: recon done, not landed (2026-11-18)
+# `replace-region-contents`: the engine is in; the DEFUN is next (2026-11-18)
 
-The only project-sized named item left. This pass read the whole of it
-and attempted the engine; **no code was landed**, deliberately. What the
-next session needs:
+The only project-sized named item left. The engine (`lib/diffseq.h`) is
+**landed** in `schemacs/editor/diffseq.scm` - see DEPARTURES.md for the
+shape, the trap, and the verification. What is left, in the order it has
+to be done:
 
 * **The C is two pieces.** `replace-region-contents`
   (`editfns.c:1922`, ~310 lines) and gnulib's `lib/diffseq.h` (578
-  lines: Myers O(ND) with Eggert's TOO_EXPENSIVE heuristic). The four
-  macros `editfns.c` supplies are `ELEMENT`/`EQUAL` (character arrays
-  compared through `buffer_chars_equal`, which also carries the
-  quit-counter and time-limit escape), `NOTE_DELETE`/`NOTE_INSERT` (bit
-  vectors) and `EARLY_ABORT`. `set_bit`/`bit_is_set` are `editfns.c`'s
-  own, over `unsigned char` arrays.
+  lines: Myers O(ND) with Eggert's TOO_EXPENSIVE heuristic). The engine
+  half is done. The DEFUN half still needs: the two character vectors,
+  `set_bit`/`bit_is_set` over bytevectors, `buffer_chars_equal` (the
+  quit counter and the time limit, escaping through `call/cc` into the
+  continuation the DEFUN installs), the string / buffer /
+  `[buf beg end]` source forms, and the trivial-case fallback.
 * **The apply phase** walks backwards from `(size_a, size_b)` over the
   two bit vectors, replacing each run with `(vector SOURCE-BUFFER BEG
   END)` through `replace_range`, inside a
@@ -10858,3 +10859,14 @@ next session needs:
   was deleted rather than left half-working. Write `diag` and
   `compareseq` to a scratch file with stub accessors, compile the
   *block* there, and only then assemble the library.
+
+## The engine's tests, and what they do not cover
+
+`diffseq-tests.scm` (5) proves the script rebuilds its target and is
+minimal, over fixed and 400 seeded random pairs, plus both heuristic
+paths. It cannot prove the *integration*: which characters are compared
+(the two regions' extracted code points, properties ignored), how the
+bit vectors are applied to a buffer, and the `max-secs`/`max-costs`
+plumbing are all the next step's, and the end-to-end comparison against
+`emacs -Q --batch` belongs there - final text, point and marker
+positions, and the return value, on the same input pairs.

@@ -140,6 +140,7 @@
         (schemacs editor custom)
         (schemacs editor data)
         (schemacs editor derived)
+        (schemacs editor diffseq)
         (schemacs editor dired)
         (schemacs editor diredc)
         (schemacs editor disp-table)

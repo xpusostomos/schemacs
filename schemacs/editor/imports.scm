@@ -92,6 +92,7 @@
     (schemacs editor lisp-mode)
     (schemacs editor theme)
     (schemacs editor chartab)
+    (schemacs editor diffseq)
     (schemacs editor data)
     (except (schemacs editor menu-bar)  *tty-menu-open-use-tmm*)
     (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char *inhibit-auto-fill* *page-delimiter* *use-hard-newlines* back-to-indentation self-insert-command self-insert-tab)
@@ -1020,6 +1021,7 @@
     common-lisp-loop-part-indentation
     common-prefix
     compare-strings
+    compareseq
     complete-with-action
     completing-read
     completion--complete-and-exit
@@ -1185,6 +1187,7 @@
     detect-coding-bytes
     detect-coding-system
     detect-eol
+    diff-context?
     digest-single-submenu
     digit-argument
     directory-abbrev-apply
@@ -1998,6 +2001,7 @@
     make-char-table
     make-coding-system
     make-ctrl-char
+    make-diff-context
     make-directory
     make-directory-internal
     make-face
