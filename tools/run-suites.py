@@ -46,6 +46,9 @@ SUITES = [
     'schemacs/editor/fileio-tests.scm',
     'schemacs/editor/files-tests.scm',
     'schemacs/editor/indentc-tests.scm',
+    # `fill.el` - the paragraph filler, its justification half and
+    # `fill-individual-paragraphs`, each expectation Emacs 31.1's own.
+    'schemacs/editor/fill-tests.scm',
     'schemacs/editor/coding-tests.scm',
     'schemacs/editor/charset-tests.scm',
     'schemacs/editor/mule-cmds-tests.scm',

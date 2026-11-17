@@ -10283,3 +10283,125 @@ What is left is *call sites*, not the primitive: the syntax-propertize
 pair, `dired`'s widen, `elisp--preceding-sexp`, `lisp-comment-indent`,
 `lisp--el-funcall-position-p`, `simple.el`'s `count-lines`,
 `eval-region` and `replace-{string,regexp}-in-region`.
+
+# fill.el, and the four primitives it broke open (2026-11-17)
+
+Chris chose "narrowing first, then all of fill.el". This is that pass:
+`schemacs/editor/fill.scm` is `lisp/textmodes/fill.el` whole, on top of
+the primitives it stands on - and the primitives were most of the work.
+DEPARTURES.md has the C and every departure; this is what the next
+session needs.
+
+## What landed
+
+`schemacs/editor/fill.scm`: `fill-region`, `fill-region-as-paragraph`
+and its default, `fill-paragraph` (M-q), `unfill-paragraph`,
+`fill-comment-paragraph`, `canonically-space-region`,
+`current-fill-column`, the adaptive fill prefix (`fill-context-prefix`,
+`fill-match-adaptive-prefix`, `fill-common-string-prefix`), the five
+no-break predicates and `fill-nobreak-p`, `fill-delete-prefix`,
+`fill-delete-newlines`, `fill-move-to-break-point`, `fill-newline`, the
+justification half (`current-justification`, `set-justification` and its
+five commands, `justify-current-line`, `unjustify-current-line`,
+`unjustify-region`), `fill-individual-paragraphs` and
+`fill-nonuniform-paragraphs`, Emacs 31's two semantic-linefeed commands,
+`beginning-of-line-text` (`indent.el`'s, moved up) and
+`with-buffer-unmodified-if-unchanged` (`subr-x.el`'s, defined here).
+
+Under it, in the files Emacs has them:
+
+| Emacs | here |
+|---|---|
+| `char-equal` (`editfns.c:4418`) | `editfns.scm` |
+| `subst-char-in-region` (`editfns.c:2294`) | `editfns.scm` |
+| `insert-before-markers`, `-and-inherit` (`editfns.c:1388`, `:1422`) | `editfns.scm` |
+| `fix-position` (`editfns.c:2281`) | `editfns.scm` |
+| `buffer-hash` (`fns.c:6454`) | `fns.scm` |
+| `string-to-list` (`subr.el:4739`) | `subr.scm` |
+| `current-left-margin`, `move-to-left-margin`, `indent-to-left-margin`, `back-to-indentation`, `fill-prefix` | `indent.scm` |
+| `paragraph-start`, `paragraph-separate`, `use-hard-newlines`, `sentence-end` + its five variables, the real `forward-paragraph`/`backward-paragraph`, `start-of-paragraph-text`, `end-of-paragraph-text`, the sentence motions | `paragraphs.scm` |
+| the `left-margin` buffer-local | `buffer.scm` |
+
+## The method that found everything: fill the same file both ways and diff
+
+Seven fixture texts, filled by `emacs -Q --batch` and by this tree, then
+`diff`. That harness is now `fill-tests.scm` - every expectation in it is
+the Emacs output byte for byte. It found five bugs that reading had not:
+
+1. **`fill-nobreak-p` returned `'()`**, an empty list, which is *true* in
+   Scheme where Elisp's nil is false. Every ordinary space was "do not
+   break here", so `fill-move-to-break-point` walked back to the front of
+   the paragraph and the fill broke after the first word. The
+   `run-hook-with-args-until-success` answer is now converted.
+2. **`fill-move-to-break-point`'s backward loop repeated unconditionally**
+   where the C's `while` body is the `when`: the search re-found the same
+   space for ever. Written as `(when (re-search-backward ...) ... (loop))`
+   with the `loop` inside the `if`'s non-rejecting arm.
+3. **`fill-individual-paragraphs`' recursion was a sibling of its `when`**
+   instead of its body, so the outer loop span for ever at one position.
+4. **Markers do not do arithmetic.** `(> to (point))` with `to` a marker
+   is a plain type error here; `%pos` reads `marker-position` at each
+   comparison. `fix-position` (added to `editfns.scm`) is the same rule
+   for `subst-char-in-region`'s arguments.
+5. **`\c|` is a character category** and the engine rejects `\c`. Every
+   `\c|` search is omitted, with a comment saying why; see DEPARTURES.md.
+
+## Two Emacs behaviours worth knowing
+
+* **`fill-delete-prefix` with a `to` at `point-max` loops for ever in
+  real Emacs too** - measured, `emacs -Q --batch` hung on it. It is only
+  safe with the marker `fill-region-as-paragraph-default` passes.
+* **Elisp's `if` takes several ELSE forms** (`(if COND THEN ELSE...)`).
+  Every multi-form arm of the C is a `begin` here.
+
+## Wiring
+
+`fill.scm` binds `M-q` (and `M-g M-q`) on `*default-keymap*` at load, so
+both front ends import it - `ttk-main.scm` and `gtk-main.scm` each have
+`(only (schemacs editor fill))` beside `paragraphs`. `loadup.scm`'s
+library list carries it, so `imports.scm` has its names for M-:, the REPL
+and the init file; regenerate with `tools/gen-imports.scm`.
+
+`tools/run-suites.py` runs `fill-tests.scm`.
+
+## The clash census caught two of this pass's own duplicates
+
+`loadup-tests.scm`'s "no exported name is two different bindings" failed
+on the first full run: `back-to-indentation` and `*page-delimiter*` were
+each defined twice - once where they already lived and once in this
+pass's new code. Both are Emacs's in the *other* file, and that is the
+fix in each case:
+
+* `back-to-indentation` is `simple.el`'s, but `indent.el`'s
+  `current-left-margin` calls it and `indent.scm` is below `simple.scm`.
+  It moved **down** into `indent.scm` (with `skip-syntax-forward` and
+  `backward-prefix-chars` along with it), and `simple.scm` imports and
+  re-exports it - the same move `beginning-of-line` made into `cmds.scm`.
+* `page-delimiter` is `paragraphs.el:213`'s defcustom and `page.el` only
+  reads it. It moved **up** into `paragraphs.scm` from `pages.scm`, which
+  now imports and re-exports it.
+
+`indent-region`'s first branch - "If a fill-prefix is specified, use it"
+- is ported as well now that `*fill-prefix*` lives in `indent.scm`.
+
+## `M-q` is two commands in Emacs 31
+
+Measured: in a **fundamental-mode** buffer `(key-binding "\M-q")` is
+`fill-paragraph`; in a **prog-mode** buffer it is
+`prog-fill-reindent-defun` (`prog-mode.el:106`), which fills the comment
+or string at point and otherwise reindents the defun. This tree binds M-q
+to `fill-paragraph` on the global map, which is Emacs's answer for the
+modes it has. `prog-fill-reindent-defun` belongs in `prog-mode.scm`'s map
+when that map is consulted; `fill-region` and `unfill-paragraph` are
+M-x-only in Emacs, and the `M-g M-q` this pass briefly bound was invented
+and is gone.
+
+## Still to do
+
+* `auto-fill-mode` / `do-auto-fill` (`simple.el`) - Emacs's `auto-fill-function`
+  hook, and `internal_self_insert`'s call to it. Everything the filling
+  itself needs is now in place; what is missing is the mode and the hook
+  in the self-insert path.
+* The comment-filling path is written and compiles, but no mode here sets
+  `comment-start`/`comment-start-skip` yet, so `fill-paragraph` in a Lisp
+  buffer takes the plain-text route.

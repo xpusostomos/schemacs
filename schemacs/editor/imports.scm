@@ -33,6 +33,7 @@
     (schemacs editor diredc)
     (schemacs editor dired)
     (schemacs editor mule)
+    (schemacs editor fill)
     (schemacs editor font-lock)
     (schemacs editor font-core)
     (schemacs editor minibuf)
@@ -43,6 +44,7 @@
     (except (schemacs editor xdisp)  *truncate-partial-width-windows* line-display-rows window-line-rows window-line-slices window-start window-truncates-lines? vertical-motion)
     (schemacs editor minibuffer)
     (schemacs editor pages)
+    (except (schemacs editor paragraphs)  *page-delimiter*)
     (schemacs editor itree)
     (schemacs editor keyboard)
     (schemacs editor isearch)
@@ -82,7 +84,6 @@
     (schemacs editor env)
     (except (schemacs editor fileio)  directory-name-p expand-file-name file-exists-p file-name-directory-part file-name-nondirectory-part file-writable-p *buffer-visited-file-modtime-function*)
     (schemacs editor font)
-    (schemacs editor paragraphs)
     (schemacs editor face-remap)
     (schemacs editor glyph)
     (schemacs editor indent)
@@ -93,7 +94,7 @@
     (schemacs editor chartab)
     (schemacs editor data)
     (except (schemacs editor menu-bar)  *tty-menu-open-use-tmm*)
-    (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char self-insert-command self-insert-tab)
+    (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char back-to-indentation self-insert-command self-insert-tab)
     (schemacs editor mule-cmds)
     (schemacs editor buffer-text)
     (schemacs editor region-cache)
@@ -161,6 +162,10 @@
     *abbreviated-home-dir*
     *activate-mark-hook*
     *activate-menubar-hook*
+    *adaptive-fill-first-line-regexp*
+    *adaptive-fill-function*
+    *adaptive-fill-mode*
+    *adaptive-fill-regexp*
     *adjust-suspend-auto-hscroll-function*
     *after-change-functions*
     *after-change-major-mode-hook*
@@ -208,6 +213,7 @@
     *coding-system-for-write*
     *coding-system-history*
     *coding-system-table*
+    *colon-double-space*
     *color-name-rgb-alist*
     *command-table*
     *comment-end-can-be-escaped*
@@ -241,6 +247,7 @@
     *custom-theme-load-path*
     *deactivate-mark-hook*
     *default-frame-alist*
+    *default-justification*
     *default-keymap*
     *default-text-properties*
     *defun-prompt-regexp*
@@ -284,6 +291,7 @@
     *echo-area-buffer*
     *echo-buffers*
     *enable-disabled-menus-and-buttons*
+    *enable-kinsoku*
     *enable-local-variables*
     *enable-multibyte-characters*
     *end-of-defun-function*
@@ -300,6 +308,17 @@
     *file-auto-mode-skip*
     *file-coding-system-alist*
     *file-name-handler-alist*
+    *fill-column-override*
+    *fill-find-break-point-function-table*
+    *fill-individual-varying-indent*
+    *fill-nobreak-invisible*
+    *fill-nobreak-predicate*
+    *fill-nospace-between-words-table*
+    *fill-paragraph-function*
+    *fill-paragraph-handle-comment*
+    *fill-prefix*
+    *fill-region-as-paragraph-function*
+    *fill-separate-heterogeneous-words-with-space*
     *find-directory-functions*
     *find-file-run-dired*
     *font-lock-comment-end-skip*
@@ -481,6 +500,9 @@
     *overwrite-mode-binary*
     *overwrite-mode-textual*
     *page-delimiter*
+    *paragraph-ignore-fill-prefix*
+    *paragraph-separate*
+    *paragraph-start*
     *parens-require-spaces*
     *parse-sexp-ignore-comments*
     *parse-sexp-lookup-properties*
@@ -541,6 +563,11 @@
     *selected-window-override*
     *selection-coding-system*
     *selection-converter-alist*
+    *sentence-end*
+    *sentence-end-base*
+    *sentence-end-double-space*
+    *sentence-end-without-period*
+    *sentence-end-without-space*
     *set-marker-function*
     *set-marker-insertion-type-function*
     *set-message-function*
@@ -639,6 +666,7 @@
     *up-list-function*
     *update-search-regs-function*
     *use-empty-active-region*
+    *use-hard-newlines*
     *use-region-p-function*
     *visual-line-fringe-indicators*
     *window-combination-limit*
@@ -724,12 +752,14 @@
     backward-char
     backward-delete-char
     backward-kill-paragraph
+    backward-kill-sentence
     backward-kill-sexp
     backward-kill-word
     backward-list
     backward-page
     backward-paragraph
     backward-prefix-chars
+    backward-sentence
     backward-sexp
     backward-up-list
     backward-word
@@ -744,6 +774,7 @@
     beginning-of-defun-comments
     beginning-of-defun-raw
     beginning-of-line
+    beginning-of-line-text
     beginning-of-visual-line
     binary-overwrite-mode
     binary-overwrite-mode-hook
@@ -770,9 +801,11 @@
     buffer-file-coding-system
     buffer-file-name
     buffer-fill-column
+    buffer-hash
     buffer-hscroll-margin
     buffer-hscroll-step
     buffer-intervals
+    buffer-left-margin
     buffer-line-texts
     buffer-line-texts-at
     buffer-list
@@ -836,6 +869,7 @@
     call-process
     called-interactively?
     cancel-timer
+    canonically-space-region
     capitalize
     capitalize-word
     casify-region
@@ -853,6 +887,7 @@
     char-display-glyph
     char-display-width
     char-displayable-p
+    char-equal
     char-hyper
     char-meta
     char-shift
@@ -1005,9 +1040,12 @@
     current-column
     current-display
     current-editor
+    current-fill-column
     current-idle-time
     current-indentation
+    current-justification
     current-kill
+    current-left-margin
     current-line-display-column
     current-local-map
     current-message
@@ -1262,6 +1300,7 @@
     end-of-buffer
     end-of-defun
     end-of-line
+    end-of-paragraph-text
     end-of-visual-line
     ensure-final-newline-on-save!
     ensure-final-newline-on-visit
@@ -1374,6 +1413,36 @@
     files--message
     files--name-absolute-system-p
     files--use-insert-directory-program-p
+    fill-column
+    fill-comment-paragraph
+    fill-common-string-prefix
+    fill-context-prefix
+    fill-delete-newlines
+    fill-delete-prefix
+    fill-find-break-point
+    fill-forward-paragraph
+    fill-forward-paragraph-function
+    fill-french-nobreak-p
+    fill-indent-to-left-margin
+    fill-individual-paragraphs
+    fill-individual-paragraphs-citation
+    fill-individual-paragraphs-prefix
+    fill-match-adaptive-prefix
+    fill-minibuffer-function
+    fill-move-to-break-point
+    fill-newline
+    fill-nobreak-p
+    fill-nonuniform-paragraphs
+    fill-paragraph
+    fill-paragraph-semlf
+    fill-polish-nobreak-p
+    fill-region
+    fill-region-as-paragraph
+    fill-region-as-paragraph-default
+    fill-region-as-paragraph-semlf
+    fill-single-char-nobreak-p
+    fill-single-word-nobreak-p
+    fill-text-properties-at
     find-alternate-file
     find-and-call-menu-selection
     find-auto-coding
@@ -1389,6 +1458,7 @@
     find-newline
     find-operation-coding-system
     finish-menu-items
+    fix-position
     fixup-whitespace
     float-time
     flush-display!
@@ -1449,6 +1519,9 @@
     forward-list-default-function
     forward-page
     forward-paragraph
+    forward-sentence
+    forward-sentence-default-function
+    forward-sentence-function
     forward-sexp
     forward-sexp-default-function
     forward-word
@@ -1609,6 +1682,7 @@
     indent-rigidly
     indent-sexp
     indent-to
+    indent-to-left-margin
     inhibit-local-variables-p
     inhibit-startup-screen
     init-menu-items
@@ -1616,6 +1690,8 @@
     init-signals
     insert
     insert-and-inherit
+    insert-before-markers
+    insert-before-markers-and-inherit
     insert-buffer-substring
     insert-char
     insert-directory
@@ -1738,6 +1814,7 @@
     itree-tree-size
     itree-tree?
     just-one-space
+    justify-current-line
     kbd
     key-binding
     key-description
@@ -1769,6 +1846,7 @@
     kill-range
     kill-region
     kill-ring-save
+    kill-sentence
     kill-sexp
     kill-this-buffer
     kill-this-buffer-enabled-p
@@ -2057,6 +2135,7 @@
     move-overlay
     move-past-close-and-reindent
     move-to-column
+    move-to-left-margin
     mule-keymap
     narrow-to-region
     negative-argument
@@ -2351,6 +2430,7 @@
     self-insert-layer
     self-insert-tab
     sendcomment
+    sentence-end
     seq-copy
     seq-difference
     seq-do-indexed
@@ -2398,6 +2478,7 @@
     set!buffer-hscroll-margin
     set!buffer-hscroll-step
     set!buffer-intervals
+    set!buffer-left-margin
     set!buffer-local-keymap
     set!buffer-markers
     set!buffer-name
@@ -2567,6 +2648,12 @@
     set-glyph-voffset!
     set-goal-column
     set-interval-object!
+    set-justification
+    set-justification-center
+    set-justification-full
+    set-justification-left
+    set-justification-none
+    set-justification-right
     set-keymap-char-table!
     set-keymap-parent
     set-mark
@@ -2624,6 +2711,7 @@
     sit-for
     skip-chars-backward
     skip-chars-forward
+    skip-line-prefix
     skip-syntax-backward
     skip-syntax-forward
     smath
@@ -2650,6 +2738,7 @@
     ssymbol
     standard-syntax-runs
     standard-syntax-table
+    start-of-paragraph-text
     status-string
     store-in-alist
     store-in-keymap
@@ -2665,6 +2754,7 @@
     string-replace
     string-search-forward
     string-suffix-p
+    string-to-list
     string-to-syntax
     string-trim
     string-trim-left
@@ -2672,6 +2762,7 @@
     string-width
     strip-undo-boundaries
     subregexp-context-p
+    subst-char-in-region
     substitute-env-vars
     substitute-in-file-name
     substitute-key-definition
@@ -3019,8 +3110,11 @@
     undo-insertion-entry?
     undo-modified-entry?
     undo-redo
+    unfill-paragraph
     unibyte-to-char
     universal-coding-system-argument
+    unjustify-current-line
+    unjustify-region
     unrecord-window-buffer
     unuse-menu-items
     up-list
@@ -3239,6 +3333,7 @@
     window-width
     window-wraps?
     windows-or-buffers-changed?
+    with-buffer-unmodified-if-unchanged
     with-current-buffer
     with-current-buffer-window
     with-selected-frame

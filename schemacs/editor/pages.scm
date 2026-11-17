@@ -20,25 +20,15 @@
           re-search-forward)
     ;; `forward-char' is `cmds.c''s `Fforward_char', which this tree keeps
     ;; in `simple.sld' beside the rest of the movement commands.
-    (only (schemacs editor simple) forward-char))
+    (only (schemacs editor simple) forward-char)
+    ;; `page-delimiter` is `paragraphs.el:213`'s defcustom; page.el only
+    ;; reads it. It lives in `paragraphs.scm` and is re-exported here, so
+    ;; this library's readers do not move.
+    (only (schemacs editor paragraphs) *page-delimiter*))
 
   (export *page-delimiter* backward-page forward-page)
 
   (begin
-
-    (define *page-delimiter* (make-parameter "^\f"))
-    ;; ^ GNU Emacs's `page-delimiter' (page.el:25): "Regexp describing
-    ;; line that separates pages. The ^L is a form feed." Emacs spells it
-    ;; `"^\f"' and that is what this is - Guile's reader has `\f' for a
-    ;; form feed.
-    ;;
-    ;; It was spelled `"^\014"' here, with a comment claiming that is the
-    ;; same string in octal. **It is not**: *neither* reader has an octal
-    ;; escape, so `\014' is a NUL followed by the two characters `1' and
-    ;; `4' - `"^" NUL "14"' - in the default reader and under `--r7rs'
-    ;; alike. Measured both ways. A page delimiter that never matched
-    ;; anything, which is why `forward-page' would run to the end of the
-    ;; buffer.
 
     (define (forward-page count)
       ;; GNU Emacs's `forward-page' (page.el:31): "Move forward to page

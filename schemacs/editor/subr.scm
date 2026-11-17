@@ -117,6 +117,7 @@
    regexp-unmatchable
    string-prefix-p
    make-syntax-table
+   string-to-list
    string-suffix-p
    assoc-default
    string-replace
@@ -1599,6 +1600,15 @@
     ;; (`kill-buffer-and-window'), `C-o' (`display-buffer') and the rest,
     ;; none of which this tree has.
     (define-key *default-keymap* (kbd "C-x 4") ctl-x-4-map)
+
+    (define (string-to-list string)
+      ;; GNU Emacs's `string-to-list' (`subr.el:4739', a `defsubst'):
+      ;; "Return a list of the characters in STRING." This tree's
+      ;; characters are characters where the C's are integers, so this is
+      ;; Scheme's `string->list' - and a caller that compares an answer
+      ;; with `memq' against `char-after' compares like with like.
+      ;;--------------------------------------------------------------
+      (string->list string))
 
     ;;----------------------------------------------------------------
     ;; The hook runner, into the library that needs it

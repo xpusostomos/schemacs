@@ -52,15 +52,18 @@
     ;; may be a marker - the C's `MARKERP (position)' branch - so the
     ;; marker predicates come with it.
     (only (schemacs editor buffer)
-          buffer-beg buffer-pt buffer-z current-buffer text-editor-text)
+          buffer-beg buffer-pt buffer-z bufferp current-buffer get-buffer
+          text-editor-text)
     ;; the characters themselves - `count_lines' is a walk over them, as
     ;; the C's `display_count_lines' is a walk over the buffer's bytes.
-    (only (schemacs editor buffer-text) buffer-text-ref buffer-text-base)
+    (only (schemacs editor buffer-text)
+          buffer-text-ref buffer-text-base buffer-text-for-each)
     (only (schemacs editor marker) marker-position markerp)
-    (only (guile) LC_COLLATE LC_CTYPE)
+    (only (guile) LC_COLLATE LC_CTYPE logxor)
     )
 
   (export compare-strings
+          buffer-hash
           concat
           vconcat
           copy-sequence
@@ -125,6 +128,59 @@
     (define (install-fns-textprop! text-property-list add-text-properties-from-list)
       (set! %text-property-list text-property-list)
       (set! %add-text-properties-from-list add-text-properties-from-list))
+
+    ;;----------------------------------------------------------------
+    ;; `buffer-hash`
+    ;;----------------------------------------------------------------
+
+    (define (buffer-hash . args)
+      ;; GNU Emacs's `buffer-hash' (`fns.c:6454`): "Return a hash of the
+      ;; contents of BUFFER-OR-NAME. This hash is performed on the raw
+      ;; internal format of the buffer, disregarding any coding systems.
+      ;; If nil, use the current buffer."
+      ;;
+      ;; **The hash function is Guile's, not SHA-1**, and that is the one
+      ;; departure here: Emacs answers a 40-character hex digest of a
+      ;; SHA-1 over the buffer's bytes, and Guile's core has no SHA-1.
+      ;; The tree's one caller is `with-buffer-unmodified-if-unchanged'
+      ;; (`fill.scm' - `subr-x.el`'s macro, which Emacs uses to leave a
+      ;; buffer unmodified when a fill ends where it started), and all it
+      ;; does is compare two hashes of the same buffer, so what the
+      ;; function has to be is *equal for equal text and different for
+      ;; different text*. **Guile's `hash' is not usable for that**:
+      ;; measured, `(hash (u32vector 1 2) N)' and `(hash (u32vector 1 3)
+      ;; N)' answer the same number, because a uniform vector is hashed by
+      ;; identity rather than by contents. So the fold is FNV-1a over the
+      ;; code points, one pass and no allocation, in `%text-hash' below.
+      ;; Emacs's own docstring says the value is "not guaranteed to return
+      ;; the same hash between different Emacs versions", so the number
+      ;; itself was never an interface.
+      ;;
+      ;; A BUFFER-OR-NAME that names no buffer is `nsberror`'s signal,
+      ;; which is this tree's "Wrong type argument".
+      ;;--------------------------------------------------------------
+      (let* ((buffer-or-name (and (pair? args) (car args)))
+             (buffer (cond ((not buffer-or-name) (current-buffer))
+                           ((bufferp buffer-or-name) buffer-or-name)
+                           (else
+                            (or (get-buffer buffer-or-name)
+                                (error "Wrong type argument" buffer-or-name))))))
+        (%text-hash (text-editor-text buffer))))
+
+    (define (%text-hash text)
+      ;; FNV-1a over the code points, one pass and no allocation - which
+      ;; is `sha1_process_bytes`' shape over the C's two segments, with a
+      ;; different function. Guile's own `hash' is *not* usable here:
+      ;; measured, `(hash (u32vector 1 2) N)' and `(hash (u32vector 1 3)
+      ;; N)' answer the same number, because a uniform vector is hashed by
+      ;; identity rather than by contents.
+      ;;--------------------------------------------------------------
+      (let ((h #x811c9dc5))
+        (buffer-text-for-each
+         text
+         (lambda (position code)
+           (set! h (modulo (* (logxor h code) #x01000193) #x100000000))))
+        h))
 
     ;;----------------------------------------------------------------
     ;; Lines, counted and numbered

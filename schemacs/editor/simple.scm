@@ -137,6 +137,11 @@
     ;; `tab-to-tab-stop`'s `delete-horizontal-space` - goes through a seam,
     ;; which this library fills at load (the end of the file).
     (only (schemacs editor indent)
+          ;; `back-to-indentation` is `simple.el`'s and moved *down* into
+          ;; `indent.scm`, where `current-left-margin` can reach it; this
+          ;; library re-exports it so every caller and `M-x` still find it
+          ;; here.
+          back-to-indentation
           indent-according-to-mode *delete-horizontal-space-function*)
     ;; `transpose-chars' reads the `read-only' property of the character
     ;; before point, which is `textprop.c`'s - Emacs's own test, added
@@ -3510,14 +3515,6 @@ a buffer-local setting."
                      column)))
       #f)
 
-    (define-command (back-to-indentation)
-      "Move point to the first non-whitespace character on this line."
-      (interactive '())
-      (beginning-of-line 1)
-      (skip-syntax-forward " " (line-end-position))
-      ;; "Move back over chars that have whitespace syntax but have the p
-      ;; flag."
-      (backward-prefix-chars))
 
     ;; The seam `indent.scm` reaches `delete-horizontal-space` through -
     ;; see the note at the top of this file's imports.

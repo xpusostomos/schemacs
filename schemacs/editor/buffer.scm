@@ -244,6 +244,8 @@
    set!buffer-overwrite-mode
    buffer-fill-column
    set!buffer-fill-column
+   buffer-left-margin
+   set!buffer-left-margin
    buffer-tab-width
    set!buffer-tab-width
    buffer-hscroll-margin
@@ -750,6 +752,14 @@
       (buffer-local-value buffer 'fill-column 70))
     (define (set!buffer-fill-column buffer value)
       (set-buffer-local-value! buffer 'fill-column value))
+    (define (buffer-left-margin buffer)
+      ;; The column `indent-to-left-margin' and the fill commands indent
+      ;; to: GNU Emacs's `left-margin', a buffer-local DEFVAR_PER_BUFFER
+      ;; whose default is 0 (`buffer.c:4905').
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'left-margin 0))
+    (define (set!buffer-left-margin buffer value)
+      (set-buffer-local-value! buffer 'left-margin value))
     (define (buffer-hscroll-margin buffer)
       ;; How close to the window's left or right edge point may sit before
       ;; auto hscrolling starts scrolling: GNU Emacs's `hscroll-margin',

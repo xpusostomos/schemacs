@@ -5,7 +5,8 @@
  (only (schemacs editor buffer)
        *current-buffer* *inhibit-read-only* allocate-buffer buffer-name
        buffer-read-only? current-buffer erase-buffer get-buffer
-       get-buffer-create major-mode set-buffer set-point with-current-buffer)
+       get-buffer-create major-mode set-buffer set-point with-current-buffer
+       *case-fold-search*)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor editfns)
        *inhibit-field-text-motion* *inhibit-message* *text-quoting-style*
@@ -16,7 +17,12 @@
        point propertize
        ;; the restriction
        narrow-to-region widen save-restriction buffer-size delete-region
-       buffer-substring char-after)
+       buffer-substring char-after
+       char-equal subst-char-in-region insert-before-markers-and-inherit)
+ (only (schemacs editor undo)
+       text-editor-undo-enable! text-editor-undo-list
+       text-editor-undo-recording?)
+ (only (schemacs editor marker) make-marker marker-position set-marker)
  (only (schemacs editor xdisp) *message-log-max*)
  (only (schemacs editor simple) messages-buffer)
  (only (schemacs editor textprop) get-char-property get-text-property put-text-property)
@@ -647,5 +653,87 @@
       (narrow-to-region 1 99))))
 
 (test-end "schemacs_editor_editfns_narrowing")
+
+;;--------------------------------------------------------------------
+;; `subst-char-in-region`, `char-equal` and `insert-before-markers`
+;;--------------------------------------------------------------------
+;; Every expectation below is Emacs 31.1's own answer for the same call,
+;; measured with `emacs -Q --batch'.
+
+(test-begin "schemacs_editor_editfns_subst")
+
+(test-equal '(#f "hellX wXrld")
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (list (subst-char-in-region (point-min) (point-max) #\o #\X)
+          (buffer-string))))
+
+;; "Both characters must have the same length of multi-byte form" - a
+;; one-byte character cannot be replaced by a three-byte one.
+(test-equal "Characters in `subst-char-in-region' have different byte-lengths"
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (guard (e (#t (exception-message e)))
+      (subst-char-in-region 1 12 #\a #\€))))
+
+;; Inside a narrowing it changes only what the restriction reaches.
+(test-equal "heXXo world"
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (narrow-to-region 1 5)
+    (subst-char-in-region 1 5 #\l #\X)
+    (widen)
+    (buffer-string)))
+
+;; ... and a range reaching outside it is `validate_region`'s signal,
+;; which is "Args out of range: #<buffer>, 1, 10" in Emacs 31.1.
+(test-equal 'args-out-of-range
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (narrow-to-region 1 5)
+    (guard (e (#t 'args-out-of-range))
+      (subst-char-in-region 1 10 #\l #\X))))
+
+;; noundo: the text changes, the undo list does not.
+(test-equal '(0 "")
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (text-editor-undo-enable! b)
+    (subst-char-in-region 1 6 #\o #\X #t)
+    (list (length (text-editor-undo-list b))
+          (if (text-editor-undo-recording? b) "" "off"))))
+
+(test-equal '(#t #t #f)
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (list (char-equal #\a #\a)
+          (char-equal #\a #\A)
+          (parameterize ((*case-fold-search* #f))
+            (char-equal #\a #\A)))))
+
+;; Equal characters answer t whatever the folding says, because the C
+;; tests equality first.
+(test-equal #t
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (parameterize ((*case-fold-search* #f)) (char-equal #\a #\a))))
+
+;; `insert-before-markers-and-inherit` moves a marker at point past the
+;; inserted text; plain `insert` leaves it before.
+(test-equal '(4 2)
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (let ((m (make-marker)))
+      (set-marker m 2)
+      (goto-char 2)
+      (insert-before-markers-and-inherit "ZZ")
+      (let ((before (marker-position m)))
+        (delete-region 2 4)
+        (set-marker m 2)
+        (goto-char 2)
+        (insert "ZZ")
+        (list before (marker-position m))))))
+
+(test-end "schemacs_editor_editfns_subst")
 
 (test-end "schemacs_editor_editfns")

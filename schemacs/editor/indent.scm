@@ -27,13 +27,23 @@
   (import
     (scheme base)
     (only (schemacs editor buffer)
-          current-buffer buffer-local-value set-buffer-local-value!)
+          current-buffer buffer-local-value set-buffer-local-value!
+          ;; `left-margin`, the buffer-local the two margin functions
+          ;; below are about (`indent.el:70')
+          buffer-left-margin)
+    ;; `current-left-margin` reads the `left-margin` text property at the
+    ;; start of the line (`indent.el:63`)
+    (only (schemacs editor textprop) get-text-property)
+    ;; `define-custom` (`custom.el') - `*fill-prefix*` below is a
+    ;; defcustom and is spelled the way this tree spells one
+    (only (schemacs editor custom) define-custom)
     (only (schemacs editor character) *tab-width*)
     (only (schemacs editor cmds) beginning-of-line backward-char)
     (only (schemacs editor command)
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor editfns)
-          bobp bolp delete-region eolp forward-line goto-char point point-marker
+          bobp bolp delete-region eobp eolp forward-line goto-char insert
+          point point-marker
           region-beginning region-end line-end-position save-excursion
           ;; `indent-according-to-mode` widens first, so that indenting a
           ;; line in a narrowed buffer sees the text outside it.
@@ -41,12 +51,14 @@
     (only (schemacs editor marker) copy-marker marker-position set-marker)
     (only (schemacs editor indentc)
           current-column current-indentation indent-to move-to-column)
-    (only (schemacs editor search) looking-at re-search-backward)
+    (only (schemacs editor search) looking-at regexp-quote
+          re-search-backward)
     (prefix (schemacs editor keymap) km:)
     (only (schemacs editor keymap) define-key)
     (only (schemacs editor subr) kbd)
     (only (schemacs editor syntax)
-          skip-chars-forward skip-chars-backward syntax-propertize)
+          backward-prefix-chars skip-chars-forward skip-chars-backward
+          skip-syntax-forward syntax-propertize)
     )
 
   (export
@@ -54,6 +66,8 @@
    indent-line-function indent-line-ignored-functions
    indent-according-to-mode indent-line-to
    indent-region-function indent-region indent-region-line-by-line
+   back-to-indentation current-left-margin move-to-left-margin
+   indent-to-left-margin *fill-prefix*
    indent-relative indent-relative-first-indent-point indent-relative-maybe
    indent-next-tab-stop tab-to-tab-stop tab-stop-list
    *delete-horizontal-space-function*
@@ -202,6 +216,114 @@ large negative ARG."
                                 (skip-chars-forward " \t")
                                 (point)))))))
 
+    (define-custom *fill-prefix* #f
+      "String to insert at beginning of each line of a paragraph.
+Used when filling paragraphs by `fill-paragraph' and friends.
+If you change this without using \\[set-fill-prefix], it is not
+automatically cleared."
+      :type '(choice (const :tag "None" nil) string)
+      :group 'fill)
+    ;; ^ GNU Emacs's `fill-prefix' (`fill.el:55') - a defcustom that
+    ;; `fill-region-as-paragraph-default' let-binds around a paragraph, so
+    ;; it is a parameter here.
+    ;;
+    ;; **Placement departure**: `fill.el`'s, and it lives in
+    ;; `indent.scm`. Three libraries read it - `indent-region`'s first
+    ;; branch (`indent.el:552`), `forward-paragraph` (`paragraphs.el:229`)
+    ;; and `beginning-of-line-text` (`indent.el:531`) - and the C's graph
+    ;; would need `paragraphs.scm` to import `indent.scm` (it does, for
+    ;; the margins) *and* `indent.scm` to import `paragraphs.scm` (for
+    ;; this), which a DAG cannot hold. `indent.scm` is the lowest of the
+    ;; three, so the variable comes down to it, as `*minor-mode-alist*`
+    ;; came down to `subr.scm`.
+
+    (define-command (back-to-indentation)
+      ;; GNU Emacs's `back-to-indentation' (`simple.el:7093'): "Move point
+      ;; to the first non-whitespace character on this line."
+      ;;
+      ;; **`simple.el`'s, and it moved down here** because
+      ;; `current-left-margin` below is `indent.el`'s first caller and
+      ;; `indent.scm` sits *below* `simple.scm` - the same downward move
+      ;; `beginning-of-line` took into `cmds.scm`. `simple.scm` imports
+      ;; and re-exports it, so `M-x` and every caller reach it where Emacs
+      ;; has it.
+      ;;--------------------------------------------------------------
+      "Move point to the first non-whitespace character on this line."
+      (interactive '())
+      (beginning-of-line 1)
+      (skip-syntax-forward " " (line-end-position))
+      ;; "Move back over chars that have whitespace syntax but have the p
+      ;; flag."
+      (backward-prefix-chars))
+
+    (define (current-left-margin)
+      ;; GNU Emacs's `current-left-margin' (`indent.el:52'): "Return the
+      ;; left margin to use for this line. This is the value of the
+      ;; buffer-local variable `left-margin' plus the value of the
+      ;; `left-margin' text-property at the start of the line."
+      ;;
+      ;; The C's `(if (and (eobp) (not (bobp))) (1- (point)) (point))'
+      ;; is the position the property is read at: at end of buffer the
+      ;; property is the one on the last character, because there is no
+      ;; character at point.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (back-to-indentation)
+        (max 0
+             (+ (buffer-left-margin (current-buffer))
+                (or (get-text-property
+                     (if (and (eobp) (not (bobp)))
+                         (- (point) 1)
+                         (point))
+                     'left-margin)
+                    0)))))
+
+    (define (move-to-left-margin . args)
+      ;; GNU Emacs's `move-to-left-margin' (`indent.el:70'): "Move to the
+      ;; left margin of the current line. With optional argument, move
+      ;; forward N-1 lines first. The column moved to is the one given by
+      ;; the `current-left-margin' function. If the line's indentation
+      ;; appears to be wrong, and this command is called interactively or
+      ;; with optional argument FORCE, it will be fixed."
+      ;;
+      ;; **Not carried: the `minibufferp` branch.** Emacs sends the
+      ;; minibuffer either to the prompt end or to the line beginning, so
+      ;; that a margin never eats the prompt. This tree's prompt is buffer
+      ;; text and `beginning-of-line` already constrains to the prompt's
+      ;; `field` (2026-11-15), which is what that branch was for;
+      ;; `fill-minibuffer-function` narrows to the prompt end before it
+      ;; fills, so the margin below is measured inside the input.
+      ;;--------------------------------------------------------------
+      (let ((n (and (pair? args) (car args)))
+            (force (and (pair? args) (pair? (cdr args)) (cadr args))))
+        (let ((n (if n n 1))
+              (force (if force #t #f)))
+          (beginning-of-line n)
+          (skip-chars-forward " \t")
+          (let ((lm (current-left-margin))
+                (cc (current-column)))
+            (cond ((> cc lm)
+                   (if (> (move-to-column lm force) lm)
+                       ;; "If lm is in a tab and we are not forcing, move
+                       ;; before tab"
+                       (backward-char 1)))
+                  ((and force (< cc lm))
+                   (indent-to-left-margin))))
+            #f)))
+
+    (define (indent-to-left-margin)
+      ;; GNU Emacs's `indent-to-left-margin' (`indent.el:101'): "Indent
+      ;; current line to the column given by `current-left-margin'." The
+      ;; second half moves point past the indentation when point is
+      ;; inside it.
+      ;;--------------------------------------------------------------
+      (save-excursion (indent-line-to (current-left-margin)))
+      (if (save-excursion
+            (skip-chars-backward " \t")
+            (bolp))
+          (skip-chars-forward " \t"))
+      #f)
+
     (define (indent-region-function)
       ;; `indent-region-function' (`indent.el:546'): "Short cut function
       ;; to indent region using `indent-according-to-mode'."
@@ -247,8 +369,23 @@ column to indent to; if it is nil, use one of the three methods above."
                     (forward-line 1)
                     (loop)))
                 (set-marker end #f)))))
-         ;; The `fill-prefix' arm is not here: `fill.el' is not ported,
-         ;; so there is no such variable to consult.
+         ;; "If a fill-prefix is specified, use it." - insert it on every
+         ;; line that does not already begin with it, and leave a blank
+         ;; line alone.
+         ((*fill-prefix*)
+          (save-excursion
+            (goto-char end)
+            (let ((end (point-marker))
+                  (regexp (regexp-quote (*fill-prefix*))))
+              (goto-char start)
+              (let loop ()
+                (when (< (point) (marker-position end))
+                  (or (looking-at regexp)
+                      (and (bolp) (eolp))
+                      (insert (*fill-prefix*)))
+                  (forward-line 1)
+                  (loop)))
+              (set-marker end #f))))
          ;;
          ;; Use `indent-region-function' if available. The C's
          ;; `save-restriction'/'widen' have nothing to do here.

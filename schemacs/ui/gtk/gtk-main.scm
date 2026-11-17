@@ -37,6 +37,8 @@
     ;; why.
     (only (schemacs editor casefiddle))
     (only (schemacs editor paragraphs))
+    ;; `fill.el`'s commands and the M-q binding it makes
+    (only (schemacs editor fill))
     ;; `replace.el' - the ncurses.sld note says why.
     ;; The mouse commands, imported for their *binding*: loading
     ;; `mouse.sld' is what puts `[down-mouse-1]' in the global map,

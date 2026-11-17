@@ -5385,3 +5385,165 @@ says, because the letter reaches `self-insert` and the buffer refuses it.
 With the remap the letter never reaches the buffer: Emacs says
 "z is undefined". The check now asserts that, with the measurement from
 Emacs 31.1 in its comment.
+
+# fill.el, and the primitives under it (2026-11-17)
+
+`schemacs/editor/fill.scm` is `lisp/textmodes/fill.el` ported whole, on
+top of the primitives it needed: `char-equal` and `subst-char-in-region`
+(`editfns.c:4418`, `:2294`), `insert-before-markers` and
+`insert-before-markers-and-inherit` (`editfns.c:1388`, `:1422`),
+`fix-position` (`editfns.c:2281`), `buffer-hash` (`fns.c:6454`),
+`string-to-list` (`subr.el:4739`), `indent.el`'s margin family
+(`current-left-margin`, `move-to-left-margin`, `indent-to-left-margin`),
+`back-to-indentation`, `beginning-of-line-text` (`indent.el:519`),
+`paragraphs.el`'s real `forward-paragraph`/`backward-paragraph` and
+`sentence-end` with their variables, and the sentence motions.
+
+## The measurements the port was checked against
+
+Every expectation in `fill-tests.scm` is Emacs 31.1's own answer for the
+same bytes: the fixture text is filled on both sides and the outputs are
+compared with `diff`. Seven whole-paragraph cases - a plain paragraph, an
+indented one (the fill-prefix path), a line whose every space follows a
+period (`sentence-end-double-space`), full justification, centring,
+`fill-individual-paragraphs`, and `unfill-paragraph` - plus a comment
+filled in `scheme-mode` (the `;;` prefix kept on every line) and four
+piece-level ones (`current-fill-column`, `canonically-space-region`,
+`fill-context-prefix`, `fill-nobreak-p`).
+
+## Departures, each named where it happens in the source
+
+### `fill-column` is buffer-local, with one dynamic override
+
+Emacs's `fill-column` is a `DEFVAR_PER_BUFFER` **and** `fill.el`
+`let`-binds it in two places (`unfill-paragraph`, `fill.el:966`;
+`fill-region-as-paragraph-semlf`, `:1743`). This tree keeps the
+buffer-local value (`buffer-fill-column`, `buffer.scm`) and adds
+`*fill-column-override*` for the two rebindings, because a Scheme `let`
+cannot reach a per-buffer table several frames down. `(fill-column)` is
+the reader and answers the override when it is bound.
+
+`fill-prefix` itself is `fill.el`'s defcustom and lives in
+`indent.scm`; see the note under "The left margin and `fill-prefix`"
+below.
+
+### `default-justification` is a parameter, not buffer-local
+
+Emacs declares it `:local t`. Nothing in this tree sets it per buffer, so
+it is a plain parameter and the per-buffer arm is absent.
+
+### There are no character categories
+
+`char-script-table`, `char-category-set` and the category `|` are
+`charset.c`'s, and `charset.scm` here carries only the metadata. The
+consequences, all of them in `fill.scm`:
+
+* `fill-move-to-break-point`'s regexp `"[ \t]\\|\\c|.\\|.\\c|"` is
+  `"[ \t]"` (the engine rejects `\c` outright), and the two `\c|`
+  branches inside its "keep at least one word" loop are omitted.
+* `fill-newline`'s `\c|` test and its `(aref (char-category-set ...) ?|)`
+  conjunct are omitted; only `fill-prefix` decides what is inserted.
+* `fill-delete-newlines`'s "delete a newline between two words of a
+  script that does not use spaces" walk is omitted entirely; Emacs
+  deletes nothing between Latin words, so for the text this editor can
+  serve the result is the same.
+* `fill-find-break-point-function-table` and
+  `fill-nospace-between-words-table` exist and are empty, so
+  `fill-find-break-point` does nothing - which is Emacs's answer for a
+  character with no entry.
+* `charset-after`, which `fill-move-to-break-point`'s last arm calls, is
+  not ported; the arm is a no-op instead of an ASCII test.
+
+### `invisible-p` is not ported
+
+`fill-nobreak-invisible` is declared and read, but the question it asks -
+"is the text at point invisible" - has no reader here, so it always
+answers "visible". Named in `fill-nobreak-p`'s comment.
+
+### `with-buffer-unmodified-if-unchanged` hashes code points, not SHA-1
+
+`subr-x.el:678`. Emacs's `buffer-hash` is a SHA-1 over the buffer's bytes
+answered as a 40-character hex digest; Guile's core has no SHA-1. The
+tree's `buffer-hash` folds FNV-1a over the code points and answers the
+integer. Its one caller compares two hashes of the same buffer, which is
+the whole contract - and Emacs's own docstring says the value is not
+stable between versions. Guile's `hash` is **not** usable here: measured,
+`(hash (u32vector 1 2) N)` and `(hash (u32vector 1 3) N)` answer the same
+number, because a uniform vector is hashed by identity.
+
+### Markers do not do arithmetic
+
+Where Emacs compares a position with a marker (`(< (point) to)` with `to`
+a marker), Scheme cannot, so `%pos` in `fill.scm` reads `marker-position`
+at each comparison. It is the read-side spelling of `fix-position`. The
+markers themselves are kept exactly where Emacs keeps them
+(`canonically-space-region`'s `end`, `fill-region-as-paragraph-default`'s
+`to`, `fill-region`'s `max`) because they must move as the text shrinks.
+
+### `fill-move-to-break-point`'s fallback condition
+
+The C's `(if (>= linebeg (point)) ...)` is a proxy for "no break point was
+accepted". In the C, a refused candidate sends point back to the bound and
+the following search fails, leaving point at LINEBEG; here
+`skip-chars-backward` stops at the first non-space, so point can end a
+little past it and the fallback ("keep at least one word, walking to the
+line end") would not be taken. Measured against Emacs 31.1 on
+`"One. Two. Three. ..."` at fill-column 70: Emacs walks to the line end
+and breaks nothing. `fill-move-to-break-point` records whether a candidate
+was refused (`rejected`) and takes the fallback when the last one was.
+
+### Elisp's `if` takes several ELSE forms
+
+`(if COND THEN ELSE...)`. Every arm of the C that carries several forms is
+written as a `begin` here; the ones that matter are `fill-newline`'s,
+`fill-paragraph`'s four-strategy `or` chain and `justify-current-line`'s
+`nil` after its `if`.
+
+### `M-k` was bound to the wrong command
+
+`paragraphs.scm` bound `M-k` to `kill-paragraph` and `M-C-k` to
+`backward-kill-paragraph`. Measured: `(key-binding "\M-k")` is
+`kill-sentence`, `M-C-k` is `kill-sexp` (which `lisp.scm` already binds,
+so the two files were fighting over one key), and `kill-paragraph` is
+bound to nothing at all. Corrected, and `C-x DEL`, `M-e`, `M-a`, `M-{`
+and `M-}` bound to what `bindings.el` binds.
+
+## Not carried, each with what it waits for
+
+* `use-hard-newlines`' **mode command** - the variable is here and every
+  branch that reads it is ported; the mode needs `:extra-args`, which
+  this tree's `define-minor-mode` does not carry, and
+  `set-hard-newline-properties`. A buffer therefore never has a `hard`
+  newline and the branches are dead until that changes.
+* `paragraph-indent-minor-mode` and its abbrev table.
+* `transpose-paragraphs`, `transpose-sentences`, `count-sentences`,
+  `repunctuate-sentences`, `mark-end-of-sentence` - each needs a piece
+  this tree does not have (`transpose-subr` over a motion function,
+  `isearch-filter-predicate`, `push-mark`'s ACTIVATE).
+* `fill-paragraph`'s `C-u` "insert the value" arm and the minibuffer's
+  prompt-width accounting: `fill-minibuffer-function` is carried, and
+  `minibufferp` answers for the active minibuffer.
+
+## The left margin and `fill-prefix` (2026-11-17)
+
+`indent.el`'s margin family is ported (`current-left-margin`,
+`move-to-left-margin`, `indent-to-left-margin`, and the `left-margin`
+buffer-local in `buffer.scm`, default 0), and with it `indent-region`'s
+first branch - "If a fill-prefix is specified, use it" - which had been
+a named gap in `indent.scm` since the file was written.
+
+`fill-prefix` is `fill.el`'s defcustom and it lives in `indent.scm`. The
+reason is the import graph, and it is the same shape as
+`*minor-mode-alist*`'s move to `subr.scm`: three libraries read it -
+`indent-region` (`indent.el:552`), `forward-paragraph`
+(`paragraphs.el:229`) and `beginning-of-line-text` (`indent.el:531`) -
+and `paragraphs.scm` already imports `indent.scm` for the margins, so
+keeping it in a `fill.scm` would make `indent -> paragraphs -> indent` a
+cycle. `indent.scm` is the lowest of the three.
+
+`move-to-left-margin`'s `minibufferp` branch is **not** carried: Emacs
+sends the minibuffer either to the prompt end or to the line beginning so
+that a margin never eats the prompt, and this tree's prompt is buffer
+text whose `field` already constrains `beginning-of-line` (2026-11-15) -
+`fill-minibuffer-function` narrows to the prompt end before it fills. The
+branch is named in the source.

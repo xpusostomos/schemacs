@@ -157,6 +157,7 @@
         (schemacs editor fns)
         (schemacs editor font)
         (schemacs editor font-core)
+        (schemacs editor fill)
         (schemacs editor font-lock)
         (schemacs editor frame)
         (schemacs editor glyph)

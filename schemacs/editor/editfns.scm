@@ -57,9 +57,17 @@
           text-editor-text
           ;; `validate_region` (`buffer.c:2504`), which `delete-region`
           ;; and both `buffer-substring`s open with
-          validate-region)
+          validate-region
+          ;; "does not record this change for undo" - the C binds the
+          ;; buffer's undo list to `t' (`editfns.c:2352`)
+          text-editor-undo-list set!text-editor-undo-list
+          ;; the C's `if (SAVE_MODIFF == m - 1) SAVE_MODIFF = m`
+          buffer-modified-tick text-editor-save-modiff
+          set!text-editor-save-modiff
+          ;; `char-equal`'s case folding reads it (`editfns.c:4437`)
+          *case-fold-search*)
     (only (schemacs editor buffer-text)
-          buffer-text-base buffer-text-z)
+          buffer-text-base buffer-text-z buffer-text-ref buffer-text-set!)
     ;; `narrow-to-region` is a redisplay event (`clip_changed`), which is
     ;; the flag `dispnew.scm` carries.
     (only (schemacs editor dispnew) set-windows-or-buffers-changed!)
@@ -97,7 +105,12 @@
     ;; The insertion and the deletion themselves are `insdel.c`'s, in its
     ;; own library - `insert_1_both` and `del_range` are that file's, the
     ;; same way `Finsert` and `Fdelete_region` below are this one's.
-    (only (schemacs editor insdel) del-range del-range-1 insert-from-string)
+    (only (schemacs editor insdel) del-range del-range-1 insert-from-string
+          modify-text signal-after-change)
+    ;; `record_change` is what a *replacement* records, and
+    ;; `subst-char-in-region` is its one caller here as it is in the C.
+    ;; Its two halves are `undo.scm`'s; the function itself is below.
+    (only (schemacs editor undo) record-insert record-delete)
     ;; `propertize' and the string paths: `propertize' copies through
     ;; `copy-sequence', and `buffer-substring' is the way text properties
     ;; cross from a buffer to a string. The other direction - a string
@@ -171,6 +184,11 @@ point-marker
    goto-char
    insert
    insert-and-inherit
+   insert-before-markers
+   insert-before-markers-and-inherit
+   fix-position
+   subst-char-in-region
+   char-equal
    line-number-at-pos
    point-max
    point-min
@@ -341,27 +359,34 @@ point-marker
           (set-point (current-buffer) at)
           at)))
 
-    (define (general-insert-function inherit args)
+    (define (general-insert-function inherit before-markers args)
       ;; GNU Emacs's `general_insert_function` (`editfns.c:1298`), the
-      ;; body `insert' and `insert-and-inherit' share. The C takes the two
+      ;; body `insert', `insert-and-inherit', `insert-before-markers' and
+      ;; `insert-before-markers-and-inherit' share. The C takes the two
       ;; insert functions as arguments because it has two pairs of them;
       ;; there is one string-insert here - see `insert-from-string-1` on
-      ;; why - so the INHERIT flag is the whole of the parameter, and it
-      ;; reaches that one call the way the C's reaches its two.
+      ;; why - so the INHERIT and BEFORE-MARKERS flags are the whole of
+      ;; the parameters, and they reach that one call the way the C's
+      ;; choice of function reaches its two.
       ;;
       ;; A character is encoded into a one-character string and inserted,
       ;; which is what the C's `CHAR_STRING` does before calling
-      ;; `insert_func`. The flag decides whether text that brings no
+      ;; `insert_func`. INHERIT decides whether text that brings no
       ;; properties of its own *keeps* the neighbouring ones or has them
-      ;; cleared off it, and it is read inside the graft.
+      ;; cleared off it, and it is read inside the graft;
+      ;; BEFORE-MARKERS decides whether a marker sitting at the insertion
+      ;; point ends up before the new text or after it (`advanced' in
+      ;; `adjust_markers_for_insert`).
       ;;--------------------------------------------------------------
       (for-each
        (lambda (arg)
          (cond
-          ((string? arg) (insert-from-string arg inherit))
-          ((char? arg) (insert-from-string (string arg) inherit))
+          ((string? arg) (insert-from-string arg inherit before-markers))
+          ((char? arg)
+           (insert-from-string (string arg) inherit before-markers))
           ((integer? arg)
-           (insert-from-string (string (integer->char arg)) inherit))
+           (insert-from-string (string (integer->char arg)) inherit
+                               before-markers))
           (else (error "Wrong type argument" arg))))
        args)
       #f)
@@ -384,7 +409,7 @@ point-marker
       ;; The graft used to be done here, after `insert-from-string'
       ;; returned and therefore after the after-change hooks had run.
       ;; `insert_from_string_1` does it now, which is where the C has it.
-      (general-insert-function #f args))
+      (general-insert-function #f #f args))
 
     (define (insert-and-inherit . args)
       ;; GNU Emacs's `insert-and-inherit' (`editfns.c:1377`): "Insert the
@@ -399,7 +424,30 @@ point-marker
       ;; inherits, which is why typing at the end of a propertized run
       ;; extends it - and so is `newline'.
       ;;--------------------------------------------------------------
-      (general-insert-function #t args))
+      (general-insert-function #t #f args))
+
+    (define (insert-before-markers . args)
+      ;; GNU Emacs's `insert-before-markers' (`editfns.c:1388`): "Insert
+      ;; text at point, relocating markers and inheriting properties" -
+      ;; except that it does *not* inherit: the C's call is
+      ;; `general_insert_function (insert_before_markers,
+      ;; insert_from_string_before_markers, 0, ...)'. What it does do is
+      ;; move the markers at the insertion point to *after* the new text,
+      ;; where plain `insert' leaves them before it.
+      ;;--------------------------------------------------------------
+      (general-insert-function #f #t args))
+
+    (define (insert-before-markers-and-inherit . args)
+      ;; GNU Emacs's `insert-before-markers-and-inherit' (`editfns.c:1422`):
+      ;; "Insert text at point, relocating markers and inheriting
+      ;; properties. Point and all markers at or after the insertion
+      ;; point move forward to end up after the inserted text."
+      ;;
+      ;; `fill-newline' is its caller in `fill.el' - "Markers that were
+      ;; after the whitespace are now at point: insert before them so
+      ;; they don't get stuck before the prefix."
+      ;;--------------------------------------------------------------
+      (general-insert-function #t #t args))
 
     (define (bobp)
       ;; GNU Emacs's `bobp' (editfns.c): "Return t if point is at the
@@ -907,6 +955,133 @@ point-marker
               (when (> left 0)
                 (insert (string character))
                 (loop (- left 1)))))))
+
+    (define (fix-position pos)
+      ;; GNU Emacs's `fix_position` (`editfns.c:2281', static): "If POS is
+      ;; a marker, return its position; otherwise, check that it is a
+      ;; fixnum and return it." The C's `Fsubst_char_in_region` runs the
+      ;; two arguments through `validate_region`, which does the same, and
+      ;; this tree's `validate_region` cannot: `marker.scm` is above
+      ;; `buffer.scm`. So the coercion lives here, where the C's own
+      ;; `fix_position` is, and the callers that take an arbitrary object
+      ;; call it.
+      ;;--------------------------------------------------------------
+      (if (markerp pos)
+          (marker-position pos)
+          pos))
+
+    (define (%char-code character)
+      ;; A character or a code point as a code point - the `CHECK_CHARACTER'
+      ;; of the two DEFUNs below, and the same tolerance `syntax.scm''s
+      ;; `%char-code` has: this tree's readers answer characters where the
+      ;; C's answer integers, and both spellings reach these.
+      ;;--------------------------------------------------------------
+      (if (char? character) (char->integer character) character))
+
+    (define (record-change beg length)
+      ;; GNU Emacs's `record_change` (`undo.c:199`): "Record a change in
+      ;; which characters from BEG to BEG+LENGTH are being replaced by
+      ;; the same number of characters." It is exactly the C's two calls,
+      ;; in the C's order - the deletion carrying the text that is about
+      ;; to go, then the insertion of what replaces it.
+      ;;
+      ;; **It is `undo.c`'s and it lives here**, because the C's
+      ;; `make_buffer_string` is what a deletion entry carries and
+      ;; `undo.scm` sits *below* `intervals.scm` in this tree's graph -
+      ;; `intervals` imports `insdel`, which imports `undo`, so the
+      ;; direction that would put `make-buffer-string` in `undo.scm` is a
+      ;; cycle. Both of the C's callers (`editfns.c:2417`, `:2626`) are
+      ;; in this file, and the text properties on the entry matter for
+      ;; exactly this operation: `subst-char-in-region` writes in place
+      ;; and must undo back to the same propertized text.
+      ;;--------------------------------------------------------------
+      (record-delete beg (make-buffer-string (current-buffer) beg
+                                             (+ beg length) #t))
+      (record-insert beg length))
+
+    (define (%character-length code)
+      ;; The byte length of CHAR_STRING for CODE - Emacs's internal
+      ;; `utf-8-emacs' encoding, where a raw byte (`CHAR_BYTE8_P') is two
+      ;; bytes and everything else is one to five. Only the *length* is
+      ;; wanted: `subst-char-in-region' refuses a replacement whose
+      ;; character would change the text's byte length, and this tree's
+      ;; store has one element per character, so nothing else of the
+      ;; encoding is observable here.
+      ;;--------------------------------------------------------------
+      (cond ((< code #x3FFF00)
+             (cond ((< code #x80) 1)
+                   ((< code #x800) 2)
+                   ((< code #x10000) 3)
+                   ((< code #x200000) 4)
+                   (else 5)))
+            ((<= code #x3FFFFF) 2)
+            (else 5)))
+
+    (define (subst-char-in-region start end fromchar tochar . rest)
+      ;; GNU Emacs's `subst-char-in-region' (`editfns.c:2294'): "From
+      ;; START to END, replace FROMCHAR with TOCHAR each time it occurs.
+      ;; If optional arg NOUNDO is non-nil, don't record this change for
+      ;; undo and don't mark the buffer as really changed.
+      ;; Both characters must have the same length of multi-byte form."
+      ;;
+      ;; **The hooks go around the whole region**: `modify_text' at the
+      ;; first character that changes, `record_change' per character, and
+      ;; one `signal_after_change' at the end - which is `casify_region''s
+      ;; division too. The C `goto restart's after `modify_text' because
+      ;; a before-change function may have moved the text; this does not,
+      ;; which is the same departure the rest of the tree's writers carry.
+      ;;--------------------------------------------------------------
+      (let ((noundo (and (pair? rest) (car rest))))
+        (let ((from (%char-code fromchar))
+              (to (%char-code tochar))
+              (buffer (current-buffer)))
+          (if (not (and (exact-integer? from) (exact-integer? to)
+                        (<= 0 from) (<= 0 to)))
+              (error "Wrong type argument" fromchar))
+          (if (not (= (%character-length from) (%character-length to)))
+              (error "Characters in `subst-char-in-region' have different byte-lengths"))
+          (let-values (((start end) (validate-region (fix-position start)
+                                                     (fix-position end))))
+            (if (= start end)
+                #f
+                (let ((saved-undo (text-editor-undo-list buffer)))
+                  (if noundo (set!text-editor-undo-list buffer #t))
+                  (let ((text (text-editor-text buffer))
+                        (changed 0)
+                        (last-changed 0))
+                    (let loop ((pos start))
+                      (if (< pos end)
+                          (begin
+                            (if (= (buffer-text-ref text pos) from)
+                                (begin
+                                  (if (= changed 0)
+                                      (begin
+                                        (set! changed pos)
+                                        (modify-text pos end)
+                                        (when noundo
+                                          ;; "don't mark the buffer as
+                                          ;; really changed" - the C's
+                                          ;; `SAVE_MODIFF' nudge after
+                                          ;; `modify_text' raised MODIFF.
+                                          (let ((m (buffer-modified-tick
+                                                    buffer)))
+                                            (if (= (text-editor-save-modiff
+                                                    buffer)
+                                                   (- m 1))
+                                                (set!text-editor-save-modiff
+                                                 buffer m))))))
+                                  (if (not noundo)
+                                      (record-change pos 1))
+                                  (buffer-text-set! text pos to)
+                                  (set! last-changed (+ pos 1))))
+                            (loop (+ pos 1)))))
+                    (when (> changed 0)
+                      (signal-after-change changed
+                                           (- last-changed changed)
+                                           (- last-changed changed)))
+                    (if noundo
+                        (set!text-editor-undo-list buffer saved-undo))
+                    #f)))))))
 
     (define (buffer-size)
       ;; GNU Emacs's `buffer-size' (editfns.c): "Return the number of
@@ -1717,6 +1892,40 @@ moved."
       ;; echo area is the frame's message when it has not expired.
       ;;--------------------------------------------------------------
       ((*current-message-function*)))
+
+    (define (char-equal c1 c2)
+      ;; GNU Emacs's `char-equal' (`editfns.c:4418`): "Return t if two
+      ;; characters match, optionally ignoring case.
+      ;; Both arguments must be characters (i.e. integers).
+      ;; Case is ignored if `case-fold-search' is non-nil in the current
+      ;; buffer."
+      ;;
+      ;; The C's `CHECK_CHARACTER` runs first - a non-character is a
+      ;; wrong-type-argument, not a nil - and the equality test comes
+      ;; before the case-folding one, which is what makes the answer `t'
+      ;; for two equal characters even with folding off.
+      ;;
+      ;; The C folds with `downcase', its case table's; here that is
+      ;; `char-downcase' over the code point, which is the same table for
+      ;; every character either can name - the tree's case tables are
+      ;; `(ice-9 unicode)`'s (`casefiddle.scm`).
+      ;;--------------------------------------------------------------
+      (let ((i1 (%char-code c1))
+            (i2 (%char-code c2)))
+        (if (not (and (exact-integer? i1) (exact-integer? i2)
+                      (<= 0 i1 #x3FFFFF) (<= 0 i2 #x3FFFFF)))
+            (error "Wrong type argument" (if (exact-integer? i1) c2 c1)))
+        (cond ((= i1 i2) #t)
+              ((not (*case-fold-search*)) #f)
+              ;; A byte character has no case, and `char-downcase` refuses
+              ;; it by refusing the character: `integer->char` above
+              ;; `#x10ffff` is outside Scheme's range, so both are
+              ;; compared as they stand.
+              ((or (> i1 #x10ffff) (> i2 #x10ffff)) #f)
+              (else (= (char->integer
+                        (char-downcase (integer->char i1)))
+                       (char->integer
+                        (char-downcase (integer->char i2))))))))
 
 
     (*point-marker-function* point-marker)

@@ -47,6 +47,8 @@
     ;; reason as the four above.
     (only (schemacs editor casefiddle))
     (only (schemacs editor paragraphs))
+    ;; `fill.el`'s commands and the M-q binding it makes
+    (only (schemacs editor fill))
     ;; `replace.el': M-% and C-M-% bind at load, the same reason as the
     ;; six above.
     ;; The mouse commands, imported for their *binding*: loading

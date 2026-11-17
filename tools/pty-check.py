@@ -5010,8 +5010,39 @@ def check_tty_menu():
     return problems
 
 
+
+def check_fill_paragraph():
+    """M-q fills the paragraph at point, and the saved file is Emacs's.
+
+    The input and the expected output are the ones `fill-tests.scm` uses:
+    a long line wrapped at the default `fill-column` of 70, with Emacs
+    31.1's own answer compared byte for byte. Filling is only visible on
+    the screen as a *wrap* ("characters in total." moves off the truncated
+    first line onto a second one), so the check saves and reads the file.
+    """
+    path = "/tmp/pty-check-fill.txt"
+    open(path, "w").write(
+        "This is a long line of text that should be wrapped at the fill "
+        "column of this buffer because it is longer than seventy "
+        "characters in total.\n")
+    # Emacs 31.1's own answer for this input at `fill-column' 70.
+    expect = ("This is a long line of text that should be wrapped at the "
+              "fill column\nof this buffer because it is longer than "
+              "seventy characters in total.\n")
+    problems = []
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 ESC, b"q", C_x + C_s], path, gap=0.35)
+    got = open(path).read()
+    if got != expect:
+        problems.append("after M-q the file is not Emacs's fill: %r" % (got,))
+    if "modified" in out and "Wrote" not in out and "wrote" not in out:
+        problems.append("C-x C-s did not report the save")
+    return problems
+
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
+    "fill-paragraph": check_fill_paragraph,
     "query-replace": check_query_replace,
     "query-replace-prompt": check_query_replace_prompt,
     "query-replace-pair-default": check_query_replace_pair_default,
