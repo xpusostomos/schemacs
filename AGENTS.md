@@ -10820,3 +10820,41 @@ C and the measured table; what the next session needs:
 Tests: `editfns-tests.scm`'s `schemacs_editor_editfns_labeled` (15),
 every expectation Emacs 31.1's own; the redisplay bracket is pinned by
 its C contract, since no Emacs-level call can reach it.
+
+# `replace-region-contents`: recon done, not landed (2026-11-18)
+
+The only project-sized named item left. This pass read the whole of it
+and attempted the engine; **no code was landed**, deliberately. What the
+next session needs:
+
+* **The C is two pieces.** `replace-region-contents`
+  (`editfns.c:1922`, ~310 lines) and gnulib's `lib/diffseq.h` (578
+  lines: Myers O(ND) with Eggert's TOO_EXPENSIVE heuristic). The four
+  macros `editfns.c` supplies are `ELEMENT`/`EQUAL` (character arrays
+  compared through `buffer_chars_equal`, which also carries the
+  quit-counter and time-limit escape), `NOTE_DELETE`/`NOTE_INSERT` (bit
+  vectors) and `EARLY_ABORT`. `set_bit`/`bit_is_set` are `editfns.c`'s
+  own, over `unsigned char` arrays.
+* **The apply phase** walks backwards from `(size_a, size_b)` over the
+  two bit vectors, replacing each run with `(vector SOURCE-BUFFER BEG
+  END)` through `replace_range`, inside a
+  `prepare_to_modify_buffer`/`inhibit_modification_hooks` bracket and
+  with one `signal_after_change` at the end.
+* **`replace_range` here only takes a string** (`insdel.scm` says so);
+  it must grow the C's buffer and `[buf beg end]` NEW forms first.
+* **The two subr.el callers** (`replace-string-in-region`,
+  `replace-regexp-in-region`, and the obsolete `replace-buffer-contents`
+  wrapper, `subr.el:4948-5040`) belong in `replace.scm` - the mirror
+  rule would say `subr.scm`, but that library is below `editfns.scm`,
+  which is a named placement departure like the labeled-restriction
+  macros'.
+* **The trap the first attempt hit, so the next one does not**: in
+  `diag`, the C's two "find the best diagonal" blocks declare
+  `fxybest`/`fxbest` and `bxybest`/`bxbest` in the *same* enclosing
+  block, and the final `if` reads all four. In Scheme they are one
+  `let` with four bindings - not two `let`s, and not one nested in the
+  other. The first draft got this wrong, then the paren chase went past
+  the point AGENTS.md allows ("a few attempts, then stop"), so the file
+  was deleted rather than left half-working. Write `diag` and
+  `compareseq` to a scratch file with stub accessors, compile the
+  *block* there, and only then assemble the library.
