@@ -246,6 +246,8 @@
    set!buffer-fill-column
    buffer-left-margin
    set!buffer-left-margin
+   buffer-auto-fill-function
+   set!buffer-auto-fill-function
    buffer-tab-width
    set!buffer-tab-width
    buffer-hscroll-margin
@@ -760,6 +762,16 @@
       (buffer-local-value buffer 'left-margin 0))
     (define (set!buffer-left-margin buffer value)
       (set-buffer-local-value! buffer 'left-margin value))
+    (define (buffer-auto-fill-function buffer)
+      ;; The function `internal_self_insert' calls after inserting a
+      ;; space or a newline: GNU Emacs's `auto-fill-function', a
+      ;; buffer-local DEFVAR_PER_BUFFER of `buffer.c:5425' whose default
+      ;; is nil. `auto-fill-mode' sets it to
+      ;; `normal-auto-fill-function' (`do-auto-fill').
+      ;;--------------------------------------------------------------
+      (buffer-local-value buffer 'auto-fill-function #f))
+    (define (set!buffer-auto-fill-function buffer value)
+      (set-buffer-local-value! buffer 'auto-fill-function value))
     (define (buffer-hscroll-margin buffer)
       ;; How close to the window's left or right edge point may sit before
       ;; auto hscrolling starts scrolling: GNU Emacs's `hscroll-margin',

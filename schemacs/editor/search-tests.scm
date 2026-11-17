@@ -242,9 +242,24 @@
 
 ;; the error strings are the C's
 
-(test-error "match-beginning with no match data"
-  #t
+;; "`(match-beginning 0)' with no match data is nil, not an error" -
+;; measured on Emacs 31.1, and the C says so too: `match_limit' answers
+;; nil for `n >= search_regs.num_regs', which is every N when there are
+;; no registers. This port raised "No match data, because no search
+;; succeeded", and `(set-match-data nil)` (which must clear the
+;; registers) did not clear them either - `narrow-to-page` walks into
+;; both.
+(test-equal "match-beginning with no match data answers nil"
+  #f
   (parameterize ((*search-regs* #f)) (match-beginning 0)))
+(test-equal "and match-end too"
+  #f
+  (parameterize ((*search-regs* #f)) (match-end 0)))
+(test-equal "set-match-data nil clears the last search's registers"
+  #f
+  (begin (string-match "b" "abc")
+         (set-match-data #f)
+         (match-beginning 0)))
 (test-error "replace-match with no match data"
   #t
   (parameterize ((*search-regs* #f)) (replace-match "x" #t #t)))

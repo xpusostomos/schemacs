@@ -75,7 +75,11 @@
           frame-char-width display-pixel-width)
     (only (schemacs editor custom) define-custom)
     (only (schemacs editor easy-mmode) define-minor-mode)
-    (only (schemacs editor command) define-command *last-command-event*)
+    ;; `current-prefix-arg` and `uarg->integer` are `define-minor-mode`'s:
+    ;; the interactive form it generates reads them, and an interactive
+    ;; expression is evaluated in the *defining* library's module.
+    (only (schemacs editor command) define-command *last-command-event*
+          current-prefix-arg uarg->integer)
     ;; The key's *basic type* - the character with every modifier
     ;; stripped - which is what Emacs's `pcase' over `last-command-event'
     ;; tests: `C-M-+' and `+' are the same adjustment.

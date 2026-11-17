@@ -128,7 +128,18 @@
     (only (schemacs editor command)
           *mark-even-if-inactive*
           *point-marker-function* *mark-marker-function*
-          *format-message-function* *message-clear-function*)
+          *format-message-function* *message-clear-function*
+          ;; `narrow-to-region' and `widen' are commands in `editfns.c'
+          ;; - their interactive specs are in the DEFUNs - so they are
+          ;; `define-command`s here.
+          define-command)
+    ;; `narrow-map' is `bindings.el`'s and is made here, beside the two
+    ;; commands it binds; `goto-line-relative` - its third key - is
+    ;; `minibuffer.scm`'s, which adds it to this map.
+    (only (schemacs editor keymap)
+          make-sparse-keymap define-key *default-keymap*)
+    ;; `kbd` is `character.scm`'s (`subr.scm` is above this library).
+    (only (schemacs editor character) kbd)
     ;; **This library no longer imports `frame.scm'.**
     ;;
     ;; `message' puts its text in the echo area, which is the frame's -
@@ -195,7 +206,7 @@ point-marker
    point
    save-excursion
    ;; the restriction, `narrow-to-region` and its friends
-   narrow-to-region widen save-restriction buffer-narrowed-p
+   narrow-to-region widen narrow-map save-restriction buffer-narrowed-p
    region-beginning
    region-end
    region-limit
@@ -1230,7 +1241,7 @@ moved."
       ;;--------------------------------------------------------------
       (buffer-text-z (text-editor-text buffer)))
 
-    (define (widen)
+    (define-command (widen)
       ;; GNU Emacs's `widen' (`editfns.c:2901'): "Remove restrictions
       ;; (narrowing) from current buffer. ... This allows the buffer's
       ;; full text to be seen and edited."
@@ -1239,7 +1250,13 @@ moved."
       ;; `without-restriction', `editfns.c:3190'), which need a stack of
       ;; labeled markers per buffer. `narrow-to-region' here has no label
       ;; to limit it to.
+      ;;
+      ;; The C's interactive spec is `(interactive)', so it is a command:
+      ;; `C-x n w' (`bindings.el:1214', `narrow-map') reaches it.
       ;;--------------------------------------------------------------
+      "Remove restrictions (narrowing) from current buffer.
+This allows the buffer's full text to be seen and edited."
+      (interactive)
       (let ((buffer (current-buffer)))
         (unless (and (= (buffer-begv buffer) (%whole-beg buffer))
                      (= (buffer-zv buffer) (%whole-z buffer)))
@@ -1251,7 +1268,7 @@ moved."
           (%clip-changed! buffer)))
       #f)
 
-    (define (narrow-to-region start end)
+    (define-command (narrow-to-region start end)
       ;; GNU Emacs's `narrow-to-region' (`editfns.c:2948'): "Restrict
       ;; editing in this buffer to the current region. The rest of the
       ;; text becomes temporarily invisible and untouchable but is not
@@ -1260,7 +1277,23 @@ moved."
       ;;
       ;; The C: sort the two ends, refuse anything outside `BEG..Z',
       ;; store them as BEGV and ZV, and pull point inside.
+      ;;
+      ;; Its interactive spec is `"r"' (`editfns.c:2948'), so it is a
+      ;; command: `C-x n n' (`narrow-map', `bindings.el:1214') reaches it.
+      ;; Emacs also puts `(put 'narrow-to-region 'disabled t)'
+      ;; (`bindings.el:1111') on it, so a key asks before narrowing; the
+      ;; disabled-command machinery is not carried - see DEPARTURES.md.
       ;;--------------------------------------------------------------
+      "Restrict editing in this buffer to the current region.
+The rest of the text becomes temporarily invisible and untouchable
+but is not deleted; if you save the buffer in a file, the invisible
+text is included in the file.  \\[widen] makes all visible again.
+See also `save-restriction'.
+
+When calling from Lisp, pass two arguments START and END:
+positions (integers or markers) bounding the text that should
+remain visible."
+      (interactive "r")
       (let* ((buffer (current-buffer))
              (s (cond ((markerp start) (marker-position start)) (else start)))
              (e (cond ((markerp end) (marker-position end)) (else end))))
@@ -1280,6 +1313,28 @@ moved."
         (let ((pt (buffer-pt buffer)))
           (when (> pt e) (set-point buffer e)))
         #f))
+
+    (define narrow-map
+      ;; GNU Emacs's `narrow-map' (`bindings.el:1214'): "Keymap for
+      ;; narrowing commands." `n`, `w` and `g` - `goto-line-relative`,
+      ;; which `simple.el` has and `minibuffer.scm` carries.
+      ;;
+      ;; Emacs puts the map in `ctl-x-map` as one event
+      ;; (`(define-key ctl-x-map "n" narrow-map)') and lets the reader
+      ;; descend into it. This tree's lookup walks a map's layers and the
+      ;; maps beside it, not a submap (`lookup-keymaps`), which is the
+      ;; `mule-keymap` departure the 2026-10-06 handoff records - so the
+      ;; sequences are bound flat as well, and the map exists for
+      ;; `where-is-internal` the way Emacs's does.
+      ;;--------------------------------------------------------------
+      (make-sparse-keymap))
+
+    (define-key narrow-map (kbd "n") narrow-to-region)
+    (define-key narrow-map (kbd "w") widen)
+
+    ;; `C-x n n` and `C-x n w` - `narrow-map`, flat (see above).
+    (define-key *default-keymap* (kbd "C-x n n") narrow-to-region)
+    (define-key *default-keymap* (kbd "C-x n w") widen)
 
     (define (%clip-changed! buffer)
       ;; `current_buffer->clip_changed = 1' (`editfns.c:2989'): "Changing

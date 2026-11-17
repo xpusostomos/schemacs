@@ -7,7 +7,8 @@
   (only (schemacs editor buffer)
         *current-buffer* allocate-buffer get-buffer-create set-buffer
         erase-buffer buffer-z set-point buffer-pt)
-  (only (schemacs editor editfns) insert point-max)
+  (only (schemacs editor editfns)
+        insert point-max save-restriction narrow-to-region)
   (only (schemacs editor frame) *current-frame* new-frame)
   (only (schemacs editor syntax)
         char-syntax string-to-syntax matching-paren modify-syntax-entry
@@ -359,3 +360,71 @@
   #\w (char-syntax (integer->char 9999)))
 
 (test-end "schemacs_editor_syntax")
+
+;; ------------------------------------------------------------------
+;; The `syntax-ppss' cache (`syntax.el:525-560')
+;; ------------------------------------------------------------------
+;;
+;; **Two buffer-local cells, as Emacs has** - `syntax-ppss-wide' and
+;; the narrowed one - and a `pt-min` of `(point-min)`. A single global
+;; cell let a state cached at a high position be read back at a lower
+;; one, and a narrowed parse poison an unnarrowed one. The failure was
+;; "Wrong type argument in position 2: #f" from the `<= pt-min pos>
+;; test, three functions from the cause: `M-j' in a fresh buffer.
+;;
+;; Emacs's own answers, measured with `emacs -Q --batch': with `;' a
+;; comment starter and `\n' its ender, a state at 11 in ";; aaa bbb\n"
+;; is the comment's - in comment, started at 1 - and one at 1 is the
+;; top level. Each buffer and each narrowing has its own cache.
+
+(test-begin "schemacs_editor_ppss_cache")
+
+(with-buffer
+ (lambda (b)
+   (fresh-syntax-table!)
+   (modify-syntax-entry #\; "<")
+   (modify-syntax-entry #\newline ">")
+   (insert ";; aaa bbb\n")
+   (let ((high (syntax-ppss 11)))
+     (test-equal "a state at a high position is the comment's"
+       (list 0 #t 1) (list (list-ref high 0) (list-ref high 4)
+                           (list-ref high 8))))
+   (let ((low (syntax-ppss 1)))
+     (test-equal "and one at a lower position after it is the top level"
+       (list 0 #f #f) (list (list-ref low 0) (list-ref low 4)
+                            (list-ref low 8))))))
+
+(test-equal "a second buffer does not read the first buffer's cache"
+  (list 0 #f #f)
+  (parameterize ((*current-frame* (new-frame (allocate-buffer) 24 80))
+                 (*current-buffer* #f))
+    (let ((a (get-buffer-create "*ppss-a*"))
+          (b (get-buffer-create "*ppss-b*")))
+      (set-buffer a)
+      (erase-buffer)
+      (modify-syntax-entry #\; "<")
+      (modify-syntax-entry #\newline ">")
+      (insert ";; one\n")
+      (syntax-ppss 8)
+      (set-buffer b)
+      (erase-buffer)
+      (insert "xyz\n")
+      (let ((st (syntax-ppss 3)))
+        (list (list-ref st 0) (list-ref st 3) (list-ref st 8))))))
+
+(with-buffer
+ (lambda (b)
+   (fresh-syntax-table!)
+   (modify-syntax-entry #\; "<")
+   (modify-syntax-entry #\newline ">")
+   (insert ";; aaa bbb\n")
+   (let ((before (syntax-ppss 11)))
+     (save-restriction
+      (narrow-to-region 1 5)
+      (syntax-ppss 1))
+     (let ((after (syntax-ppss 11)))
+       (test-equal "a narrowed parse does not displace the unnarrowed state"
+         (list (list-ref before 0) (list-ref before 8))
+         (list (list-ref after 0) (list-ref after 8)))))))
+
+(test-end "schemacs_editor_ppss_cache")

@@ -15,6 +15,11 @@
  (only (schemacs editor easy-mmode)
        define-minor-mode define-globalized-minor-mode
        easy-mmode-pretty-mode-name)
+ ;; The generated command's interactive form is `eval'ed in *this*
+ ;; module, so the names it reads have to be imported here - see the
+ ;; arity group below and `easy-mmode.scm`'s note.
+ (only (schemacs editor command)
+       command-record-of command-procedure current-prefix-arg uarg->integer)
  (only (schemacs editor xdisp) mode-line-window-selected-p)
  (only (schemacs editor frame) *old-selected-window*
                              *selected-window-override*))
@@ -150,6 +155,47 @@
             (easy-mmode-pretty-mode-name 'global-foo-mode))
 
 (test-end "schemacs_editor_easy_mmode")
+
+;;----------------------------------------------------------------
+;; The generated command's ARG, and its interactive form
+;;----------------------------------------------------------------
+;;
+;; Emacs's `(defun ,mode (&optional arg ...))' - measured on 31.1:
+;; `(auto-fill-mode)' with no argument enables (nil is not `'toggle',
+;; so it takes the `(t ...)' arm), a second bare call leaves it
+;; enabled, `(auto-fill-mode nil)' enables, and only the *interactive*
+;; form's `'toggle' - what it supplies when there is no prefix -
+;; toggles.
+;;
+;; The interactive form is `eval'ed in the *defining* module, so this
+;; library imports the two names it reads exactly as `font-core`,
+;; `face-remap` and `fill` now do; without them the entry raises
+;; `Unbound variable: current-prefix-arg', which the command loop's
+;; guard swallows.
+
+(test-begin "schemacs_editor_easy_mmode_arity")
+
+(define (interactive-entry command)
+  ;; The thunk the command loop calls for a key with no prefix.
+  ((command-procedure (command-record-of command)) #f))
+
+(set-buffer (get-buffer-create "em-three"))
+(set-buffer-local-value! (current-buffer) 'em-test-local-mode #f)
+
+(test-equal "a bare call is accepted and enables" #t (em-test-local-mode))
+(test-equal "a second bare call leaves it enabled, as Emacs's (t ...) arm"
+            #t (em-test-local-mode))
+(em-test-local-mode 0)
+(test-equal "an explicit nil enables too" #t (em-test-local-mode #f))
+(em-test-local-mode 0)
+(test-equal "the interactive form toggles when there is no prefix"
+            #t (interactive-entry em-test-local-mode))
+(test-equal "and toggles back" #f (interactive-entry em-test-local-mode))
+(em-test-local-mode 1)
+(test-equal "with a prefix it sets rather than toggles"
+            #f ((command-procedure (command-record-of em-test-local-mode)) 0))
+
+(test-end "schemacs_editor_easy_mmode_arity")
 
 ;;----------------------------------------------------------------
 ;; `define-globalized-minor-mode`

@@ -59,10 +59,14 @@
           set-char-table-range)
     (only (schemacs editor buffer)
           current-buffer bufferp get-buffer set-buffer
+          buffer-local-value set-buffer-local-value!
           buffer-fill-column set!buffer-fill-column
           buffer-read-only?
           buffer-modified-p restore-buffer-modified-p buffer-live-p
           *case-fold-search* *inhibit-read-only*
+          ;; `auto-fill-mode`'s buffer slot (`buffer.c:5425`) and the
+          ;; function `internal-self-insert` calls
+          buffer-auto-fill-function set!buffer-auto-fill-function
           mark-active transient-mark-mode
           fetch-char set-point buffer-beg buffer-z buffer-pt)
     (only (schemacs editor editfns)
@@ -82,7 +86,11 @@
           constrain-to-field
           message)
     (only (schemacs editor cmds)
-          beginning-of-line end-of-line forward-char backward-char delete-char)
+          beginning-of-line end-of-line forward-char backward-char delete-char
+          ;; the seam `internal_self_insert` calls after a space or a
+          ;; newline - `cmds.c` is where the call is, `simple.el` where
+          ;; the function is
+          *internal-auto-fill-function*)
     (only (schemacs editor indent)
           indent-line-to indent-according-to-mode indent-region
           current-left-margin move-to-left-margin indent-to-left-margin
@@ -96,7 +104,7 @@
           replace-match regexp-quote)
     (only (schemacs editor syntax)
           char-syntax skip-chars-forward skip-chars-backward
-          skip-syntax-backward)
+          skip-syntax-backward syntax-ppss)
     (only (schemacs editor textprop)
           get-text-property put-text-property set-text-properties
           remove-text-properties remove-list-of-text-properties
@@ -114,13 +122,28 @@
           *sentence-end* sentence-end *sentence-end-double-space*
           *sentence-end-without-period* *sentence-end-without-space*
           forward-paragraph backward-paragraph forward-sentence)
-    (only (schemacs editor simple) delete-horizontal-space)
+    ;; `default-indent-new-line`'s non-soft break is `newline`, which
+    ;; this tree spells `insert-newline` - `(scheme base)` took the plain
+    ;; name - and the horizontal-space deletion beside it.
+    (only (schemacs editor simple) delete-horizontal-space insert-newline)
     (only (schemacs editor newcomment)
           comment-start comment-end comment-start-skip
-          comment-search-forward comment-string-strip comment-normalize-vars)
+          comment-search-forward comment-search-backward
+          comment-beginning comment-forward comment-enter-backward
+          comment-string-strip comment-normalize-vars comment-indent
+          comment-indent-default comment-column comment-styles
+          *comment-style* *comment-multi-line*
+          *comment-auto-fill-only-comments*)
     (only (schemacs editor minibuffer) minibufferp minibuffer-prompt-end)
     (only (schemacs editor custom) define-custom)
-    (only (schemacs editor command) current-prefix-arg define-command)
+    ;; `uarg->integer` is `define-minor-mode`'s: the interactive form it
+    ;; generates for `auto-fill-mode` reads it when a prefix is given, and
+    ;; an interactive expression is evaluated in the *defining* library's
+    ;; module.
+    (only (schemacs editor command) current-prefix-arg uarg->integer
+          called-interactively?
+          define-command define-alias)
+    (only (schemacs editor easy-mmode) define-minor-mode)
     (only (schemacs editor keymap) define-key *default-keymap*)
     )
 
@@ -157,6 +180,12 @@
    fill-individual-paragraphs-prefix fill-individual-paragraphs-citation
    fill-region-as-paragraph-semlf fill-paragraph-semlf
    beginning-of-line-text
+   ;; Auto Fill mode (`simple.el`'s half, placed here - see the note)
+   auto-fill-mode turn-on-auto-fill turn-off-auto-fill
+   do-auto-fill default-indent-new-line internal-auto-fill
+   *auto-fill-inhibit-regexp* *inhibit-auto-fill*
+   comment-line-break-function normal-auto-fill-function
+   comment-indent-new-line comment-valid-prefix-p indent-new-comment-line
    with-buffer-unmodified-if-unchanged
    )
 
@@ -1282,8 +1311,16 @@ themselves."
       ;; current comment. If we're not in a comment, just return nil so
       ;; that the caller can take care of filling. JUSTIFY is used as in
       ;; `fill-paragraph'."
+      ;;
+      ;; **The C's `let*` starts with `(fill-prefix fill-prefix)`**, and
+      ;; that binding is load-bearing: the body *sets* `fill-prefix` (the
+      ;; adaptive prefix, then the comment's own), and without a binding
+      ;; of its own it wrote the parameter for the whole editor - the
+      ;; next auto-fill in an unrelated buffer continued its lines with
+      ;; this comment's `;;`. Caught by the auto-fill tests.
       ;;--------------------------------------------------------------
-      (let ((justify (and (pair? rest) (car rest))))
+      (parameterize ((*fill-prefix* (*fill-prefix*)))
+       (let ((justify (and (pair? rest) (car rest))))
         (comment-normalize-vars)
         ;; "Non-nil if it contains code and a comment."
         (let ((has-code-and-comment #f)
@@ -1428,7 +1465,7 @@ themselves."
                                       (re-search-forward (comment-start-skip)))))
                                ;; "Make sure we don't return nil."
                                #t)))))
-                  result))))))
+                  result)))))))
 
     ;;----------------------------------------------------------------
     ;; `fill-region'
@@ -2135,6 +2172,530 @@ details."
              result)))))
 
     ;;----------------------------------------------------------------
+    ;; Auto Fill mode (`simple.el:9088-9300')
+    ;;----------------------------------------------------------------
+    ;;
+    ;; **`simple.el`'s, and it lives in `fill.scm`.** `do-auto-fill` is
+    ;; written almost entirely in this file's functions, and
+    ;; `simple.scm` is *below* `paragraphs.scm`, which `fill.scm`
+    ;; imports - so `simple -> fill` would be a cycle. The alternative to
+    ;; the move would be a seam for each of the eight functions
+    ;; `do-auto-fill` calls, which is more departure for the same
+    ;; covering. The `fill.el` library declares it in
+    ;; `(provide 'fill)` terms; Emacs's `simple.el` calls it.
+
+    (define-custom *auto-fill-inhibit-regexp* #f
+      "Regexp to match lines that should not be auto-filled."
+      :type '(choice (const :tag "None" nil) regexp)
+      :group 'fill)
+
+    (define *inhibit-auto-fill* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-auto-fill' (`simple.el:9204'): "Non-nil
+    ;; means to do as if `auto-fill-mode' was disabled." A parameter,
+    ;; because `newline' `let`-binds it around the self-insert that does
+    ;; the filling - the convention's test, and the binding has to reach
+    ;; `internal-auto-fill` several frames down.
+
+    (define normal-auto-fill-function #f)
+    ;; ^ GNU Emacs's `normal-auto-fill-function' (`simple.el:9215'):
+    ;; "The function to use for `auto-fill-function' if Auto Fill mode is
+    ;; turned on. Some major modes set this." A plain variable. Emacs
+    ;; gives it a quoted *symbol* (`#'do-auto-fill'), which a load-time
+    ;; `defvar' can name before the function exists; here the value is
+    ;; the procedure, so the assignment to it is below the definition -
+    ;; a forward reference would be an unbound variable when the library
+    ;; is loaded interpreted.
+
+    (define (auto-fill-function-value)
+      ;; The buffer's `auto-fill-function` - GNU Emacs's buffer-local of
+      ;; that name, a DEFVAR_PER_BUFFER. (Emacs also has a *defun* called
+      ;; `auto-fill-function', whose body is nil and whose docstring is
+      ;; the variable's; there is nothing to call here, so it is not
+      ;; carried.)
+      ;;--------------------------------------------------------------
+      (buffer-auto-fill-function (current-buffer)))
+
+    (define (internal-auto-fill)
+      ;; GNU Emacs's `internal-auto-fill' (`simple.el:9207'): "The
+      ;; function called by `self-insert-command' to perform
+      ;; auto-filling."
+      ;;--------------------------------------------------------------
+      (if (or (*inhibit-auto-fill*)
+              (and (comment-start)
+                   (*comment-auto-fill-only-comments*)
+                   (not (list-ref (syntax-ppss) 4))))
+          #f
+          (let ((fn (auto-fill-function-value)))
+            (and fn (fn)))))
+
+    (define-command (do-auto-fill)
+      ;; GNU Emacs's `do-auto-fill' (`simple.el:9120'): "The default value
+      ;; for `normal-auto-fill-function'. This is the default auto-fill
+      ;; function, some major modes use a different one. Returns t if it
+      ;; really did any work."
+      ;;
+      ;; **The C's `while` body sets `give-up` in three places**; the
+      ;; `(let ((fill-prefix fill-prefix)) ...)` is a `parameterize`, the
+      ;; one place in this file where the binding has to reach
+      ;; `fill-move-to-break-point` and `default-indent-new-line` several
+      ;; frames down.
+      ;;--------------------------------------------------------------
+      "The default value for `normal-auto-fill-function'.
+This is the default auto-fill function, some major modes use a different one.
+Returns t if it really did any work."
+      (interactive)
+      (parameterize ((*fill-prefix* (*fill-prefix*)))
+        (let ((justify (current-justification))
+              (fc (current-fill-column)))
+          (if (or (not justify)
+                  (not fc)
+                  (and (eq? justify 'left)
+                       (<= (current-column) fc))
+                  (and (*auto-fill-inhibit-regexp*)
+                       (save-excursion
+                         (beginning-of-line 1)
+                         (looking-at (*auto-fill-inhibit-regexp*)))))
+              ;; "Auto-filling not required."
+              #f
+              (begin
+                (if (memv justify '(full center right))
+                    (save-excursion (unjustify-current-line)))
+                ;; "Choose a fill-prefix automatically."
+                (when (and (*adaptive-fill-mode*)
+                           (or (not (*fill-prefix*))
+                               (string=? (*fill-prefix*) "")))
+                  (let ((prefix
+                         (fill-context-prefix
+                          (save-excursion (fill-forward-paragraph -1) (point))
+                          (save-excursion (fill-forward-paragraph 1) (point)))))
+                    (and prefix (not (equal? prefix ""))
+                         ;; "Use auto-indentation rather than a guessed
+                         ;; empty prefix."
+                         (not (and *fill-indent-according-to-mode*
+                                   (string-match "\\`[ \t]*\\'" prefix)))
+                         (*fill-prefix* prefix))))
+                (let loop ((give-up #f))
+                  (if (and (not give-up) (> (current-column) fc))
+                      (let ((fill-point
+                             (save-excursion
+                               (beginning-of-line 1)
+                               ;; "Don't split earlier in the line than the
+                               ;; length of the fill prefix, since the
+                               ;; resulting line would be longer."
+                               (when (*fill-prefix*)
+                                 (move-to-column (string-width (*fill-prefix*))))
+                               (let ((after-prefix (point)))
+                                 (move-to-column (+ 1 fc))
+                                 (fill-move-to-break-point after-prefix)
+                                 (point)))))
+                        ;; "See whether the place we found is any good."
+                        (if (save-excursion
+                              (goto-char fill-point)
+                              (or (bolp)
+                                  ;; "There is no use breaking at end of
+                                  ;; line."
+                                  (save-excursion (skip-chars-forward " ")
+                                                  (eolp))
+                                  ;; "Don't split right after a comment
+                                  ;; starter since we would just make
+                                  ;; another comment starter."
+                                  (and (comment-start-skip)
+                                       (let ((limit (point)))
+                                         (beginning-of-line 1)
+                                         (and (re-search-forward
+                                               (comment-start-skip) limit #t)
+                                              (eq? (point) limit))))))
+                            ;; "No good place to break => stop trying."
+                            (loop #t)
+                            ;; "Ok, we have a useful place to break the
+                            ;; line. Do it."
+                            (let ((prev-column (current-column)))
+                              ;; "If point is at the fill-point, do not
+                              ;; `save-excursion'. Otherwise, if a comment
+                              ;; prefix or fill-prefix is inserted, point
+                              ;; will end up before it rather than after
+                              ;; it."
+                              (if (save-excursion
+                                    (skip-chars-backward " \t")
+                                    (= (point) fill-point))
+                                  (default-indent-new-line #t)
+                                  (save-excursion
+                                    (goto-char fill-point)
+                                    (default-indent-new-line #t)))
+                              ;; "Now do justification, if required"
+                              (if (not (eq? justify 'left))
+                                  (save-excursion
+                                    (end-of-line 0)
+                                    (justify-current-line justify #f #t)))
+                              ;; "If making the new line didn't reduce the
+                              ;; hpos of the end of the line, then give up
+                              ;; now; trying again will not help."
+                              (if (>= (current-column) prev-column)
+                                  (loop #t)
+                                  (loop #f)))))
+                      #f))
+                ;; "Justify last line."
+                (justify-current-line justify #t #t)
+                #t)))))
+
+    ;; `normal-auto-fill-function`'s value - see its definition above.
+    (set! normal-auto-fill-function do-auto-fill)
+
+    ;;----------------------------------------------------------------
+    ;; `comment-valid-prefix-p' (`newcomment.el:1424') and
+    ;; `comment-indent-new-line' (`:1465').
+    ;;----------------------------------------------------------------
+    ;; **`newcomment.el`'s, placed in `fill.scm`.** `comment-indent-new-line`
+    ;; reads `adaptive-fill-mode` (`fill.el:240'), which this library
+    ;; defines, and this library *imports* newcomment - so the function's
+    ;; Emacs home would close a cycle (`fill -> newcomment -> fill`) for
+    ;; that one variable. Its only caller is `default-indent-new-line`
+    ;; below, and it is `comment-line-break-function`'s default. The
+    ;; general half - `comment-beginning`, `comment-forward`,
+    ;; `comment-enter-backward`, `comment-search-backward` - stays in
+    ;; `newcomment.scm`, where the C has it.
+
+    (define (comment-valid-prefix-p prefix compos)
+      ;; "Check that the adaptive fill prefix is consistent with the
+      ;; context. PREFIX is the prefix (presumably guessed by
+      ;; `adaptive-fill-mode'). COMPOS is the position of the beginning of
+      ;; the comment we're in, or nil if we're not inside a comment."
+      ;;
+      ;; "This consistency checking is mostly needed to workaround the
+      ;; limitation of auto-fill-mode whose paragraph-determination
+      ;; doesn't pay attention to comment boundaries."
+      ;;--------------------------------------------------------------
+      (if (not compos)
+          ;; "We're not inside a comment: the prefix shouldn't match a
+          ;; comment-starter."
+          (not (and (comment-start)
+                    (comment-start-skip)
+                    (string-match (comment-start-skip) prefix)))
+          (or
+           ;; "Accept any prefix if the current comment is not
+           ;; EOL-terminated."
+           (save-excursion (goto-char compos) (comment-forward) (not (bolp)))
+           ;; "Accept any prefix that starts with the same comment-start
+           ;; marker as the current one."
+           (if (string-match (string-append "\\`[ \t]*\\(?:"
+                                            (comment-start-skip) "\\)")
+                             prefix)
+               (let ((prefix-com (comment-string-strip
+                                  (match-string 0 prefix) #f #t)))
+                 (string-match "\\`[ \t]*" prefix-com)
+                 (let* ((prefix-space (match-string 0 prefix-com))
+                        (prefix-indent (string-width prefix-space))
+                        (prefix-comstart (substring prefix-com (match-end 0))))
+                   (save-excursion
+                     (goto-char compos)
+                     ;; "The comstart marker is the same."
+                     (and (looking-at (regexp-quote prefix-comstart))
+                          ;; "The indentation as well."
+                          (or (= prefix-indent
+                                 (- (current-column) (current-left-margin)))
+                              ;; "Check the indentation in two different
+                              ;; ways, just to try and avoid most of the
+                              ;; potential funny cases."
+                              (equal prefix-space
+                                     (buffer-substring
+                                      (point)
+                                      (begin (move-to-left-margin)
+                                             (point)))))))))
+               #f))))
+
+    (define (%with-comment-indent-bindings col fn comstart comend thunk)
+      ;; Elisp's `let*' over *buffer-local* variables - the one
+      ;; `comment-indent-new-line` wraps around `(comment-indent
+      ;; continuep)`:
+      ;;
+      ;;   (let* ((comment-column ...) (comment-indent-function ...)
+      ;;          (comment-start comstart) (comment-end comend)
+      ;;          (comment-continue nil)) ...)
+      ;;
+      ;; In Emacs that is `specbind': the current buffer's value is set
+      ;; and the old one put back on the way out, however the body leaves
+      ;; - which is this `dynamic-wind`. A variable that was not locally
+      ;; bound is put back to the value every reader here reads it with;
+      ;; there is no way to *un-bind* a slot in this tree, which is the
+      ;; one observable difference and is named in DEPARTURES.md.
+      ;;--------------------------------------------------------------
+      (let* ((buf (current-buffer))
+             (saved (list (cons 'comment-column
+                                (buffer-local-value buf 'comment-column 32))
+                          (cons 'comment-indent-function
+                                (buffer-local-value buf 'comment-indent-function
+                                                    comment-indent-default))
+                          (cons 'comment-start
+                                (buffer-local-value buf 'comment-start #f))
+                          (cons 'comment-end
+                                (buffer-local-value buf 'comment-end ""))
+                          (cons 'comment-continue
+                                (buffer-local-value buf 'comment-continue #f)))))
+        (dynamic-wind
+         (lambda ()
+           (set-buffer-local-value! (current-buffer) 'comment-column col)
+           (set-buffer-local-value! (current-buffer) 'comment-indent-function fn)
+           (set-buffer-local-value! (current-buffer) 'comment-start comstart)
+           (set-buffer-local-value! (current-buffer) 'comment-end comend)
+           (set-buffer-local-value! (current-buffer) 'comment-continue #f))
+         thunk
+         (lambda ()
+           (for-each (lambda (entry)
+                       (set-buffer-local-value! (current-buffer)
+                                                (car entry) (cdr entry)))
+                     saved)))))
+
+    (define-command (comment-indent-new-line . rest)
+      ;; "Break line at point and indent, continuing comment if within
+      ;; one. This indents the body of the continued comment under the
+      ;; previous comment line."
+      ;;
+      ;; "This command is intended for styles where you write a comment
+      ;; per line, starting a new comment (and terminating it if
+      ;; necessary) on each line. If you want to continue one comment
+      ;; across several lines, use \\[newline-and-indent]."
+      ;;
+      ;; "If a fill column is specified, it overrides the use of the
+      ;; comment column or comment indentation."
+      ;;
+      ;; "The inserted newline is marked hard if variable
+      ;; `use-hard-newlines' is true, unless optional argument SOFT is
+      ;; non-nil."
+      ;;--------------------------------------------------------------
+      "Break line at point and indent, continuing comment if within one.
+This indents the body of the continued comment
+under the previous comment line.
+
+This command is intended for styles where you write a comment per line,
+starting a new comment (and terminating it if necessary) on each line.
+If you want to continue one comment across several lines, use \\[newline-and-indent].
+
+If a fill column is specified, it overrides the use of the comment column
+or comment indentation.
+
+The inserted newline is marked hard if variable `use-hard-newlines' is true,
+unless optional argument SOFT is non-nil."
+      (interactive '())
+      (let ((soft (and (pair? rest) (car rest)))
+            (compos #f)
+            (comin #f))
+        (comment-normalize-vars #t)
+        ;; "If we are not inside a comment and we only auto-fill comments,
+        ;; don't do anything (unless no comment syntax is defined)."
+        ;;
+        ;; The `(prog1 (setq compos ...) (setq comin ...))' is the two
+        ;; `set!`s below: what the `save-excursion` answers is the
+        ;; comment's beginning, which the `not` inverts.
+        (if (and (comment-start)
+                 ;; a *call* of the parameter: an uncalled one is a
+                 ;; procedure, and so always true
+                 (*comment-auto-fill-only-comments*)
+                 ;; Elisp's `(called-interactively-p 'interactive)' - the
+                 ;; tree's spelling names the command it is asking about.
+                 (not (called-interactively? comment-indent-new-line))
+                 (not (save-excursion
+                        (set! compos (comment-beginning))
+                        (set! comin (point))
+                        compos)))
+            #f
+            (begin
+              ;; "Now we know we should auto-fill. Insert the newline
+              ;; before removing empty space so that markers get preserved
+              ;; better."
+              (if soft
+                  (insert-and-inherit #\newline)
+                  (insert-newline 1))
+              (save-excursion (forward-char -1) (delete-horizontal-space #f))
+              (delete-horizontal-space #f)
+
+              (if (and (*fill-prefix*) (not (*adaptive-fill-mode*)))
+                  ;; "Blindly trust a non-adaptive fill-prefix."
+                  (begin
+                    (indent-to-left-margin)
+                    (insert-before-markers-and-inherit (*fill-prefix*)))
+
+                  ;; "If necessary check whether we're inside a comment."
+                  (begin
+                    (unless (or compos (not (comment-start)))
+                      (save-excursion
+                        (backward-char)
+                        (set! compos (comment-beginning))
+                        (set! comin (point))))
+
+                    (cond
+                   ;; "If there's an adaptive prefix, use it unless we're
+                   ;; inside a comment and the prefix is not a comment
+                   ;; starter."
+                   ((and (*fill-prefix*)
+                         (comment-valid-prefix-p (*fill-prefix*) compos))
+                    (indent-to-left-margin)
+                    (insert-and-inherit (*fill-prefix*)))
+                   ;; "If we're not inside a comment, just try to indent."
+                   ((not compos) (indent-according-to-mode))
+                   (else
+                    (let* ((comstart (buffer-substring compos comin))
+                           (normalp (string-match
+                                     (regexp-quote (comment-string-strip
+                                                    (comment-start) #t #t))
+                                     comstart))
+                           (comend
+                            (if normalp
+                                (comment-end)
+                                ;; "The comment starter is not the normal
+                                ;; comment-start so we can't just use
+                                ;; comment-end."
+                                (save-excursion
+                                  (goto-char compos)
+                                  (if (not (comment-forward))
+                                      (comment-end)
+                                      (comment-string-strip
+                                       (buffer-substring
+                                        (save-excursion
+                                          (comment-enter-backward)
+                                          (point))
+                                        (point))
+                                       #f #t))))))
+                      (if (and (*comment-multi-line*) (> (string-length comend) 0))
+                          (indent-according-to-mode)
+                          (begin
+                            (insert-and-inherit #\newline)
+                            (forward-char -1)
+                            ;; The C's `let*' over buffer-locals - see
+                            ;; `%with-comment-indent-bindings`.
+                            (let* ((col (save-excursion
+                                          (goto-char compos)
+                                          ;; "The continuation indentation
+                                          ;; should be somewhere between
+                                          ;; the current line's indentation
+                                          ;; (plus 2 for good measure) and
+                                          ;; the current comment's
+                                          ;; indentation, with a preference
+                                          ;; for comment-column."
+                                          (min (current-column)
+                                               (max (comment-column)
+                                                    (+ 2 (current-indentation))))))
+                                   (fn (if (save-excursion
+                                             (goto-char compos)
+                                             (skip-chars-backward " \t")
+                                             (bolp))
+                                           ;; "If the previous comment is on
+                                           ;; its own line, then reuse its
+                                           ;; indentation unconditionally."
+                                           (lambda () col)
+                                           (buffer-local-value
+                                            (current-buffer)
+                                            'comment-indent-function
+                                            comment-indent-default)))
+                                   (continuep (or (*comment-multi-line*)
+                                                  (cadr (assoc (*comment-style*)
+                                                               comment-styles)))))
+                              (%with-comment-indent-bindings
+                               col fn comstart comend
+                               (lambda () (comment-indent continuep))))
+                            (save-excursion
+                              (let ((pt (point)))
+                                (end-of-line)
+                                (let ((comend (buffer-substring pt (point))))
+                                  ;; "The 1+ is to make sure we delete the
+                                  ;; \n inserted above."
+                                  (delete-region pt (+ 1 (point)))
+                                  (end-of-line 0)
+                                  (insert comend)))))))))))))))
+
+
+    ;; `comment-line-break-function` - GNU Emacs's
+    ;; `comment-line-break-function` (`simple.el:9188'), whose default is
+    ;; `#'comment-indent-new-line` (`newcomment.el`), which is the
+    ;; function just above. A plain variable: nothing `let`-binds it, it
+    ;; is only setq-ed - and its readers are all in this library, so no
+    ;; cross-module write.
+    (define comment-line-break-function comment-indent-new-line)
+
+    (define-command (default-indent-new-line . rest)
+      ;; GNU Emacs's `default-indent-new-line' (`simple.el:9193'): "Break
+      ;; line at point and indent. If a comment syntax is defined, call
+      ;; `comment-line-break-function'."
+      ;;
+      ;; **The C's `if` has several ELSE forms** (the newline, the two
+      ;; horizontal-space deletions and the indent) - Elisp's `if` takes
+      ;; `ELSE...` - so the else is one `begin` here, and the function's
+      ;; value is the `if`'s.
+      ;;--------------------------------------------------------------
+      "Break line at point and indent.
+If a comment syntax is defined, call `comment-line-break-function'.
+
+The inserted newline is marked hard if variable `use-hard-newlines' is true,
+unless optional argument SOFT is non-nil."
+      (interactive (list #f #t))
+      (let ((soft (and (pair? rest) (car rest)))
+            (force (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+        (if (and (comment-start) comment-line-break-function)
+            (if force
+                (let ((*comment-auto-fill-only-comments* #f))
+                  (comment-line-break-function soft))
+                (comment-line-break-function soft))
+            (begin
+              ;; "Insert the newline before removing empty space so that
+              ;; markers get preserved better."
+              (if soft
+                  (insert-and-inherit #\newline)
+                  (insert-newline 1))
+              (save-excursion (forward-char -1) (delete-horizontal-space #f))
+              (delete-horizontal-space #f)
+              (if (and (*fill-prefix*) (not (*adaptive-fill-mode*)))
+                  ;; "Blindly trust a non-adaptive fill-prefix."
+                  (begin
+                    (indent-to-left-margin)
+                    (insert-before-markers-and-inherit (*fill-prefix*)))
+                  (cond
+                   ;; "If there's an adaptive prefix, use it unless we're
+                   ;; inside a comment and the prefix is not a comment
+                   ;; starter." (The comment test is
+                   ;; `comment-valid-prefix-p`, which is not ported; the
+                   ;; prefix is used as it stands - see the variable's
+                   ;; note above.)
+                   ((*fill-prefix*)
+                    (indent-to-left-margin)
+                    (insert-and-inherit (*fill-prefix*)))
+                   ;; "If we're not inside a comment, just try to indent."
+                   (else (indent-according-to-mode))))))))
+
+    (define-minor-mode auto-fill-mode
+      "Toggle automatic line breaking (Auto Fill mode).
+
+When Auto Fill mode is enabled, inserting a space at a column
+beyond `current-fill-column' automatically breaks the line at a
+previous space.
+
+When `auto-fill-mode' is on, the `auto-fill-function' variable is
+non-nil.
+
+The value of `normal-auto-fill-function' specifies the function to use
+for `auto-fill-function' when turning Auto Fill mode on."
+      :variable (lambda () (auto-fill-function-value))
+                (lambda (v)
+                  (set!buffer-auto-fill-function
+                   (current-buffer)
+                   (if v normal-auto-fill-function #f))))
+
+    (define-command (turn-on-auto-fill)
+      "Unconditionally turn on Auto Fill mode."
+      (interactive '())
+      (auto-fill-mode 1))
+
+    (define-command (turn-off-auto-fill)
+      "Unconditionally turn off Auto Fill mode."
+      (interactive '())
+      (auto-fill-mode -1))
+
+    ;; The C's call site: `internal_self_insert` runs `internal-auto-fill`
+    ;; after the insertion when the character is in `auto-fill-chars` and
+    ;; the buffer's `auto-fill-function` is set. `cmds.scm` is below this
+    ;; library, so it arrives as a seam, the way
+    ;; `*barf-if-buffer-read-only-function*` does.
+    (*internal-auto-fill-function* internal-auto-fill)
+
+    ;;----------------------------------------------------------------
     ;; The keys
     ;;----------------------------------------------------------------
 
@@ -2144,5 +2705,15 @@ details."
     ;; prog-mode buffer M-q is `prog-fill-reindent-defun', which is
     ;; `prog-mode.scm`'s to bind.)
     (define-key *default-keymap* (kbd "M-q") fill-paragraph)
+
+    ;; `bindings.el:1604' binds `ESC j' and `ESC C-j' to
+    ;; `default-indent-new-line'.
+    (define-key *default-keymap* (kbd "M-j") default-indent-new-line)
+    (define-key *default-keymap* (kbd "M-C-j") default-indent-new-line)
+
+    ;; `(defalias 'indent-new-comment-line 'comment-indent-new-line)'
+    ;; (`newcomment.el:81') - one procedure, two names, and M-x reaches
+    ;; both. It lives here because the function it aliases does.
+    (define-alias indent-new-comment-line comment-indent-new-line)
 
     ))

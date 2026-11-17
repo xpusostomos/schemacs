@@ -5040,9 +5040,77 @@ def check_fill_paragraph():
     return problems
 
 
+def check_comment_continuation():
+    """ESC j continues a Lisp comment, and the saved file is Emacs's.
+
+    `M-j` is `default-indent-new-line` (`bindings.el:1604`), which is
+    `comment-line-break-function`'s caller, so this drives the whole
+    chain: `insert-newline`, `comment-beginning`, the adaptive prefix,
+    `comment-indent-new-line` and the `;;` it repeats. Emacs 31.1 with
+    `M-j` at the end of the comment line writes exactly these bytes.
+    """
+    path = "/tmp/pty-check-comment.scm"
+    open(path, "w").write(";; aaa bbb\n")
+    expect = ";; aaa bbb\n;; \n"
+    problems = []
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 C_e, ESC, b"j", C_x + C_s], path, gap=0.35)
+    got = open(path).read()
+    if got != expect:
+        problems.append("after M-j the file is not Emacs's continuation: %r"
+                        % (got,))
+    if "modified" in out and "Wrote" not in out and "wrote" not in out:
+        problems.append("C-x C-s did not report the save")
+    return problems
+
+
+def check_narrow():
+    """C-x n n narrows to the region, show it, and C-x n w widens again.
+
+    `narrow-to-region` is a command in `editfns.c` (interactive spec
+    "r"), and `narrow-map` (`bindings.el:1214`) is what `C-x n` reaches.
+    Until 2026-11-17 neither the specs nor the bindings existed, so
+    `C-x n n` was an undefined key and did nothing; this drives the whole
+    path - `C-SPC` for the mark, the motion, the key, the redisplay and
+    the widened screen.
+    """
+    path = "/tmp/pty-check-narrow.txt"
+    open(path, "w").write("alpha\nbravo\ncharlie\ndelta\n")
+    problems = []
+    C_SPC = b"\x00"   # C-SPC, `set-mark-command`
+    C_N = b"\x0e"     # C-n, `next-line`
+    # C-SPC activates the mark at point 1; C-n C-n puts point on "charlie"
+    # (line 3), so the region is [1, line-3 start) and narrowing hides
+    # "alpha" and "bravo".
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 C_SPC, C_N, C_N, C_x + b"nn"],
+                path, gap=0.35)
+    # The region is [1, the start of line 3), so after narrowing "alpha"
+    # and "bravo" are shown and "charlie" is not.
+    screen = screen_of(out)
+    if "alpha" not in screen:
+        problems.append("after C-x n n the first line of the region is "
+                        "gone: no alpha on the screen")
+    if "bravo" not in screen:
+        problems.append("after C-x n n the second line of the region is "
+                        "gone")
+    if "charlie" in screen:
+        problems.append("after C-x n n a line outside the region is still "
+                        "drawn")
+    # And back out.
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 C_SPC, C_N, C_N, C_x + b"nn", C_x + b"nw"],
+                path, gap=0.35)
+    if "charlie" not in screen_of(out):
+        problems.append("after C-x n w the hidden line is not back")
+    return problems
+
+
 CHECKS = {
     "buffer-menu": check_buffer_menu,
     "fill-paragraph": check_fill_paragraph,
+    "comment-continuation": check_comment_continuation,
+    "narrow": check_narrow,
     "query-replace": check_query_replace,
     "query-replace-prompt": check_query_replace_prompt,
     "query-replace-pair-default": check_query_replace_pair_default,

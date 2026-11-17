@@ -2924,6 +2924,18 @@
                                        (if (window-minibuffer-p window)
                                            0 -1))))
              (desired (window-desired-matrix window)))
+        ;; "If the window start is outside the accessible range, reset
+        ;; it" - `redisplay_window`'s local `startp` clamp
+        ;; (`xdisp.c:20781`: "if (CHARPOS (startp) < BEGV) SET_TEXT_POS
+        ;; (startp, BEGV, BEGV_BYTE); else if (CHARPOS (startp) > ZV)
+        ;; ..."). A narrowing moves `BEGV` without moving the window's
+        ;; start *marker*, and every walk below begins there: unclamped,
+        ;; `C-x n n` cleared the whole screen, because the row walk began
+        ;; before the accessible portion and produced no rows at all.
+        (let ((start (window-start window)))
+          (unless (and (>= start (point-min)) (<= start (point-max)))
+            (%window-start-set! window
+                                (max (point-min) (min start (point-max))))))
         (let loop ((row 0)
                    (y (row->pixel-y (window-body-top window)))
                    (line-start (window-start window)))
@@ -3825,7 +3837,18 @@
       ;; second redisplay cleared the surface and skipped every window
       ;; whose ticks still matched, and the file only came back when a
       ;; resize changed a window's size and forced a rebuild.
-      (when (frame-garbaged-p frame)
+      ;; **A buffer's restriction moving is a full repaint too.**
+      ;; `narrow_to_region`/`Fwiden` set `clip_changed`
+      ;; (`editfns.c:2989`), and `redisplay_internal` answers it by
+      ;; invalidating every window's matrices and redisplaying the whole
+      ;; frame - which is why the C can skip rows and still be right.
+      ;; This tree sets `windows-or-buffers-changed` there
+      ;; (`%clip-changed!`), and until this test the renderer trusted the
+      ;; row diff and skipped the rows a narrowing kept: the screen was
+      ;; left showing whatever the terminal had, which for `C-x n n` and
+      ;; `C-x n d` was nothing at all after ncurses' own clear.
+      (when (or (frame-garbaged-p frame)
+                (windows-or-buffers-changed?))
         (when (not (graphical-frame?))
           (clear-frame-area! (current-display)))
         (for-each (lambda (w)

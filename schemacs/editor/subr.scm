@@ -71,6 +71,7 @@
     (only (schemacs editor search)
           string-match string-match-p match-beginning match-end match-string
           replace-match match-data--translate save-match-data)
+    (only (schemacs editor insdel) *inhibit-modification-hooks*)
     (only (schemacs editor buffer)
           *run-hooks-function*
           ;; `with-temp-buffer` makes and kills one; `kill-buffer` is
@@ -81,8 +82,8 @@
           ;; and it does resolve them here: a `syntax-rules` template's
           ;; free identifiers are hygienic, meaning they name what they
           ;; name *in this library*, whatever the caller has imported.
-          ;; The one of the four this tree has not got is
-          ;; `inhibit-modification-hooks`.
+          ;; ... and `inhibit-modification-hooks` is `insdel.c`'s, so
+          ;; the template reads it from there.
           *inhibit-read-only* buffer-modified-p current-buffer
           restore-buffer-modified-p set!text-editor-undo-list
           text-editor-undo-list)
@@ -977,11 +978,12 @@
       ;; and the saved value is put back on the way out, which the C's
       ;; `let' does too.
       ;;
-      ;; **`inhibit-modification-hooks' is not carried**, there being no
-      ;; such switch here; it is what stops the change hooks running, and
-      ;; nothing in this tree reads it. With it, `signal-before-change'
-      ;; and `signal-after-change' still run inside BODY here where Emacs
-      ;; suppresses them. Named, not faked.
+      ;; **`inhibit-modification-hooks' is carried now** (2026-11-17):
+      ;; it is `insdel.scm`'s parameter, tested where the C tests it -
+      ;; in `prepare_to_modify_buffer_1` before the before-change hooks,
+      ;; and at `signal_after_change`'s first line. Without it a property
+      ;; write during `syntax-propertize` ran the change hooks, which
+      ;; flushed the `syntax-ppss` cache in the middle of a parse.
       ;;
       ;; `autosaved' - the third value Emacs 31's `buffer-modified-p' can
       ;; answer - has no counterpart: this tree's is true or false.
@@ -991,7 +993,8 @@
          (let ((buffer (current-buffer)))
            (let ((modified (buffer-modified-p buffer))
                  (undo-list (text-editor-undo-list buffer)))
-             (parameterize ((*inhibit-read-only* #t))
+             (parameterize ((*inhibit-read-only* #t)
+                            (*inhibit-modification-hooks* #t))
                (dynamic-wind
                  ;; `(let ((buffer-undo-list t)) ...)' - Emacs's `t', which
                  ;; is `#t' here and not `#f' (see `buffer.scm`'s note on

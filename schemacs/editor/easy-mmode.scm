@@ -321,6 +321,16 @@
                         ;; does the toggling correctly." The expression
                         ;; is `eval'ed in the command's module when a key
                         ;; reaches it, so its contents are plain data.
+                        ;;
+                        ;; **It is `eval'ed in the *caller's* module**, so
+                        ;; a library that calls `define-minor-mode' must
+                        ;; import `current-prefix-arg' and `uarg->integer'
+                        ;; from `(schemacs editor command)' - Emacs gets
+                        ;; both from its one obarray and needs nothing.
+                        ;; Without them the command works when called as a
+                        ;; procedure and raises `Unbound variable' when a
+                        ;; key reaches it, which the command loop's guard
+                        ;; swallows into "the key did nothing".
                         (interactive-form
                          (datum->syntax #'mode
                                         (list 'interactive
@@ -345,10 +355,18 @@
                                  #`(lambda (v) (#,setter-id v))))
                         (command
                          (if interactive
-                             #`(define-command (#,mode-id arg)
+                             ;; ARG is *optional* - `(defun ,mode
+                             ;; (&optional arg ...)' - so a bare
+                             ;; `(auto-fill-mode)' is a call Emacs
+                             ;; accepts, and a nil ARG takes the
+                             ;; enabled branch (only `'toggle', which
+                             ;; the interactive form supplies when no
+                             ;; prefix is given, toggles).
+                             #`(define-command (#,mode-id . rest)
                                  #,(or doc #'"Toggle the minor mode.")
                                  #,interactive-form
-                                 (let ((last-message (current-message)))
+                                 (let* ((arg (and (pair? rest) (car rest)))
+                                        (last-message (current-message)))
                                    ;; `(cond ((eq arg 'toggle) (not ,getter))
                                    ;;        (t (not (and (numberp arg)
                                    ;;                     (< arg 1)))))'

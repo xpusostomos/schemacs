@@ -205,6 +205,7 @@
   (export
    ;; the change hooks
    *before-change-functions*  *after-change-functions*
+   *inhibit-modification-hooks*
    signal-before-change  signal-after-change
    ;; the caches
    invalidate-buffer-caches
@@ -252,6 +253,15 @@
     ;; position of the Emacs-named layer is. `font-lock-mode` hangs its
     ;; incremental fontification on this.
 
+    (define *inhibit-modification-hooks* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-modification-hooks` (`insdel.c:2575`): "If
+    ;; non-nil, don't run `before-change-functions' or
+    ;; `after-change-functions'." A DEFVAR_BOOL that Elisp `let`-binds -
+    ;; `with-silent-modifications` is the main one - so a parameter. The
+    ;; C tests it in two places: `prepare_to_modify_buffer_1` returns
+    ;; before `signal_before_change` (`:2167`) and `signal_after_change`
+    ;; returns at its first line (`:2387`).
+
     (define *before-change-functions* (make-parameter '()))
     ;; ^ GNU Emacs's `before-change-functions`: "List of functions to call
     ;; before a buffer is modified. Each function gets two arguments, the
@@ -294,8 +304,9 @@
       ;; `insert-in-front-hooks` that the C runs after an insertion
       ;; (`report_interval_modification`).
       ;;--------------------------------------------------------------
-      (for-each (lambda (f) (f charpos (+ charpos lenins) lendel))
-                (*after-change-functions*)))
+      (unless (*inhibit-modification-hooks*)
+        (for-each (lambda (f) (f charpos (+ charpos lenins) lendel))
+                  (*after-change-functions*))))
 
     ;;----------------------------------------------------------------
     ;; The caches
@@ -367,7 +378,11 @@
       ;; written the C's way anyway, ready for the day something does.
       ;;--------------------------------------------------------------
       (barf-if-buffer-read-only start)
-      (signal-before-change start end)
+      ;; The C's `if (inhibit_modification_hooks) return;' (`:2167') -
+      ;; after the read-only gate, before the hooks and everything that
+      ;; precedes them.
+      (unless (*inhibit-modification-hooks*)
+        (signal-before-change start end))
       ;; The C's last line is `Fset (Qdeactivate_mark, Qt)' - "Buffer
       ;; modifications store t in this variable", and it is a buffer-local
       ;; one, so it is the *current buffer's* value that is set.

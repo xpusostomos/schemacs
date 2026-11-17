@@ -59,13 +59,14 @@
   (import
     (scheme base)
     (scheme char)
-    (only (guile) ash logand logior)
+    (only (guile) ash logand logior most-positive-fixnum)
     ;; The Unicode blocks' syntax, `characters.el'''s half of the
     ;; standard table - see `%standard-syntax-table'.
     (only (schemacs editor characters) standard-syntax-runs)
 
     (only (schemacs editor buffer) current-buffer
           fetch-char set-point buffer-pt buffer-beg buffer-z
+          *inhibit-read-only*
           buffer-local-value set-buffer-local-value!)
     (only (schemacs editor chartab)
           make-char-table char-table? char-table-ref char-table-set
@@ -75,12 +76,14 @@
     (only (schemacs editor command) maybe-quit rarely-quit)
     ;; `*before-change-functions*' - `insdel.c''s hook list, which is
     ;; what this library flushes its parse-state cache from.
-    (only (schemacs editor insdel) *before-change-functions*)
+    (only (schemacs editor insdel)
+          *before-change-functions* *inhibit-modification-hooks*)
     (only (schemacs editor intervals)
           interval-position interval-length interval-last-pos interval-plist
           update-interval next-interval previous-interval textget)
     (only (schemacs editor textprop)
           get-text-property put-text-property remove-text-properties
+          get-char-property
           interval-of)
     )
 
@@ -88,6 +91,10 @@
    ;; syntax.c's DEFUNs
    syntax-table-p syntax-table standard-syntax-table copy-syntax-table
    set-syntax-table char-syntax syntax-class-to-char matching-paren
+   ;; `syntax-after` is `subr.el:6563`'s, not `syntax.c`'s - placed here
+   ;; because it reads the `syntax-table` text property through
+   ;; `get-char-property`, which is this library's neighbour.
+   syntax-after
    string-to-syntax modify-syntax-entry
    parse-partial-sexp
    ;; syntax.c's class codes
@@ -375,6 +382,29 @@
             #f)))
 
     ;; ---------------------------------------------------------------
+    ;; `syntax-after' (`subr.el:6563').
+    ;; ---------------------------------------------------------------
+    (define (syntax-after pos)
+      ;; GNU Emacs's `syntax-after' (`subr.el:6563'): "Return the raw
+      ;; syntax descriptor for the char after POS. If POS is outside the
+      ;; buffer's accessible portion, return nil."
+      ;;
+      ;; The text property wins - `comment-enter-backward` is its
+      ;; caller here, through `comment-indent-new-line` - and the answer
+      ;; is the same shape `string-to-syntax` gives, a `(CODE .
+      ;; MATCHING)` cons.
+      ;;--------------------------------------------------------------
+      (if (or (< pos (%point-min)) (>= pos (%point-max)))
+          #f
+          (let ((st (if (*parse-sexp-lookup-properties*)
+                        (get-char-property pos 'syntax-table)
+                        #f)))
+            (if (pair? st)
+                st
+                (char-table-ref (or st (syntax-table))
+                                (%char-code (fetch-char (current-buffer) pos)))))))
+
+    ;; ---------------------------------------------------------------
     ;; `string-to-syntax' (`syntax.c:1156') and `modify-syntax-entry'
     ;; (`syntax.c:1234').
     ;; ---------------------------------------------------------------
@@ -482,6 +512,9 @@
               %uninitialized-interval %uninitialized-interval #f))
 
     (define (%point-max) (buffer-z (current-buffer)))
+    ;; `(point-min)`/`(point-max)` are `editfns.scm`'s, and that library
+    ;; imports this one - so the two positions are read here.
+    (define (%point-min) (buffer-beg (current-buffer)))
 
     (define %syntax-propertize-done 0)
     ;; ^ `syntax-propertize--done` cached for the scan loops: the C reads
@@ -2362,19 +2395,38 @@
           thunk
           (lambda () (set-syntax-table saved)))))
 
-    (define *syntax-ppss-cache* (make-parameter #f))
     (define *syntax-ppss-stats* (make-vector 6 0))
 
     (define (%syntax-ppss-data)
-      ;; `syntax-ppss--data' (`syntax.el:595'): the cache cell. Emacs
-      ;; keeps two globals (`syntax-ppss-wide' for a buffer whose
-      ;; point-min is 1 and a narrow pair otherwise); one parameter holds
-      ;; `(last . cache)` here because narrowing is not carried.
+      ;; `syntax-ppss--data' (`syntax.el:595'): "Cons of two elements
+      ;; (LAST . CACHE). Where LAST is a pair (LAST-POS . LAST-PPS)
+      ;; caching the last invocation and CACHE is a list of (POS . PPSS)
+      ;; pairs, in decreasing POS order. These are valid when the buffer
+      ;; has no restriction."
+      ;;
+      ;; **Two cells, and buffer-local, as Emacs's two `defvar-local`s
+      ;; are.** `syntax-ppss-wide' for a buffer at its full extent and
+      ;; `syntax-ppss-narrow' for one inside a `save-restriction' -
+      ;; reset whenever the narrowing's start moves - "so a parse done
+      ;; inside a `save-restriction` cannot poison the cache the
+      ;; unnarrowed parse reads" (`syntax.el:525`). The single parameter
+      ;; this replaces was both shared by every buffer and blind to
+      ;; narrowing, which is how `M-j` in a fresh buffer could read an
+      ;; empty buffer's state back at a position that has text.
       ;;--------------------------------------------------------------
-      (or (*syntax-ppss-cache*)
-          (let ((v (cons #f '())))
-            (*syntax-ppss-cache* v)
-            v)))
+      (let ((buf (current-buffer)))
+        (if (= (%point-min) 1)
+            (or (buffer-local-value buf 'syntax-ppss-wide #f)
+                (let ((v (cons #f '())))
+                  (set-buffer-local-value! buf 'syntax-ppss-wide v)
+                  v))
+            (begin
+              (unless (equal? (buffer-local-value buf 'syntax-ppss-narrow-start #f)
+                              (%point-min))
+                (set-buffer-local-value! buf 'syntax-ppss-narrow-start
+                                         (%point-min))
+                (set-buffer-local-value! buf 'syntax-ppss-narrow (cons #f '())))
+              (buffer-local-value buf 'syntax-ppss-narrow #f)))))
 
     (define (%nth n lst)
       (let loop ((i 0) (l lst))
@@ -2386,7 +2438,18 @@
       ;; GNU Emacs's `syntax-ppss' (`syntax.el:606'): "Parse-Partial-Sexp
       ;; State at POS, defaulting to point."
       ;;--------------------------------------------------------------
-      (let ((pos (if (pair? rest) (car rest) (buffer-pt (current-buffer)))))
+      ;; "`(unless pos (setq pos (point)))'" (`syntax.el:617'): a nil POS
+      ;; means point, and **a caller that passes one must not corrupt the
+      ;; cache**. A `(syntax-ppss #f)` used to store `(cons #f PPSS)` as
+      ;; the last entry; a later call then found OLD-PPSS with OLD-POS
+      ;; nil, took the "use OLD-PPSS" branch, and compared
+      ;; `(<= (or toplevel-pos (nth 2 ppss)) pos)' - `nth 2' is nil for
+      ;; the empty buffer's state - which raises "Wrong type argument in
+      ;; position 2: #f" from a `<'. Found by `M-j' in a fresh buffer:
+      ;; the first fontification inserts, and the syntactic pass asks
+      ;; for a state at a nil START.
+      (let ((pos (or (and (pair? rest) (car rest))
+                     (buffer-pt (current-buffer)))))
         (syntax-propertize pos)
         (with-syntax-table (or (*syntax-ppss-table*) (syntax-table))
           (lambda ()
@@ -2395,94 +2458,121 @@
                    (ppss-cache (cdr cell))
                    (old-pos (and ppss-last (car ppss-last)))
                    (old-ppss (and ppss-last (cdr ppss-last)))
-                   (pt-min 1))
+                   (pt-min (%point-min))
+                   (ppss #f))
               (if (and old-pos (> old-pos pos)) (set! old-pos #f))
-              (cond
-               ;; "Use the OLD-POS if usable and close."
-               ((and old-pos (< (- pos old-pos) 2000))
-                (parse-partial-sexp old-pos pos #f #f old-ppss #f))
-               ;; "Use OLD-PPSS if possible and close enough."
-               ((and (not old-pos) old-ppss
-                     (let ((m (or (syntax-ppss-toplevel-pos old-ppss)
-                                  (%nth 2 old-ppss))))
-                       (set! pt-min m)
-                       (and (<= m pos)
-                            (< (- pos m) (*syntax-ppss-max-span*)))))
-                (parse-partial-sexp pt-min pos #f #f #f #f))
-               (else
-                ;; **`pt-min` is rebound here.** Emacs's `else` binds
-                ;; `(pt-min (point-min))`; without it the failed
-                ;; OLD-PPSS branch above leaves `pt-min` at a position
-                ;; *after* POS, and the parse below gets FROM > TO -
-                ;; "End position is smaller than start position".
-                (let ((cache-pred #f) (cache ppss-cache) (pt-min 1)
-                      (pt-best 1) (ppss-best #f))
-                  ;; "Setup the before-change function if necessary."
-                  ;; `(add-hook 'before-change-functions
-                  ;;            #'syntax-ppss-flush-cache 99 t)'
-                  ;; (`syntax.el:677'). Emacs installs it buffer-locally the
-                  ;; first time a buffer is parsed; a hook here is a
-                  ;; parameter, so it is one list and the `memq' keeps it
-                  ;; to one entry. **Without it a cached state outlives the
-                  ;; edit that moved the positions it describes** -
-                  ;; `syntax-ppss' then answers a state from the wrong
-                  ;; place, and `comment-search-forward' on a line that
-                  ;; plainly starts with `;' finds no comment. Found by
-                  ;; `indent-region' over a file with a commented-out
-                  ;; block; the answer depended on where the region
-                  ;; started, which is the signature of a stale cache.
-                  ;; "`(unless (or ppss-cache ppss-last) ...)'" - and
-                  ;; **an empty cache list is TRUE in Scheme**, so the
-                  ;; test is `pair?' and not the list itself.
-                  (unless (or (pair? ppss-cache) ppss-last)
-                    (unless (memq syntax-ppss-flush-cache
-                                  (*before-change-functions*))
-                      (*before-change-functions*
-                       (append (*before-change-functions*)
-                               (list syntax-ppss-flush-cache)))))
-                  (let loop ((c cache) (pred #f))
-                    (cond ((and (pair? c) (< pos (caar c)))
-                           (loop (cdr c) c))
-                          (else (set! cache c) (set! cache-pred pred))))
-                  (when (pair? cache)
-                    (set! pt-min (caar cache))
-                    (set! ppss-best (cdar cache)))
-                  (if (or (not old-pos) (< old-pos pt-min))
-                      (begin (set! pt-best pt-min) #t)
-                      (begin (set! pt-best old-pos) (set! ppss-best old-ppss)))
-                  (let ((ppss
-                         (if (< (- pos pt-best) (*syntax-ppss-max-span*))
-                             (parse-partial-sexp pt-best pos #f #f ppss-best #f)
-                             (let slow ((pt-min pt-min) (ppss-best ppss-best)
-                                        (ppss-cache ppss-cache))
-                               (if (> (- pos pt-min) (* 2 (*syntax-ppss-max-span*)))
-                                   (let ((mid (quotient (+ pt-min pos) 2)))
-                                     (let ((mid-ppss (parse-partial-sexp
-                                                      pt-min mid #f #f ppss-best #f)))
-                                       (slow mid mid-ppss
-                                             (cons (cons mid mid-ppss) ppss-cache))))
-                                   (let ((result (parse-partial-sexp
-                                                  pt-min pos #f #f ppss-best #f)))
-                                     result))))))
-                    ;; "Store it in the cache." Emacs keeps the list in
-                    ;; **decreasing position order**, which the scan above
-                    ;; relies on; a blind push breaks it and then `pt-min'
-                    ;; can come back *after* POS.
-                    (let ((pair (cons pos ppss)))
-                      (if cache-pred
-                          (if (> (- (caar cache-pred) pos)
-                                 (*syntax-ppss-max-span*))
-                              (set-cdr! cache-pred
-                                        (cons pair (cdr cache-pred)))
-                              (set-car! cache-pred pair))
-                          (if (or (null? ppss-cache)
-                                  (> (- (caar ppss-cache) pos)
-                                     (*syntax-ppss-max-span*)))
-                              (set! ppss-cache (cons pair ppss-cache))
-                              (set-car! ppss-cache pair))))
-                    (set-car! cell (cons pos ppss))
-                    (set-cdr! cell ppss-cache)
-                    ppss)))))))))
+              (set! ppss
+                    (cond
+                     ;; "Use the OLD-POS if usable and close."
+                     ((and old-pos (< (- pos old-pos) 2000))
+                      (parse-partial-sexp old-pos pos #f #f old-ppss #f))
+                     ;; "Use OLD-PPSS if possible and close enough."
+                     ((and (not old-pos) old-ppss
+                           (let ((m (or (syntax-ppss-toplevel-pos old-ppss)
+                                        (%nth 2 old-ppss))))
+                             (set! pt-min m)
+                             (and (<= m pos)
+                                  (< (- pos m) (*syntax-ppss-max-span*)))))
+                      ;; The OLD-PPSS branch updates `last` - measured on
+                      ;; Emacs 31.1: `(syntax-ppss 15)' then
+                      ;; `(syntax-ppss 6)' leaves `last` at 6 - but not
+                      ;; the cache list. The OLD-POS branch updates
+                      ;; *neither* ("Don't update the `last' cache",
+                      ;; `syntax.el:632'), which the same measurement
+                      ;; shows: 10 then 13 leaves `last` at 10.
+                      (let ((ppss (parse-partial-sexp pt-min pos #f #f #f #f)))
+                        (set-car! cell (cons pos ppss))
+                        (set-buffer-local-value!
+                         (current-buffer) 'syntax-ppss--updated-cache #t)
+                        ppss))
+                     (else
+                      ;; **`pt-min` is rebound here.** Emacs's `else` binds
+                      ;; `(pt-min (point-min))`; without it the failed
+                      ;; OLD-PPSS branch above leaves `pt-min` at a position
+                      ;; *after* POS, and the parse below gets FROM > TO -
+                      ;; "End position is smaller than start position".
+                      (let ((cache-pred #f) (cache ppss-cache)
+                            (pt-min (%point-min))
+                            (pt-best (%point-min)) (ppss-best #f))
+                        ;; "Setup the before-change function if necessary."
+                        ;; `(add-hook 'before-change-functions
+                        ;;            #'syntax-ppss-flush-cache 99 t)'
+                        ;; (`syntax.el:677'). Emacs installs it buffer-locally
+                        ;; the first time a buffer is parsed; a hook here is a
+                        ;; parameter, so it is one list and the `memq' keeps
+                        ;; it to one entry. **Without it a cached state
+                        ;; outlives the edit that moved the positions it
+                        ;; describes** - `syntax-ppss' then answers a state
+                        ;; from the wrong place, and `comment-search-forward'
+                        ;; on a line that plainly starts with `;' finds no
+                        ;; comment. Found by `indent-region' over a file with
+                        ;; a commented-out block; the answer depended on where
+                        ;; the region started, which is the signature of a
+                        ;; stale cache.
+                        ;; "`(unless (or ppss-cache ppss-last) ...)'" - and
+                        ;; **an empty cache list is TRUE in Scheme**, so the
+                        ;; test is `pair?' and not the list itself.
+                        (unless (or (pair? ppss-cache) ppss-last)
+                          (unless (memq syntax-ppss-flush-cache
+                                        (*before-change-functions*))
+                            (*before-change-functions*
+                             (append (*before-change-functions*)
+                                     (list syntax-ppss-flush-cache)))))
+                        (let loop ((c cache) (pred #f))
+                          (cond ((and (pair? c) (< pos (caar c)))
+                                 (loop (cdr c) c))
+                                (else (set! cache c) (set! cache-pred pred))))
+                        (when (pair? cache)
+                          (set! pt-min (caar cache))
+                          (set! ppss-best (cdar cache)))
+                        (if (or (not old-pos) (< old-pos pt-min))
+                            (begin (set! pt-best pt-min) #t)
+                            (begin (set! pt-best old-pos)
+                                   (set! ppss-best old-ppss)))
+                        (let ((ppss
+                               (if (< (- pos pt-best) (*syntax-ppss-max-span*))
+                                   (parse-partial-sexp pt-best pos #f #f
+                                                       ppss-best #f)
+                                   (let slow ((pt-min pt-min)
+                                              (ppss-best ppss-best)
+                                              (ppss-cache ppss-cache))
+                                     (if (> (- pos pt-min)
+                                            (* 2 (*syntax-ppss-max-span*)))
+                                         (let ((mid (quotient (+ pt-min pos) 2)))
+                                           (let ((mid-ppss
+                                                  (parse-partial-sexp
+                                                   pt-min mid #f #f ppss-best #f)))
+                                             (slow mid mid-ppss
+                                                   (cons (cons mid mid-ppss)
+                                                         ppss-cache))))
+                                         (parse-partial-sexp
+                                          pt-min pos #f #f ppss-best #f))))))
+                          ;; "Store it in the cache." Emacs keeps the list in
+                          ;; **decreasing position order**, which the scan
+                          ;; above relies on; a blind push breaks it and then
+                          ;; `pt-min' can come back *after* POS.
+                          (let ((pair (cons pos ppss)))
+                            (if cache-pred
+                                (if (> (- (caar cache-pred) pos)
+                                       (*syntax-ppss-max-span*))
+                                    (set-cdr! cache-pred
+                                              (cons pair (cdr cache-pred)))
+                                    (set-car! cache-pred pair))
+                                (if (or (null? ppss-cache)
+                                        (> (- (caar ppss-cache) pos)
+                                           (*syntax-ppss-max-span*)))
+                                    (set! ppss-cache (cons pair ppss-cache))
+                                    (set-car! ppss-cache pair))))
+                          ;; "`(setq ppss-last (cons pos ppss))'
+                          ;; (setcar cell ppss-last) (setcdr cell
+                          ;; ppss-cache)'" - the `last` entry and the cache
+                          ;; list, and the flag the propertizer reads.
+                          (set-car! cell (cons pos ppss))
+                          (set-cdr! cell ppss-cache)
+                          (set-buffer-local-value!
+                           (current-buffer) 'syntax-ppss--updated-cache #t)
+                          ppss)))))
+              ppss)))))
 
     (define (ppss-comment-or-string-start ppss)
       ;; GNU Emacs's `ppss-comment-or-string-start' (`syntax.el'): "The
@@ -2520,18 +2610,46 @@
             (else #f)))
 
     (define (syntax-ppss-flush-cache beg . rest)
-      ;; `syntax-ppss-flush-cache' (`syntax.el:544').
+      ;; `syntax-ppss-flush-cache' (`syntax.el:544'): "Flush the cache of
+      ;; `syntax-ppss' starting at position BEG."
+      ;;
+      ;; **Both cells** (`:550`), which is what a narrowed parse and an
+      ;; unnarrowed one need. Emacs also moves `syntax-propertize--done'
+      ;; back (`syntax.el:547`) unless a propertize is in process; that
+      ;; is here too, without the in-process flag - a propertize that
+      ;; flushes its own region would redo work, never do less.
       ;;--------------------------------------------------------------
-      (let ((cell (*syntax-ppss-cache*)))
-        (when cell
-          (let ((last (car cell)))
-            (when (and last (>= (car last) beg))
-              (set-car! cell #f)))
-          (set-cdr! cell
-                    (let loop ((c (cdr cell)))
-                      (cond ((null? c) '())
-                            ((>= (caar c) beg) (loop (cdr c)))
-                            (else (cons (car c) (loop (cdr c)))))))))
+      (let ((done (%propertize-done)))
+        ;; "`(unless (syntax-propertize--in-process-p) ...)'"
+        ;; (`syntax.el:547'): while a propertize is in process the limit
+        ;; is `most-positive-fixnum` and must be left alone - `:389' says
+        ;; why: "so that `syntax-ppss-flush-cache' can be used from within
+        ;; `syntax-propertize' without ruining the `syntax-table' already
+        ;; set."
+        (unless (= done most-positive-fixnum)
+          (unless (< done beg)
+            (set-buffer-local-value! (current-buffer) 'syntax-propertize--done
+                                     (min beg done)))))
+      (let loop ((names '(syntax-ppss-wide syntax-ppss-narrow)))
+        (when (pair? names)
+          (let ((cell (buffer-local-value (current-buffer) (car names) #f)))
+            (when (pair? cell)
+              (let ((last (car cell)))
+                (when (and (pair? last) (< beg (or (car last) 0)))
+                  ;; "If `syntax-begin-function' jumped to BEG, then the
+                  ;; old state at BEG can depend on the text after BEG
+                  ;; (which is presumably changed)."
+                  (if (<= beg (or (syntax-ppss-toplevel-pos (cdr last))
+                                  (list-ref last 3)
+                                  0))
+                      (set-car! cell #f)
+                      (set-car! last #f))))
+              (set-cdr! cell
+                        (let loop2 ((c (cdr cell)))
+                          (cond ((null? c) '())
+                                ((> (caar c) beg) (loop2 (cdr c)))
+                                (else (cons (car c) (loop2 (cdr c)))))))))
+          (loop (cdr names))))
       #f)
 
     ;; The three editfns functions the propertize helpers need. Local
@@ -2591,60 +2709,116 @@
             (set! end (point)))
           (cons start end))))
 
+    (define (%propertize-done)
+      ;; `syntax-propertize--done' (`syntax.el:391'): buffer-local, and
+      ;; `most-positive-fixnum` while a propertize is *in process* - the
+      ;; C's `syntax-propertize--in-process-p' (`:384') tests exactly
+      ;; that value, and it is what stops the recursion.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (current-buffer) 'syntax-propertize--done 0))
+
+    (define (%set-propertize-done! value)
+      (set-buffer-local-value! (current-buffer) 'syntax-propertize--done value)
+      (set! %syntax-propertize-done value))
+
     (define (syntax-propertize pos)
       ;; GNU Emacs's `syntax-propertize' (`syntax.el:395'): "Ensure that
       ;; syntax-table properties are set until POS (a buffer point)."
       ;;
-      ;; `syntax-propertize--done' is buffer-local, as it is in Emacs
-      ;; (`syntax.c:3778' makes it so), and it is moved to END *before*
-      ;; the mode's function runs: the function calls `syntax-ppss',
-      ;; which calls back here, and that is what makes the recursion
-      ;; terminate.
+      ;; **The in-process sentinel is the point of this port.** Emacs
+      ;; binds `syntax-propertize--done' to `most-positive-fixnum` around
+      ;; the mode's function (`:457') precisely because the function
+      ;; calls `syntax-ppss' - which calls back here - and because the
+      ;; `syntax-ppss-flush-cache` that can run inside must not reset the
+      ;; limit. Without it every `syntax-ppss' re-entered the propertizer
+      ;; and re-flushed the parse cache, which cleared the *position* of
+      ;; the cached state while keeping the state, and the next parse read
+      ;; that state back as if it belonged to the new position - the
+      ;; "Wrong type argument in position 2: #f" that made `narrow-to-
+      ;; defun` fail in an `emacs-lisp-mode` buffer.
       ;;--------------------------------------------------------------
-      (let ((done (buffer-local-value (current-buffer)
-                                      'syntax-propertize--done 0)))
-        (when (< done pos)
-          (let ((fun (buffer-local-value (current-buffer)
-                                         'syntax-propertize-function #f)))
-            (cond
-             ((not fun)
-              ;; Nothing to do, and nothing will ever need doing.
-              (set-buffer-local-value! (current-buffer)
-                                       'syntax-propertize--done
-                                       (max (%point-max) pos))
-              (set! %syntax-propertize-done (max (%point-max) pos)))
-             (else
-              (let* ((start (max (min done (%point-max)) 1))
-                     (end (max pos (min (%point-max)
-                                        (+ start
-                                           (*syntax-propertize-chunk-size*))))))
-                (when (< start end)
-                  ;; `(save-excursion (with-silent-modifications ...))'
-                  ;; (`syntax.el:430') - the mode's function is free to
-                  ;; move point and usually does (`(goto-char start)'),
-                  ;; and that must not be visible to its caller. This
-                  ;; library's `save-excursion' takes a thunk.
-                  (save-excursion
-                   (lambda ()
-                     (let extend ((funs (*syntax-propertize-extend-region-functions*))
-                                  (b start) (e end))
-                       (cond
-                        ((null? funs)
-                         ;; "Move the limit before calling the function,
-                         ;; so it's done in case of errors."
-                         (set-buffer-local-value! (current-buffer)
-                                                  'syntax-propertize--done e)
-                         (set! %syntax-propertize-done e)
-                         (syntax-ppss-flush-cache b)
-                         ;; "Remove the properties we are about to
-                         ;; recompute."
-                         (remove-text-properties b e '(syntax-table nil))
-                         (fun b e))
-                        (else
-                         (let ((new ((car funs) b e)))
-                           (if new
-                               (extend (cdr funs) (car new) (cdr new))
-                               (extend (cdr funs) b e)))))))))))))))
+      (when (< (%propertize-done) pos)
+        (let ((fun (buffer-local-value (current-buffer)
+                                       'syntax-propertize-function #f)))
+          (if (or (not fun) (eq? fun 'ignore))
+              ;; `(memq syntax-propertize-function '(nil ignore))' - a
+              ;; mode that has nothing to do says so with `ignore'.
+              (%set-propertize-done! (max (%point-max) pos))
+              (begin
+                ;; `(setq-local parse-sexp-lookup-properties t)' (`:403').
+                (set-buffer-local-value! (current-buffer)
+                                         'parse-sexp-lookup-properties #t)
+                ;; "Since we share a single 'flush' function between
+                ;; `syntax-ppss' and `syntax-propertize', we also have to
+                ;; make sure the flush function is installed here
+                ;; (bug#29767)." - only when the limit has been left
+                ;; behind the narrowing.
+                (when (< (%propertize-done) (%point-min))
+                  (unless (memq syntax-ppss-flush-cache
+                                (*before-change-functions*))
+                    (*before-change-functions*
+                     (append (*before-change-functions*)
+                             (list syntax-ppss-flush-cache)))))
+                ;; `(save-excursion (with-silent-modifications (with-syntax-table ...)))'
+                ;; - the `with-silent-modifications` is spelled out; see
+                ;; the note in the previous version of this function and
+                ;; DEPARTURES.md for the two bindings carried and the two
+                ;; not.
+                (parameterize ((*inhibit-modification-hooks* #t)
+                               (*inhibit-read-only* #t))
+                 (save-excursion
+                  (lambda ()
+                   (with-syntax-table (or (*syntax-ppss-table*) (syntax-table))
+                    (lambda ()
+                     (let* ((start (max (min (%propertize-done) (%point-max))
+                                        (%point-min)))
+                            (end (max pos
+                                      (min (%point-max)
+                                           (+ start
+                                              (*syntax-propertize-chunk-size*))))))
+                      ;; The extend-region walk, with the limit bound to
+                      ;; the sentinel around each function (`:433').
+                      (let extend ((funs (*syntax-propertize-extend-region-functions*))
+                                   (b start) (e end))
+                        (cond
+                         ((null? funs)
+                          ;; "Flush `ppss` cache between the original value
+                          ;; of START and that set above by
+                          ;; `syntax-propertize-extend-region-functions`."
+                          (syntax-ppss-flush-cache b)
+                          ;; "Move the limit before calling the function,
+                          ;; so it's done in case of errors."
+                          (%set-propertize-done! e)
+                          ;; "Remove the properties we are about to
+                          ;; recompute."
+                          (remove-text-properties
+                           b e '(syntax-table nil syntax-multiline nil))
+                          ;; "Bind `syntax-propertize--done' to avoid
+                          ;; recursion!"
+                          (%set-propertize-done! most-positive-fixnum)
+                          (set-buffer-local-value!
+                           (current-buffer) 'syntax-ppss--updated-cache #f)
+                          (dynamic-wind
+                            (lambda () #f)
+                            (lambda () (fun b e))
+                            (lambda () (%set-propertize-done! e)))
+                          ;; "`syntax-ppss' was called and updated the cache
+                          ;; while we were propertizing so we need to flush
+                          ;; the part of the cache that may have been
+                          ;; rendered out-of-date by the new properties."
+                          (when (buffer-local-value
+                                 (current-buffer) 'syntax-ppss--updated-cache #f)
+                            (syntax-ppss-flush-cache b)))
+                         (else
+                          (let ((new (let ((saved (%propertize-done)))
+                                       (%set-propertize-done! most-positive-fixnum)
+                                       (dynamic-wind
+                                         (lambda () #f)
+                                         (lambda () ((car funs) b e))
+                                         (lambda () (%set-propertize-done! saved))))))
+                            (if new
+                                (extend (cdr funs) (car new) (cdr new))
+                                (extend (cdr funs) b e))))))))))))))))
       #f)
 
     ))

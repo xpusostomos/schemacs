@@ -14,8 +14,8 @@
   ;;   * `mark-defun-back' - it is `mark-defun''s own `this-command'
   ;;     symbol, and this tree has no command symbols separate from the
   ;;     procedures.
-  ;;   * `narrow-to-region'/`widen' in `up-list-default-function' and
-  ;;     `beginning-of-defun-raw' - this tree has no narrowing.
+  ;;   * `narrow-to-defun' is carried (`C-x n d'); the narrowing it uses
+  ;;     is `editfns.scm`'s.
   ;;   * `beginning-of-defun''s `wrong-number-of-arguments' fallback
   ;;     catches every error instead: one condition type here.
   ;;
@@ -43,7 +43,7 @@
     (only (schemacs editor editfns)
           point point-min point-max goto-char insert insert-char forward-line
           line-beginning-position line-end-position bobp eobp bolp
-          point-marker preceding-char following-char save-excursion
+          point-marker preceding-char following-char save-excursion eolp
           region-beginning region-end
           ;; `beginning-of-defun-raw` scans the whole buffer and clamps
           ;; the answer back into the restriction (`lisp.el:465`).
@@ -60,7 +60,11 @@
           make-scan-error scan-error? scan-error-message scan-error-start
           scan-error-end)
     (only (schemacs editor search)
-          looking-at re-search-backward save-match-data match-end))
+          looking-at re-search-backward re-search-forward save-match-data
+          match-end match-beginning)
+    ;; `narrow-to-defun`'s INCLUDE-COMMENTS walk reads the page delimiter
+    ;; (`lisp.el:783`).
+    (only (schemacs editor paragraphs) *page-delimiter*))
 
   (export
    buffer-end
@@ -75,7 +79,7 @@
    *beginning-of-defun-function* beginning-of-defun beginning-of-defun-raw
    beginning-of-defun--in-emptyish-line-p beginning-of-defun-comments
    *end-of-defun-function* *end-of-defun-moves-to-eol* end-of-defun
-   mark-defun
+   mark-defun narrow-to-defun narrow-to-defun-include-comments
    *transpose-sexps-function* transpose-sexps-default-function
    transpose-sexps
    move-past-close-and-reindent *calculate-lisp-indent-function*
@@ -778,6 +782,86 @@ in the middle of a sexp to be transposed."
     (define-key km:*default-keymap* (kbd "C-M-e") end-of-defun)
     (define-key km:*default-keymap* (kbd "C-M-a") beginning-of-defun)
     (define-key km:*default-keymap* (kbd "C-M-h") mark-defun)
+
+    (define narrow-to-defun-include-comments #f)
+    ;; ^ GNU Emacs's `narrow-to-defun-include-comments' (`lisp.el:739'):
+    ;; "If non-nil, `narrow-to-defun' will also show comments preceding
+    ;; the defun." A `defvar` in the C, so a plain variable - and the
+    ;; self-assignment is the compiler's constant-folding guard.
+    (set! narrow-to-defun-include-comments narrow-to-defun-include-comments)
+
+    (define-command (narrow-to-defun . rest)
+      ;; GNU Emacs's `narrow-to-defun' (`lisp.el:742'): "Make text
+      ;; outside current defun invisible. The current defun is the one
+      ;; that contains point or follows point."
+      ;;
+      ;; `(while (looking-at "^\n") ...)' is a Scheme `let loop` because
+      ;; Elisp's `while` is a special form.
+      ;;--------------------------------------------------------------
+      "Make text outside current defun invisible.
+The current defun is the one that contains point or follows point.
+Preceding comments are included if INCLUDE-COMMENTS is non-nil.
+Interactively, the behavior depends on `narrow-to-defun-include-comments'."
+      (interactive (list narrow-to-defun-include-comments))
+      (let ((include-comments (and (pair? rest) (car rest))))
+        (save-excursion
+          (widen)
+          (let ((opoint (point))
+                (beg #f)
+                (end #f))
+            ;; "Try first in this order for the sake of languages with
+            ;; nested functions where several can end at the same place as
+            ;; with the offside rule, e.g. Python."
+            ;;
+            ;; "Finding the start of the function is a bit problematic
+            ;; since `beginning-of-defun' when we are on the first
+            ;; character of the function might go to the previous
+            ;; function. Therefore we first move one character forward and
+            ;; then call `beginning-of-defun'."
+            (unless (eolp) (forward-char))
+            (beginning-of-defun)
+            (set! beg (point))
+            (end-of-defun)
+            (set! end (point))
+            (let loop ()
+              (when (looking-at "^\n")
+                (forward-line 1)
+                (loop)))
+            (unless (> (point) opoint)
+              ;; "beginning-of-defun moved back one defun so we got the
+              ;; wrong one."
+              (goto-char opoint)
+              (end-of-defun)
+              (set! end (point))
+              (beginning-of-defun)
+              (set! beg (point)))
+            (when include-comments
+              (goto-char beg)
+              ;; "Move back past all preceding comments (and whitespace)."
+              (when (forward-comment -1)
+                (let loop ()
+                  (when (forward-comment -1) (loop)))
+                ;; "Move forwards past any page breaks within these
+                ;; comments."
+                (when (and (*page-delimiter*)
+                           (not (string=? (*page-delimiter*) "")))
+                  (let loop ()
+                    (when (re-search-forward (*page-delimiter*) beg #t)
+                      (loop))))
+                ;; "Lastly, move past any empty lines."
+                (skip-chars-forward "[:space:]\n")
+                (beginning-of-line)
+                (set! beg (point))))
+            (goto-char end)
+            (re-search-backward "^\n" (- (point) 1) #t)
+            (narrow-to-region beg end)))))
+
+    ;; `narrow-map`'s `d` (`bindings.el:1669'), flat - see the note on
+    ;; `narrow-map` in `editfns.scm`. It goes AFTER the command it binds:
+    ;; a `define-key` here holds the command's *value*, and a binding
+    ;; above its definition reads an unbound variable at module load.
+    (define-key km:*default-keymap* (kbd "C-x n d") narrow-to-defun)
+
     ;; ---------------------------------------------------------------
     ;; `move-past-close-and-reindent' (`lisp.el:969').
     ;; ---------------------------------------------------------------

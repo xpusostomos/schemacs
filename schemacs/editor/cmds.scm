@@ -22,8 +22,13 @@
     (scheme char)
     (only (guile) format most-positive-fixnum)
     (only (schemacs editor character) char-width characterp)
+    ;; `auto-fill-chars` is a char-table, and `chartab.scm` is where
+    ;; char-tables live.
+    (only (schemacs editor chartab) char-table? char-table-range
+          make-char-table set-char-table-range)
     (only (schemacs editor buffer)
-          buffer-overwrite-mode current-buffer set-point buffer-pt buffer-beg buffer-z)
+          buffer-overwrite-mode current-buffer set-point buffer-pt buffer-beg
+          buffer-z buffer-auto-fill-function)
     (only (schemacs editor editfns)
           char-after char-before delete-region goto-char insert
           insert-and-inherit
@@ -41,7 +46,7 @@
     )
 
   (export
-   internal-self-insert
+   internal-self-insert auto-fill-chars *internal-auto-fill-function*
    backward-char beginning-of-line delete-char end-of-line forward-char
    self-insert-command self-insert-tab
    )
@@ -158,10 +163,66 @@
               ;; a propertized run extends the run.
               (when (> n 0)
                 (insert-and-inherit (make-string n c))))
-          ;; `internal-auto-fill' goes here in the C; auto fill is not
-          ;; ported. Neither is `post-self-insert-hook', which is the
-          ;; last thing the C runs.
+          ;; `internal_self_insert`'s last act before the hooks
+          ;; (`cmds.c:482'): "if the character is in `auto-fill-chars`
+          ;; and the buffer's `auto-fill-function` is non-nil", call
+          ;; `internal-auto-fill`. The newline case moves point back over
+          ;; the line break first, "so that filling and justification, if
+          ;; any, know where the end is going to be" (`:488'), and steps
+          ;; forward again afterwards.
+          ;;
+          ;; `internal-auto-fill` is `simple.el`'s and `simple.scm` is
+          ;; above this library, so it arrives as a seam - the way
+          ;; `*barf-if-buffer-read-only-function*` does. Nothing is
+          ;; installed until `fill.scm` loads.
+          (if (and (> n 0)
+                   (let ((table auto-fill-chars))
+                     (if (char-table? table)
+                         (char-table-range table (char->integer c))
+                         (memv c (list #\space #\newline))))
+                   (buffer-auto-fill-function ed)
+                   (*internal-auto-fill-function*))
+              (let ((newline? (char=? c #\newline)))
+                (if newline?
+                    (set-point ed (- (buffer-pt ed) 1)))
+                (let ((result ((*internal-auto-fill-function*))))
+                  ;; "Test PT < ZV in case the auto-fill-function is
+                  ;; strange."
+                  (if (and newline?
+                           (< (buffer-pt ed) (buffer-z ed))
+                           (char=? (char-after (buffer-pt ed)) #\newline))
+                      (set-point ed (+ (buffer-pt ed) 1)))
+                  (if result (set! hairy 2)))))
+          ;; `post-self-insert-hook` is still not run - it is the last
+          ;; thing the C does and no mode here has a use for it yet.
           hairy)))
+
+    (define auto-fill-chars
+      ;; GNU Emacs's `auto-fill-chars' (`character.c:1107'): "A char-table
+      ;; for characters which invoke auto-filling. Such characters have
+      ;; the value t in this table."
+      ;;
+      ;; **`character.c`'s, and it lives here**, next to its only reader:
+      ;; `internal_self_insert`'s test is the whole of its use, and
+      ;; `character.scm` cannot hold it - a char-table brings
+      ;; `chartab.scm` in, which brings `intervals.scm`, which imports
+      ;; `buffer.scm`, whose `buffer-text` imports `character.scm`: a
+      ;; cycle. `cmds.c` is where the test is.
+      ;;--------------------------------------------------------------
+      (let ((table (make-char-table 'auto-fill-chars #f)))
+        ;; The C sets `' '` and `'\n'`, which are integers there; a
+        ;; range here is an integer too.
+        (set-char-table-range table (char->integer #\space) #t)
+        (set-char-table-range table (char->integer #\newline) #t)
+        table))
+
+    (define *internal-auto-fill-function* (make-parameter #f))
+    ;; ^ `simple.el`'s `internal-auto-fill`, installed by `fill.scm` as
+    ;; it loads (`(*internal-auto-fill-function* internal-auto-fill)`).
+    ;; A parameter, like `*barf-if-buffer-read-only-function*`: it is a
+    ;; value crossing from a library above into this one, and a
+    ;; parameter's setter is the only way to write another module's
+    ;; binding.
 
 
     ;;------------------------------------------------------------------

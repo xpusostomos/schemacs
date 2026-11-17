@@ -10413,12 +10413,230 @@ the work (a gap note that overstates stops the next person asking).
 `replace-buffer-contents` (`insdel.c`), which is not ported - they are
 not a narrowing job.
 
+## Auto Fill mode, and the bug it found (2026-11-17)
+
+`auto-fill-mode`, `do-auto-fill`, `internal-auto-fill`,
+`default-indent-new-line` and the `auto-fill-function` buffer slot are
+in, with `internal_self_insert`'s call to them. Verified by typing the
+same text one character at a time in both editors at `fill-column` 20:
+identical output. Two placements are forced by the import graph and
+named in DEPARTURES.md: the auto-fill half of `simple.el` lives in
+`fill.scm` (`simple` is below `paragraphs`, which `fill` imports), and
+`auto-fill-chars` lives in `cmds.scm` (a char-table in `character.scm`
+would close a cycle through `chartab -> intervals -> buffer ->
+buffer-text -> character`).
+
+**The first test run caught a real bug three files away**:
+`fill-comment-paragraph` had dropped the C's `(fill-prefix fill-prefix)`
+binding, so filling a comment wrote the comment's `;; ` into the
+*parameter*, and the next buffer's auto-fill continued its lines with
+it. `parameterize` now, and the auto-fill tests are the regression test.
+
 ## Still to do
 
-* `auto-fill-mode` / `do-auto-fill` (`simple.el`) - Emacs's `auto-fill-function`
-  hook, and `internal_self_insert`'s call to it. Everything the filling
-  itself needs is now in place; what is missing is the mode and the hook
-  in the self-insert path.
-* The comment-filling path is written and compiles, but no mode here sets
-  `comment-start`/`comment-start-skip` yet, so `fill-paragraph` in a Lisp
-  buffer takes the plain-text route.
+* `comment-indent-new-line` (the comment-continuation half of
+  `newcomment.el`) - it is `comment-line-break-function`'s default, and
+  without it auto-fill inside a comment does not repeat the `;;`. It
+  needs `comment-beginning`, `comment-valid-prefix-p`, `comment-forward`,
+  `comment-enter-backward` and `comment-styles`.
+* A typed RET does not auto-fill: `insert-newline` inlines the insert
+  where Emacs's `newline` calls `self-insert-command`. Fixing it means
+  routing `insert-newline` through `internal-self-insert`, which also
+  brings `post-self-insert-hook`.
+* `replace-buffer-contents` (`insdel.c`), which
+  `replace-string-in-region`/`replace-regexp-in-region` wait on.
+
+## `define-minor-mode`'s ARG, and the names its form reads (2026-11-17)
+
+Found by asking a generated command what it does rather than by any test
+- and all three answers were departures.
+
+**A bare `(auto-fill-mode)` raised "Wrong number of arguments".** Emacs
+generates `(defun ,mode (&optional arg ...))`; this macro generated a
+required parameter. And a bare call **enables rather than toggles** -
+measured on Emacs 31.1: nil is not `'toggle`, so it takes the `(t ...)`
+arm; `(auto-fill-mode)` twice leaves it on, `(auto-fill-mode nil)`
+enables, and only the *interactive* form's `'toggle` toggles. The
+command is `(define-command (#,mode-id . rest)` with ARG from REST now.
+DEPARTURES.md has the Emacs table.
+
+**The generated interactive form names two things the calling library
+must import.** It is Emacs's
+`(list (if current-prefix-arg (prefix-numeric-value current-prefix-arg)
+'toggle))`, evaluated in the command's *defining* module. `font-core`,
+`face-remap` and `fill` did not import `current-prefix-arg` or
+`uarg->integer`, so **`M-x font-lock-mode`, `M-x text-scale-mode` and
+`M-x auto-fill-mode` raised "Unbound variable: current-prefix-arg"** and
+the command loop's guard made them keys that did nothing. This is the
+missing-import class again, and the tell is the same one as before: the
+command works when called as a procedure and fails when a key reaches
+it, because only then is the specification evaluated. All three import
+both names now, and the macro's comment says why. `easy-mmode-tests.scm`
+drives the interactive *entry* - `((command-procedure (command-record-of
+CMD)) #f)` - because a direct call bypasses the specification and cannot
+see this.
+
+**`normal-auto-fill-function` was a forward reference.** Emacs's `defvar`
+holds the quoted *symbol* `do-auto-fill`, which needs nothing to exist
+yet; here it holds the procedure, and defining it above `do-auto-fill`
+made `fill.scm` unloadable *interpreted* ("Unbound variable:
+do-auto-fill") while the compiled `.go` resolved it - so only a run with
+no compiled cache showed it. It is `#f` where Emacs declares it and
+`set!` after the definition, which also marks it mutable against the
+compiler's constant folding.
+
+## The comment continuation, and a parameter that was always true (2026-11-17)
+
+`comment-indent-new-line` (`newcomment.el:1465`) is in, with the four
+functions it stands on, so **auto-fill inside a comment repeats the `;;`**
+and `comment-line-break-function` has Emacs's real default. Ten fixtures
+against Emacs 31.1 are byte-identical (continue at the end, split in the
+middle, `comment-multi-line`, a `;;;` doc comment, a comment after code,
+one in an indented body, and the three auto-fill cases) and they are in
+`fill-tests.scm`'s `comment_line` group.
+
+**Where it lives**: `comment-indent-new-line` and `comment-valid-prefix-p`
+are `fill.scm`'s, not `newcomment.scm`'s - the function reads
+`adaptive-fill-mode`, `fill.scm` imports `newcomment`, and the Emacs home
+would close the cycle for that one variable. The general half
+(`comment-search-backward`, `comment-beginning`, `comment-forward`,
+`comment-enter-backward`, `comment-styles` and the two defcustoms) is in
+`newcomment.scm`, and `syntax-after` (`subr.el:6563`) is in `syntax.scm`.
+
+**The bug worth remembering** is the one this pass found in its own new
+code: the guard
+
+    (and (comment-start) *comment-auto-fill-only-comments* ...)
+
+reads the *parameter* without its parentheses, and an uncalled parameter is
+a procedure, which is true - so the guard never short-circuited and the
+`save-excursion` below it ran on every call. The visible symptom was one
+extra byte in a middle-of-comment split (`";;\n;;\naaa bbb"` for Emacs's
+`";;\n;;aaa bbb"`); the end-of-comment fixture passed either way. **A
+parameter used as a variable is always true**, and a test with point at
+the end of the line cannot see it.
+
+Two Elisp-isms the port needed, both named in the source: the C's `let*`
+over the five comment **buffer-locals** is a `dynamic-wind` of
+`set-buffer-local-value!` (Emacs's `specbind`), and
+`(called-interactively-p 'interactive)` is
+`(called-interactively? comment-indent-new-line)`.
+
+Still not carried from that half of `newcomment.el`: `comment-dwim`,
+`comment-region`/`uncomment-region`, the quoting machinery,
+`comment-set-column`, `comment-line` and `comment-kill`.
+
+## `syntax-ppss`'s cache was one global cell (2026-11-17)
+
+Found by `M-j` in a fresh scheme buffer: "Wrong type argument in position
+2: #f", three functions from the cause. Emacs keeps **two buffer-local
+cells** - `syntax-ppss-wide` and a separate one for a narrowed buffer,
+reset when the narrowing's start moves (`syntax.el:525-540`) - and
+`pt-min` is `(point-min)`. This tree had one `make-parameter` cell, global
+to the editor thread and blind to narrowing, and `pt-min` was `1`. So a
+state cached at a high position could be read back at a low one with the
+empty buffer's state in it, where Emacs's own `(<= pt-min pos)` test is
+`(<= nil pos)` and raises.
+
+`syntax-ppss-flush-cache` is `syntax.el:544`'s now too: **both cells**, the
+C's strictly-greater entry rule, and the C's `last`-throwing condition
+(the port cleared `last` unconditionally).
+
+**A local `point-min` was missing as well**: `editfns.scm` imports this
+library, so `syntax.scm` reads positions through `%point-min`/`%point-max`
+beside it - and `syntax-after` (`subr.el:6563`), added this pass, had been
+referring to an unbound `point-min` since it was written.
+
+The regression tests are `syntax-tests.scm`'s `ppss_cache` group, and
+their expectations had to be measured **with the comment syntax set**:
+without `;` = starter and newline = ender in the test buffer, `;` is
+punctuation and every state says "not in a comment", which makes the test
+look right and mean nothing.
+
+# The narrowing commands, and the repaint they needed (2026-11-17)
+
+Chris: *"I thought you said narrowing was done, but C-x n n seems to do
+nothing."* Right, and the handoff wording is what hid it: **the primitive
+and the call sites were done; the commands and the keys were not.**
+`narrow-to-region`/`widen` were plain functions with no interactive spec,
+and nothing had ever bound `C-x n`.
+
+## What is in now
+
+- `narrow-to-region` and `widen` are `define-command`s with the C's own
+  interactive specs (`editfns.c:2948`, `:2901`), plus `narrow-map`
+  (`bindings.el:1214`).
+- `narrow-to-defun` (`lisp.el:742`, `C-x n d`), `narrow-to-page`
+  (`page.el:88`, `C-x n p`), `goto-line-relative` (`simple.el:1703`,
+  `C-x n g`).
+- **The keys are flat** (`C-x n n`, `C-x n w`, ...) because this tree's
+  lookup does not descend into a submap - the `mule-keymap` departure,
+  recorded again in DEPARTURES.md. `narrow-map` exists as Emacs's object
+  beside them.
+- `schemacs/editor/narrow-tests.scm` (15 tests, every number Emacs
+  31.1's) and `tools/pty-check.py`'s `narrow`.
+
+**Not carried**: Emacs disables `narrow-to-region` by default
+(`(put 'narrow-to-region 'disabled t)`) and asks "Use this command?"
+first; the disabled-command machinery (`simple.el:2821`, `novice.el`)
+needs `substitute-command-keys`, which is not ported. So `C-x n n`
+narrows at once here.
+
+## The redisplay a narrowing needs
+
+`narrow_to_region`/`Fwiden` set `clip_changed` and `redisplay_internal`
+answers by invalidating every window's matrix and redrawing the frame.
+Our `%clip-changed!` set `windows-or-buffers-changed`, and `render!` used
+that flag only for the menu and tab bars - so **the row diff skipped the
+rows a narrowing left unchanged and the screen kept whatever ncurses had,
+which after its own clear was nothing**: the mode line stayed, the text
+went. `C-x n d` showed it too, so it was narrowing in general, not the
+region.
+
+The fix is one `or` in `render!`: a frame is treated as garbaged when
+`windows-or-buffers-changed?` is set, so its matrices are invalidated and
+its surface cleared as on a resize. **A flag that says "the screen no
+longer follows from the matrices" has to reach the matrix
+invalidation, not just the menu bar.**
+
+## The three primitives found under it
+
+1. **`inhibit-modification-hooks` was not carried** (its absence was
+   written in `with-silent-modifications`' own comment). It is
+   `insdel.scm`'s parameter now, tested where the C tests it
+   (`prepare_to_modify_buffer_1:2167`, `signal_after_change:2387`), and
+   bound by `with-silent-modifications` and `syntax-propertize`. Without
+   it a property write during propertizing ran `syntax-ppss-flush-cache`
+   over the parse that was computing the properties.
+2. **`syntax-propertize` had no in-process sentinel**
+   (`syntax-propertize--done` = `most-positive-fixnum`,
+   `syntax.el:384/457/547`), so every `syntax-ppss` re-entered the
+   propertizer and re-flushed the cache. Ported whole, with the
+   extend-region binding and `syntax-ppss--updated-cache`.
+3. **`syntax-ppss`'s `last` entry is stored by the OLD-PPSS and `else`
+   branches only** - not by OLD-POS. Measured on Emacs: 10 then 13 leaves
+   `last` at 10; 15 then 6 leaves it at 6.
+
+And two search bugs `narrow-to-page` walked into: `match-beginning`/
+`match-end` raised where Emacs answers nil (`search.c:2776`) and
+`(set-match-data nil)` did not clear the registers - both with
+regression tests, and the old test that pinned the error now tests the
+Emacs answer.
+
+## Method notes
+
+- **A live editor answers questions the headless harness cannot**, and
+  the two disagreed here: the `<test-display>` drew the narrowed buffer
+  perfectly while the terminal drew nothing. Querying the live editor
+  (`window-desired-matrix`, `glyph-row-glyphs`, `window-start`,
+  `point-min`/`point-max`, `%window-line-slices`) is what showed the
+  matrix was *right* and the diff was the problem.
+- When a screen is blank, distinguish **cleared** from **blanked**:
+  `blank-glyph-row!` writes spaces and means the desired rows were
+  disabled; a cleared screen with correct rows means the diff skipped
+  them. The raw escape stream tells the two apart (`\x1b[2J` versus 80
+  spaces per row).
+- **The pty check I wrote first had its expectations inverted** (I
+  assumed the region was [13,18) when `C-SPC C-n C-n` makes it [1,13)).
+  It "failed" while the editor was right. Work out what the keys select
+  before writing assertions about them.

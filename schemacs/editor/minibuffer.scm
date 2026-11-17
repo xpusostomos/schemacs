@@ -131,6 +131,9 @@
           save-excursion
           ;; `goto-line`'s restriction handling (`simple.el:1690`)
           save-restriction widen buffer-narrowed-p
+          ;; `goto-line-relative` is `narrow-map`'s `g`
+          ;; (`bindings.el:1214`).
+          narrow-map
           text-editor-cursor-column text-editor-cursor-line)
     (only (schemacs editor fns) count-lines)
     ;; `forward-char' is `cmds.c''s and lives in `(schemacs editor cmds)'.
@@ -318,7 +321,7 @@ read-number-history
    read-expression-history
    set-fill-column
    zap-to-char
-   goto-line-read-args
+   goto-line-read-args goto-line-relative
    make<minibuffer>
    minibuffer-complete
    minibuffer-completion-help
@@ -3657,12 +3660,35 @@ previous element of the minibuffer history in the minibuffer."
             (widen))
           (goto-char pos))))
 
+    (define-command (goto-line-relative line buffer interactive)
+      ;; GNU Emacs's `goto-line-relative' (`simple.el:1703'): "Go to LINE,
+      ;; counting from line at (point-min). The line number is relative to
+      ;; the accessible portion of the narrowed buffer."
+      ;;
+      ;; `(interactive (append (goto-line-read-args t) '(t)))' - the
+      ;; reading is *relative* (so the prompt offers the line inside the
+      ;; narrowing) and the appended `t` is INTERACTIVE. The move is
+      ;; `goto-line`'s with RELATIVE t, which is what skips the widening.
+      ;;--------------------------------------------------------------
+      "Go to LINE, counting from line at (point-min).
+The line number is relative to the accessible portion of the narrowed
+buffer.  The arguments BUFFER and INTERACTIVE are the same as in the
+function `goto-line'."
+      (interactive (append (goto-line-read-args #t) (list #t)))
+      (goto-line line buffer #t interactive))
+
     ;; The keys GNU Emacs binds it to (M-g g, and M-g M-g, which is the
     ;; same command), beside the command as the other libraries state
     ;; theirs.
     (define-key *default-keymap* (kbd "M-g g") goto-line)
     (define-key *default-keymap* (kbd "M-g M-g")
       goto-line)
+
+    ;; `narrow-map`'s `g` (`bindings.el:1214`), flat - see the note on
+    ;; `narrow-map` in `editfns.scm` - and in the map itself, which Emacs
+    ;; has it in.
+    (define-key *default-keymap* (kbd "C-x n g") goto-line-relative)
+    (define-key narrow-map (kbd "g") goto-line-relative)
 
     ;;----------------------------------------------------------------
     ;; Zap to char - simple.el:6739, and here for the same reason as

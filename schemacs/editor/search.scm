@@ -205,16 +205,25 @@
       (not (*search-regs*)))
 
     (define (%match-limit n beginningp)
-      ;; GNU Emacs's `match_limit' (search.c:2776): the position of
-      ;; SUBEXP N's start or end, `#f' for a subexpression that did not
-      ;; match and for one beyond the register count - the C answers
-      ;; nil for both (`n >= search_regs.num_regs || start[n] < 0' ->
-      ;; Qnil) - and the "no search succeeded" error while there is no
-      ;; match data at all.
+      ;; GNU Emacs's `match_limit' (`search.c:2776'):
+      ;;
+      ;;     if (n < 0 || n >= search_regs.num_regs
+      ;;         || search_regs.start[n] < 0)
+      ;;       return Qnil;
+      ;;
+      ;; **`#f' in all three cases**, including no match data at all -
+      ;; `(set-match-data nil)' then `(match-beginning 0)' is nil in
+      ;; Emacs, measured. This port raised twice there ("Args out of
+      ;; range" for a negative N, "No match data, because no search
+      ;; succeeded" with no registers), which `narrow-to-page` walks
+      ;; straight into: it clears the match data with
+      ;; `(set-match-data nil)' and then asks `(match-beginning 0)'.
+      ;; The only error the C raises is `CHECK_FIXNUM`'s.
       ;;--------------------------------------------------------------
       (cond
-       ((< n 0) (error "Args out of range" n 0))
-       ((not (*search-regs*)) (error "No match data, because no search succeeded"))
+       ((not (integer? n)) (error "Wrong type argument: fixnump" n))
+       ((< n 0) #f)
+       ((not (*search-regs*)) #f)
        ((>= n (length (*search-regs*))) #f)
        (else
         (let ((pair (list-ref (*search-regs*) n)))
@@ -349,7 +358,21 @@
       ;; marker's buffer, or the buffer element, makes the match data
       ;; the buffer's; anything else stays a string's.
       (cond
-       ((not list) #f)
+       ((not list)
+        ;; "The registers beyond the list are cleared, which is the C's
+        ;; final loop" - and for a nil LIST *that is every register*
+        ;; (`for (i = length; i < search_regs.num_regs; i++) start[i] =
+        ;; -1;' with length 0). Emacs measured: a search, then
+        ;; `(set-match-data nil)', then `(match-beginning 0)' answers
+        ;; nil. Returning without clearing left the last search's
+        ;; registers readable, which `narrow-to-page` walks into: it
+        ;; clears the match data and asks `(match-beginning 0)' to learn
+        ;; whether `forward-page' matched.
+        (*search-regs*
+         (let ((n (length (or (*search-regs*) '()))))
+           (make-list n #f)))
+        (*last-thing-searched* 'string)
+        #f)
        (else
         ;; the register count grows, never shrinks - `xpalloc'
         (let* ((old (*search-regs*))

@@ -175,6 +175,7 @@
     *amalgamating-undo-limit*
     *auto-coding-alist*
     *auto-coding-regexp-alist*
+    *auto-fill-inhibit-regexp*
     *auto-mode-alist*
     *auto-mode-case-fold*
     *auto-mode-interpreter-regexp*
@@ -216,7 +217,10 @@
     *colon-double-space*
     *color-name-rgb-alist*
     *command-table*
+    *comment-auto-fill-only-comments*
     *comment-end-can-be-escaped*
+    *comment-multi-line*
+    *comment-style*
     *comment-use-syntax-ppss*
     *completion-auto-help*
     *completion-auto-wrap*
@@ -369,6 +373,7 @@
     *history-length*
     *icon-preference*
     *indent-tabs-mode*
+    *inhibit-auto-fill*
     *inhibit-field-text-motion*
     *inhibit-file-name-handlers*
     *inhibit-file-name-operation*
@@ -377,6 +382,7 @@
     *inhibit-local-variables-suffixes*
     *inhibit-menubar-update*
     *inhibit-message*
+    *inhibit-modification-hooks*
     *inhibit-quit*
     *inhibit-read-only*
     *inhibit-redisplay*
@@ -390,6 +396,7 @@
     *interactive-read-existing-buffer-function*
     *interactive-read-file-name-function*
     *interactive-read-function-name-function*
+    *internal-auto-fill-function*
     *internal-syntax-propertize-function*
     *interpreter-mode-alist*
     *interprogram-cut-function*
@@ -748,6 +755,8 @@
     attributes-set
     auto-coding-alist-lookup
     auto-coding-regexp-alist-lookup
+    auto-fill-chars
+    auto-fill-mode
     back-to-indentation
     backward-char
     backward-delete-char
@@ -789,6 +798,7 @@
     bobp
     bol
     bolp
+    buffer-auto-fill-function
     buffer-auto-hscroll-mode
     buffer-beg
     buffer-begv
@@ -974,22 +984,31 @@
     command-value-of
     command?
     comment-add
+    comment-beginning
     comment-choose-indent
     comment-column
+    comment-continue
     comment-end
     comment-end-skip
+    comment-enter-backward
     comment-fill-column
+    comment-forward
     comment-indent
     comment-indent-default
+    comment-indent-new-line
     comment-inline-offset
     comment-insert-comment-function
+    comment-line-break-function
     comment-normalize-vars
+    comment-search-backward
     comment-search-forward
     comment-start
     comment-start-skip
     comment-string-strip
+    comment-styles
     comment-use-global-state
     comment-use-syntax
+    comment-valid-prefix-p
     common-lisp-indent-call-method
     common-lisp-indent-function
     common-lisp-indent-function-1
@@ -1105,6 +1124,7 @@
     default-boundp
     default-buffer-file-coding-system
     default-directory
+    default-indent-new-line
     default-to-grave-quoting-style
     default-value
     defface
@@ -1275,6 +1295,7 @@
     display-text-width
     display-tty-menu-item
     display-warning
+    do-auto-fill
     do-pending-window-change
     down-list
     down-list-default-function
@@ -1635,6 +1656,7 @@
     goto-line
     goto-line-history
     goto-line-read-args
+    goto-line-relative
     graft-intervals-into-buffer
     grow-mini-window
     gui--last-selected-text-clipboard
@@ -1672,6 +1694,7 @@
     indent-line-function
     indent-line-ignored-functions
     indent-line-to
+    indent-new-comment-line
     indent-next-tab-stop
     indent-region
     indent-region-function
@@ -1708,6 +1731,7 @@
     install-ls-lisp-files!
     intern
     intern-soft
+    internal-auto-fill
     internal-complete-buffer
     internal-complete-buffer-except
     internal-get-lisp-face-attribute
@@ -2137,6 +2161,10 @@
     move-to-column
     move-to-left-margin
     mule-keymap
+    narrow-map
+    narrow-to-defun
+    narrow-to-defun-include-comments
+    narrow-to-page
     narrow-to-region
     negative-argument
     new-buffer-text
@@ -2159,6 +2187,7 @@
     next-property-change
     next-single-char-property-change
     next-single-property-change
+    normal-auto-fill-function
     normal-mode
     normal-splash-screen
     not-modified
@@ -2467,6 +2496,7 @@
     set!%window-start
     set!%window-start-at-line-beg
     set!%window-suspend-auto-hscroll?
+    set!buffer-auto-fill-function
     set!buffer-auto-hscroll-mode
     set!buffer-begv
     set!buffer-cursor-in-non-selected-windows
@@ -2777,6 +2807,7 @@
     switch-to-prev-buffer
     sword
     sync-frame-size!
+    syntax-after
     syntax-class-to-char
     syntax-ppss
     syntax-ppss-context
@@ -3099,6 +3130,8 @@
     tty-slant-number
     tty-standard-colors
     tty-weight-number
+    turn-off-auto-fill
+    turn-on-auto-fill
     turn-on-font-lock
     turn-on-font-lock-if-desired
     turn-on-visual-line-mode

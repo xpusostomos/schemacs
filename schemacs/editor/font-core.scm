@@ -43,7 +43,11 @@
     (scheme char)
     ;; `*inhibit-quit*` is `turn-on-font-lock-if-desired`'s, whose C is a
     ;; `let` binding of it around the turn-on.
-    (only (schemacs editor command) *inhibit-quit*)
+    ;; `current-prefix-arg` and `uarg->integer` are `define-minor-mode`'s:
+    ;; the interactive form it generates reads them, and an interactive
+    ;; expression is evaluated in the *defining* library's module.
+    (only (schemacs editor command) *inhibit-quit*
+          current-prefix-arg uarg->integer)
     (only (schemacs editor buffer) buffer-name current-buffer major-mode)
     (only (schemacs editor custom) define-custom)
     (only (schemacs editor frame) *current-frame* set!frame-message)

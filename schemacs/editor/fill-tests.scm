@@ -18,10 +18,17 @@
         (only (schemacs editor fill)
               fill-region fill-paragraph unfill-paragraph
               fill-individual-paragraphs canonically-space-region
-              current-fill-column fill-context-prefix fill-nobreak-p)
+              current-fill-column fill-context-prefix fill-nobreak-p
+              auto-fill-mode)
+        ;; `auto-fill-mode` is `internal_self_insert`'s caller, so the
+        ;; test types the text rather than inserting it.
+        (only (schemacs editor cmds) self-insert-command)
         ;; `fill-comment-paragraph` needs a mode that sets a comment
         ;; syntax - `scheme-mode` is the one this tree has.
-        (only (schemacs editor scheme) scheme-mode))
+        (only (schemacs editor scheme) scheme-mode)
+        (only (schemacs editor newcomment) *comment-auto-fill-only-comments*
+              *comment-multi-line*)
+        (only (schemacs editor fill) comment-indent-new-line))
 
 (define (with-text text)
   (let ((b (allocate-buffer)))
@@ -140,3 +147,143 @@
           (save-excursion (goto-char 10) (fill-nobreak-p)))))
 
 (test-end "schemacs_editor_fill_pieces")
+
+;;--------------------------------------------------------------------
+;; Auto Fill mode
+;;--------------------------------------------------------------------
+
+(define (type-text text)
+  (let loop ((i 0))
+    (when (< i (string-length text))
+      (self-insert-command 1 (char->integer (string-ref text i)))
+      (loop (+ i 1)))))
+
+(test-begin "schemacs_editor_fill_auto")
+
+;; Emacs 31.1 with `auto-fill-mode' on and `fill-column' 20, typing the
+;; same text one character at a time.
+(test-equal "This is a long line\nof text that should\nwrap automatically\nwhen it passes the\nfill column."
+  (let ((b (with-text "")))
+    (set-buffer b)
+    (auto-fill-mode 1)
+    (set!buffer-fill-column b 20)
+    (type-text "This is a long line of text that should wrap automatically when it passes the fill column.")
+    (buffer-string)))
+
+;; With the mode off the same typing does not wrap.
+(test-equal "This is a long line of text that should wrap automatically when it passes the fill column."
+  (let ((b (with-text "")))
+    (set-buffer b)
+    (set!buffer-fill-column b 20)
+    (type-text "This is a long line of text that should wrap automatically when it passes the fill column.")
+    (buffer-string)))
+
+(test-end "schemacs_editor_fill_auto")
+
+;;--------------------------------------------------------------------
+;; `comment-indent-new-line' - the comment continuation
+;;--------------------------------------------------------------------
+;;
+;; Every expectation is Emacs 31.1's own bytes for the same text in
+;; `scheme-mode', measured with `emacs -Q --batch'. It is `newcomment.el`'s
+;; and lives in `fill.scm` - see the note there - and it is what
+;; `comment-line-break-function' calls, so the auto-fill tests above are
+;; its other caller.
+
+(test-begin "schemacs_editor_fill_comment_line")
+
+;; The plain case: the `;;` is repeated and the continuation column is
+;; the comment's own.
+(test-equal ";; hello world\n;; "
+  (let ((b (with-text ";; hello world")))
+    (set-buffer b)
+    (scheme-mode)
+    (goto-char (point-max))
+    (comment-indent-new-line)
+    (buffer-string)))
+
+;; Split in the middle of a comment: the text after point keeps its
+;; place and the starter is continued with no space added.
+(test-equal ";;\n;;aaa bbb"
+  (let ((b (with-text ";; aaa bbb")))
+    (set-buffer b)
+    (scheme-mode)
+    (goto-char 4)
+    (comment-indent-new-line)
+    (buffer-string)))
+
+;; `comment-multi-line' inserts no second starter.
+(test-equal ";; aaa bbb\n;; "
+  (let ((b (with-text ";; aaa bbb")))
+    (set-buffer b)
+    (scheme-mode)
+    (goto-char (point-max))
+    (parameterize ((*comment-multi-line* #t))
+      (comment-indent-new-line))
+    (buffer-string)))
+
+;; A `;;;' comment keeps its three semicolons.
+(test-equal ";;; doc line here\n;;; "
+  (let ((b (with-text ";;; doc line here")))
+    (set-buffer b)
+    (scheme-mode)
+    (goto-char (point-max))
+    (comment-indent-new-line)
+    (buffer-string)))
+
+;; A comment after code continues at the left margin, not under the code.
+(test-equal "(foo bar) ;; a comment\n;; "
+  (let ((b (with-text "(foo bar) ;; a comment")))
+    (set-buffer b)
+    (scheme-mode)
+    (goto-char (point-max))
+    (comment-indent-new-line)
+    (buffer-string)))
+
+;; ... and one inside an indented body continues at the body's
+;; indentation.
+(test-equal "(define (f x)\n  ;; body comment\n  ;; "
+  (let ((b (with-text "(define (f x)\n  ;; body comment")))
+    (set-buffer b)
+    (scheme-mode)
+    (goto-char (point-max))
+    (comment-indent-new-line)
+    (buffer-string)))
+
+;; Auto Fill now repeats the starter - `internal-self-insert` calls
+;; `internal-auto-fill`, which is `do-auto-fill`, which calls
+;; `default-indent-new-line`, which calls this. Emacs 31.1 with
+;; `fill-column` 20 and the same text typed one character at a time.
+(test-equal ";; aaa bbb ccc ddd\n;; eee fff "
+  (let ((b (with-text "")))
+    (set-buffer b)
+    (scheme-mode)
+    (set!buffer-fill-column b 20)
+    (auto-fill-mode 1)
+    (type-text ";; aaa bbb ccc ddd eee fff ")
+    (buffer-string)))
+
+;; `comment-auto-fill-only-comments' says no to a line that is not a
+;; comment, and yes to one that is.
+(test-equal "aaa bbb ccc ddd eee fff "
+  (let ((b (with-text "")))
+    (set-buffer b)
+    (scheme-mode)
+    (set!buffer-fill-column b 20)
+    (auto-fill-mode 1)
+    (parameterize ((*comment-auto-fill-only-comments* #t))
+      (type-text "aaa bbb ccc ddd eee fff "))
+    (buffer-string)))
+
+(test-equal ";; aaa bbb ccc ddd\n;; eee fff "
+  (let ((b (with-text "")))
+    (set-buffer b)
+    (scheme-mode)
+    (set!buffer-fill-column b 20)
+    (auto-fill-mode 1)
+    (parameterize ((*comment-auto-fill-only-comments* #t))
+      (type-text ";; aaa bbb ccc ddd eee fff "))
+    (buffer-string)))
+
+(test-end "schemacs_editor_fill_comment_line")
+
