@@ -5824,10 +5824,12 @@ Emacs's object beside them (for `where-is-internal` and for tests).
 
 **`(put 'narrow-to-region 'disabled t)` (`bindings.el:1111`) and the
 `page.el` equivalent are not carried**: Emacs asks "Use this command?"
-before narrowing, and the disabled-command machinery (`simple.el:2821`,
-`novice.el`) needs `substitute-command-keys`, which is not ported. So
-`C-x n n` narrows at once here where Emacs prompts. Worth closing when
-that machinery is ported; named rather than faked.
+before narrowing, and the disabled-command machinery (`simple.el:2811`,
+`novice.el`) needs `substitute-command-keys` - `help.el:1435` in
+Emacs 31, not `doc.c` - beside `key-valid-p`, `documentation` and a
+`\={MAPVAR}` keymap summary, none of which is ported. So `C-x n n`
+narrows at once here where Emacs prompts. Worth closing when that
+machinery is ported; named rather than faked.
 
 ## `clip_changed` is a full repaint, and the renderer did not know it
 

@@ -10740,9 +10740,13 @@ small statics. `replace-string-in-region`/`replace-regexp-in-region`
 it is the honest size to plan against.
 
 What is left of the named list is the disabled-command machinery
-(`C-x n n`'s "Use this command?" prompt, which needs
-`substitute-command-keys` - `doc.c`'s ~1000-line walk). The other two
-entries are done - `simple.el`'s Lisp `count-lines` and the labeled
+(`C-x n n`'s "Use this command?" prompt). **Its size was overstated
+twice**: `substitute-command-keys` is `help.el:1435` in Emacs 31 (not a
+~1000-line `doc.c` walk), and the real dependencies are
+`where-is-internal` and `key-description` (both here), `key-valid-p`,
+`documentation` and a `\={MAPVAR}` keymap summary (all missing), then
+`novice.el`'s `disabled-command-function` and the `command-execute`
+hook. The other two entries are done - `simple.el`'s Lisp `count-lines` and the labeled
 restrictions, in the two sections below. The list also carried
 `narrowing-locked`, **which does not exist in Emacs 31.1** (measured:
 `fboundp` and `boundp` are both nil, and nothing in `lisp/` or `src/`
