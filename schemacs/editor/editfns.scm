@@ -54,7 +54,10 @@
           buffer-begv set!buffer-begv buffer-zv set!buffer-zv
           ;; `BEG`/`Z` themselves, for `widen`, `narrow-to-region`'s
           ;; range check and `buffer-size`
-          text-editor-text)
+          text-editor-text
+          ;; `validate_region` (`buffer.c:2504`), which `delete-region`
+          ;; and both `buffer-substring`s open with
+          validate-region)
     (only (schemacs editor buffer-text)
           buffer-text-base buffer-text-z)
     ;; `narrow-to-region` is a redisplay event (`clip_changed`), which is
@@ -259,9 +262,8 @@ point-marker
       ;; `if (! (BEGV <= beg && end <= ZV)) args_out_of_range_3 (...)`. It
       ;; does not clip: `(delete-region 1 12)' in a buffer narrowed to
       ;; 3..5 is "Args out of range", measured on Emacs 31.1.
-      (when (or (< start (point-min)) (> end (point-max)))
-        (error "Args out of range" start end))
-      (del-range start end)
+      (let-values (((start end) (validate-region start end)))
+        (del-range start end))
       #f)
 
     (define (region-beginning)
@@ -852,15 +854,23 @@ point-marker
       ;;
       ;; The positions are this layer's and the engine's alike - both
       ;; count from one - so nothing is converted.
+      ;;
+      ;; **`validate_region`** (`editfns.c:1674`) comes first, so a range
+      ;; that reaches outside a narrowing is "Args out of range" -
+      ;; measured on Emacs 31.1, in a buffer narrowed to 3..5,
+      ;; `(buffer-substring 1 12)` signals and `(buffer-substring 3 5)` is
+      ;; the text.
       ;;--------------------------------------------------------------
-      (make-buffer-string (current-buffer) beg end #t))
+      (let-values (((beg end) (validate-region beg end)))
+        (make-buffer-string (current-buffer) beg end #t)))
 
     (define (buffer-substring-no-properties beg end)
       ;; GNU Emacs's `buffer-substring-no-properties': "Return the
       ;; characters of part of the current buffer, without text
-      ;; properties."
+      ;; properties." Same `validate_region` as `buffer-substring`.
       ;;--------------------------------------------------------------
-      (make-buffer-string (current-buffer) beg end))
+      (let-values (((beg end) (validate-region beg end)))
+        (make-buffer-string (current-buffer) beg end)))
 
     (define (propertize string . properties)
       ;; GNU Emacs's `propertize' (editfns.c:3296): "Return a copy of

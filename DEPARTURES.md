@@ -4216,6 +4216,32 @@ version of this pass *clipped* instead, which reads as the kinder
 behaviour and is not Emacs's: `(delete-region 1 12)` in a buffer narrowed
 to 3..5 is "Args out of range" there, and now here.
 
+## Every rule `BEGV`/`ZV` governs, checked against the C
+
+| primitive | the rule | where |
+|---|---|---|
+| `goto-char` | clips to `[BEGV, ZV]` | `editfns.c` |
+| insert / delete / `replace_range` | `ZV` moves with `Z` | `insdel.c:935`, `:1597` |
+| `del_range_1` | clips FROM to `BEGV`, TO to `ZV`, then returns on an empty range | `insdel.c:1875` |
+| `validate_region` | sorts, then **signals** outside `[BEGV, ZV]` - never clips | `buffer.c:2504` |
+| `delete-region`, `buffer-substring`, `buffer-substring-no-properties`, `casify-region` | all open with it | `editfns.c:1674`, `casefiddle.c:534` |
+| `char-after` | **nil**, not an error, outside the restriction | `editfns.c` |
+| searches | nil bound is `ZV`/`BEGV`; an explicit one is side-checked then clipped | `search.c:1006` |
+| `erase-buffer` | widens, then deletes `BEG..Z` | `buffer.c:2472` |
+| `buffer-size` | `Z - BEG` - the whole text | `editfns.c` |
+| `buffer-string` | the accessible portion | `editfns.c` |
+| `set-marker` / `set_marker_restricted` | clip to `BEG`/`Z` and to `BEGV`/`ZV` | `marker.c:564` |
+
+`buffer-substring` was the one still missing: ours had no
+`validate_region`, so a range reaching outside a narrowing silently read
+past it where Emacs signals. Measured: in a buffer narrowed to 3..5,
+`(buffer-substring 1 12)` is "Args out of range" and `(char-after 1)` is
+nil.
+
+`validate_region` itself is `buffer.scm`'s and is shared now - the first
+version of this pass wrote a second copy in `editfns.scm`, which is the
+duplicate `current_column_1` lesson all over again.
+
 ## What is not carried
 
 * **Labeled restrictions** (`with-restriction`, `without-restriction`,

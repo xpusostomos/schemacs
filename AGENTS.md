@@ -10263,3 +10263,23 @@ GREEDY on every comment end) went quadratic and the editor wedged. The
 pty battery caught it as a 90-second REPL timeout inside
 `completion-scroll`. The walk is contiguous now, and the copy stops at
 PT - which is the C's own `(narrow-to-region (point-min) start)`.
+
+## Narrowing's own clipping rules, all checked (2026-11-17, third pass)
+
+The primitive is complete for everything `BEGV`/`ZV` governs, each rule
+read from the C and tabulated in DEPARTURES.md. The one that was still
+missing is `buffer-substring`: it had no `validate_region`, so a range
+reaching outside a narrowing read past it where Emacs signals "Args out
+of range". `delete-region`, `buffer-substring`,
+`buffer-substring-no-properties` and `casify-region` all open with the
+same `validate_region`, which is `buffer.scm`'s - do not write a second
+copy (this pass did, and deleted it).
+
+Not carried, and each is a real Emacs feature rather than a gap in the
+port: labeled restrictions (`with-restriction`/`without-restriction`) and
+`narrowing-locked`.
+
+What is left is *call sites*, not the primitive: the syntax-propertize
+pair, `dired`'s widen, `elisp--preceding-sexp`, `lisp-comment-indent`,
+`lisp--el-funcall-position-p`, `simple.el`'s `count-lines`,
+`eval-region` and `replace-{string,regexp}-in-region`.

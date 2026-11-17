@@ -15,7 +15,8 @@
        line-beginning-position line-end-position line-number-at-pos message
        point propertize
        ;; the restriction
-       narrow-to-region widen save-restriction buffer-size delete-region)
+       narrow-to-region widen save-restriction buffer-size delete-region
+       buffer-substring char-after)
  (only (schemacs editor xdisp) *message-log-max*)
  (only (schemacs editor simple) messages-buffer)
  (only (schemacs editor textprop) get-char-property get-text-property put-text-property)
@@ -625,6 +626,19 @@
                    #f)))
       (widen)
       (list threw (buffer-string)))))
+
+;; **`validate_region` is what `buffer-substring` opens with too**
+;; (`editfns.c:1674`): a range that reaches outside the restriction
+;; signals, and `char-after` outside it is nil rather than an error. Both
+;; measured on Emacs 31.1 in a buffer narrowed to 3..5.
+(test-equal '(args-out-of-range "ll" #f #f)
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (narrow-to-region 3 5)
+    (list (guard (e (#t 'args-out-of-range)) (buffer-substring 1 12))
+          (buffer-substring 3 5)
+          (char-after 1)
+          (char-after 9))))
 
 (test-equal 'args-out-of-range
   (let ((b (narrow-buffer)))
