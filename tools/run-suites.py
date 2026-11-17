@@ -56,6 +56,7 @@ SUITES = [
     # `window.c`'s `current-window-configuration` and
     # `set-window-configuration`, which the tab bar is built on.
     'schemacs/editor/window-config-tests.scm',
+    'schemacs/editor/window-tests.scm',
     'schemacs/editor/window-state-tests.scm',
     # `tab-bar.el` - the frame's tabs, each a window configuration.
     'schemacs/editor/tab-bar-tests.scm',

@@ -65,6 +65,15 @@
           %window-suspend-auto-hscroll? set!%window-suspend-auto-hscroll?
           *current-frame* frame-height frame-width frame-top-margin
           frame-minibuffer-window
+          ;; `FRAME_WINDOW_CHANGE`, which the window-tree functions set
+          ;; (`window.c:3715`, `:4427`, `:4896`, `:5681`, `:5828'), and
+          ;; the stamp and live-window count the change functions read
+          ;; and bump
+          set!frame-window-change frame-window-change
+          frame-change-stamp set!frame-change-stamp
+          frame-old-selected-window set!frame-old-selected-window
+          frame-number-of-windows set!frame-number-of-windows
+          *frame-list*
           window-type?
           make<window>
           frame-selected-window frame-windows select-window
@@ -129,7 +138,16 @@
           frame-char-height frame-char-width frame-type? selected-frame
           *resize-mini-windows* grow-mini-window shrink-mini-window
           minibuffer-window-active-p window-tab-line-height
-          window-parameter)
+          window-parameter
+          ;; The window-change record: what each window was when
+          ;; `run-window-change-functions` last ran (`window.h`'s
+          ;; `change_stamp`, `old_buffer` and the four old sizes).
+          window-change-stamp set!window-change-stamp
+          window-old-buffer set!window-old-buffer
+          window-old-pixel-width set!window-old-pixel-width
+          window-old-pixel-height set!window-old-pixel-height
+          window-old-body-pixel-width set!window-old-body-pixel-width
+          window-old-body-pixel-height set!window-old-body-pixel-height)
     ;; `display-buffer' puts what it shows in the buffer list's
     ;; most-recently-used order, which is Emacs's `record_buffer';
     ;; `pop-to-buffer' makes a buffer current by name when a string is
@@ -166,6 +184,8 @@
    list-substitute
    list-without
    other-window
+   *window-configuration-change-hook*
+   run-window-change-functions
    pop-to-buffer
    quit-window
    pop-to-buffer-same-window
@@ -334,7 +354,8 @@
                             top height left width
                             (window-parent window) (list window new)
                             0 0 #f 0 '() '()
-                            #f 0 0 0 0 0 0 0 -1 #f '() #f))
+                            #f 0 0 0 0 0 0 0 -1 #f '() #f
+                          0 #f 0 0 0 0))
 
     (define (install-window-parent! frame window parent)
       ;; Put PARENT where WINDOW was in the tree, in WINDOW's own place in
@@ -435,7 +456,8 @@
                                     (window-left f) (window-width f)
                                     parent inside
                                     0 0 #f 0 '() '()
-                                    #f 0 0 0 0 0 0 0 -1 #f '() #f)))
+                                    #f 0 0 0 0 0 0 0 -1 #f '() #f
+                          0 #f 0 0 0 0)))
               ;; "Set up PARENT's positions and sizes": the union of the
               ;; run's rectangles.
               (if horflag
@@ -538,6 +560,13 @@
               new))))
 
     (define (split-window window size horizontal)
+      ;; `FRAME_WINDOW_CHANGE` (`window.c:5681`). **At the top rather
+      ;; than at the C's end**, where this function has two return points
+      ;; and the C one; a split that raises leaves the flag set where the
+      ;; C's would not, and the next run finds nothing changed and runs
+      ;; no hook - which is the same outcome, one pass earlier.
+      ;;--------------------------------------------------------------
+      (set!frame-window-change (window-frame window) #t)
       ;; GNU Emacs's `split-window' - `Fsplit_window' in window.c - the
       ;; one primitive every split is: divide the live window WINDOW in
       ;; two, the first part SIZE rows (or columns, for a horizontal
@@ -610,7 +639,8 @@
                           right
                           #f '()
                           0 0 #f 0 '() '()
-                          #f 0 0 0 0 0 0 0 -1 #f '() #f)))
+                          #f 0 0 0 0 0 0 0 -1 #f '() #f
+                          0 #f 0 0 0 0)))
                 (%split-window-install! frame window new #t
                                         top height start width)
                 new)))
@@ -651,7 +681,8 @@
                           width
                           #f '()
                           0 0 #f 0 '() '()
-                          #f 0 0 0 0 0 0 0 -1 #f '() #f)))
+                          #f 0 0 0 0 0 0 0 -1 #f '() #f
+                          0 #f 0 0 0 0)))
                 (%split-window-install! frame window new #f
                                         top height left width)
                 new)))))
@@ -1559,6 +1590,15 @@ minibuffer window or is dedicated to its buffer."
               (else (set window (build-marker buffer (marker-position position)))))))
 
     (define (set-window-configuration configuration . args)
+      ;; **`FRAME_WINDOW_CHANGE` is set unconditionally** (`window.c:8082`),
+      ;; even when the configuration is identical to the current one.
+      ;; That is the *first* gate only: `run-window-change-functions` then
+      ;; asks whether any window really changed buffer or size or was
+      ;; deleted, and a restore of the layout the frame already has runs
+      ;; no hook - measured on Emacs 31.1, and pinned in `window-tests`.
+      ;; Set at the top rather than at the end where the C sets it: the
+      ;; flag is read at the next redisplay, and the only difference is a
+      ;; restore that errors half-way through.
       ;; "Set the configuration of windows and buffers as specified by
       ;; CONFIGURATION. ... Normally, this function selects the frame of
       ;; the CONFIGURATION, but if DONT-SET-FRAME is non-nil, it leaves
@@ -1575,6 +1615,11 @@ minibuffer window or is dedicated to its buffer."
       ;;--------------------------------------------------------------
       (unless (window-configuration? configuration)
         (error "Wrong type argument: window-configuration-p" configuration))
+      ;; `FRAME_WINDOW_CHANGE` (`window.c:8082`), **unconditionally** -
+      ;; which is what makes a restore that revives a deleted window a
+      ;; change even though nothing on the frame moved.
+      (let ((f (window-configuration-frame configuration)))
+        (when f (set!frame-window-change f #t)))
       (let* ((dont-set-frame (and (pair? args) (car args) #t))
              (dont-set-miniwindow
               (and (pair? args) (pair? (cdr args)) (cadr args) #t))
@@ -1799,6 +1844,258 @@ minibuffer window or is dedicated to its buffer."
       (pop-to-buffer buffer-or-name #t (if (pair? args) (car args) #f)))
 
 
+    (define *window-configuration-change-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `window-configuration-change-hook` (`window.c:9227`):
+    ;; "Normal hook run when the buffer in the window changes ...".
+    ;;
+    ;; **The hook `tab-bar-history-mode` runs on.** A change is noticed
+    ;; Emacs's way: the four window-tree functions set the frame's
+    ;; `FRAME_WINDOW_CHANGE` flag (`window.c:3715`, `:4427`, `:4896`,
+    ;; `:5681`, `:5828`), and `run-window-change-functions` - which the
+    ;; redisplay calls where `redisplay_internal` calls it
+    ;; (`xdisp.c:17588`) - walks the frames whose flag is set, asks
+    ;; whether any window really changed buffer or size or was deleted,
+    ;; and runs this hook if so. A parameter because a hook is
+    ;; `let`-bound around code that runs it.
+
+    (define %old-selected-frame #f)
+    ;; ^ `old_selected_frame` (`window.c:3958`): the frame that was
+    ;; selected when window change functions last ran, so the next run
+    ;; can tell whether a frame event was a *selection* change. Not
+    ;; dynamically bound, so a plain variable.
+
+    (define %window-change-record-frames #f)
+    ;; ^ `window_change_record_frames` (`window.c:3947`): whether this
+    ;; run of `run-window-change-functions` saw a change worth recording.
+    ;; `window_change_record` does nothing when it is false, which is
+    ;; what keeps the bookkeeping off the ordinary redisplay.
+
+    (define (window-sub-list window windows)
+      ;; GNU Emacs's `window_sub_list` (`window.c:3884`): "Return list of
+      ;; live windows constructed by traversing any window sub-tree
+      ;; rooted at WINDOW in preorder followed by right siblings of
+      ;; WINDOW... The returned list is in reverse order."
+      ;;--------------------------------------------------------------
+      (let loop ((w window) (acc windows))
+        (cond ((not w) acc)
+              ((window-internal? w)
+               (loop (window-next-sibling w)
+                     (window-sub-list (window-child w) acc)))
+              (else (loop (window-next-sibling w) (cons w acc))))))
+
+    (define (%window-body-pixel-width window)
+      ;; `window_body_width (w, WINDOW_BODY_IN_PIXELS)`: this tree has no
+      ;; stored pixel width, so it is the body's columns times the
+      ;; frame's character width - the same product `window-pixel-width`
+      ;; is.
+      ;;--------------------------------------------------------------
+      (* (window-body-width window) (frame-char-width (window-frame window))))
+
+    (define (%window-body-pixel-height window)
+      ;; `window_body_height (w, WINDOW_BODY_IN_PIXELS)`.
+      ;;--------------------------------------------------------------
+      (* (window-body-height window) (frame-char-height (window-frame window))))
+
+    (define (window-change-record-windows window stamp number)
+      ;; GNU Emacs's `window_change_record_windows` (`window.c:3913`):
+      ;; set each live window's change stamp, old buffer and four old
+      ;; sizes to what they are now, and answer how many live windows
+      ;; that was. "When not called by itself recursively, WINDOW is its
+      ;; frame's root window, STAMP is the current change stamp of
+      ;; WINDOW's frame and NUMBER is 0."
+      ;;--------------------------------------------------------------
+      (let loop ((w window) (n number))
+        (cond ((not w) n)
+              ((window-internal? w)
+               (loop (window-next-sibling w)
+                     (window-change-record-windows (window-child w) stamp n)))
+              (else
+               (set!window-change-stamp w stamp)
+               (set!window-old-buffer w (window-buffer w))
+               (set!window-old-pixel-width w (window-pixel-width w))
+               (set!window-old-pixel-height w (window-pixel-height w))
+               (set!window-old-body-pixel-width w (%window-body-pixel-width w))
+               (set!window-old-body-pixel-height w (%window-body-pixel-height w))
+               (loop (window-next-sibling w) (+ n 1))))))
+
+    (define (window-change-record)
+      ;; GNU Emacs's `window_change_record` (`window.c:3957`): "For each
+      ;; frame that has recorded changes, record its selected window,
+      ;; update Fchange stamp, record the states of all its live windows
+      ;; via `window_change_record_windows` and reset its `window_change`
+      ;; and `window_state_change` flags."
+      ;;
+      ;; The C's `FRAME_WINDOW_STATE_CHANGE` is not carried: only the
+      ;; Lisp function `set-frame-window-state-change` (`frame.c:5047`)
+      ;; ever sets it, and nothing here calls one.
+      ;;--------------------------------------------------------------
+      (when %window-change-record-frames
+        (for-each
+         (lambda (frame)
+           ;; "Record FRAME's selected window."
+           (set!frame-old-selected-window frame (frame-selected-window frame))
+           ;; "Bump up FRAME's change stamp. If this wraps, make it 1 to
+           ;; avoid that a new window (whose change stamp is always set
+           ;; to 0) gets reported as 'existing before'."
+           (let ((stamp (+ (frame-change-stamp frame) 1)))
+             (set!frame-change-stamp frame (if (= stamp 0) 1 stamp)))
+           ;; "Bump up the change stamps of all live windows on this
+           ;; frame so the next call of this function can tell whether
+           ;; any of them 'existed before'."
+           (set!frame-number-of-windows
+            frame
+            (window-change-record-windows (frame-root-window frame)
+                                          (frame-change-stamp frame) 0))
+           ;; "Reset our flags."
+           (set!frame-window-change frame #f))
+         (*frame-list*)))
+      (set! %old-selected-frame (*current-frame*)))
+
+    (define (run-window-configuration-change-hook frame)
+      ;; `run_window_configuration_change_hook` (`window.c:3786`): "The
+      ;; buffer-local values are run with the window showing the buffer
+      ;; selected. The default value is run with the frame specified by
+      ;; F selected. All functions are called with the selected window's
+      ;; buffer current."
+      ;;
+      ;; **Not carried**: the buffer-local half (`Flocal_variable_p` over
+      ;; `(window-list frame lambda)`, then selecting each window) - a
+      ;; buffer-local hook slot is a thing this tree's parameters do not
+      ;; have, and nothing here sets one. `f->can_set_window_size` and
+      ;; `f->after_make_frame` are Gtk sizing state, also not carried;
+      ;; `Vrun_hooks` has no counterpart.
+      ;;
+      ;; FRAME is selected by binding `*current-frame*` rather than by
+      ;; Emacs's `select_frame_norecord`: the selection is what
+      ;; `(selected-frame)` answers, and the frame list does not record
+      ;; one of these.
+      ;;--------------------------------------------------------------
+      (when (frame-type? frame)
+        (parameterize ((*current-frame* frame))
+          (run-hooks (*window-configuration-change-hook*)))))
+
+    (define (window-buffer-change? frame window frame-window-change)
+      ;; `window_buffer_change` (`window.c:4174`): "A 'buffer change'
+      ;; means either the window's buffer changed or the window was not
+      ;; part of this frame the last time window change functions were run
+      ;; for it."
+      ;;--------------------------------------------------------------
+      (and frame-window-change
+           (or (not (eq? (window-buffer window) (window-old-buffer window)))
+               (not (= (window-change-stamp window)
+                       (frame-change-stamp frame))))))
+
+    (define (window-size-change? frame window frame-window-change)
+      ;; `window_size_change` (`window.c:4186`): "A 'size change' means
+      ;; either a buffer change or that the total or body size of the
+      ;; window has changed."
+      ;;--------------------------------------------------------------
+      (and frame-window-change
+           (or (window-buffer-change? frame window frame-window-change)
+               (not (= (window-pixel-width window)
+                       (window-old-pixel-width window)))
+               (not (= (window-pixel-height window)
+                       (window-old-pixel-height window)))
+               (not (= (%window-body-pixel-width window)
+                       (window-old-body-pixel-width window)))
+               (not (= (%window-body-pixel-height window)
+                       (window-old-body-pixel-height window))))))
+
+    (define (any-window-either? yes? no? windows)
+      ;; The two flags `run_window_change_functions`'s window walk
+      ;; accumulates (`window.c:4211`): whether any window of WINDOWS
+      ;; answers `yes?`, or, failing that, `no?`. Written as one walk
+      ;; because the C computes both in the same loop.
+      ;;--------------------------------------------------------------
+      (cond ((null? windows) #f)
+            ((yes? (car windows)) #t)
+            ((no? (car windows)) #t)
+            (else (any-window-either? yes? no? (cdr windows)))))
+
+    (define (run-window-change-functions-for-frame frame selected-frame-change)
+      ;; `run_window_change_functions`'s frame loop body
+      ;; (`window.c:4124`-`:4310`) for one frame.
+      ;;--------------------------------------------------------------
+      (let* ((frame-window-change (frame-window-change frame))
+             (frame-selected-change
+              (and selected-frame-change
+                   (or (eq? frame %old-selected-frame)
+                       (eq? frame (*current-frame*)))))
+             (frame-selected-window-change
+              (not (eq? (frame-old-selected-window frame)
+                        (frame-selected-window frame)))))
+        ;; "Either we are not allowed to run hooks for this frame or no
+        ;; window change has been reported for it since the last time we
+        ;; ran window change functions on it."
+        (when (and (frame-live-p frame)
+                   (or frame-window-change frame-selected-change
+                       frame-selected-window-change))
+          (let* ((windows (reverse (window-sub-list (frame-root-window frame) '())))
+                 (number-of-windows (length windows))
+                 ;; "The following loop collects all data needed to tell
+                 ;; whether the default value of a hook shall be run".
+                 (frame-size-change
+                  (any-window-either?
+                   (lambda (w) (window-size-change? frame w frame-window-change))
+                   (lambda (w) #f)
+                   windows))
+                 (frame-buffer-change
+                  (any-window-either?
+                   (lambda (w) (window-buffer-change? frame w frame-window-change))
+                   (lambda (w) #f)
+                   windows))
+                 ;; "When the number of windows on a frame has decreased,
+                 ;; at least one window of that frame was deleted."
+                 (window-deleted
+                  (< number-of-windows (frame-number-of-windows frame))))
+            ;; "A frame has changed state when a size or buffer change
+            ;; occurred, its selected window has changed, when it was
+            ;; (de-)selected or its window state change flag was set" -
+            ;; the record is kept for the next run. **This comes before
+            ;; the hook**, as the C has it (`window.c:4296` then
+            ;; `:4308`), so a hook that signals still leaves the record
+            ;; due.
+            (when (or frame-selected-change frame-selected-window-change
+                      frame-buffer-change window-deleted frame-size-change)
+              (set! %window-change-record-frames #t))
+            ;; "A frame's configuration changed when one of its windows
+            ;; has changed buffer or size or at least one window was
+            ;; deleted."
+            (when (or frame-size-change window-deleted)
+              (run-window-configuration-change-hook frame))))))
+
+    (define (run-window-change-functions)
+      ;; GNU Emacs's `run_window_change_functions` (`window.c:4111`),
+      ;; "called from a 'safe' position in `redisplay_internal`".
+      ;;
+      ;; **The three families of per-window hooks are not carried** -
+      ;; `window-buffer-change-functions`, `window-size-change-functions`
+      ;; and `window-selection-change-functions`, local and default, and
+      ;; the `window-state-change-hook` they feed. What they need is kept,
+      ;; because it is what decides whether the *configuration* hook
+      ;; runs: `frame_size_change || window_deleted` (`:4300`).
+      ;;
+      ;; **Not carried**: the `Qinhibit_redisplay` binding around it
+      ;; (`:4121`), which lives in `xdisp.scm` and is above this library;
+      ;; `report_selected_window_change` (the input method); and
+      ;; `f->can_set_window_size`/`f->after_make_frame`, which are Gtk
+      ;; sizing state.
+      ;;--------------------------------------------------------------
+      (let ((selected-frame-change
+             (not (eq? (*current-frame*) %old-selected-frame))))
+        (set! %window-change-record-frames #f)
+        ;; `window_change_record` is the C's `record_unwind_protect_void`
+        ;; (`:4122`), so it runs even when a hook signals - which is what
+        ;; keeps a failing hook from re-running for ever.
+        (dynamic-wind
+          (lambda () #f)
+          (lambda ()
+            (for-each (lambda (frame)
+                        (run-window-change-functions-for-frame
+                         frame selected-frame-change))
+                      (*frame-list*)))
+          (lambda () (window-change-record)))))
+
     (define (recombine-windows window)
       ;; GNU Emacs's `recombine_windows` (`window.c:2612`): "If WINDOW can
       ;; be deleted, delete it" is the neighbouring function; this one
@@ -1891,6 +2188,10 @@ minibuffer window or is dedicated to its buffer."
                   (let ((first (car (window-list frame))))
                     (select-window first)
                     (record-buffer! (window-buffer first))))
+                ;; `FRAME_WINDOW_CHANGE (f) = true;` (`window.c:5828`), at
+                ;; the end of the C's success branch - a *failed* delete
+                ;; is not a window change.
+                (set!frame-window-change frame #t)
                 #f))))))
 
     (define-command (delete-window window)
@@ -1954,6 +2255,12 @@ WINDOW defaults to the selected one. Return nil."
       (let ((frame (*current-frame*)))
         (select-window window)
         (record-buffer! (window-buffer window))
+        ;; **`FRAME_WINDOW_CHANGE`** - the C's `Fdelete_other_windows_internal`
+        ;; sets it itself, at the end (`window.c:3715`), where this
+        ;; function assigns the rectangle directly instead of running the
+        ;; resize engine. Without it, deleting the other windows is the
+        ;; one window change nothing hears about.
+        (set!frame-window-change frame #t)
         ;; **The text area begins below the menu bar**, Emacs's
         ;; `FRAME_TOP_MARGIN` - the row the bar is drawn in is not the
         ;; window's to use.
@@ -4108,4 +4415,5 @@ by this function.  This happens in an interactive call."
                                             acc)))
                              (else (loop (cdr items) acc))))))
         (if buffer (cons buffer buffers) buffers)))
+    
     ))

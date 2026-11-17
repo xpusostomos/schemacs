@@ -50,8 +50,9 @@
   ;; to build what exists): **tab groups** (`tab-bar-tab-group-default`,
   ;; the group format and its face, `tab-bar-change-tab-group`,
   ;; `tab-bar-close-group-tabs`, `tab-bar-move-tab-to-group`),
-  ;; **`tab-bar-history-mode`** (with the fingerprint departure noted
-  ;; below) and **`tab-bar-menu-bar`** with `menu-bar-keymap` under it.
+  ;; **`tab-bar-history-mode`** (on `window-configuration-change-hook`,
+  ;; as in Emacs) and **`tab-bar-menu-bar`** with `menu-bar-keymap` under
+  ;; it.
   ;;
   ;; **Not carried, with what each waits for:**
   ;;
@@ -65,11 +66,10 @@
   ;;     `tab-bar-detach-tab`): no touch events, and detaching needs a
   ;;     new frame built *from* a window configuration, which
   ;;     `new-frame` does not take.
-  ;;   * **`tab-switcher-mode`'s `:suppress t`** and its `?` binding:
-  ;;     a letter typed in the `*Tabs*` list inserts itself, and `?`
-  ;;     does nothing, because `describe-mode` is not ported and a
-  ;;     buffer's own map cannot suppress the self-insert fallback (the
-  ;;     same gap `special-mode-map` names).
+  ;;   * **`tab-switcher-mode`'s `?` binding**: `describe-mode` is not
+  ;;     ported. The map's `:suppress t` is carried (`suppress-keymap`),
+  ;;     so a letter typed in the `*Tabs*` list is `undefined` rather
+  ;;     than inserting itself.
   ;;   * **The Gtk tab bar is a row of the drawing area, not a widget.**
   ;;     GNU Emacs's Gtk build builds one with `xg_create_frame_widgets`;
   ;;     this tree draws the same `display-tab-bar` row there, so the bar
@@ -103,6 +103,7 @@
           window-left window-width resize-frame-windows!
           frame-height frame-width frame-inner-width *pre-command-hook*)
     (only (schemacs editor window)
+       *window-configuration-change-hook*
           current-window-configuration set-window-configuration
           window-configuration-p window-configuration-frame
           *window-restore-killed-buffer-windows*
@@ -126,7 +127,9 @@
     (only (schemacs editor subr) run-hook-with-args
           run-hook-with-args-until-success run-hooks add-hook remove-hook
           assq-delete-all delq posn-string posn-x-y event-start event-end
-          posn-window posn-point)
+          posn-window posn-point
+          ;; `tab-switcher-mode-map`'s `:suppress t` (`tab-bar.el:2772`)
+          suppress-keymap)
     (only (schemacs editor editfns) goto-char point point-marker propertize
           message insert insert-char *inhibit-message* save-excursion
           delete-region point-min eobp forward-line)
@@ -1979,40 +1982,29 @@ function `tab-bar-tab-name-function'."
     ;;--------------------------------------------------------------
     ;; Tab history mode - `tab-bar.el:2566`
     ;;
-    ;; **The one departure of this section is how a change is noticed.**
-    ;; Emacs bumps `f->change_stamp` in `Fset_window_buffer`,
-    ;; `Fdelete_window`, `Fsplit_window_internal` and
-    ;; `Fset_window_configuration` (`window.c:3715`, `:5681`, `:5828`,
-    ;; `:8082`) and `run_window_change_functions` runs
-    ;; `window-configuration-change-hook` when the stamp moved or the
-    ;; selected window or frame did. This tree has neither the stamp nor
-    ;; that hook, so the same facts are captured as a *fingerprint* of
-    ;; the frame's window tree - the selected window, and each window
-    ;; with its buffer and rectangle - and compared at the next
-    ;; command's `pre-command-hook`.
+    ;; **A change is noticed the way Emacs notices one**: `set-window-buffer!`,
+    ;; `split-window`, `delete-window-internal`, `delete-other-windows`
+    ;; and `set-window-configuration` set the frame's `FRAME_WINDOW_CHANGE`
+    ;; flag (`window.c:3715`, `:4427`, `:5681`, `:5828`, `:8082` - and
+    ;; `window_resize_apply` at `:4896`), and `run-window-change-functions` -
+    ;; called from the redisplay, as the C calls it from
+    ;; `redisplay_internal` - runs `window-configuration-change-hook`,
+    ;; which is where `tab-bar--history-change` now sits.
     ;;
-    ;; **Two differences, and an earlier version of this note said there
-    ;; were none** ("only *when* the push happens... the history a reader
-    ;; sees is the same"). That was too strong:
+    ;; This replaced a *fingerprint* of the window tree compared at the
+    ;; next command's `pre-command-hook`. One difference a reader could
+    ;; see, and one that a previous version of this note claimed and
+    ;; measurement disproved:
     ;;
-    ;;   1. **When.** The push is one command later. Any *command* still
-    ;;      sees the right history, because every command's
-    ;;      `pre-command-hook' pushes the pending change before its body
-    ;;      runs - which is why `tab-bar-history-back` works. What sees
-    ;;      the lag is a reader that is not a command: a timer, a process
-    ;;      filter, or the REPL back door, between the change and the
-    ;;      next keypress. The tab bar's own buttons do not, because
-    ;;      `tab-bar-format-history` draws them whenever the mode is on
-    ;;      rather than per history state.
-    ;;
-    ;;   2. **Which events count.** `Fset_window_configuration`
-    ;;      (`window.c:5681`) sets `FRAME_WINDOW_CHANGE` unconditionally,
-    ;;      so restoring a configuration identical to the current one
-    ;;      pushes a history entry in Emacs and not here - a fingerprint
-    ;;      cannot see a no-op. (`Fset_window_buffer` is *not* such a
-    ;;      case: it sets the flag only when the buffer differs,
-    ;;      `:4427`.) After such a no-op restore, Emacs's "back" is a
-    ;;      no-op too, while this tree's goes to the layout before it.
+    ;;   * **Real**: the push was one command late - invisible to a
+    ;;     command, because `tab-bar-history-back` runs its own
+    ;;     pre-command first, but visible to anything that is not one: a
+    ;;     timer, or the REPL back door.
+    ;;   * **Not real**: that a `set-window-configuration` restoring the
+    ;;     layout the frame already had pushes in Emacs and not here.
+    ;;     Measured on Emacs 31.1, it does not push - the flag is only
+    ;;     the first gate. Taking the flag as the answer would have pushed
+    ;;     where Emacs does not.
     ;;--------------------------------------------------------------
 
     (define tab-bar-history-limit 10)
@@ -2032,33 +2024,6 @@ function `tab-bar-tab-name-function'."
     ;; ^ "Command set to `this-command' by `pre-command-hook'."
     (define tab-bar-history-done-command #f)
     ;; ^ "Command handled by `window-configuration-change-hook'."
-    (define tab-bar-history-fingerprint #f)
-    ;; ^ This tree's stand-in for `f->change_stamp`, see the note above.
-
-    (define (tab-bar--window-fingerprint frame)
-      ;; What `FRAME_WINDOW_CHANGE` reports: the selected window, and the
-      ;; window tree with each window's buffer and rectangle. A list of
-      ;; records and numbers, compared by `tab-bar--same-fingerprint?` -
-      ;; `equal?` would walk a window's frame and a frame's windows for
-      ;; ever.
-      ;;--------------------------------------------------------------
-      (list (frame-selected-window frame)
-            (map (lambda (w)
-                   (list w (window-buffer w) (window-top w)
-                         (window-height w) (window-left w) (window-width w)))
-                 (window-list frame #t))))
-
-    (define (tab-bar--same-fingerprint? a b)
-      (define (same-row? x y)
-        (and (eq? (list-ref x 0) (list-ref y 0))
-             (eq? (list-ref x 1) (list-ref y 1))
-             (equal? (cddr x) (cddr y))))
-      (and (eq? (car a) (car b))
-           (let loop ((x (cadr a)) (y (cadr b)))
-             (cond ((and (null? x) (null? y)) #t)
-                   ((or (null? x) (null? y)) #f)
-                   ((not (same-row? (car x) (car y))) #f)
-                   (else (loop (cdr x) (cdr y)))))))
 
     (define (tab-bar--minibuffer-depth-zero?)
       ;; `(zerop (minibuffer-depth))` - no prompt is being read. This
@@ -2068,9 +2033,10 @@ function `tab-bar-tab-name-function'."
       (not (minibufferp)))
 
     (define (tab-bar--history-change)
-      ;; GNU Emacs's `tab-bar--history-change` (`tab-bar.el:2596`),
-      ;; called from `window-configuration-change-hook` there and from
-      ;; the pre-change below here.
+      ;; GNU Emacs's `tab-bar--history-change` (`tab-bar.el:2596`). It is
+      ;; on `window-configuration-change-hook`, so **the hook running is
+      ;; the test that the configuration changed** - the C compares
+      ;; nothing here, and neither does this now.
       ;;--------------------------------------------------------------
       (when (and (not tab-bar-history-omit) tab-bar-history-old
                  ;; "Don't register changes performed by the same command
@@ -2078,10 +2044,7 @@ function `tab-bar-tab-name-function'."
                  ;; resizing."
                  (not (eq? tab-bar-history-done-command
                            tab-bar-history-pre-command))
-                 (tab-bar--minibuffer-depth-zero?)
-                 (not (tab-bar--same-fingerprint?
-                       tab-bar-history-fingerprint
-                       (tab-bar--window-fingerprint (*current-frame*)))))
+                 (tab-bar--minibuffer-depth-zero?))
         (hashq-set! tab-bar-history-back-table (selected-frame)
                     (seq-take (cons tab-bar-history-old
                                     (or (hashq-ref tab-bar-history-back-table
@@ -2092,20 +2055,23 @@ function `tab-bar-tab-name-function'."
       (set! tab-bar-history-done-command tab-bar-history-pre-command))
 
     (define (tab-bar--history-pre-change)
-      ;; GNU Emacs's `tab-bar--history-pre-change` (`:2590`), plus the
-      ;; `window-configuration-change-hook` call this tree has no hook
-      ;; for - see this section's note.
+      ;; GNU Emacs's `tab-bar--history-pre-change` (`tab-bar.el:2590`):
+      ;; record where the configuration *was* before the command runs.
+      ;;
+      ;; **The push is not here** - it is `tab-bar--history-change`, on
+      ;; `window-configuration-change-hook`, which the redisplay runs once
+      ;; the command has changed the window tree
+      ;; (`run-window-change-functions`). This function used to call it
+      ;; because there was no such hook, which made every push one command
+      ;; late - see the note above.
       ;;--------------------------------------------------------------
-      (tab-bar--history-change)
       ;; "Reset before the command could set it"
       (set! tab-bar-history-omit #f)
       (set! tab-bar-history-pre-command (*this-command*))
       (when (tab-bar--minibuffer-depth-zero?)
         (set! tab-bar-history-old
               (list (cons 'wc (current-window-configuration))
-                    (cons 'wc-point (point-marker))))
-        (set! tab-bar-history-fingerprint
-              (tab-bar--window-fingerprint (*current-frame*)))))
+                    (cons 'wc-point (point-marker))))))
 
     (define-command (tab-bar-history-back)
       "Restore a previous window configuration used in the current tab.
@@ -2166,8 +2132,12 @@ and can restore them."
       (if tab-bar-history-mode-variable
           (begin
             (add-hook *pre-command-hook* tab-bar--history-pre-change)
+            (add-hook *window-configuration-change-hook* tab-bar--history-change)
             (force-mode-line-update))
-          (remove-hook *pre-command-hook* tab-bar--history-pre-change)))
+          (begin
+            (remove-hook *pre-command-hook* tab-bar--history-pre-change)
+            (remove-hook *window-configuration-change-hook*
+                         tab-bar--history-change))))
 
     ;;--------------------------------------------------------------
     ;; The tab list - `tab-switcher` (`tab-bar.el:2700`)
@@ -2179,6 +2149,9 @@ and can restore them."
     ;; buffer sets it, which is the same answer while there is one list.
 
     (define tab-switcher-mode-map (make-sparse-keymap))
+    ;; `defvar-keymap tab-switcher-mode-map ... :suppress t` (`:2770`):
+    ;; "Letters do not insert themselves; instead, they are commands."
+    (suppress-keymap tab-switcher-mode-map)
 
     (define (tab-switcher-current-tab error-if-non-existent-p)
       ;; "Return window configuration described by this line of the

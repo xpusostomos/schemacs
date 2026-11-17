@@ -209,6 +209,13 @@
    frame-selected-window
    mouse-position
    frame-type?
+   ;; `window.c`'s change stamp: `FRAME_WINDOW_CHANGE` and friends. The
+   ;; window-tree functions set the flag; `run-window-change-functions`
+   ;; reads it, bumps the stamp and records the live-window count.
+   frame-change-stamp set!frame-change-stamp
+   frame-window-change set!frame-window-change
+   frame-old-selected-window set!frame-old-selected-window
+   frame-number-of-windows set!frame-number-of-windows
    frame-windows
    window-type?
    new-frame
@@ -304,6 +311,13 @@
    window-parameters set!window-parameters *window-persistent-parameters*
    window-wants-tab-line window-tab-line-height window-body-top
    window-last-tab-line set!window-last-tab-line
+   ;; the window-change record (`window.c`'s `run_window_change_functions`)
+   window-change-stamp set!window-change-stamp
+   window-old-buffer set!window-old-buffer
+   window-old-pixel-width set!window-old-pixel-width
+   window-old-pixel-height set!window-old-pixel-height
+   window-old-body-pixel-width set!window-old-body-pixel-width
+   window-old-body-pixel-height set!window-old-body-pixel-height
    ;; `window_outdated` (`window.c:231`), which the redisplay asks before
    ;; it trusts a window's glyph matrix.
    window-outdated?
@@ -405,7 +419,10 @@
        last-width last-height last-hscroll last-point last-mark
        last-mode-line
        parameters
-       last-tab-line)
+       last-tab-line
+       change-stamp old-buffer
+       old-pixel-width old-pixel-height
+       old-body-pixel-width old-body-pixel-height)
       window-type?
       (frame     window-frame       set!window-frame)
       ;; ^ The frame this window is on: GNU Emacs's `w->frame', the first
@@ -540,6 +557,20 @@
       (last-mark window-last-mark set!window-last-mark)
       (last-mode-line window-last-mode-line set!window-last-mode-line)
       (last-tab-line window-last-tab-line set!window-last-tab-line)
+      ;; **The window-change record** (`window.h`): what this window was
+      ;; when `run_window_change_functions` last ran - `w->change_stamp`,
+      ;; `w->old_buffer` and the four old sizes. They are compared
+      ;; against the live values there to decide whether a window
+      ;; changed buffer or size, which is what runs
+      ;; `window-configuration-change-hook` (`window.c:4271`).
+      (change-stamp window-change-stamp set!window-change-stamp)
+      (old-buffer window-old-buffer set!window-old-buffer)
+      (old-pixel-width window-old-pixel-width set!window-old-pixel-width)
+      (old-pixel-height window-old-pixel-height set!window-old-pixel-height)
+      (old-body-pixel-width window-old-body-pixel-width
+                            set!window-old-body-pixel-width)
+      (old-body-pixel-height window-old-body-pixel-height
+                             set!window-old-body-pixel-height)
       (parameters window-parameters set!window-parameters)
       ;; ^ ... and `last-tab-line`, the record of what the tab line row
       ;; last had written to it - the same compare-and-skip that
@@ -1045,6 +1076,18 @@
         ;; buffer's keymaps (`window.c:4387`'s line is the one that makes
         ;; `C-x b` show the new buffer's menus).
         (set-update-mode-lines! #t)
+        ;; **`FRAME_WINDOW_CHANGE`** (`window.c:4427`), the C's last
+        ;; statement: "Ensure that window change functions are run later
+        ;; if the buffer differs and the window is neither a mini nor a
+        ;; pseudo window."
+        ;;
+        ;; Note what it tests: the *buffer* and not this call. Setting the
+        ;; buffer a window already shows is not a change, so it raises no
+        ;; hook - measured on Emacs 31.1 (`window-tests.scm` pins it).
+        (when (and old (not (eq? old buffer))
+                   (not (eq? window (frame-minibuffer-window
+                                      (window-frame window)))))
+          (set!frame-window-change (window-frame window) #t))
         window))
 
     (define (window-start window)
@@ -1108,12 +1151,14 @@
                         top height left width #f '()
                         0 0 #f 0 '() '()
                         ;; nothing built yet: `window_outdated?` says so
-                        #f 0 0 0 0 0 0 0 -1 #f '() #f)
+                        #f 0 0 0 0 0 0 0 -1 #f '() #f
+                          0 #f 0 0 0 0)
           (make<window> frame #f #f #f #f
                         0 0 #f 0 0
                         top height left width #f '()
                         0 0 #f 0 '() '()
-                        #f 0 0 0 0 0 0 0 -1 #f '() #f)))
+                        #f 0 0 0 0 0 0 0 -1 #f '() #f
+                          0 #f 0 0 0 0)))
 
     ;;----------------------------------------------------------------
     ;; Editor state
@@ -1124,8 +1169,25 @@
        message message-timer keymap-state quit-cont output name
        parameters garbaged new-width new-height new-size-p
        menu-bar-items menu-bar-items-used
-       tab-bar-items tab-bar-items-used)
+       tab-bar-items tab-bar-items-used
+       change-stamp window-change old-selected-window number-of-windows)
       frame-type?
+      ;; **`window.c`'s change stamp.** `FRAME_WINDOW_CHANGE` is set by
+      ;; the functions that alter a frame's window tree, and
+      ;; `run_window_change_functions` reads it to decide whether
+      ;; anything needs looking at. `change-stamp` is `f->change_stamp`,
+      ;; `window-change` is `FRAME_WINDOW_CHANGE`, `old-selected-window`
+      ;; is `FRAME_OLD_SELECTED_WINDOW` - the selection as it was when
+      ;; the change functions last ran - and `number-of-windows` is
+      ;; `f->number_of_windows`, the live-window count from that run,
+      ;; which is how a deletion is noticed (`window_deleted = number
+      ;; < f->number_of_windows`, `window.c:4271`).
+      (change-stamp frame-change-stamp set!frame-change-stamp)
+      (window-change frame-window-change set!frame-window-change)
+      (old-selected-window frame-old-selected-window
+                           set!frame-old-selected-window)
+      (number-of-windows frame-number-of-windows
+                         set!frame-number-of-windows)
       (windows   frame-windows   set!frame-windows)
       ;; ^ The frame's windows, top to bottom. Emacs's `window-list'.
       (minibuffer-window frame-minibuffer-window
@@ -2491,7 +2553,14 @@
                                  ;; the C's "no size change pending".
                                  -1 -1 #f
                                  ;; No menu bar or tab bar built yet.
-                                 #f 0 #f 0))
+                                 #f 0 #f 0
+                                 ;; `change_stamp` 0, `FRAME_WINDOW_CHANGE`
+                                 ;; false, no selection recorded yet and
+                                 ;; no live windows counted - a fresh
+                                 ;; frame has no change for the hook to
+                                 ;; hear about. **The order is the
+                                 ;; record's**, which is the stamp first.
+                                 0 #f #f 0))
              ;; **The text area starts below the top margin**, which is
              ;; what makes the menu bar a row the windows do not use -
              ;; GNU Emacs's `r->top_line = FRAME_TOP_MARGIN (f)`
@@ -2967,6 +3036,13 @@
       ;; - 1` rows starting at `FRAME_TOP_MARGIN` (`window.c:5050`), so a
       ;; frame with a bar divides its rows between the bar, the text area
       ;; and the echo row.
+      ;;
+      ;; **It is a window change**: the C's `resize_frame_windows` reaches
+      ;; `window_resize_apply`, which sets `FRAME_WINDOW_CHANGE`
+      ;; (`window.c:4896`). This function assigns the rectangles itself,
+      ;; so the flag is set here - a terminal resize runs
+      ;; `window-configuration-change-hook` in Emacs and must here.
+      (set!frame-window-change frame #t)
       (let ((margin (frame-top-margin frame)))
         (scale-window! (car (frame-windows frame))
                        0 0 old-width (max 1 (- old-height 1))
@@ -4106,7 +4182,13 @@
       ;; `window_resize_apply` (`window.c:4815`): give WINDOW the size
       ;; the engine computed, and walk the tree assigning each child its
       ;; start position along the axis being applied and its own size.
+      ;;
+      ;; It also sets `FRAME_WINDOW_CHANGE` (`:4896`): "a resize is a
+      ;; window change even when the tree is the same shape". The C guards
+      ;; it with `!WINDOW_PSEUDO_P`, and this tree has no pseudo window to
+      ;; guard against.
       ;;--------------------------------------------------------------
+      (set!frame-window-change (window-frame window) #t)
       (let* ((frame (window-frame window))
              (unit (if horizontal (frame-char-width frame) (frame-char-height frame)))
              (children (window-children window)))

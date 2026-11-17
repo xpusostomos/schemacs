@@ -11,7 +11,8 @@
        *current-frame* *current-buffer* *default-frame-alist*
        new-frame frame-parameter frame-selected-window window-top
        window-height window-list frame-inner-width %frame-tab-bar-lines)
- (only (schemacs editor window) switch-to-buffer split-window)
+ (only (schemacs editor window) switch-to-buffer split-window
+      run-window-change-functions)
  (only (schemacs editor command) command-record-named)
  (only (schemacs editor tab-bar)
        tab-bar-mode tab-bar-mode-variable tab-bar-tabs tab-bar-new-tab
@@ -28,6 +29,7 @@
        tab-bar-format-list tab-bar-format-tabs *tab-bar-format*
        tab-bar-format-menu-bar tab-bar-menu-bar-button
        tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
+       tab-switcher-mode-map
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*
        *tab-bar-new-tab-choice* tab-bar-split-tab tab-bar-merge-tabs
        tab-bar-move-window-to-tab split-tab merge-tabs tab-new tab-list)
@@ -224,9 +226,17 @@
 ;; call it the same way, with `this-command` set, and then run the
 ;; command.
 (define (run-command-history! cmd thunk)
+  ;; The command loop's three steps, as far as the history cares:
+  ;; `pre-command-hook' (which records the configuration before the
+  ;; command), the command, and then `run-window-change-functions' before
+  ;; the redisplay - which is what runs
+  ;; `window-configuration-change-hook` and so pushes the entry. Emacs
+  ;; runs that last step inside `redisplay_internal`; this tree calls it
+  ;; from the command loop, one statement before `redisplay-frames!`.
   (parameterize ((*this-command* cmd))
     (tab-bar--history-pre-change)
-    (thunk)))
+    (thunk)
+    (run-window-change-functions)))
 
 (test-equal '(#f #t)
   (let ((frame (fresh-frame)))
@@ -410,6 +420,19 @@
         (list (with-current-buffer b (buffer-read-only? (current-buffer)))
               (if (string-contains (buffer-string-of b) "tab-one") #t #f)
               (if (string-contains (buffer-string-of b) "s2") #t #f))))))
+
+;; **`tab-switcher-mode`'s map carries `:suppress t`** (`tab-bar.el:2772`):
+;; "Letters do not insert themselves; instead, they are commands." The
+;; binding is the *remap* `suppress-keymap` makes (`subr.el:1316`), so a
+;; letter resolves through `command-remapping` rather than being bound
+;; directly - the end-to-end path the `special-mode-map` test in
+;; `tty-editor-tests` walks. The digits and `-` keep their
+;; prefix-argument meaning.
+(test-equal '(undefined digit-argument negative-argument)
+  (list (keymap-lookup tab-switcher-mode-map
+                       (vector 'remap 'self-insert-command))
+        (keymap-lookup tab-switcher-mode-map (vector (char->integer #\5)))
+        (keymap-lookup tab-switcher-mode-map (vector (char->integer #\-)))))
 
 ;; Selecting a line of the list switches to that tab and kills the list.
 ;; The line selected on entry is the second one, which is the most

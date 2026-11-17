@@ -3978,39 +3978,109 @@ not. This port stores the value the same way and draws every item, so an
 `:enable` in a tab's item has no visible effect - which is also what
 Emacs's terminal tab bar does, since `display_tab_bar` never asks.
 
-# `tab-bar-history-mode`'s change detection (2026-11-16)
+# `tab-bar-history-mode`'s change detection, ported (2026-11-17)
 
 GNU Emacs notices that a command changed the window configuration through
-the frame's `change_stamp`, which four functions bump -
+the frame's `FRAME_WINDOW_CHANGE` flag, which these sites set -
 
 ```c
-  FRAME_WINDOW_CHANGE (f) = true;   /* window.c:3715, Fset_window_buffer */
-                                    /* :5681, Fdelete_window            */
-                                    /* :5828, Fsplit_window_internal     */
-                                    /* :8082, Fset_window_configuration  */
+  FRAME_WINDOW_CHANGE (f) = true;   /* window.c:3715  Fdelete_other_windows_internal */
+                                    /* :4427  set_window_buffer (if !samebuf,
+                                       and neither a mini nor a pseudo window) */
+                                    /* :4896  window_resize_apply              */
+                                    /* :5681  Fsplit_window_internal           */
+                                    /* :5828  Fdelete_window_internal          */
+                                    /* :8082  Fset_window_configuration        */
 ```
 
-- and `run_window_change_functions` (`window.c:4200`) runs
-`window-configuration-change-hook` when that flag, the selected window or
-the selected frame moved since the last redisplay. `tab-bar--history-change`
-is on that hook, so the configuration recorded before a command is pushed
-onto the back history only when the command changed the window layout.
+- and `run_window_change_functions` (`window.c:4111`), called from
+`redisplay_internal` (`xdisp.c:17588`), decides whether anything really
+changed: for a frame whose flag is set it walks the live windows and asks
+whether any changed its buffer, its pixel or body-pixel size, or was
+newly created (`w->change_stamp != f->change_stamp`), and whether the
+frame now has fewer live windows than at the last run. **Only then** does
+`window-configuration-change-hook` run (`window.c:4308`) - and
+`tab-bar--history-change` is on that hook.
 
-This tree has neither `f->change_stamp` nor `window-configuration-change-hook`,
-and bumping a stamp at four sites would mean teaching every window
-primitive a field that nothing else reads. Instead `tab-bar--window-fingerprint`
-captures what those four events change - the selected window and each
-window with its buffer and rectangle - and `tab-bar--history-pre-change`
-compares it at the next command's `pre-command-hook`, pushing the previous
-command's configuration when it moved.
+This port now has all of it: `<frame>`'s `change-stamp`/`window-change`/
+`old-selected-window`/`number-of-windows`, `<window>`'s `change-stamp`/
+`old-buffer`/the four old sizes (`window.h`'s fields), `window-sub-list`,
+`window-change-record-windows`, `window_change_record` and
+`run_window_change_functions` (`window.c:4111`), with the last called
+from `redisplay-frames!` in the place the C calls it. Measured against
+Emacs 31.1 in an `emacs -nw` pty, counting the hook's calls:
 
-The same four events move the fingerprint and nothing else does: point,
-scrolling and text edits are not in it, and window buffer changes, splits,
-deletions, configurations and resizes are. The only observable
-difference is *when* the push happens - one command later, at the next
-pre-command rather than at the previous command's redisplay - and no
-reader can see that, because `tab-bar-history-back` itself runs its
-pre-command first.
+| event | Emacs | here |
+|---|---|---|
+| split | 1 | 1 |
+| `set-window-configuration` of the same layout | 0 | 0 |
+| `set-window-configuration` of a different layout | 1 | 1 |
+| `select-window` on the selected window | 0 | 0 |
+| `set-window-buffer` to a different buffer | 1 | 1 |
+| `set-window-buffer` to the same buffer | 0 | 0 |
+
+`window-tests.scm` pins every row.
+
+## This replaces a fingerprint, and an account of its differences that was wrong
+
+The previous version compared a *fingerprint* of the window tree at the
+next command's `pre-command-hook`. Two differences were claimed for it;
+one was real and one was not.
+
+**Real**: the push was one command late, which no command could see but a
+non-command reader could - a timer, or the REPL back door.
+
+**Not real, and measured**: the note said `Fset_window_configuration` sets
+the flag unconditionally "so restoring a configuration identical to the
+current one pushes a history entry in Emacs and not here". It does not
+push. The flag is only the first gate; the per-window comparison above is
+what runs the hook, and a restore of the layout the frame already has
+changes no window's buffer or size and deletes nothing. Measured on Emacs
+31.1: `ran=0`. A port that took the flag as the answer would push where
+Emacs does not - exactly the wrong correction, from reasoning about the
+C instead of asking it.
+
+## Where the flag is set here, and the two places it is set by hand
+
+The six C sites are ported as they stand. Two more places need it
+because this tree reaches the same result by a different route than the
+C's:
+
+* **`delete-other-windows`** (`window.scm`). The C's
+  `Fdelete_other_windows_internal` sets the flag itself (`window.c:3715`);
+  this port's version of the function is a rebuild of the tree rather than
+  the C's resize walk, and had no such statement.
+* **`resize-frame-windows!`** (`frame.scm`). The C's
+  `resize_frame_windows` ends in `window_resize_apply`, which sets the
+  flag (`:4896`); this function scales the rectangles itself. This is the
+  terminal-resize path, so without it a resized frame runs no
+  `window-configuration-change-hook` at all.
+
+Both are marked at the line.
+
+## Not carried, and what each needs
+
+* **The three per-window hook families** -
+  `window-buffer-change-functions`, `window-size-change-functions`,
+  `window-selection-change-functions`, local and default - and
+  `window-state-change-hook`. Their arguments and their buffer-local
+  machinery are a whole notification surface with no consumer here. The
+  *inputs* they need are kept, since they are what decides the
+  configuration hook.
+* **`FRAME_WINDOW_STATE_CHANGE`.** Only the Lisp function
+  `set-frame-window-state-change` (`frame.c:5047`) ever sets it, and
+  nothing here calls one.
+* **The buffer-local half of `window-configuration-change-hook`**
+  (`window.c:3810`): a buffer-local hook slot is a thing this tree's
+  parameters do not have. Only the global value runs.
+* **`specbind (Qinhibit_redisplay, Qt)`** around the run (`:4121`):
+  `*inhibit-redisplay*` is `xdisp.scm`'s and that library is above this
+  one. A hook that calls `redisplay` would recurse where Emacs suppresses
+  it.
+* **`f->can_set_window_size` / `f->after_make_frame`**, Gtk sizing state.
+  Emacs skips a frame that is not yet fully made; here a frame is fully
+  made when the constructor returns.
+* **`report_selected_window_change`** (the input method).
 
 # Window states: the size registers, and the pixel/total split
 (2026-11-16)

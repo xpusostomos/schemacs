@@ -301,6 +301,11 @@
           ;; the `*Messages*' buffer's own mode, which `message-dolog'
           ;; switches a newly made buffer into
           messages-buffer-mode)
+    ;; `run_window_change_functions` is `window.c`'s and lives in
+    ;; `window.scm`; `redisplay_internal` calls it (`xdisp.c:17588`), so
+    ;; this library calls it in `redisplay-frames!`. `window.scm` reaches
+    ;; this one through `simple.scm`, which is a diamond and not a cycle.
+    (only (schemacs editor window) run-window-change-functions)
     ;; `minor-mode-alist' is `bindings.el`'s and lives in `subr.scm`,
     ;; beside `add-minor-mode' - **the one function that writes it**. It
     ;; is imported here rather than declared here, which it was until
@@ -3635,17 +3640,31 @@
       ;;--------------------------------------------------------------
       (if (*inhibit-redisplay*)
           #f
-          (let ((selected (*current-frame*)))
-            (let loop ((frames (*frame-list*)))
-              (cond ((null? frames) #f)
-                    (else
-                     (let ((f (car frames)))
-                       (when (or (eq? f selected)
-                                 (not (eq? (frame-output f)
-                                           (and selected
-                                                (frame-output selected)))))
-                         (render! f)))
-                     (loop (cdr frames)))))
+          (begin
+            ;; **`run_window_change_functions`** (`xdisp.c:17588`): "Run
+            ;; window change functions for each live frame. This function
+            ;; must be called from a 'safe' position in
+            ;; `redisplay_internal`." Emacs runs it after the echo-area
+            ;; work and *before* any frame is drawn, and only when a
+            ;; redisplay happens at all - `redisplay_internal` returns
+            ;; early under `inhibit-redisplay` (`xdisp.c:17402`), which
+            ;; is this branch's test.
+            ;;
+            ;; It is `window.c`'s function and lives in `window.scm`.
+            ;; That library imports this one through `simple`, so the
+            ;; import here is a diamond and not a cycle.
+            (run-window-change-functions)
+            (let ((selected (*current-frame*)))
+              (let loop ((frames (*frame-list*)))
+                (cond ((null? frames) #f)
+                      (else
+                       (let ((f (car frames)))
+                         (when (or (eq? f selected)
+                                   (not (eq? (frame-output f)
+                                             (and selected
+                                                  (frame-output selected)))))
+                           (render! f)))
+                       (loop (cdr frames))))))
             ;; **The flag is cleared once every frame has been drawn**,
             ;; which is where `redisplay_internal` clears it (`xdisp.c`):
             ;; it means "something changed since the last redisplay", and

@@ -10002,7 +10002,7 @@ check is corrected.
 `popup-menu` (`menu-bar.scm`). Both corrected - a gap note that
 overstates is as expensive as one that understates.
 
-### The `a` code, carried without completion (2026-11-16)### The `a` code, carried without completion (2026-11-16)
+### The `a` code, carried without completion (2026-11-16)
 
 `a` asks for the name of *any* function, not a command - the ones worth
 instrumenting are rarely commands. Emacs gets that from the obarray with
@@ -10040,3 +10040,80 @@ procedure.)
 **So the remaining `callint.c` work was `k` `K` `U`, and its cost turned
 out to be sequence assembly rather than a registry - see above. With those
 in, and `a` follows it with **no list either** - see below.**
+
+# The window change stamp, and the history hook on it (2026-11-17)
+
+Chris: "fix the change_stamp thing". This is `window.c`'s change notice,
+ported whole, and it replaces the fingerprint `tab-bar-history-mode` had
+been using. DEPARTURES.md has the C each rule was taken from and the full
+account of what is not carried; this is what the next session needs.
+
+## What a window change now is
+
+`FRAME_WINDOW_CHANGE` is set by six sites (`window.c:3715`, `:4427`,
+`:4896`, `:5681`, `:5828`, `:8082`) and `redisplay_internal` calls
+`run_window_change_functions` (`xdisp.c:17588`). That walks the frames
+whose flag is set, asks per live window whether it changed buffer, pixel
+or body-pixel size, or is new (`w->change_stamp != f->change_stamp`), and
+asks whether the frame has fewer windows than at the last run. **Only
+then** does `window-configuration-change-hook` run. `tab-bar--history-change`
+is on that hook, which is where Emacs has it.
+
+`<frame>` gained `change-stamp`, `window-change`, `old-selected-window`
+and `number-of-windows`; `<window>` gained `change-stamp`, `old-buffer`
+and the four old sizes. All six `make<window>` sites and the one live
+`make<frame>` take the new arguments.
+
+## The thing that was wrong, and how it was wrong
+
+The previous session's note said a `set-window-configuration` restoring
+the layout the frame already had pushes a history entry in Emacs and not
+here, because the C sets the flag unconditionally. **Measured on Emacs
+31.1 in a pty: it does not push.** The flag is the first gate only; the
+per-window comparison is what decides. Taking the flag as the answer would
+have pushed exactly where Emacs does not - the correction was wrong in the
+same direction the departure was.
+
+The general lesson is already in this file twice, and this is a third
+instance: **when the claim is about behaviour, measure before writing it
+into a note**. The C *looks* like it says the flag is the answer, because
+the unconditional set is right there and the per-window walk is a page
+further on.
+
+## What to measure with, and where the table is
+
+`emacs -nw` under `script -qec` writing results with `with-temp-file`,
+then reading them back - `--batch` does not redisplay, so every hook count
+comes out zero and looks like "Emacs never runs the hook". The six-row
+table (split 1, no-op restore 0, real restore 1, select-window 0,
+set-window-buffer different 1, same 0) is pinned in
+`schemacs/editor/window-tests.scm`, a new suite.
+
+## Two flag sets that are this tree's, not the C's
+
+`delete-other-windows` (`window.scm`) and `resize-frame-windows!`
+(`frame.scm`) assign rectangles directly where the C runs
+`window_resize_apply` or sets the flag itself, so each sets it by hand,
+marked at the line. Without the second, a resized terminal frame ran no
+configuration hook at all.
+
+## Traps this pass
+
+- **The record's field order is the constructor's order.** The first
+  attempt passed `#f 0 #f` where the fields were `change-stamp`,
+  `window-change`, `old-selected-window` - the comment beside the call
+  was in a different order from the record, and `(+ #f 1)` killed the
+  hook on its first run.
+- **`window.scm`'s block was written in one deeply nested form and its
+  parens never came out right.** The way that worked: write the block to
+  `/tmp/block.scm`, read it with Guile's reader counting top-level forms,
+  and splice it whole. Hand-counting inside a five-deep `let*`/`lambda`
+  nest produced "unexpected end of input" three times.
+- **The C sets `window_change_record_frames` *before* running the
+  configuration hook** (`window.c:4296` then `:4308`), so a hook that
+  signals still leaves the record due. With the order reversed, a failing
+  hook left the flag set and would have run again on every redisplay.
+- **`xdisp -> window` is a diamond, not a cycle.** The earlier attempt
+  put the call in the command loop because it believed `window -> xdisp
+  -> simple -> window`; `window.scm` does not import `xdisp` at all.
+  `redisplay-frames!` is where `redisplay_internal` calls it now.

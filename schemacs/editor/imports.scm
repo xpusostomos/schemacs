@@ -643,6 +643,7 @@
     *visual-line-fringe-indicators*
     *window-combination-limit*
     *window-combination-resize*
+    *window-configuration-change-hook*
     *window-persistent-parameters*
     *window-restore-killed-buffer-windows*
     *window-scroll-function*
@@ -1449,6 +1450,7 @@
     forward-sexp-default-function
     forward-word
     forward-word-position
+    frame-change-stamp
     frame-char-height
     frame-char-size
     frame-char-width
@@ -1468,6 +1470,8 @@
     frame-minibuffer-window
     frame-name
     frame-new-size-p
+    frame-number-of-windows
+    frame-old-selected-window
     frame-or-buffer-changed-p
     frame-output
     frame-parameter
@@ -1484,6 +1488,7 @@
     frame-type?
     frame-visible-p
     frame-width
+    frame-window-change
     frame-windows
     frame?
     funcall-interactively
@@ -2281,6 +2286,7 @@
     run-hooks
     run-mode-hooks
     run-pre-command-hook!
+    run-window-change-functions
     run-with-idle-timer
     run-with-timer
     sanitize-char-width
@@ -2408,6 +2414,7 @@
     set!font-lock-defaults!
     set!font-lock-keywords!
     set!font-lock-mode!
+    set!frame-change-stamp
     set!frame-editor
     set!frame-height
     set!frame-keymap-state
@@ -2416,11 +2423,14 @@
     set!frame-message
     set!frame-message-timer
     set!frame-minibuffer-window
+    set!frame-number-of-windows
+    set!frame-old-selected-window
     set!frame-quit-cont
     set!frame-selected-window
     set!frame-tab-bar-items
     set!frame-tab-bar-items-used
     set!frame-width
+    set!frame-window-change
     set!frame-windows
     set!history-entries
     set!interval-left
@@ -2476,6 +2486,7 @@
     set!widget-value-selected!
     set!widget-value-value
     set!window-buffer
+    set!window-change-stamp
     set!window-children
     set!window-cursor-off?
     set!window-frame
@@ -2492,6 +2503,11 @@
     set!window-last-tab-line
     set!window-last-width
     set!window-left
+    set!window-old-body-pixel-height
+    set!window-old-body-pixel-width
+    set!window-old-buffer
+    set!window-old-pixel-height
+    set!window-old-pixel-width
     set!window-parameters
     set!window-parent
     set!window-top
@@ -3074,6 +3090,7 @@
     window-body-width
     window-bottom-divider-width
     window-buffer
+    window-change-stamp
     window-child
     window-child-count
     window-children
@@ -3141,6 +3158,11 @@
     window-normal-size
     window-normalize-buffer-to-switch-to
     window-normalize-window
+    window-old-body-pixel-height
+    window-old-body-pixel-width
+    window-old-buffer
+    window-old-pixel-height
+    window-old-pixel-width
     window-outdated?
     window-parameter
     window-parameters
