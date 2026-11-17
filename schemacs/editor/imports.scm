@@ -79,6 +79,7 @@
     (schemacs editor easy-mmode)
     (except (schemacs editor window)  *cursor-in-echo-area* window-live-p window-normal-size window-size)
     (schemacs editor warnings)
+    (schemacs editor doc)
     (schemacs editor loadup)
     (schemacs editor elisp-mode)
     (schemacs editor env)
@@ -106,6 +107,7 @@
     (schemacs editor scheme)
     (schemacs editor select)
     (schemacs editor seq)
+    (schemacs editor help)
     (except (schemacs editor syntax)  word-char? forward-word-position backward-word-position word-run-end word-run-start)
     (schemacs editor tab-bar)
     (schemacs editor tab-line)
@@ -1305,6 +1307,8 @@
     display-warning
     do-auto-fill
     do-pending-window-change
+    documentation
+    documentation-property
     down-list
     down-list-default-function
     downcase
@@ -1680,6 +1684,7 @@
     gui-set-selection
     handle-delete-frame
     handle-interrupt
+    help--key-description-fontified
     history-entries
     history?
     hscroll-line-slice
@@ -1853,6 +1858,7 @@
     key-binding
     key-description
     key-event->key
+    key-valid-p
     keyboard-coding-system
     keyboard-quit
     keymap
@@ -2818,10 +2824,12 @@
     strip-undo-boundaries
     subregexp-context-p
     subst-char-in-region
+    substitute-command-keys
     substitute-env-vars
     substitute-in-file-name
     substitute-key-definition
     substitute-key-definition-key
+    substitute-quotes
     suppress-keymap
     suspend-display!
     suspend-frame

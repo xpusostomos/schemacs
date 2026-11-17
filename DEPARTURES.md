@@ -6453,3 +6453,62 @@ Every expectation in `replace-tests.scm`'s new block is
   the C compares timespecs exactly.
 - `replace_range`'s vector form checks nothing of its own beyond the
   buffer's type; its only maker is the DEFUN, which validated the range.
+
+# `substitute-command-keys`, `key-valid-p` and `documentation` (2026-11-18)
+
+The help primitives the disabled-command prompt stands on, in two new
+libraries: `help.scm` (help.el's) and `doc.scm` (doc.c's reader half).
+
+## What is carried
+
+- **`substitute-command-keys`** (`help.el:1435`), cases 1A-1D and the
+  quote rules, with the C's in-place buffer walk (a temporary buffer,
+  every branch editing it) rather than a string accumulator - a `\=`
+  deletes two characters and a failed ``\`KEY'`` substitution has to
+  leave the backtick for the quote rule on the next pass, and a string
+  walk would re-implement that bookkeeping. `\[COMMAND]` resolves
+  through `where-is-internal` in the *user's* buffer (remembered as
+  `orig-buf`, as the C's `with-current-buffer` does), and both
+  substituted forms get the `face` **and** `font-lock-face`
+  `help-key-binding` properties, as the C adds both.
+- **`substitute-quotes`** (`help.el:1578`) and the two faces it and the
+  key substitution use: `help-key-binding` and its `:inherit` target
+  `fixed-pitch`, both from faces.el.
+- **`key-valid-p`** (`keymap.el:328`) - **a placement departure**: it is
+  `keymap.el`'s, but it is a string matcher (`string-match-p`,
+  `split-string`), and both live above `keymap.scm`; `help.scm` is the
+  first library that wants it. Every string here is multibyte, so the
+  C's `multibyte-string-p` arm is always true.
+- **`documentation`** and **`documentation-property`** (`doc.c:333`,
+  `:430`), including `documentation`'s `substitute-command-keys` run
+  unless RAW. A command's docstring is the record's
+  (`command-doc-string`), where `define-command` stores it; a symbol
+  that names nothing is `void-function` and a non-function is
+  `invalid-function`, both measured on Emacs.
+
+## Not carried, named
+
+- **`\{MAPVAR}` and `\<MAPVAR>`** - the keymap summary and the "use
+  this map" form. The summary is `help--describe-map-tree`, the
+  describe-bindings machinery (`C-h b`'s), which this tree has not; the
+  forms are left standing, and the walk moves past them as it does past
+  an unquoted non-key.
+- `help-link-key-to-documentation` / `help-mode--add-function-link` -
+  both gated on `help-buffer-under-preparation`, which nothing sets, so
+  Emacs takes the same fallback (the plain fontified key).
+- doc.c's DOC file (`get_doc_string`, `Snarf-documentation`): a
+  docstring lives on its procedure here, and a variable's on its
+  `variable-documentation` property (where `define-custom` puts it).
+
+## The measured table
+
+Every expectation in `help-tests.scm` (16) is `emacs -Q --batch`'s own:
+the thirteen-string `key-valid-p` table; `"abc"` unchanged;
+`\[narrow-to-region]` → `"C-x n n"`; `\[no-such-command]` →
+`"M-x no-such-command"`; ``\`C-x'`` → `"C-x"` with both face properties
+at the key's offset; the invalid ``\`not-a-key'`` → `"x\‘not-a-key’"`
+under `curve` (the backslash stands, the quotes convert - the C's walk
+leaves the backtick for the quote rule); a trailing backslash stands;
+`\=` at end stands; `a\=b` → `"ab"`; `\=\[` → `"\["`; the three quoting
+styles; `substitute-quotes`; and `documentation`'s substituted-vs-RAW
+pair on `narrow-to-region`'s own docstring.

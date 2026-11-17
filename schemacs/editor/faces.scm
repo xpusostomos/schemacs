@@ -993,6 +993,32 @@ This inherits from the `mode-line` face.")
           '((default :inherit tab-line-tab) (((class color) (min-colors 88) (background light)) :background "grey85") (((class color) (min-colors 88) (background dark)) :background "grey40"))
           "Tab line face for tab with current buffer in selected window.")
 
+    ;; faces.el's `fixed-pitch' and `help-key-binding' (`:2476', `:3068').
+    ;; The second names the first in `:inherit', which is why both land
+    ;; together - `substitute-command-keys' puts the face on the key
+    ;; descriptions it substitutes, and a help buffer draws them.
+    (defface 'fixed-pitch
+          '((t :family "Monospace"))
+          "The basic fixed-pitch face.")
+
+    (defface 'help-key-binding
+          '((((class color) (min-colors 88) (background light))
+             :background "grey96" :foreground "DarkBlue"
+             :box (:line-width (-1 . -1) :color "grey80")
+             :inherit fixed-pitch)
+            (((class color) (min-colors 88) (background dark))
+             :background "grey19" :foreground "LightBlue"
+             :box (:line-width (-1 . -1) :color "grey35")
+             :inherit fixed-pitch)
+            (((class color grayscale) (background light)) :background "grey90"
+             :inherit fixed-pitch)
+            (((class color grayscale) (background dark)) :background "grey25"
+             :inherit fixed-pitch)
+            (t :background "grey90" :inherit fixed-pitch))
+          "Face for keybindings in *Help* buffers.
+
+This face is added by `substitute-command-keys', which see.")
+
     (defface 'tab-line-highlight
           '((((class color) (min-colors 88) (background light)) :box (:line-width 1 :style released-button) :background "grey85" :foreground "black") (((class color) (min-colors 88) (background dark)) :box (:line-width 1 :style released-button) :background "grey40" :foreground "white") (t :inverse-video nil))
           "Tab line face for highlighting.")

@@ -45,6 +45,7 @@ SUITES = [
     'schemacs/editor/cl-indent-tests.scm',
     'schemacs/editor/marker-tests.scm',
     'schemacs/editor/editfns-tests.scm',
+    'schemacs/editor/help-tests.scm',
     'schemacs/editor/env-tests.scm',
     'schemacs/editor/fileio-tests.scm',
     'schemacs/editor/files-tests.scm',

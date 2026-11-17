@@ -10888,3 +10888,31 @@ as the C does, but no test pins a marker's position across a hunk;
 worth adding when something here depends on it. The `max-secs`
 escalation is measured only at 0 (the trivial path); no test forces a
 mid-diff abort, which needs a deliberately slow comparison.
+
+# The help primitives (2026-11-18)
+
+`help.scm` (help.el's `substitute-command-keys`, `substitute-quotes`,
+`key-valid-p`, `help--key-description-fontified`) and `doc.scm`
+(doc.c's `documentation`, `documentation-property`), with the
+`help-key-binding`/`fixed-pitch` faces. DEPARTURES.md has the measured
+table. What the next session needs for the disabled-command pass:
+
+* **`substitute-command-keys` is in place**, so `novice.el`'s prompt
+  strings work. `keyboard.scm`'s `help-echo-substitute-command-keys`
+  stub still returns its input unchanged - it can now be a seam: a
+  parameter in `keyboard.scm` defaulting to identity, installed by
+  `help.scm` (which is above it).
+* **`documentation` takes a procedure, a command record's symbol, or a
+  symbol carrying `'function-documentation`**; a bare symbol that names
+  nothing signals "Void function" and a non-function "Invalid function",
+  both measured on Emacs. `novice.el` passes a command symbol - fine.
+* **`key-valid-p` is in `help.scm`, not `keymap.scm`** (a named
+  placement departure): it needs `string-match-p` and `split-string`,
+  both above `keymap.scm`.
+* **The 1E forms (`\{MAPVAR}`, `\<MAPVAR>`) are not carried** - they
+  need `help--describe-map-tree`. They are left standing in the text.
+* Still missing for `novice.el` itself: `this-command-keys` as a
+  function (the tree has `*this-command-keys*`), `read-multiple-choice`
+  (rmc.scm exists - check its signature takes a help string and a
+  buffer name), `system-type` (absent), and `user-init-file` for
+  `enable-command`'s init-file write.
