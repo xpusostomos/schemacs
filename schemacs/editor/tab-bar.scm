@@ -58,10 +58,12 @@
   ;;
   ;;   * `frameset-*` persistence (`tab-bar--tab`'s `ws` source) and
   ;;     `tab-bar-select-restore-context` (`window-point-context-*`).
-  ;;   * **`tab-bar-auto-width`**: it lays tabs out with a `display`
-  ;;     space specification measured in pixels, and this renderer draws
-  ;;     character cells. The variable is carried so a user setting it
-  ;;     sees no error; the bar simply is not stretched.
+  ;;   * **`tab-bar-auto-width`'s memoization** (`tab-bar--auto-width-hash`,
+  ;;     keyed by `equal-including-properties`): the widths are recomputed
+  ;;     each redisplay rather than cached. **The sizing itself is
+  ;;     carried** - what Emacs pads with is a space that carries the
+  ;;     name's properties, not a `display` specification, so a renderer
+  ;;     that draws cells is sized the same way.
   ;;   * **touch input, tab drag and detach** (`tab-bar-mouse-move-tab`,
   ;;     `tab-bar-detach-tab`): no touch events, and detaching needs a
   ;;     new frame built *from* a window configuration, which
@@ -101,7 +103,10 @@
           window-minibuffer-p window-parameter set-window-parameter
           window-internal? window-parent window-height window-top
           window-left window-width resize-frame-windows!
-          frame-height frame-width frame-inner-width *pre-command-hook*)
+          frame-height frame-width frame-inner-width *pre-command-hook*
+          ;; the automatic tab widths: the cell size a tab's width is
+          ;; measured in (see `string-pixel-width` in `xdisp.scm`)
+          frame-char-height frame-char-width)
     (only (schemacs editor window)
        *window-configuration-change-hook*
           current-window-configuration set-window-configuration
@@ -135,7 +140,9 @@
           delete-region point-min eobp forward-line)
     (only (schemacs editor cmds) beginning-of-line delete-char forward-char)
     (only (schemacs editor indentc) move-to-column)
-    (only (schemacs editor search) re-search-forward)
+    (only (schemacs editor search) re-search-forward
+          ;; `tab-bar-auto-width-predicate-default` tests the item key
+          string-match-p)
     (only (schemacs editor derived) define-derived-mode)
     (only (schemacs editor files) kill-buffer)
     (only (schemacs editor marker) copy-marker markerp marker-buffer
@@ -144,11 +151,19 @@
           truncate-string-ellipsis)
     (only (schemacs editor character) string-width)
     (only (schemacs editor textprop) get-text-property add-face-text-property
-          put-text-property next-single-property-change)
+          put-text-property next-single-property-change
+          ;; `tab-bar-auto-width` pads a name with a space that carries
+          ;; the name's own properties
+          text-properties-at)
+    ;; `concat` and not `string-append`: the resized name keeps its
+    ;; properties, and `concat` is the C's `concat`.
+    (only (schemacs editor fns) concat)
     (only (schemacs editor seq) seq-position seq-filter seq-remove seq-sort-by
           seq-take)
     (only (schemacs editor xdisp) force-mode-line-update format-mode-line
           *tab-bar-keymap-function* *global-mode-string*
+          ;; the automatic tab widths' measurement
+          string-pixel-width
           *activate-menubar-hook* *menu-bar-update-hook*)
     (only (schemacs editor faces) *window-system*)
     (only (schemacs editor menu-bar) popup-menu menu-bar-keymap)
@@ -348,10 +363,19 @@ If nil, don't show it at all."
       :group 'tab-bar)
 
     (define-custom *tab-bar-auto-width* #t
-      "Automatically resize width of tabs on tab bar.
-**Carried as a variable only**: the layout it does is a `display`
-space specification measured in pixels, and this renderer draws
-character cells. Setting it has no effect here."
+      "Automatically resize width of tabs on tab bar to fill available tab-bar space.
+When non-nil, the widths of the tabs on the tab bar are automatically
+resized so that their width is evenly distributed across the tab bar.
+This keeps the widths of the tabs independent of the length of the
+buffer names shown on each tab; the tab widths change only when tabs
+are added or deleted, or when the frame's dimensions change.  This also
+avoids as much as possible wrapping a long tab bar to a second tab-bar
+line.
+
+The automatic resizing of tabs takes place as long as tabs are no wider
+than allowed by the value of `tab-bar-auto-width-max', and at least as
+wide as specified by the value of `tab-bar-auto-width-min'.  Tabs whose
+width falls outside these bounds are not resized."
       :type 'boolean
       :initialize custom-initialize-default
       :group 'tab-bar)
@@ -1110,7 +1134,10 @@ Function gets two arguments, the tab and its number."
         (map-keymap (lambda (key binding)
                       (define-key map (vector key) binding))
                     tab-bar-map)
-        ;; **`tab-bar-auto-width` is not carried** - the header says why.
+        ;; **`tab-bar-auto-width`** (`tab-bar.el:1283`) resizes the tab
+        ;; names before the items become the bar's keymap.
+        (when (*tab-bar-auto-width*)
+          (set! items (tab-bar-auto-width items)))
         ;; **An item IS a keymap alist entry**: `(current-tab menu-item
         ;; "name" ignore ...)` means key `current-tab`, binding
         ;; `(menu-item "name" ignore ...)` - the car and the cdr, not the
@@ -1129,6 +1156,172 @@ Function gets two arguments, the tab and its number."
         ;; `tab-bar-items` (`keyboard.c`'s walk) finds the items.
         (define-key *default-keymap* (vector 'tab-bar) map)
         map))
+
+    ;;--------------------------------------------------------------
+    ;; Automatic tab widths - `tab-bar.el:1288`
+    ;;
+    ;; "Automatically resize width of tabs on tab bar to fill available
+    ;; tab-bar space." Every tab is padded (or truncated) to the same
+    ;; width, so the tabs do not move when a buffer name changes length.
+    ;;--------------------------------------------------------------
+
+    (define-custom *tab-bar-auto-width-max* '((220) 20)
+      "Maximum width for automatic resizing of width of tab-bar tabs.
+This determines the maximum width of tabs before their names will be
+truncated on display.
+
+The value should be a list of two values: the first is the maximum width
+of tabs in pixels for GUI frames, the second is the maximum width of
+tabs in characters on TTY frames.  Of these two values both accept
+integers, but the first element that provides a width in pixels can
+further be a list of a single integer, also specifying an integral width
+in pixels, but signifying that it should be scaled by the difference
+between the `frame-char-height' of the tab bar's frame, and 15, when the
+former height exceeds the latter threshold.
+
+If the value of this variable is nil, there is no limit on maximum
+width.  This variable has effect only when `tab-bar-auto-width' is
+non-nil."
+      :type 'sexp
+      :initialize custom-initialize-default
+      :group 'tab-bar)
+
+    (define tab-bar-auto-width-min '((20) 2))
+    ;; ^ "Minimum width of tabs for automatic resizing under
+    ;; `tab-bar-auto-width'. ... It's not recommended to change this
+    ;; value since with larger values, the tab bar might wrap to the
+    ;; second line when it shouldn't."
+    ;;
+    ;; A `defvar` in Emacs, not a defcustom, so a plain variable here.
+
+    (define tab-bar--auto-width-faces-default
+      '(tab-bar-tab tab-bar-tab-inactive
+        tab-bar-tab-ungrouped tab-bar-tab-group-inactive))
+
+    (define tab-bar-auto-width-faces tab-bar--auto-width-faces-default)
+    ;; ^ "Resize tabs only with these faces."
+
+    (define (tab-bar-auto-width-predicate-default item)
+      ;; "Accepts tab ITEM and returns non-nil for tabs and tab groups."
+      ;;
+      ;; The C tests the *key* - `current-tab`, or a symbol whose name
+      ;; starts with `tab-` or `group-` - unless the face list has been
+      ;; customized, in which case it looks at the name's face instead.
+      ;;--------------------------------------------------------------
+      (if (eq? tab-bar-auto-width-faces tab-bar--auto-width-faces-default)
+          (string-match-p "\\`\\(?:current-tab\\|\\(?:group\\|tab\\)-\\)"
+                          (symbol->string (car item)))
+          (memq (get-text-property 0 'face (list-ref item 2))
+                tab-bar-auto-width-faces)))
+
+    (define tab-bar-auto-width-functions
+      (list tab-bar-auto-width-predicate-default))
+    ;; ^ "List of functions for `tab-bar-auto-width' to call with a tab
+    ;; ITEM."
+
+    (define (tab-bar-auto-width-1 wvalue)
+      ;; "Return scaled value if WVALUE, if necessary. If WVALUE is a
+      ;; list of the form accepted as pixel width specifications by
+      ;; `tab-bar-auto-width-max' and suchlike, return its value as it
+      ;; should be scaled for display on the current frame."
+      ;;--------------------------------------------------------------
+      (if (pair? wvalue)
+          (let ((height (frame-char-height)))
+            (if (< height 15)
+                (car wvalue)
+                (* (car wvalue) (/ height 15.0))))
+          wvalue))
+
+    (define (%tab-bar-auto-width-name name width)
+      ;; The `with-memoization` body of `tab-bar-auto-width`
+      ;; (`tab-bar.el:1432`): make NAME WIDTH pixels wide by padding it
+      ;; with a space that carries the name's own properties, or by
+      ;; dropping characters - and shadowing the last two - when it is
+      ;; too wide.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length name))
+             (close-p (and (> len 0) (get-text-property (- len 1) 'close-tab name)))
+             (prev-width (string-pixel-width name)))
+        (cond
+         ((< prev-width width)
+          ;; "Set back a shorter name" - the loop tries one more space at
+          ;; a time and answers the last name that still fit.
+          (let* ((space (apply propertize " " (text-properties-at 0 name)))
+                 (ins-pos (- len (if close-p (string-length tab-bar-close-button) 0))))
+            (let loop ((name name))
+              (let* ((next (string-append (substring name 0 ins-pos)
+                                          space
+                                          (substring name ins-pos)))
+                     (curr-width (string-pixel-width next)))
+                (if (< curr-width width)
+                    (loop next)
+                    name)))))
+         ((> prev-width width)
+          (let ((shrunk
+                 (let loop ((name name))
+                   (let* ((len (string-length name))
+                          (next (if close-p
+                                    (string-append (substring name 0 (- len 2))
+                                                   (substring name (- len 1) len))
+                                    (substring name 0 (- len 1)))))
+                     (if (> (string-pixel-width next) width)
+                         (loop next)
+                         next)))))
+            ;; "Set back a shorter name", then mark the cut with the
+            ;; `shadow' face on the last two characters.
+            (let* ((len (string-length shrunk))
+                   (pos (- len (if close-p 1 0))))
+              (add-face-text-property (max 0 (- pos 2)) (max 0 pos) 'shadow
+                                      #f shrunk))
+            shrunk))
+         (else name))))
+
+    (define (tab-bar-auto-width items)
+      ;; "Return tab-bar items with resized tab names."
+      ;;
+      ;; **Not carried: the memoization** (`tab-bar--auto-width-hash`,
+      ;; keyed by `equal-including-properties`). It is a cache, not a
+      ;; rule - the answer is the same without it - and this tree has no
+      ;; `equal-including-properties` to key it with. What it saves is
+      ;; the repeated measurement in the padding loop, which here is a
+      ;; `string-width` rather than a glyph walk.
+      ;;--------------------------------------------------------------
+      (let ((tabs '())     ;; tabs whose names are resized
+            (non-tabs "")  ;; concatenated names of the others
+            (width 0))
+        (for-each
+         (lambda (item)
+           (when (and (pair? item) (pair? (cdr item)) (pair? (cddr item))
+                      (eq? (list-ref item 1) 'menu-item)
+                      (string? (list-ref item 2)))
+             (if (run-hook-with-args-until-success
+                  tab-bar-auto-width-functions item)
+                 (set! tabs (cons item tabs))
+                 (unless (eq? (car item) 'align-right)
+                   ;; `concat`, not `string-append`: the properties of the
+                   ;; names have to survive into the measurement's face.
+                   (set! non-tabs (concat non-tabs (list-ref item 2)))))))
+         items)
+        (when (pair? tabs)
+          (add-face-text-property 0 (string-length non-tabs) 'tab-bar #f non-tabs)
+          (set! width (quotient (- (* (frame-inner-width) (frame-char-width))
+                                   (string-pixel-width non-tabs))
+                                (length tabs)))
+          (when tab-bar-auto-width-min
+            (set! width (max width (if (*window-system*)
+                                       (tab-bar-auto-width-1
+                                        (car tab-bar-auto-width-min))
+                                       (cadr tab-bar-auto-width-min)))))
+          (when (*tab-bar-auto-width-max*)
+            (set! width (min width (if (*window-system*)
+                                       (tab-bar-auto-width-1
+                                        (car (*tab-bar-auto-width-max*)))
+                                       (cadr (*tab-bar-auto-width-max*))))))
+          (for-each
+           (lambda (item)
+             (set-car! (cddr item) (%tab-bar-auto-width-name (list-ref item 2) width)))
+           tabs))
+        items))
 
     (define-custom *tab-bar-format*
       (list tab-bar-format-history tab-bar-format-tabs

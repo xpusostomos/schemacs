@@ -2653,6 +2653,7 @@
     string-lessp
     string-match
     string-match-p
+    string-pixel-width
     string-prefix-p
     string-replace
     string-search-forward

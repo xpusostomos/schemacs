@@ -10117,3 +10117,37 @@ configuration hook at all.
   put the call in the command loop because it believed `window -> xdisp
   -> simple -> window`; `window.scm` does not import `xdisp` at all.
   `redisplay-frames!` is where `redisplay_internal` calls it now.
+
+# `tab-bar-auto-width` (2026-11-17)
+
+The first of the tab-bar/tab-line remainder. `tab-bar-auto-width`
+(`tab-bar.el:1288`) is ported, with `string-pixel-width` under it in
+`xdisp.scm` (DEPARTURES.md says why it lives there rather than in a
+`subr-x` library).
+
+* It is called from `tab-bar-make-keymap-1`, where Emacs calls it
+  (`tab-bar.el:1283`), and it **mutates the item's caption** - which is
+  safe because every format function conses fresh item lists on each
+  call.
+* The padding is `(apply propertize " " (text-properties-at 0 name))`, as
+  the C has it; a `string-append` of a plain space would lose the face and
+  the bar would measure and draw it differently.
+* **`tab-bar-auto-width-min` is a `defvar` in Emacs**, so it is a plain
+  variable here; `tab-bar-auto-width-max` is a defcustom and so a
+  parameter (`(*tab-bar-auto-width-max*)`). Writing one for the other is
+  the mistake this cost: `(when *tab-bar-auto-width-max* ...)` compiles
+  and tests the *procedure*.
+* `tab-bar-tests` gains two: the captions are un-stretched with the
+  feature bound off (the item-shape test, which now binds
+  `(*tab-bar-auto-width* #f)`), and two tabs of different name lengths
+  come out the same width with it on. The second was run with the
+  feature bound off and seen to fail (`(#f #f)`).
+
+## What is left in tab-bar after this
+
+`tab-bar-detach-tab`, `tab-bar-move-tab-to-frame`, `tab-bar-mouse-move-tab`
+(drag), `tab-bar-mouse-context-menu`, `tab-bar--load-buttons`,
+`tab-bar-get-buffer-tab`/`tab-bar--reusable-frames`,
+`tab-bar-minibuffer-restore-tab`/`tab-bar-select-restore-windows`, the
+`frameset` persistence, the Gtk tab bar as a widget, and touch (no touch
+events exist in either front end).

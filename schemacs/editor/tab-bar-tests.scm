@@ -30,6 +30,7 @@
        tab-bar-format-menu-bar tab-bar-menu-bar-button
        tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
        tab-switcher-mode-map
+       *tab-bar-auto-width*
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*
        *tab-bar-new-tab-choice* tab-bar-split-tab tab-bar-merge-tabs
        tab-bar-move-window-to-tab split-tab merge-tabs tab-new tab-list)
@@ -174,11 +175,36 @@
       (map (lambda (item) (car item)) (tab-bar-format-list (*tab-bar-format*))))))
 
 ;; The parsed items carry the tab's caption, its six slots, and a nil
-;; binding for a tab (the click finds its tab by the key).
+;; binding for a tab (the click finds its tab by the key). **The captions
+;; are the un-stretched names here**: `tab-bar-auto-width` is bound off,
+;; because what this checks is the item's shape, not the layout.
 (test-equal '("|" "tab-one x" "|" " + ")
   (let ((frame (fresh-frame)))
-    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f)
+                   (*tab-bar-auto-width* #f))
       (map (lambda (item) (list-ref item 3)) (tab-bar-items)))))
+
+;; **`tab-bar-auto-width`** (`tab-bar.el:1288`) gives every tab the same
+;; width, so the bar does not shuffle when a buffer name changes length:
+;; `(frame-inner-width - the non-tab items) / the tab count`, clamped by
+;; `tab-bar-auto-width-min`/`-max`. Two tabs of different name lengths
+;; come out the same width, and wider than either name.
+(test-equal '(#t #t)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (switch-to-buffer (get-buffer-create "two"))
+      (let* ((items (tab-bar-items))
+             (caption-of
+              (lambda (key)
+                (let loop ((rest items))
+                  (cond ((null? rest) #f)
+                        ((eq? (car (car rest)) key) (list-ref (car rest) 3))
+                        (else (loop (cdr rest)))))))
+             (first (caption-of 'tab-1))
+             (current (caption-of 'current-tab)))
+        (list (= (string-length first) (string-length current))
+              (> (string-length first) (string-length "tab-one x")))))))
 
 ;; ...and the current tab's item is enabled, with the close button inside
 ;; its caption - `tab-bar-name-format-close-button`.

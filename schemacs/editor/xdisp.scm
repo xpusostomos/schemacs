@@ -34,7 +34,11 @@
     ;; coordinates arrive as inexact numbers and every cell here
     ;; is an exact one - `pgtk.sld''s `pgtk-ensure-surface!' makes
     ;; the same conversion for the same reason.
-    (only (guile) delq filter sort inexact->exact)
+    (only (guile) delq filter sort inexact->exact
+          ;; `string-pixel-width` measures the widest line of a string
+          ;; that holds newlines, as the C's `buffer-text-pixel-size`
+          ;; does over the work buffer.
+          string-split)
     ;; The display interface: the redisplay draws through these generics
     ;; and never touches a terminal itself. `dispnew.sld' defines them,
     ;; and `term.sld' answers them for the curses terminal.
@@ -99,6 +103,9 @@
     ;; unlike `string-append' it copies the pieces' text properties, as
     ;; the C's does; `pad-line`'s padding goes on through it.
     (only (schemacs editor fns) concat)
+    ;; `string-width` is `character.c`'s, and `string-pixel-width` below
+    ;; is the cell-model measurement over it.
+    (only (schemacs editor character) string-width)
     ;; `count-lines' is `xdisp.c''s own (`:29892') and reads straight from
     ;; this file's library - it is placed in `fns.scm' beside the
     ;; `line-number-at-pos' that wants it, because this library is the top
@@ -109,6 +116,8 @@
          *current-frame* *echo-area-buffer* *minibuffer*
          *window-scroll-function*
          *frame-cursor-type* *frame-focus* frame-height frame-width
+         ;; `string-pixel-width` measures in the frame's cells
+         frame-char-width
          ;; `FRAME_MENU_BAR_LINES (f)` - whether this frame draws a bar -
          ;; and `f->menu_bar_vector`, where `display_menu_bar` records the
          ;; column it drew each item at.
@@ -374,6 +383,8 @@
    *truncate-partial-width-windows*
    line-display-rows
    line-display-width
+   ;; `subr-x.el`'s, for want of a `subr-x` library above `frame.scm`
+   string-pixel-width
    mode-line-string
    render! redisplay-frames! *redisplay-in-progress* *after-redisplay-hook*
    force-mode-line-update
@@ -1780,6 +1791,32 @@
             column
             (let ((ch (string-ref line-string i)))
               (loop (+ i 1) (+ column (char-display-width ch column)))))))
+
+    (define (string-pixel-width string . args)
+      ;; GNU Emacs's `string-pixel-width` (`subr-x.el:389`): "Return the
+      ;; width of STRING in pixels. ... If you call this function to
+      ;; measure pixel width of a string with embedded newlines, it
+      ;; returns the width of the widest substring that does not include
+      ;; newlines."
+      ;;
+      ;; **It lives here rather than in a `subr-x` library**, because it
+      ;; needs the frame's cell size and `subr.scm` is below `frame.scm`.
+      ;; It is the same placement `buffer-text-pixel-size` would have if
+      ;; this tree had one.
+      ;;
+      ;; **The C's measurement is not carried, and cannot be**: the
+      ;; function fills a work buffer and runs the display iterator over
+      ;; it (`buffer-text-pixel-size`, `xdisp.c`), which asks the font.
+      ;; Here a glyph is one cell, so a line's width is its cell width
+      ;; times the frame's character width - the same product
+      ;; `window-pixel-width` is. The optional BUFFER argument is dropped
+      ;; for the same reason: a face remapping does not change a glyph's
+      ;; width.
+      ;;--------------------------------------------------------------
+      (if (= (string-length string) 0)
+          0
+          (* (apply max (map string-width (string-split string #\newline)))
+             (frame-char-width))))
 
     (define (draw-special-glyph! row-y x0 width glyph)
       ;; The continuation glyph (`\') or the truncation glyph (`$') in a

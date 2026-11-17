@@ -4082,6 +4082,40 @@ Both are marked at the line.
   made when the constructor returns.
 * **`report_selected_window_change`** (the input method).
 
+# `tab-bar-auto-width`, and `string-pixel-width` in a cell renderer
+# (2026-11-17)
+
+`tab-bar-auto-width` (`tab-bar.el:1288`) is ported: every tab's name is
+padded or truncated to `(frame-inner-width - the non-tab items) / the tab
+count` pixels, clamped by `tab-bar-auto-width-min`/`-max`, and the
+padding is a space that carries the name's own text properties - which is
+exactly what Emacs does, so a renderer that draws cells sizes the bar the
+same way.
+
+## What is not carried
+
+* **The memoization** (`tab-bar--auto-width-hash`, keyed by
+  `equal-including-properties`). It is a cache, not a rule: the names come
+  out the same. This tree has no `equal-including-properties` to key it
+  with, and what the cache saves is the padding loop's repeated
+  measurement, which here is a `string-width` rather than a glyph walk.
+
+## `string-pixel-width` is the cell model, and lives in `xdisp.scm`
+
+`subr-x.el:389`'s function measures a string by filling a work buffer and
+running the display iterator over it (`buffer-text-pixel-size`), which
+asks the font. This tree has one cell size per frame, so the answer is
+`(string-width STRING) × (frame-char-width)` - the same product
+`window-pixel-width` is. A line's width is its cell width; a string with
+newlines answers its widest line, as the C's docstring promises.
+
+**Placement**: `xdisp.scm`, not a `subr-x` library, because it needs
+`frame-char-width` and `subr.scm` is below `frame.scm` - the same seam
+reasoning that put `locate-file-internal` in `fileio.scm`.
+
+`buffer-text-pixel-size` itself is not ported: there is no font metric to
+ask, so it would be a multiplication behind a glyph walk.
+
 # Window states: the size registers, and the pixel/total split
 (2026-11-16)
 
