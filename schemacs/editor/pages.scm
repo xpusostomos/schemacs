@@ -35,7 +35,8 @@
     ;; `page-delimiter` is `paragraphs.el:213`'s defcustom; page.el only
     ;; reads it. It lives in `paragraphs.scm` and is re-exported here, so
     ;; this library's readers do not move.
-    (only (schemacs editor paragraphs) *page-delimiter*))
+    (only (schemacs editor paragraphs) *page-delimiter*)
+    (only (schemacs editor intervals) put))
 
   (export *page-delimiter* backward-page forward-page narrow-to-page)
 
@@ -98,9 +99,11 @@
       ;; or backward by that many pages, thus showing a page other than
       ;; the one point was originally in."
       ;;
-      ;; `(put 'narrow-to-page 'disabled t)' (`page.el:127') is Emacs's
-      ;; too; the disabled-command machinery is not carried - see
-      ;; DEPARTURES.md.
+      ;; `(put 'narrow-to-page 'disabled t)' (`page.el:127') is set
+      ;; below, as `bindings.el:1111' sets `narrow-to-region`'s: the
+      ;; prompt is `novice.scm`'s, and with that library not loaded the
+      ;; command runs as Emacs's does with `disabled-command-function`
+      ;; nil.
       ;;--------------------------------------------------------------
       "Make text outside current page invisible.
 A numeric arg specifies to move forward or backward by that many pages,
@@ -157,5 +160,8 @@ thus showing a page other than the one point was originally in."
 
     ;; `narrow-map`'s `p` (`bindings.el:1729'), flat - see the note on
     ;; `narrow-map` in `editfns.scm`.
+
+    ;; `(put 'narrow-to-page 'disabled t)' (`page.el:127').
+    (put 'narrow-to-page 'disabled #t)
     (define-key *default-keymap* (kbd "C-x n p") narrow-to-page)
 ))

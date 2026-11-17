@@ -13,7 +13,9 @@
     ;; copy, which `,describe' shows: `procedure-name' and
     ;; `procedure-documentation' read them back for the obarray record.
     (only (guile) current-module procedure-name procedure-documentation
-          logand))
+          logand)
+    ;; the `disabled' property `command-execute` reads (`simple.el:2811`)
+    (only (schemacs editor intervals) get put))
 
   (export
    command-type? make<command> new-command new-count-command
@@ -31,6 +33,12 @@
    *format-message-function* *read-string-function* *read-number-function*
    *read-char-event-function* *message-clear-function*
    *read-key-sequence-function* *read-key-sequence-vector-function*
+   ;; the disabled-command machinery: the hook function
+   ;; (`novice.el`'s, installed by `novice.scm`) and the asker the
+   ;; `query' form uses (`simple.el`'s `command-execute--query`, whose
+   ;; `y-or-n-p`/`yes-or-no-p` live above this library).
+   *disabled-command-function* *command-execute--query-function*
+   command-query %run-command
    *interactive-read-function-name-function*
    *read-command-function* *read-variable-function*
    *read-minibuffer-function* *eval-minibuffer-function*
@@ -466,6 +474,29 @@
     (define *read-key-sequence-vector-function* (make-parameter #f))
     ;; ^ The `k' and `K' readers (`keyboard.c:12501', `:12562'), both
     ;; `keyboard.scm`'s.
+    (define *disabled-command-function* (make-parameter #f))
+    ;; ^ `disabled-command-function' (`novice.el:38'): "Function to call
+    ;; to handle disabled commands. If nil, the feature is disabled,
+    ;; i.e. all commands work normally." Emacs `setq`s it (to nil on the
+    ;; `!' answer); a parameter is this tree's spelling for a variable
+    ;; whose readers are in another library and whose setter must be
+    ;; seen by compiled readers.
+    (define *command-execute--query-function* (make-parameter #f))
+    ;; ^ `command-execute--query` (`simple.el:2857`): "Query the user
+    ;; whether to run COMMAND." The askers are `files.scm`'s
+    ;; `y-or-n-p` and `minibuffer.scm`'s `yes-or-no-p`, both above this
+    ;; library; `novice.scm` installs the whole call.
+
+    (define (command-query command query . rest)
+      ;; GNU Emacs's `command-query' (`simple.el:2865'): "Make executing
+      ;; COMMAND issue QUERY. This will, by default, use `y-or-n-p', but
+      ;; if VERBOSE, `yes-or-no-p' is used instead." **A placement
+      ;; departure**: `simple.el`'s, beside the `command-execute` check
+      ;; in `run-command` that reads it.
+      ;;--------------------------------------------------------------
+      (put command 'disabled
+           (list 'query (and (pair? rest) (car rest)) query)))
+
     (define *read-char-event-function* (make-parameter #f))
     (define *message-clear-function* (make-parameter #f))
     ;; ^ The `c' code's reader (`keyboard.c:11240`, spelled
@@ -1151,8 +1182,35 @@
       ;; arguments, so the usual call passes none; a command that
       ;; declares it consumes the universal argument is passed the raw
       ;; `UARG' value.
-      (apply (command-procedure cmd) args)
-      )
+      ;;
+      ;; **The disabled check comes first** - `command-execute`'s
+      ;; (`simple.el:2811'): "if the command's `disabled' property is
+      ;; set, either ask about it - the `query' form - or hand it to
+      ;; `disabled-command-function', which the user can answer once,
+      ;; enable forever, or cancel; the command does not run at all."
+      ;; Both halves arrive as seams because the askers live above this
+      ;; library; with neither installed the machinery is off, which is
+      ;; Emacs's own `disabled-command-function' of nil.
+      ;;--------------------------------------------------------------
+      (let* ((name (string->symbol (command-name cmd)))
+             (disabled (get name 'disabled))
+             (query? (and (pair? disabled) (eq? (car disabled) 'query))))
+        (if (and disabled
+                 (or (and query?
+                          (not (and (*command-execute--query-function*)
+                                    ((*command-execute--query-function*) cmd))))
+                     (and (not query?) (*disabled-command-function*))))
+            (unless query?
+              ((*disabled-command-function*)))
+            (%run-command cmd args))))
+
+    (define (%run-command cmd args)
+      ;; The call itself, without the disabled check - Emacs's
+      ;; `call-interactively` from `disabled-command-function`
+      ;; (`novice.el`), which must be able to run the very command it
+      ;; just asked about. `novice.scm` is the caller.
+      ;;--------------------------------------------------------------
+      (apply (command-procedure cmd) args))
 
     (define (apply-command cmd . args)
       ;; Some commands have an "API" (application programming interface)

@@ -90,7 +90,7 @@
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
-    (only (schemacs editor intervals) make-buffer-string)
+    (only (schemacs editor intervals) make-buffer-string get put)
     
     ;; The scans `bol', `eol' and the line arithmetic below are built on -
     ;; `find_newline`, `scan_newline_from_point` and
@@ -1906,6 +1906,13 @@ argument.  To gain access to other portions of the buffer, use
 
     ;; `C-x n n` and `C-x n w` - `narrow-map`, flat (see above).
     (define-key *default-keymap* (kbd "C-x n n") narrow-to-region)
+    ;; `(put 'narrow-to-region 'disabled t)' (`bindings.el:1111'): Emacs
+    ;; asks "Use this command?" before it narrows. The property is read
+    ;; by `run-command` (`command.scm`), and the prompt is `novice.scm`'s
+    ;; - with `novice.scm` not loaded, `disabled-command-function` is
+    ;; nil and the command runs, exactly as Emacs's variable's default
+    ;; of nil means "all commands work normally".
+    (put 'narrow-to-region 'disabled #t)
     (define-key *default-keymap* (kbd "C-x n w") widen)
 
     (define (%clip-changed! buffer)

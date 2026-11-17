@@ -100,7 +100,7 @@
    splash-screen-keymap
    ;; whether the init file is loaded at all - the command line's
    ;; `--no-init-file' (`-q'), which an entry point binds
-   *init-file-user*
+   *init-file-user* *user-init-file*
    ;; emacs.c's two process facts the Lisp layer reads
    system-type daemonp
    )
@@ -231,6 +231,12 @@
       ;;--------------------------------------------------------------
       #f)
 
+    (define *user-init-file* (make-parameter #f))
+    ;; ^ GNU Emacs's `user-init-file' (`startup.el`): "File name of the
+    ;; user's init file ... nil if no init file has been loaded." Set by
+    ;; `load-init` to the path it loaded; `novice.el`'s
+    ;; `enable-command` asks whether there is one to write to.
+
     (define *init-file-user* (make-parameter #t))
     ;; ^ GNU Emacs's `init-file-user' (`startup.el:341'), which is what
     ;; `--no-init-file' (`-q') sets to nil (:1407) and what
@@ -341,6 +347,7 @@
       ;;--------------------------------------------------------------
       (let ((path (and (*init-file-user*) (init-path))))
         (when path
+          (*user-init-file* path)
           ;; In the *user's* module and not this library's, so that the
           ;; file has Guile's ordinary bindings - `display', `getenv' and
           ;; the rest - and `(import (scheme-utils repl server))' works,

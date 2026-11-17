@@ -6512,3 +6512,77 @@ leaves the backtick for the quote rule); a trailing backslash stands;
 `\=` at end stands; `a\=b` → `"ab"`; `\=\[` → `"\["`; the three quoting
 styles; `substitute-quotes`; and `documentation`'s substituted-vs-RAW
 pair on `narrow-to-region`'s own docstring.
+
+# The disabled-command machinery (2026-11-18)
+
+`novice.scm` (novice.el), the check in `command.scm`'s `run-command`
+(the tree's `command-execute`, `simple.el:2811`), the
+`command-query`/`command-execute--query` pair, and rmc.el's
+`read-multiple-choice--from-minibuffer` - the arm Emacs actually takes
+for `novice.el`'s prompt. `C-x n n` now asks "Use this command?" before
+it narrows, and `C-x n p` likewise.
+
+## The shape
+
+- **The check** is `run-command`'s first act: a command whose `disabled`
+  property is set is handed to `disabled-command-function` (plain t) or
+  asked about (`(query VERBOSE PROMPT)`), and only then run - through
+  `%run-command`, which `novice.scm` calls back through as Emacs's
+  `call-interactively` does, so the command the user just approved does
+  not ask again.
+- **Both halves are seams**, because the askers (`y-or-n-p`,
+  `yes-or-no-p`) live above `command.scm`: `*disabled-command-function*`
+  and `*command-execute--query-function*` are parameters there, and
+  `novice.scm` installs both as it loads. With neither installed the
+  machinery is off - Emacs's own `disabled-command-function` of nil.
+- **`commmand-query` is a placement departure**: `simple.el`'s, beside
+  the `run-command` check that reads it.
+- **The markers**: `(put 'narrow-to-region 'disabled #t)` in
+  `editfns.scm`'s narrow-map section (bindings.el:1111's home here) and
+  `(put 'narrow-to-page 'disabled #t)` in `pages.scm` (page.el:127).
+
+## rmc.el's minibuffer arm, and the bug it found
+
+`novice.el` passes HELP-STRING and SHOW-HELP but no LONG-FORM, so
+Emacs takes `read-multiple-choice--from-minibuffer` (its
+`read-char-choice-use-read-key` and `use-dialog-box-p` are both nil).
+That arm is ported: a keymap built from the shared minibuffer
+bindings, each choice's key bound to a command that records
+`last-command-event` and exits, `?`/C-h for the help, `[remap
+self-insert-command]` for the refusal.
+
+**The bug it exposed**: the choices hold *characters* in this tree
+(the callers write `(list #\y "yes")`) where Emacs holds `?\y`
+integers, so the command must convert `last-command-event` with
+`integer->char` before `assq`ing it - without that every answer looked
+like a refusal (`(assq 32 '(#\space ...))` is false), and the first
+"refusal" that seemed to work was an error in the caller's `char=?`
+taking the error path. Measured, then fixed; the pty check pins SPC,
+n and `!`.
+
+## Not carried, each named
+
+- **`en/disable-command`'s init-file write.** Emacs edits the
+  `(put 'CMD 'disabled X)` line out of `user-init-file` and appends a
+  new one. This tree's init file is Scheme, so the line would also need
+  an `(import (schemacs editor intervals))`, and finding the file is
+  `startup.scm`'s path discovery - the *session* effect (the `put`) is
+  carried, which is what the user sees; `startup.scm` gained
+  `*user-init-file*` for the day the write half is done.
+- **`ding`** (rmc's wrong-key bell): the "Invalid choice" message is
+  the report.
+- **The help buffer is not killed on the way out** (`rmc.el:384`'s
+  `unwind-protect`): the next prompt of the same name empties and
+  reuses it.
+- **The modal/dialog arm** (`--short-answers`), for the two switches
+  above that have no counterpart here.
+- `enable-recursive-minibuffers` and the text-conversion style in the
+  minibuffer arm - neither exists.
+
+## Verification
+
+`novice-tests.scm` (7): the property both ways, an unknown name's
+error, the hook path, hook-nil-means-off, the query form's two
+answers, and `%run-command`'s bypass. The pty battery gained
+`disabled-command` (n refuses, SPC runs once, `!` enables for the
+session) and `narrow` now answers the prompt it pins.

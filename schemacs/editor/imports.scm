@@ -78,6 +78,7 @@
     (schemacs editor icons)
     (schemacs editor easy-mmode)
     (except (schemacs editor window)  *cursor-in-echo-area* window-live-p window-normal-size window-size)
+    (schemacs editor novice)
     (schemacs editor warnings)
     (schemacs editor doc)
     (schemacs editor loadup)
@@ -135,6 +136,7 @@
     %nonexistent-modtime-nsecs
     %row-beginning
     %row-of-position
+    %run-command
     %set!keymap-order!
     %setup-syntax-table
     %text-editor-incr-modiff!
@@ -222,6 +224,7 @@
     *coding-system-table*
     *colon-double-space*
     *color-name-rgb-alist*
+    *command-execute--query-function*
     *command-table*
     *comment-auto-fill-only-comments*
     *comment-end-can-be-escaped*
@@ -294,6 +297,7 @@
     *dired-subdir-alist*
     *dired-switches-in-mode-line*
     *dired-trivial-filenames*
+    *disabled-command-function*
     *dispatch-event*
     *display-color-cells*
     *display-type*
@@ -683,6 +687,7 @@
     *use-empty-active-region*
     *use-hard-newlines*
     *use-region-p-function*
+    *user-init-file*
     *visual-line-fringe-indicators*
     *window-combination-limit*
     *window-combination-resize*
@@ -985,6 +990,7 @@
     command-loop-ready?
     command-name
     command-procedure
+    command-query
     command-record-named
     command-record-of
     command-remapping
@@ -1280,7 +1286,9 @@
     dired-unmark
     dired-up-directory
     dired-why
+    disable-command
     disable-theme
+    disabled-command-function
     discard-menu-items
     dispatch-input-event
     dispatch-key
@@ -1327,6 +1335,8 @@
     emacs-lisp-mode-hook
     emacs-lisp-mode-map
     emacs-lisp-mode-syntax-table
+    en/disable-command
+    enable-command
     enable-theme
     encode-coding-string
     encode-eol
@@ -1366,6 +1376,7 @@
     exec-path
     executable-find
     execute-extended-command
+    exit-minibuffer
     exit-recursive-edit
     exit-splash-screen
     expand-file-name
@@ -2129,10 +2140,12 @@
     minibuffer-history
     minibuffer-insert!
     minibuffer-lazy-highlight-setup
+    minibuffer-local-bindings
     minibuffer-local-completion-map
     minibuffer-local-filename-completion-map
     minibuffer-local-map
     minibuffer-local-must-match-map
+    minibuffer-map-from-bindings
     minibuffer-message
     minibuffer-next-completion
     minibuffer-position
@@ -2355,6 +2368,7 @@
     read-menu-command
     read-minibuffer
     read-multiple-choice
+    read-multiple-choice--from-minibuffer
     read-multiple-choice--long-answers
     read-non-nil-coding-system
     read-number
@@ -2417,6 +2431,8 @@
     revert-buffer--default
     revert-buffer-with-coding-system
     right-char
+    rmc--add-key-description
+    rmc--show-help
     row-equal?
     row-hash
     rows-above

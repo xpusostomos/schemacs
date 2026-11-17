@@ -316,6 +316,10 @@ read-number-history
    eval-expression eval-expression-print-format read--expression
    eval-expression-get-print-arguments
    read--expression-map read--expression-try-read
+   ;; the minibuffer's own bindings, for a caller that must *replace*
+   ;; `minibuffer-local-map` with one of its own and keep them -
+   ;; `rmc.scm`'s choice map is the second such caller.
+   minibuffer-local-bindings minibuffer-map-from-bindings
    debugger-quit debugger-mode-map
    *eval-expression-print-maximum-character* *eval-expression-debug-on-error*
    read-expression-history
@@ -342,7 +346,7 @@ read-number-history
    previous-history-element
    previous-line-or-history-element
    read-char-from-minibuffer
-   read-from-minibuffer
+   read-from-minibuffer exit-minibuffer
    read-string
    read-command read-variable read-minibuffer eval-minibuffer
    custom-variable-history

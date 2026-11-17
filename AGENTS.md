@@ -10911,8 +10911,30 @@ table. What the next session needs for the disabled-command pass:
   both above `keymap.scm`.
 * **The 1E forms (`\{MAPVAR}`, `\<MAPVAR>`) are not carried** - they
   need `help--describe-map-tree`. They are left standing in the text.
-* Still missing for `novice.el` itself: `this-command-keys` as a
-  function (the tree has `*this-command-keys*`), `read-multiple-choice`
-  (rmc.scm exists - check its signature takes a help string and a
-  buffer name), `system-type` (absent), and `user-init-file` for
-  `enable-command`'s init-file write.
+* **Done since**: `novice.scm` is in with the `run-command` check,
+  rmc's `--from-minibuffer` arm, and the two disabled markers
+  (`narrow-to-region`, `narrow-to-page`). DEPARTURES.md has the
+  measured behaviour. **The trap that cost the most**: a keymap's
+  binding for a `define-command` is the command's *procedure*, so
+  `*this-command*` at prompt time is that procedure - the name is found
+  through `command-record-of`, not by applying `command-name` to it.
+  And rmc's choices hold *characters* here where Emacs holds integers,
+  so `last-command-event` must be converted with `integer->char` before
+  the `assq`.
+* **Still missing**: `en/disable-command`'s init-file write (the
+  session `put` is carried; `*user-init-file*` now exists in
+  `startup.scm`), `ding`, and the rmc modal/dialog arm.
+
+## The disabled-command pass (2026-11-18)
+
+`novice.scm`, the check in `run-command`, `command-query`/
+`command-execute--query`, rmc's minibuffer arm, and the two
+`(put ... 'disabled t)` markers. Verified: `novice-tests` 7; the pty
+battery's new `disabled-command` check (n / SPC / `!`) and `narrow`,
+which now answers the prompt it pins. Two things to know before
+touching it: `*this-command*` is the bound *procedure* (see above),
+and the `disabled` property is keyed by the command's *name symbol*,
+which `run-command` derives with `(string->symbol (command-name cmd))`
+- a command reached as a procedure (a menu item holding one, or
+`%run-command`) never consults the check, as Emacs's Lisp callers
+never reach `command-execute`.

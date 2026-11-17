@@ -79,9 +79,21 @@
     (only (guile) string-join)
     ;; the question itself, and the optional-argument reader the two
     ;; entry points share with the rest of the tree
-    (only (schemacs editor minibuffer) completing-read list-ref-or))
+    (only (schemacs editor minibuffer)
+          completing-read list-ref-or read-from-minibuffer exit-minibuffer
+          minibuffer-message minibuffer-local-bindings
+          minibuffer-map-from-bindings)
+    (only (guile) string-index string-upcase)
+    (only (schemacs editor command) *last-command-event*)
+    (only (schemacs editor keymap) key-description define-key)
+    (only (schemacs editor buffer)
+          get-buffer-create with-current-buffer erase-buffer)
+    (only (schemacs editor editfns) insert goto-char point-min)
+    (only (schemacs editor window) display-buffer))
 
-  (export read-multiple-choice read-multiple-choice--long-answers)
+  (export read-multiple-choice read-multiple-choice--long-answers
+          read-multiple-choice--from-minibuffer
+          rmc--add-key-description rmc--show-help)
 
   (begin
 
@@ -145,9 +157,128 @@
       ;; ask its question, it raised. Emacs's own argument list is
       ;; `(PROMPT CHOICES &optional HELP-STRING SHOW-HELP LONG-FORM)'
       ;; (`rmc.el:133'), and its `cond' tests LONG-FORM first.
-      (let ((long-form (list-ref-or rest 2 #f)))
+      (let ((long-form (list-ref-or rest 2 #f))
+            (help-string (list-ref-or rest 0 #f))
+            (show-help (list-ref-or rest 1 #f)))
         (if long-form
             (read-multiple-choice--long-answers prompt choices)
-            (error "read-multiple-choice: the minibuffer and modal paths are not ported; pass LONG-FORM"))))
+            ;; Emacs's cond then tests the modal/dialog arm, whose two
+            ;; switches (`read-char-choice-use-read-key`,
+            ;; `use-dialog-box-p`) have no counterpart here; on a
+            ;; terminal with neither, Emacs takes this same arm.
+            (read-multiple-choice--from-minibuffer
+             prompt choices help-string show-help))))
+
+    ;;----------------------------------------------------------------
+    ;; `read-multiple-choice--from-minibuffer' (rmc.el:336)
+    ;;
+    ;; The arm Emacs takes for `novice.el`'s "Use this command?" - the
+    ;; modal and dialog arms are not carried (`read-char-choice-use-
+    ;; read-key` and `use-dialog-box-p` have no counterpart here, and
+    ;; neither is wanted on a terminal), so this is the default.
+    ;;----------------------------------------------------------------
+
+    (define (rmc--add-key-description elem)
+      ;; GNU Emacs's `rmc--add-key-description' (`rmc.el:26'): the
+      ;; choice's key description and name - "Y (yes)" for a name that
+      ;; contains the key, "[Y]es" on a terminal, and "SPC (space bar)
+      ;; only once" for one that does not.
+      ;;
+      ;; **The graphical arm is not carried** (`read-multiple-choice-face`
+      ;; and the underline probe are a window-system's); the terminal's
+      ;; bracket form is what is drawn either way here.
+      ;;--------------------------------------------------------------
+      (let* ((char (car elem))
+             (name (cadr elem))
+             (pos (string-index name char))
+             (desc (key-description (vector (char->integer char)))))
+        (cons char
+              (cond
+               ;; "Not in the name string, or a special character."
+               ((or (not pos)
+                    (member desc '("ESC" "TAB" "RET" "DEL" "SPC")))
+                (string-append desc " " name))
+               ;; "And put it in [bracket] on non-graphical terminals."
+               (else
+                (string-append (substring name 0 pos)
+                               "["
+                               (string-upcase (substring name pos (+ pos 1)))
+                               "]"
+                               (substring name (+ pos 1))))))))
+
+    (define (rmc--show-help prompt help-string show-help choices altered)
+      ;; GNU Emacs's `rmc--show-help' (`rmc.el:56'): "Show the help
+      ;; buffer" - the caller's HELP-STRING, or the choices written out,
+      ;; in a buffer named by SHOW-HELP when it is a string.
+      ;;
+      ;; **The buffer is not killed on the way out**: that is
+      ;; `read-multiple-choice--from-minibuffer`'s `unwind-protect`
+      ;; (`rmc.el:384`), and `kill-buffer` would have to be reached
+      ;; through the window library. The next prompt of the same name
+      ;; empties and reuses it, so nothing accumulates.
+      ;;--------------------------------------------------------------
+      (let* ((buf-name (if (string? show-help) show-help
+                           "*Multiple Choice Help*"))
+             (buf (get-buffer-create buf-name)))
+        (with-current-buffer buf
+          (erase-buffer)
+          (insert (if help-string
+                      help-string
+                      (string-append prompt "\n\n"
+                                     (string-join (map cdr altered) "\n"))))
+          (goto-char (point-min)))
+        (display-buffer buf)
+        buf))
+
+    (define (read-multiple-choice--from-minibuffer prompt choices
+                                                  help-string show-help)
+      ;; GNU Emacs's `read-multiple-choice--from-minibuffer'
+      ;; (`rmc.el:336'): "Read short answers from the minibuffer." Each
+      ;; choice's key is bound to a command that records
+      ;; `last-command-event` and exits; `?` and C-h show the help; any
+      ;; other printing key is refused with "Invalid choice".
+      ;;
+      ;; Emacs sets `enable-recursive-minibuffers` and a text-conversion
+      ;; style here; neither exists in this tree, and the help buffer's
+      ;; kill (`rmc.el:384`) is named on `rmc--show-help`.
+      ;;--------------------------------------------------------------
+      (let* ((prompt-choices (if show-help choices
+                                 (append choices (list (list #\? "?")))))
+             (altered (map rmc--add-key-description prompt-choices))
+             (full-prompt (string-append
+                           prompt " ("
+                           (string-join (map cdr altered) ", ")
+                           "): "))
+             (tchar #f)
+             (buf #f)
+             (map (minibuffer-map-from-bindings '*rmc--keymap*
+                                                (minibuffer-local-bindings))))
+        (define (cmd-char)
+          ;; The choices hold *characters* (this tree's spelling of
+          ;; Emacs's `?\s' integers) and `last-command-event' is the
+          ;; event's code, so the answer is converted here - without
+          ;; this, `(assq 32 '(#\space ...))' was false and every answer
+          ;; looked like a refusal.
+          (let ((e (*last-command-event*)))
+            (set! tchar (if (integer? e) (integer->char e) e)))
+          (exit-minibuffer))
+        (define (cmd-help)
+          (set! buf (rmc--show-help prompt help-string show-help
+                                    choices altered)))
+        (define (cmd-wrong)
+          ;; `(ding)` is not ported: the message is the report.
+          (set! buf (rmc--show-help prompt help-string show-help
+                                    choices altered))
+          (minibuffer-message "Invalid choice"))
+        (for-each (lambda (c)
+                    (define-key map (vector (char->integer (car c))) cmd-char))
+                  choices)
+        ;; `help-char` is C-h; the tree has not the variable.
+        (define-key map (vector 8) cmd-help)
+        (unless show-help
+          (define-key map (vector (char->integer #\?)) cmd-help))
+        (define-key map (vector 'remap 'self-insert-command) cmd-wrong)
+        (read-from-minibuffer full-prompt #f map)
+        (assq tchar choices)))
 
     ))

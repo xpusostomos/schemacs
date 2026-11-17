@@ -2757,6 +2757,54 @@ def check_load_theme():
     return problems
 
 
+def check_disabled_command():
+    """`C-x n n` asks first, and the prompt's answers do what they say.
+
+    `narrow-to-region` carries `(put 'narrow-to-region 'disabled t)`
+    (`bindings.el:1111`), and `command.scm`'s `run-command` - Emacs's
+    `command-execute` - hands a disabled command to `novice.el`'s
+    `disabled-command-function`, which asks "Use this command?" with one
+    keypress for the answer. `n` refuses and nothing happens; SPC runs
+    it once; `!` runs it and turns the questions off for the session.
+    """
+    path = "/tmp/pty-check-disabled.txt"
+    open(path, "w").write("alpha\nbravo\ncharlie\ndelta\n")
+    problems = []
+    C_SPC = b"\x00"
+    C_N = b"\x0e"
+    # n: refused. The buffer is not narrowed, so "charlie" - outside the
+    # region [1, line-3 start) - is still drawn.
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 C_SPC, C_N, C_N, C_x + b"nn",
+                 WAIT(b"Use this command?"), b"n"],
+                path, gap=0.35)
+    screen = screen_of(out)
+    if "only once" not in out:
+        problems.append("the disabled command's prompt never came up "
+                        "(no choices text on the screen)")
+    elif "charlie" not in screen:
+        problems.append("after answering n the buffer was narrowed anyway")
+    # SPC: run once - the region is narrowed, so "charlie" is gone.
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 C_SPC, C_N, C_N, C_x + b"nn",
+                 WAIT(b"Use this command?"), b" "],
+                path, gap=0.35)
+    screen = screen_of(out)
+    if "charlie" in screen:
+        problems.append("after SPC the command did not run: a line "
+                        "outside the region is still drawn")
+    # !: enable for the session; the next C-x n n runs with no question.
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 C_SPC, C_N, C_N, C_x + b"nn",
+                 WAIT(b"Use this command?"), b"!",
+                 C_x + b"nn"],
+                path, gap=0.35)
+    screen = screen_of(out)
+    if "charlie" in screen:
+        problems.append("after ! the command did not run")
+    return problems
+
+
 def check_completion_scroll():
     """The completions window scrolls, as GNU Emacs's does.
 
@@ -5071,8 +5119,8 @@ def check_narrow():
     "r"), and `narrow-map` (`bindings.el:1214`) is what `C-x n` reaches.
     Until 2026-11-17 neither the specs nor the bindings existed, so
     `C-x n n` was an undefined key and did nothing; this drives the whole
-    path - `C-SPC` for the mark, the motion, the key, the redisplay and
-    the widened screen.
+    path - `C-SPC` for the mark, the motion, the key, the disabled
+    command's prompt, the redisplay and the widened screen.
     """
     path = "/tmp/pty-check-narrow.txt"
     open(path, "w").write("alpha\nbravo\ncharlie\ndelta\n")
@@ -5083,7 +5131,11 @@ def check_narrow():
     # (line 3), so the region is [1, line-3 start) and narrowing hides
     # "alpha" and "bravo".
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
-                 C_SPC, C_N, C_N, C_x + b"nn"],
+                 C_SPC, C_N, C_N, C_x + b"nn",
+                 # `narrow-to-region` is disabled by default
+                 # (`bindings.el:1111`), so Emacs asks first; SPC is
+                 # "only this once".
+                 WAIT(b"Use this command?"), b" "],
                 path, gap=0.35)
     # The region is [1, the start of line 3), so after narrowing "alpha"
     # and "bravo" are shown and "charlie" is not.
@@ -5099,7 +5151,9 @@ def check_narrow():
                         "drawn")
     # And back out.
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
-                 C_SPC, C_N, C_N, C_x + b"nn", C_x + b"nw"],
+                 C_SPC, C_N, C_N, C_x + b"nn",
+                 WAIT(b"Use this command?"), b" ",
+                 C_x + b"nw"],
                 path, gap=0.35)
     if "charlie" not in screen_of(out):
         problems.append("after C-x n w the hidden line is not back")
@@ -5111,6 +5165,7 @@ CHECKS = {
     "fill-paragraph": check_fill_paragraph,
     "comment-continuation": check_comment_continuation,
     "narrow": check_narrow,
+    "disabled-command": check_disabled_command,
     "query-replace": check_query_replace,
     "query-replace-prompt": check_query_replace_prompt,
     "query-replace-pair-default": check_query_replace_pair_default,

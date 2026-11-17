@@ -39,6 +39,10 @@
     (only (schemacs editor paragraphs))
     ;; `fill.el`'s commands and the M-q binding it makes
     (only (schemacs editor fill))
+    ;; `novice.el`'s disabled-command prompt; loading it installs
+    ;; `disabled-command-function` and the `query` form's asker, which
+    ;; `command.scm`'s `run-command` reads.
+    (only (schemacs editor novice))
     ;; `replace.el' - the ncurses.sld note says why.
     ;; The mouse commands, imported for their *binding*: loading
     ;; `mouse.sld' is what puts `[down-mouse-1]' in the global map,

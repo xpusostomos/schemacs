@@ -150,6 +150,7 @@
         (schemacs editor editfns)
         (schemacs editor elisp-mode)
         (schemacs editor newcomment)
+        (schemacs editor novice)
         (schemacs editor face-remap)
         
         (schemacs editor env)
