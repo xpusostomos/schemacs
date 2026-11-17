@@ -48,9 +48,21 @@
           ;; `SET_PT` (`buffer.h:170`), the write below `goto-char` -
           ;; also the engine's until 2026-10-13, where it was
           ;; `text-editor-set-cursor`.
-          set-point buffer-read-only? buffer-beg buffer-z buffer-pt)
+          set-point buffer-read-only? buffer-beg buffer-z buffer-pt
+          ;; `BEGV' and `ZV' - what `narrow-to-region' sets and
+          ;; `point-min'/`point-max' answer.
+          buffer-begv set!buffer-begv buffer-zv set!buffer-zv
+          ;; `BEG`/`Z` themselves, for `widen`, `narrow-to-region`'s
+          ;; range check and `buffer-size`
+          text-editor-text)
+    (only (schemacs editor buffer-text)
+          buffer-text-base buffer-text-z)
+    ;; `narrow-to-region` is a redisplay event (`clip_changed`), which is
+    ;; the flag `dispnew.scm` carries.
+    (only (schemacs editor dispnew) set-windows-or-buffers-changed!)
     (only (schemacs editor marker)
-          build-marker markerp marker-position set-marker)
+          build-marker markerp marker-position set-marker
+          set-marker-insertion-type marker-buffer)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
@@ -161,6 +173,8 @@ point-marker
    point-min
    point
    save-excursion
+   ;; the restriction, `narrow-to-region` and its friends
+   narrow-to-region widen save-restriction
    region-beginning
    region-end
    region-limit
@@ -240,6 +254,13 @@ point-marker
       ;;--------------------------------------------------------------
       (when (> start end)
         (let ((swap start)) (set! start end) (set! end swap)))
+      ;; `validate_region` (`buffer.c:2504') sorts the two ends and
+      ;; **signals** when either is outside the accessible portion:
+      ;; `if (! (BEGV <= beg && end <= ZV)) args_out_of_range_3 (...)`. It
+      ;; does not clip: `(delete-region 1 12)' in a buffer narrowed to
+      ;; 3..5 is "Args out of range", measured on Emacs 31.1.
+      (when (or (< start (point-min)) (> end (point-max)))
+        (error "Args out of range" start end))
       (del-range start end)
       #f)
 
@@ -283,15 +304,17 @@ point-marker
     (define (point-min)
       ;; GNU Emacs's `point-min' (editfns.c): "the minimum permissible
       ;; value of point in the current buffer. This is 1, unless
-      ;; narrowing ... is in effect." Nothing is narrowed here.
+      ;; narrowing ... is in effect." It is `BEGV', which `narrow-to-region'
+      ;; sets and `widen' puts back to `BEG'.
       ;;--------------------------------------------------------------
-      1)
+      (buffer-begv (current-buffer)))
 
     (define (point-max)
-      ;; GNU Emacs's `point-max' (editfns.c): one past the last
-      ;; character of the buffer.
+      ;; GNU Emacs's `point-max' (editfns.c): one past the last character
+      ;; of the buffer - `ZV', which is the end of the *accessible*
+      ;; portion. `buffer-size' is the one that answers the whole buffer.
       ;;--------------------------------------------------------------
-      (buffer-z (current-buffer)))
+      (buffer-zv (current-buffer)))
 
     (define (goto-char position)
       ;; GNU Emacs's `goto-char' (editfns.c): "Set point to POSITION,
@@ -309,8 +332,12 @@ point-marker
       (let ((at (cond
                  ((markerp position) (marker-position position))
                  (else position))))
-        (set-point (current-buffer) at)
-        at))
+        ;; `clip_to_bounds (BEGV, XFIXNUM (position), ZV)' - the C's
+        ;; first statement. A position outside the accessible portion is
+        ;; pulled to its edge rather than refused.
+        (let ((at (min (max at (point-min)) (point-max))))
+          (set-point (current-buffer) at)
+          at)))
 
     (define (general-insert-function inherit args)
       ;; GNU Emacs's `general_insert_function` (`editfns.c:1298`), the
@@ -873,10 +900,14 @@ point-marker
 
     (define (buffer-size)
       ;; GNU Emacs's `buffer-size' (editfns.c): "Return the number of
-      ;; characters in the current buffer" - no narrowing here, so
-      ;; nothing is subtracted.
+      ;; characters in the current buffer. In the presence of multibyte
+      ;; characters, this is not the same as the size of the buffer in
+      ;; bytes. Narrowing is in effect, this returns the size of the
+      ;; accessible portion." - `Z - BEG`, **not** `ZV - BEGV`: the whole
+      ;; text, narrowing or not.
       ;;--------------------------------------------------------------
-      (- (buffer-z (current-buffer)) (buffer-beg (current-buffer))))
+      (let ((text (text-editor-text (current-buffer))))
+        (- (buffer-text-z text) (buffer-text-base text))))
 
     (define (buffer-string)
       ;; GNU Emacs's `buffer-string' (editfns.c): "Return the contents
@@ -990,6 +1021,135 @@ moved."
       ;;--------------------------------------------------------------
       (build-marker (current-buffer)
                    (buffer-pt (current-buffer))))
+
+    (define (%whole-beg buffer)
+      ;; `BEG' - the start of the buffer text, which narrowing does not
+      ;; move. `buffer-beg' answers `BEGV'.
+      ;;--------------------------------------------------------------
+      (buffer-text-base (text-editor-text buffer)))
+
+    (define (%whole-z buffer)
+      ;; `Z' - the end of the buffer text, which narrowing does not move.
+      ;;--------------------------------------------------------------
+      (buffer-text-z (text-editor-text buffer)))
+
+    (define (widen)
+      ;; GNU Emacs's `widen' (`editfns.c:2901'): "Remove restrictions
+      ;; (narrowing) from current buffer. ... This allows the buffer's
+      ;; full text to be seen and edited."
+      ;;
+      ;; **Not carried**: labeled restrictions (`with-restriction' /
+      ;; `without-restriction', `editfns.c:3190'), which need a stack of
+      ;; labeled markers per buffer. `narrow-to-region' here has no label
+      ;; to limit it to.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (unless (and (= (buffer-begv buffer) (%whole-beg buffer))
+                     (= (buffer-zv buffer) (%whole-z buffer)))
+          (set!buffer-begv buffer (%whole-beg buffer))
+          (set!buffer-zv buffer (%whole-z buffer))
+          ;; `buf->clip_changed = 1': "Changing the buffer bounds
+          ;; invalidates any recorded current column" and tells the
+          ;; redisplay the window's start position may now be invisible.
+          (%clip-changed! buffer)))
+      #f)
+
+    (define (narrow-to-region start end)
+      ;; GNU Emacs's `narrow-to-region' (`editfns.c:2948'): "Restrict
+      ;; editing in this buffer to the current region. The rest of the
+      ;; text becomes temporarily invisible and untouchable but is not
+      ;; deleted; if you save the buffer in a file, the invisible text is
+      ;; included in the file."
+      ;;
+      ;; The C: sort the two ends, refuse anything outside `BEG..Z',
+      ;; store them as BEGV and ZV, and pull point inside.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (current-buffer))
+             (s (cond ((markerp start) (marker-position start)) (else start)))
+             (e (cond ((markerp end) (marker-position end)) (else end))))
+        (when (> s e)
+          (let ((tem s)) (set! s e) (set! e tem)))
+        ;; `if (!(BEG <= s && s <= e && e <= Z)) args_out_of_range'
+        (unless (and (<= (%whole-beg buffer) s)
+                     (<= s e)
+                     (<= e (%whole-z buffer)))
+          (error "Args out of range" start end))
+        (unless (and (= (buffer-begv buffer) s) (= (buffer-zv buffer) e))
+          (set!buffer-begv buffer s)
+          (set!buffer-zv buffer e)
+          (%clip-changed! buffer))
+        (let ((pt (buffer-pt buffer)))
+          (when (< pt s) (set-point buffer s)))
+        (let ((pt (buffer-pt buffer)))
+          (when (> pt e) (set-point buffer e)))
+        #f))
+
+    (define (%clip-changed! buffer)
+      ;; `current_buffer->clip_changed = 1' (`editfns.c:2989'): "Changing
+      ;; the buffer bounds invalidates any recorded current column" and
+      ;; tells the redisplay that the window's start may no longer be in
+      ;; the accessible portion. This tree computes columns on demand, so
+      ;; what is left is the renderer's "something changed" flag - the
+      ;; same one `force-mode-line-update` sets.
+      ;;--------------------------------------------------------------
+      (set-windows-or-buffers-changed! #t))
+
+    (define-syntax save-restriction
+      ;; GNU Emacs's `save-restriction' (`editfns.c:3150'): "Execute
+      ;; BODY, saving and restoring current buffer's restrictions. ...
+      ;; The old restrictions settings are restored even in case of
+      ;; abnormal exit (throw or error)."
+      ;;
+      ;; The C saves a pair of *markers* (`save_restriction_save_1'),
+      ;; the end one with an insertion type of 1 so that text inserted
+      ;; exactly at the end is inside the restored restriction; the
+      ;; restore puts them back only if BEGV/ZV have moved, and pulls
+      ;; point inside (`save_restriction_restore_1').
+      ;;
+      ;; A macro as it is in Emacs, because the body is several forms.
+      ;; `(%save-restriction-save)' is a procedure so that the markers
+      ;; are made once, where the C makes them.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((save-restriction body ...)
+         (let ((saved (%save-restriction-save)))
+           (dynamic-wind
+             (lambda () #f)
+             (lambda () body ...)
+             (lambda () (%save-restriction-restore saved)))))))
+
+    (define (%save-restriction-save)
+      ;; `save_restriction_save_1' (`editfns.c:3043'): a pair of markers
+      ;; bounding the accessible portion - the end one advancing on an
+      ;; insertion at its own position.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (list (build-marker buffer (buffer-begv buffer))
+              (let ((end (build-marker buffer (buffer-zv buffer))))
+                (set-marker-insertion-type end #t)
+                end))))
+
+    (define (%save-restriction-restore saved)
+      ;; `save_restriction_restore_1' (`editfns.c:3067'), less the
+      ;; labeled-restriction stack.
+      ;;--------------------------------------------------------------
+      (let* ((start (car saved))
+             (end (cadr saved))
+             (buffer (marker-buffer start)))
+        (when buffer
+          (let ((s (marker-position start))
+                (e (marker-position end)))
+            (unless (and (= (buffer-begv buffer) s) (= (buffer-zv buffer) e))
+              (set!buffer-begv buffer s)
+              (set!buffer-zv buffer e)
+              (let ((pt (buffer-pt buffer)))
+                (when (or (< pt s) (> pt e))
+                  (set-point buffer (min (max pt s) e))))
+              (%clip-changed! buffer))))
+        ;; "Detach the markers, and free the cons"
+        (set-marker start #f)
+        (set-marker end #f))
+      #f)
 
 (define-syntax save-excursion
       ;; GNU Emacs's `save-excursion' (editfns.c:818): "Save point, and

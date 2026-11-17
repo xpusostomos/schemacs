@@ -13,7 +13,9 @@
        format format-message get-pos-property point-max point-min
        forward-line goto-char insert insert-and-inherit insert-buffer-substring
        line-beginning-position line-end-position line-number-at-pos message
-       point propertize)
+       point propertize
+       ;; the restriction
+       narrow-to-region widen save-restriction buffer-size delete-region)
  (only (schemacs editor xdisp) *message-log-max*)
  (only (schemacs editor simple) messages-buffer)
  (only (schemacs editor textprop) get-char-property get-text-property put-text-property)
@@ -529,5 +531,107 @@
        (list moved (point) (constrain-to-field 1 12 #f #t #f))))))
 
 (test-end "schemacs_editor_editfns_fields")
+
+
+;; **Narrowing** - `narrow-to-region`/`widen`/`save-restriction`
+;; (`editfns.c:2948`, `:2901`, `:3150`). `point-min` and `point-max`
+;; answer the accessible portion, `goto-char` clips to it, an insertion at
+;; ZV grows it, and `buffer-size` is the whole text while `buffer-string`
+;; is the accessible one - every expectation measured on Emacs 31.1.
+(test-begin "schemacs_editor_editfns_narrowing")
+
+(define (narrow-buffer)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "hello world")
+    b))
+
+(test-equal '(1 12)
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (list (point-min) (point-max))))
+
+;; Narrowing clips point into the new range (`if (PT < s) SET_PT (s); if
+;; (e < PT) SET_PT (e)`), and `goto-char` clips to the edges.
+(test-equal '(3 8 8 3 8)
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (goto-char 12)
+    (narrow-to-region 3 8)
+    (let ((min (point-min)) (max (point-max)) (pt (point)))
+      (goto-char 1)
+      (let ((low (point)))
+        (goto-char 20)
+        (list min max pt low (point))))))
+
+;; An insertion inside the restriction grows ZV, and the text outside it
+;; is untouched.
+(test-equal '(3 10 "llo wXY")
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (narrow-to-region 3 8)
+    (goto-char (point-max))
+    (insert "XY")
+    (list (point-min) (point-max) (buffer-string))))
+
+;; `buffer-size` is the whole text: "Narrowing is in effect, this returns
+;; the size of the accessible portion" was the *old* docstring - Emacs
+;; answers `Z - BEG`, which is 11 here however narrow the restriction.
+(test-equal '(11 4)
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (narrow-to-region 1 5)
+    (list (buffer-size) (string-length (buffer-string)))))
+
+;; `widen` puts both ends back.
+(test-equal '(1 12)
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (narrow-to-region 3 8)
+    (widen)
+    (list (point-min) (point-max))))
+
+;; `save-restriction` restores what was in effect when it was entered -
+;; including after an error. Measured on Emacs 31.1: inside the outer
+;; form the restriction is the one the inner `save-restriction` left,
+;; `(2 3)`, and the outer one comes back when the outer form ends.
+(test-equal '((1 5) (2 3) (2 3) (1 5))
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (narrow-to-region 1 5)
+    (let ((before (list (point-min) (point-max))))
+      (let ((inside+after
+             (save-restriction
+               (narrow-to-region 2 3)
+               (let ((inside (list (point-min) (point-max))))
+                 (guard (e (#t #f))
+                   (save-restriction
+                     (narrow-to-region 2 2)
+                     (error "boom")))
+                 (list inside (list (point-min) (point-max)))))))
+        (list before (car inside+after) (cadr inside+after)
+              (list (point-min) (point-max)))))))
+
+;; `delete-region` calls `validate_region` (`buffer.c:2504`), which
+;; *signals* when either end is outside the accessible portion - it does
+;; not clip. Measured on Emacs 31.1: "Args out of range: #<buffer ...>,
+;; 1, 12".
+(test-equal '(args-out-of-range "hello world")
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (narrow-to-region 3 5)
+    (let ((threw (guard (e (#t 'args-out-of-range))
+                   (delete-region 1 12)
+                   #f)))
+      (widen)
+      (list threw (buffer-string)))))
+
+(test-equal 'args-out-of-range
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (guard (e (#t 'args-out-of-range))
+      (narrow-to-region 1 99))))
+
+(test-end "schemacs_editor_editfns_narrowing")
 
 (test-end "schemacs_editor_editfns")

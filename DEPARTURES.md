@@ -4169,6 +4169,65 @@ duplicate in the alist rather than replacing it.
    `tab-bar-history-back-table`/`-forward-table`, and the two sites say so
    now.
 
+# Narrowing, and the two bounds that were the whole buffer (2026-11-17)
+
+`fill.el` needs `narrow-to-region`/`save-restriction`, which this tree had
+never had, so the restriction came first. A buffer now carries Emacs's
+`BEGV` and `ZV` (`buffer.h:1054`) beside its `PT`, and:
+
+* `narrow-to-region` (`editfns.c:2948`) sorts the two ends, refuses
+  anything outside `BEG..Z`, stores them, and pulls point inside the new
+  range; `widen` (`:2901`) puts them back; `save-restriction` (`:3150`)
+  saves a pair of *markers* - the end one with an insertion type of 1, so
+  text inserted exactly at the end is inside the restored restriction -
+  and puts them back on an abnormal exit too, because it is a
+  `dynamic-wind`;
+* `point-min` and `point-max` answer `BEGV`/`ZV`;
+* `goto-char` clips to them (`clip_to_bounds (BEGV, ..., ZV)`);
+* every insertion grows `ZV` with `Z` and every deletion shrinks it
+  (`insdel.c:935`, `:1597`, and `replace_range`'s two writers).
+
+**The change that made it work everywhere at once**: `buffer-beg` and
+`buffer-z` in `buffer.scm` answer `BEGV`/`ZV` now. Their docstrings had
+always *called* them `point-min`/`point-max` and their bodies returned the
+text's `BEG`/`Z` - identical while nothing was ever narrowed. Every scanner
+that asks those two where the text starts and ends (`search.scm`,
+`syntax.scm`, `simple.scm`, `xdisp.scm`) therefore bounds itself by the
+accessible portion without being touched, which is exactly what the C's
+scanners do. The whole text keeps its own two reads -
+`buffer-text-base`/`buffer-text-z` of `(text-editor-text b)` - for the
+places that really mean it: `widen`, `narrow-to-region`'s range check,
+`buffer-size` and `erase-buffer`.
+
+## `buffer-size` is `Z - BEG`, not `ZV - BEGV`
+
+`(buffer-size)` answers the whole text however narrow the restriction is;
+`buffer-string` answers the accessible portion. The old docstring here
+said the opposite ("Narrowing is in effect, this returns the size of the
+accessible portion") - it was the *`buffer-string`* rule, not
+`buffer-size`'s. Measured on Emacs 31.1: an 11-character buffer narrowed
+to 1..5 answers 11, and its string is 4 characters.
+
+## `validate_region` signals, it does not clip
+
+`delete-region`'s range check is `buffer.c:2504`: sort the ends, then
+`if (! (BEGV <= beg && end <= ZV)) args_out_of_range_3 (...)`. The first
+version of this pass *clipped* instead, which reads as the kinder
+behaviour and is not Emacs's: `(delete-region 1 12)` in a buffer narrowed
+to 3..5 is "Args out of range" there, and now here.
+
+## What is not carried
+
+* **Labeled restrictions** (`with-restriction`, `without-restriction`,
+  `narrow-to-region`'s label argument): they need a stack of labeled
+  marker pairs per buffer.
+* **`narrowing-locked`**: the buffer slot a mode sets to forbid narrowing;
+  nothing here sets one.
+
+`clip_changed` - the C's "the restriction moved, so the window start and
+the recorded column mean nothing" - is `set-windows-or-buffers-changed!`
+from `dispnew.scm`, the flag the renderer already reads.
+
 # Window states: the size registers, and the pixel/total split
 (2026-11-16)
 

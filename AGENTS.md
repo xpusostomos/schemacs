@@ -10179,3 +10179,40 @@ DEPARTURES.md has the shape; three things are worth carrying forward:
 bar as a widget, `tab-bar-get-buffer-tab`, `tab-bar--load-buttons`
 (the buttons are the same `text` strings the icon spec falls back to),
 and touch (no touch events in either front end).
+
+# Narrowing - `BEGV`/`ZV` on the buffer (2026-11-17)
+
+Chris chose "narrowing first, then all of fill.el", and this is the first
+half. DEPARTURES.md has the C and the reasoning; what the next session
+needs to know:
+
+* **`buffer-beg`/`buffer-z` answer `BEGV`/`ZV` now.** They always claimed
+  to be `point-min`/`point-max` in their docstrings; they were the text's
+  `BEG`/`Z`, which is the same thing until something narrows. The whole
+  text is `buffer-text-base`/`buffer-text-z` of `(text-editor-text b)`.
+  That one change bounds every scanner correctly.
+* **A record change**: `<buffer>` gained `begv`/`zv`. `rm -rf
+  ~/.cache/guile/ccache` before believing anything - and note the failure
+  mode: a *stale* `.go` for `undo.scm` kept writing the old field index,
+  so the undo list landed in the `zv` slot and the symptom was
+  `(+ #f 1)` two libraries away.
+* **`ZV` has to be maintained at every writer**: `insert-from-string-1`,
+  `del-range-2`, and *both* `replace-range`/`replace_range_2`, which write
+  through `buffer-text-delete!`/`insert!` directly. Missing the replace
+  path made an overwrite lose the tail of the line - `(aX  3)` where
+  Emacs gives `(aX b 3)`.
+* **`delete-region` signals outside the restriction**; it does not clip.
+* `save-restriction` is a `syntax-rules` macro over `dynamic-wind` with
+  two markers, the end one insertion-type 1.
+
+`editfns-tests.scm` has a `schemacs_editor_editfns_narrowing` group whose
+every expectation was measured on Emacs 31.1 first.
+
+## Next: fill.el
+
+The core (`fill-paragraph`, `fill-region-as-paragraph`,
+`fill-region-as-paragraph-default`, the adaptive-fill prefix helpers, the
+nobreak predicates, `canonically-space-region`, the justification half)
+can now be ported whole, including the four functions that narrow
+(`justify-current-line`'s full mode, `fill-comment-paragraph`,
+`set-justification`, `fill-individual-paragraphs`).

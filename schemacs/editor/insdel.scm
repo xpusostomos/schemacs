@@ -163,6 +163,8 @@
     (only (schemacs editor region-cache) invalidate-region-cache)
     (only (schemacs editor buffer)
           current-buffer buffer-beg buffer-z buffer-pt set!buffer-pt
+          ;; `ZV` grows and shrinks with the text (`insdel.c:935`, `:1597`).
+          buffer-begv buffer-zv set!buffer-begv set!buffer-zv
           barf-if-buffer-read-only text-editor-text text-editor-undo-list
           %text-editor-newline-cache
           ;; `Ferase_buffer` (`buffer.c`) empties a buffer by calling
@@ -552,6 +554,10 @@
               ;; that matters - `record_point` asks "is this the first
               ;; change since the save?" and the counter is what answers.
               (record-insert pt nchars)
+              ;; `ZV += nchars` (`insdel.c:935`): the accessible portion
+              ;; grows with the text, because an insertion can only happen
+              ;; inside it.
+              (set!buffer-zv buffer (+ (buffer-zv buffer) nchars))
               ;; `modiff_incr (&MODIFF, nchars); CHARS_MODIFF = MODIFF'
               (%text-editor-incr-modiff! buffer nchars)
               ;; `adjust_markers_for_insert (PT, PT_BYTE, PT + nchars, ..)'
@@ -690,6 +696,10 @@
         (let ((offset (*text-property-offset-function*)))
           (when offset (offset buffer from (- nchars-del))))
         (buffer-text-delete! text from to)
+        ;; `ZV -= nchars_del` (`insdel.c:1597`): what was deleted was
+        ;; inside the accessible portion, so its end comes back by the
+        ;; same amount.
+        (set!buffer-zv buffer (- (buffer-zv buffer) nchars-del))
         ;; The C also shrinks `BEG_UNCHANGED` here, after the gap has
         ;; moved (`insdel.c`, `if (GPT - BEG < BEG_UNCHANGED) ...`).
         ;; `invalidate_buffer_caches` has already done it for this same
@@ -745,6 +755,10 @@
                                   #f)))
                 (buffer-text-delete! text from to)
                 (buffer-text-insert! text from new)
+                ;; `ZV` moves by the same amount `Z` did: out goes
+                ;; NCHARS-DEL, in comes INSCHARS (`insdel.c:1597`, `:935`).
+                (set!buffer-zv buffer (+ (buffer-zv buffer) inschars
+                                         (- nchars-del)))
                 ;; "Record the insertion first, so that when we undo, the
                 ;; deletion will be undone first. Thus, undo will insert
                 ;; before deleting, and thus will keep the markers before
@@ -852,6 +866,9 @@
             (begin
               (buffer-text-delete! text from to)
               (buffer-text-insert! text from ins)
+              ;; `ZV` follows `Z`, as in `replace_range-2`.
+              (set!buffer-zv buffer (+ (buffer-zv buffer) inschars
+                                       (- nchars-del)))
               ;; "Adjust markers for the deletion and the insertion."
               (unless (and (= nchars-del 1) (= inschars 1))
                 (when markers

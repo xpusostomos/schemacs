@@ -760,6 +760,7 @@
     bolp
     buffer-auto-hscroll-mode
     buffer-beg
+    buffer-begv
     buffer-chars-modified-tick
     buffer-cursor-in-non-selected-windows
     buffer-cursor-type
@@ -823,6 +824,7 @@
     buffer-visited-file-modtime
     buffer-word-wrap
     buffer-z
+    buffer-zv
     bufferp
     build-marker
     bury-buffer
@@ -2055,6 +2057,7 @@
     move-past-close-and-reindent
     move-to-column
     mule-keymap
+    narrow-to-region
     negative-argument
     new-buffer-text
     new-command
@@ -2296,6 +2299,7 @@
     save-current-buffer
     save-excursion
     save-match-data
+    save-restriction
     save-some-buffers
     scan-error-end
     scan-error-message
@@ -2383,6 +2387,7 @@
     set!%window-start-at-line-beg
     set!%window-suspend-auto-hscroll?
     set!buffer-auto-hscroll-mode
+    set!buffer-begv
     set!buffer-cursor-in-non-selected-windows
     set!buffer-cursor-type
     set!buffer-default-directory
@@ -2405,6 +2410,7 @@
     set!buffer-text-overlay-modiff
     set!buffer-truncate-lines
     set!buffer-word-wrap
+    set!buffer-zv
     set!cache-long-scans
     set!cd-path
     set!dired-actual-switches!
@@ -3048,6 +3054,7 @@
     walk-window-tree-1
     what-cursor-position
     where-is-internal
+    widen
     widget-value-button-type
     widget-value-call-data
     widget-value-contents

@@ -126,6 +126,7 @@
    allocate-buffer  bufferp  show-text-editor
    text-editor-text  set!text-editor-text
    buffer-pt  set!buffer-pt
+   buffer-begv set!buffer-begv buffer-zv set!buffer-zv
    %text-editor-newline-cache  set!%text-editor-newline-cache
    text-editor-text-props  set!text-editor-text-props
    text-editor-undo-list  set!text-editor-undo-list
@@ -1987,11 +1988,16 @@
       ;; nothing - no auto saving machinery.
       ;;--------------------------------------------------------------
       (barf-if-buffer-read-only)
-      (let ((ed (current-buffer)))
-        ;; The C is three lines: `Fwiden ()', `del_range (BEG, Z)', and
-        ;; the housekeeping that follows. Nothing is narrowed here, so
-        ;; the widen is a no-op, and the rest is `del_range`'s.
-        ((*del-range-function*) (buffer-beg ed) (buffer-z ed)))
+      (let* ((ed (current-buffer))
+             (beg (buffer-text-base (text-editor-text ed)))
+             (z (buffer-text-z (text-editor-text ed))))
+        ;; "Any narrowing restriction in effect is removed": the C is
+        ;; `Fwiden ()' then `del_range (BEG, Z)'. `widen` is
+        ;; `editfns.scm`'s and this library is below it, so the two
+        ;; writes are here.
+        (set!buffer-begv ed beg)
+        (set!buffer-zv ed z)
+        ((*del-range-function*) beg z))
       #f)
     (define (set-buffer-modified-p flag)
       ;; GNU Emacs's `set-buffer-modified-p' (buffer.c:1549): "Mark
@@ -2101,7 +2107,7 @@
 
     (define-record-type <buffer>
       (make<buffer>
-       text  newline-cache  point
+       text  newline-cache  point  begv  zv
        textprops  undo
        save-modiff  modtime  modtime-size  cache-long-scans  read-only  mark  markers
        overlays
@@ -2126,6 +2132,14 @@
       ;; the text is one sequence of characters there and it is one
       ;; here.
       (point      buffer-pt         set!buffer-pt)
+      ;; ^ ... and beside it `BUF_BEGV' and `BUF_ZV', the *accessible*
+      ;; portion: GNU Emacs's `b->begv' and `b->zv' (`buffer.h:1054'),
+      ;; set by `narrow-to-region' and put back by `widen'. `point-min'
+      ;; and `point-max' answer these, `goto-char' clips to them, and
+      ;; every insertion and deletion moves ZV with Z (`insdel.c:935`) -
+      ;; what is *outside* is invisible and untouchable, not deleted.
+      (begv       buffer-begv        set!buffer-begv)
+      (zv         buffer-zv          set!buffer-zv)
       ;; ^ The cursor - GNU Emacs's `BUF_PT (buf)`, which is the field
       ;; `PT` on the buffer (`buffer.h:1078`). It is a `buffer-text`
       ;; *position*: one-based, the convention the class speaks, and
@@ -2313,6 +2327,9 @@
          ;; the newline cache, made on first use
          #f
          1
+         ;; BEGV and ZV: a fresh buffer is not narrowed, so they are the
+         ;; text's own BEG and Z (`BEG' is 1 and a fresh Z is 1).
+         1 1
          #f
          ;; A newly created buffer records undo information from the
          ;; start, as in GNU Emacs.
@@ -2417,17 +2434,22 @@
     (define (buffer-beg ed)
       ;; GNU Emacs's `point-min' (`editfns.c'): "the minimum permissible
       ;; value of point in the current buffer. This is 1, unless
-      ;; narrowing ... is in effect." Nothing is narrowed here, and the
-      ;; buffer-text's base is that same 1.
+      ;; narrowing ... is in effect." It is `BEGV'.
+      ;;
+      ;; **Every scan that asks this library where the text starts is
+      ;; asking `BEGV`** - the C's scanners all bound themselves by
+      ;; `BEGV`/`ZV`, which is why the name answers the accessible portion
+      ;; and not the `buffer_text`'s own base. The whole text is
+      ;; `buffer-text-base`/`buffer-text-z` of `(text-editor-text ed)`,
+      ;; which is what `widen`, `erase-buffer` and `buffer-size` read.
       ;;--------------------------------------------------------------
-      (buffer-text-base (text-editor-text ed)))
+      (buffer-begv ed))
 
     (define (buffer-z ed)
       ;; GNU Emacs's `point-max' (`editfns.c'): one past the last
-      ;; character of the buffer. It is the buffer-text's own `z' field,
-      ;; which is Emacs's `Z'.
+      ;; character of the *accessible* portion - `ZV'.
       ;;--------------------------------------------------------------
-      (buffer-text-z (text-editor-text ed)))
+      (buffer-zv ed))
 
     (define (fetch-char ed pos)
       ;; GNU Emacs's `FETCH_CHAR (pos)' (`buffer.h'): the character at
