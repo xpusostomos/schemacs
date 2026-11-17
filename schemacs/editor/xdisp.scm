@@ -108,12 +108,12 @@
     ;; `string-width` is `character.c`'s, and `string-pixel-width` below
     ;; is the cell-model measurement over it.
     (only (schemacs editor character) string-width)
-    ;; `count-lines' is `xdisp.c''s own (`:29892') and reads straight from
+    ;; `%count-lines' is `xdisp.c''s own (`:29903') and reads straight from
     ;; this file's library - it is placed in `fns.scm' beside the
     ;; `line-number-at-pos' that wants it, because this library is the top
     ;; of the graph and a definition up here could not be reached from
     ;; below. See the note on it there.
-    (only (schemacs editor fns) count-lines)
+    (only (schemacs editor fns) %count-lines)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* *minibuffer*
          *window-scroll-function*
@@ -1138,10 +1138,10 @@
                                        base-pos)))
                    (line (if use-cache cached 1))
                    (linepos (if use-cache base-pos (buffer-beg ed)))
-                   (nlines (count-lines ed linepos startpos))
+                   (nlines (%count-lines ed linepos startpos))
                    (topline (+ nlines line)))
               (let ((nlines-from-start
-                     (lambda () (count-lines ed startpos (window-point window)))))
+                     (lambda () (%count-lines ed startpos (window-point window)))))
                 (cond
                  ((= startpos (buffer-beg ed))
                   (set!%window-base-line-number window topline)

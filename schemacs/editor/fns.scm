@@ -67,7 +67,8 @@
           concat
           vconcat
           copy-sequence
-          count-lines
+          %assq
+          %count-lines
           install-fns-textprop!
           line-number-at-pos
           plist-get plist-put
@@ -186,23 +187,23 @@
     ;; Lines, counted and numbered
     ;;----------------------------------------------------------------
 
-    (define (count-lines ed from to)
+    (define (%count-lines ed from to)
       ;; The number of line boundaries between the positions FROM and TO -
-      ;; GNU Emacs's `count_lines' (`xdisp.c:29892'), which is one call to
+      ;; GNU Emacs's `count_lines' (`xdisp.c:29903'), which is one call to
       ;; `display_count_lines (FROM, TO, ZV, &ignored)', the `count > 0'
       ;; branch of that walk.
       ;;
-      ;; **Emacs also has a *Lisp* `count-lines' - `simple.el:1800' - and
-      ;; it is a different function that answers differently.** It narrows
-      ;; to START..END, counts the newlines in there, and adds one when
-      ;; `START /= END' and the greater end is not at the beginning of a
-      ;; line: measured, `(count-lines 1 6)' over `"a\nb\nc"' is **3**,
-      ;; where this walk from 1 to 6 finds the two newlines and answers
-      ;; **2**. That one is `simple.el''s, so it belongs in `simple.scm',
-      ;; and it is not ported - it is written over `narrow-to-region' and
-      ;; `re-search-forward', and nothing here is narrowed. So this name
-      ;; is the *C helper's*, spelled as the C spells it, and it must not
-      ;; be read as the Lisp function of the same spelling.
+      ;; **The `%` is because Emacs's Lisp-visible `count-lines' is a
+      ;; *different function* - `simple.el:1800' - and that one owns the
+      ;; plain name, in `simple.scm'.** The C has both too, and they do
+      ;; not collide there because this one is a C function with no Lisp
+      ;; name at all (`lisp.h:4409' declares it and nothing DEFUNs it).
+      ;; The two answer differently: over `"a\nb\nc"', the Lisp
+      ;; `(count-lines 1 6)' is **3** (it adds one when the range does
+      ;; not end at the start of a line), where this walk finds the two
+      ;; newlines and answers **2**. The tree has been here before with
+      ;; `kill-buffer' - the user-visible name is Emacs's, and the
+      ;; mechanism takes the `%'.
       ;;
       ;; **Its Emacs file is `xdisp.c', and it lives here.** The C needs
       ;; it low, because `fns.c''s `line-number-at-pos' - this file's own
@@ -268,12 +269,12 @@
                         (else (error "Wrong type argument" position))))
              (absolute (and (pair? args) (pair? (cdr args)) (cadr args))))
         (if absolute
-            (+ 1 (count-lines ed
-                              (buffer-text-base (text-editor-text ed))
-                              pos))
-            (+ 1 (count-lines ed (buffer-beg ed)
-                              (min (max pos (buffer-beg ed))
-                                   (buffer-z ed)))))))
+            (+ 1 (%count-lines ed
+                               (buffer-text-base (text-editor-text ed))
+                               pos))
+            (+ 1 (%count-lines ed (buffer-beg ed)
+                               (min (max pos (buffer-beg ed))
+                                    (buffer-z ed)))))))
 
     (define (concat . args)
       ;; GNU Emacs's `concat' (fns.c): "Concatenate all the arguments and
@@ -422,6 +423,50 @@
                   (string-locale-ci<? s1 s2)
                   (string-locale<? s1 s2))))
         (compare)))
+
+    ;;----------------------------------------------------------------
+    ;; `assq'
+    ;;----------------------------------------------------------------
+
+    (define (%assq key alist)
+      ;; GNU Emacs's `assq' (`fns.c:1967'): "Return non-nil if KEY is `eq'
+      ;; to the car of an element of ALIST. The value is actually the
+      ;; first element of ALIST whose car is KEY. Elements of ALIST that
+      ;; are not conses are ignored."
+      ;;
+      ;; **The `%` is because Guile's core `assq` cannot be shadowed by a
+      ;; library import.** Measured: a library that excepts `assq' from
+      ;; `(scheme base)' and imports another library's `assq' still calls
+      ;; the core one - the module's binding is not the imported
+      ;; procedure (`(eq? (module-ref user 'assq) (module-ref other
+      ;; 'assq))' is #f). That is the same situation `%kill-buffer' is in,
+      ;; from the other side: the host claims the plain name.
+      ;;
+      ;; The difference this port exists for is the docstring's last
+      ;; sentence, which R7RS's `assq' does not have: it is "an error" for
+      ;; an element not to be a pair, and Guile's raises, where Emacs
+      ;; steps over it. Measured on Emacs 31.1: `(assq 'bar '(foo))' is
+      ;; nil and `(assq 'bar '(foo (bar . 2)))' is `(bar . 2)'. It is the
+      ;; shape `buffer-invisibility-spec' has - symbols and `(SYMBOL .
+      ;; BOOL)' pairs in one list - and it is why `window--state-assq' and
+      ;; `tab-bar--assq' exist lower in the tree.
+      ;;
+      ;; **The rest of the tree still calls the core `assq'.** Converting
+      ;; it, and `assoc''s identical tolerance, is named in DEPARTURES.md
+      ;; as the follow-up rather than done in this pass; the two private
+      ;; look-alikes above are where that work starts.
+      ;;
+      ;; The C walks with `FOR_EACH_TAIL' and then `CHECK_LIST_END', so an
+      ;; improper tail is `wrong-type-argument listp'; this raises the
+      ;; tree's ordinary type error there, and reads Elisp's nil as either
+      ;; of the tree's two spellings (`#f' or `()').
+      ;;--------------------------------------------------------------
+      (let loop ((tail alist))
+        (cond ((or (null? tail) (not tail)) #f)
+              ((not (pair? tail)) (error "Wrong type argument" alist))
+              ((and (pair? (car tail)) (eq? (car (car tail)) key))
+               (car tail))
+              (else (loop (cdr tail))))))
 
     ;;----------------------------------------------------------------
     ;; Property lists - `fns.c`'s three, which the menu machinery needs

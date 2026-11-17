@@ -135,7 +135,7 @@
           ;; (`bindings.el:1214`).
           narrow-map
           text-editor-cursor-column text-editor-cursor-line)
-    (only (schemacs editor fns) count-lines)
+    (only (schemacs editor fns) %count-lines)
     ;; `forward-char' is `cmds.c''s and lives in `(schemacs editor cmds)'.
     (only (schemacs editor cmds) forward-char)
     (only (schemacs editor search) search-backward search-forward)
@@ -2653,7 +2653,7 @@ previous element of the minibuffer history in the minibuffer."
       ;; **The measure is the display's, not the line count.** Emacs
       ;; asks `window-text-pixel-size' (`window.el:10415') - how many
       ;; pixels the text will occupy *as drawn*, wrapped rows included -
-      ;; and rounds to lines. This tree's `count-lines' is the logical
+      ;; and rounds to lines. This tree's `%count-lines' is the logical
       ;; line breaks, and a candidate line wider than the window wraps
       ;; into more rows than it has breaks: measured on a 60-column
       ;; window, a buffer of 3 logical lines is 5 display rows, and the

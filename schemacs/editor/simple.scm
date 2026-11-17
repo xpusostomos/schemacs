@@ -116,7 +116,11 @@
           line-end-position goto-char mark-marker message point point-max
           preceding-char region-beginning region-end save-excursion
           text-editor-cursor-column text-editor-get-end-of-line
-          text-editor-get-start-of-line)
+          text-editor-get-start-of-line
+          ;; `count-lines` narrows to its range and counts inside it -
+          ;; the narrowing is `editfns.c`'s, and `save-restriction` is
+          ;; what puts the old bounds back.
+          narrow-to-region point-min save-restriction)
     ;; The line movement's screen geometry: `vertical-motion` is
     ;; `indent.c`'s and lives in `indent.c`'s library since 2026-11-07,
     ;; with the row walk under it. `current-column` and `move-to-column`
@@ -128,7 +132,15 @@
     ;; The line options are `defcustom's in Emacs, so a user can set them
     ;; through Customize as well as by name.
     (only (schemacs editor custom) define-custom)
-    (only (schemacs editor search) looking-at)
+    ;; `count-lines` is a walk of `re-search-forward` matches, wrapped in
+    ;; `save-match-data` as its C counterpart's walk is wrapped by the
+    ;; Lisp.
+    (only (schemacs editor search) looking-at re-search-forward save-match-data)
+    ;; `line-number-at-pos` is `fns.c`'s (`fns.scm`), which is below this
+    ;; library - `count-lines` asks it at `point-max`; `%assq` is the
+    ;; same file's, under the `%` because Guile's core `assq` cannot be
+    ;; shadowed and the two differ on a non-cons element (see `fns.scm`).
+    (only (schemacs editor fns) line-number-at-pos %assq)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
           skip-syntax-forward backward-prefix-chars
           word-char? forward-word-position backward-word-position
@@ -152,8 +164,11 @@
     ;; before point, which is `textprop.c`'s - Emacs's own test, added
     ;; with the `text-editor-move-cursor' removal 2026-10-13.
     ;; `set-hard-newline-properties` writes the `hard` property, added
-    ;; with `newline`'s hard-newline half.
-    (only (schemacs editor textprop) get-text-property put-text-property)
+    ;; with `newline`'s hard-newline half. `get-char-property` is what
+    ;; `count-lines`' ignore-invisible-lines branch asks about the
+    ;; newline it just matched (`textprop.c:681`).
+    (only (schemacs editor textprop)
+          get-char-property get-text-property put-text-property)
     ;; `casify-region` is `casefiddle.c`'s, and `upcase-region` and
     ;; `downcase-region` - which read the region and so cannot live in
     ;; `casefiddle.scm` - are defined in this file and call it.
@@ -257,6 +272,7 @@
    region-active-p set-mark set-mark-command
    set!mark-ring use-region-p
 prefix-argument-description
+   count-lines
    what-cursor-position
    ;; `eval-region' is `lread.c''s, M-x only as it is in Emacs -
    ;; `(where-is-internal 'eval-region)' is nil.
@@ -3213,6 +3229,79 @@ If N is omitted or nil, move point 1 character to the left."
     (define-key *default-keymap* (kbd "M-\\") delete-horizontal-space)
     (define-key *default-keymap* (kbd "C-t") transpose-chars)
     (define-key *default-keymap* (kbd "M-t") transpose-words)
+
+    (define (count-lines start end . rest)
+      ;; GNU Emacs's `count-lines' (`simple.el:1800'): "Return number of
+      ;; lines between START and END. This is usually the number of
+      ;; newlines between them, but can be one more if START is not equal
+      ;; to END and the greater of them is not at the start of a line."
+      ;;
+      ;; The body is Emacs's, in its order: narrow to the range, then the
+      ;; two branches this tree can be in - `ignore-invisible-lines`, and
+      ;; the default, which asks `line-number-at-pos' at `point-max' and
+      ;; takes one off when that position is at the start of a line.
+      ;; `narrow-to-region` sorts its arguments itself, which is how the
+      ;; "greater of them" comes out right for a reversed range.
+      ;;
+      ;; **Emacs's first branch, `(eq selective-display t)`, is not
+      ;; carried.** It counts with a `\r' ending a line as well as a
+      ;; newline, which is the redisplay's selective-display rule - and
+      ;; this tree's redisplay has none. The variable's default is nil,
+      ;; so Emacs takes the third branch too unless a user sets it, and
+      ;; the answers here are Emacs's for every state the tree can be in.
+      ;; `%count-lines` (`fns.scm`) carries the same omission for its own
+      ;; C walk, with the same reason.
+      ;;
+      ;; **The invisible-lines branch is carried whole, and its answer is
+      ;; about the buffer rather than the screen.** The property dired
+      ;; writes is real here, so the count is Emacs's own; the renderer
+      ;; does not yet hide `invisible' text, so what the screen shows and
+      ;; what this counts can differ until that lands. `buffer-invisibility-spec`
+      ;; is `buffer.c`'s buffer-local with no definition site here, so it
+      ;; is read from the buffer table with Emacs's default, `t' - "any
+      ;; non-nil `invisible' property hides the text".
+      ;;--------------------------------------------------------------
+      (let ((ignore-invisible-lines (and (pair? rest) (car rest))))
+        (save-excursion
+          (save-restriction
+            (narrow-to-region start end)
+            (cond
+             (ignore-invisible-lines
+              (goto-char (point-min))
+              (save-match-data
+                (- (buffer-size)
+                   (forward-line (buffer-size))
+                   (let ((invisible-count 0))
+                     (goto-char (point-min))
+                     ;; "(while (re-search-forward ... nil t) (setq prop
+                     ;; (get-char-property (1- (point)) 'invisible)) ...)"
+                     ;; - the property is the one on the matched newline,
+                     ;; which is why the position is `point - 1`.
+                     (let loop ()
+                       (when (re-search-forward "\n\\|\r[^\n]" #f #t)
+                         (let* ((prop (get-char-property (- (point) 1)
+                                                         'invisible))
+                                (spec (buffer-local-value
+                                       (current-buffer)
+                                       'buffer-invisibility-spec #t))
+                                ;; Elisp's nil, either spelling: "nothing
+                                ;; is hidden".
+                                (spec (if (eq? spec #f) '() spec))
+                                ;; Emacs's `(if (eq buffer-invisibility-spec t)
+                                ;; prop (or (memq prop ...) (assq prop ...)))'.
+                                (hidden (if (eq? spec #t)
+                                            prop
+                                            (or (memq prop spec)
+                                                (%assq prop spec)))))
+                           (when hidden
+                             (set! invisible-count (+ invisible-count 1))))
+                         (loop)))
+                     invisible-count))))
+             (else
+              (goto-char (point-max))
+              (if (bolp)
+                  (- (line-number-at-pos) 1)
+                  (line-number-at-pos))))))))
 
     ;;----------------------------------------------------------------
     ;; `what-cursor-position' - simple.el:1856, C-x =

@@ -6073,3 +6073,132 @@ for the same text in `emacs-lisp-mode`:
   string's opening quote. The first test run compared against booleans
   and failed against the port's correct answers - the measurement, not
   the port, is what the expectation must copy.
+
+# `simple.el`'s `count-lines`, and the `assq` under it (2026-11-18)
+
+## The name: `%count-lines` is the C helper, `count-lines` is the Lisp one
+
+Emacs has two functions that both count lines between two positions, and
+only one of them has a Lisp name:
+
+- `count_lines` (`xdisp.c:29903`) - a C function declared in `lisp.h`
+  (`:4409`) and DEFUN'd nowhere, counting line breaks with
+  `display_count_lines`. It lives in `fns.scm` in this tree because its
+  only real caller is `fns.c`'s `line-number-at-pos` (`xdisp.c`'s line
+  number for the `%l` cache reaches it through `fns` from below).
+- `count-lines` (`simple.el:1800`) - the Lisp function, which narrows to
+  START..END and adds one when the range does not end at the start of a
+  line. Measured on Emacs 31.1: over `"a\nb\nc"`, `(count-lines 1 6)` is
+  **3**, where the C walk answers **2**.
+
+The tree had given the C helper the plain name, with a comment saying the
+Lisp function was not ported and the name must not be read as it. That
+stopped being tenable once the Lisp function was ported: both cannot
+carry one name, and the user-visible one is `simple.el`'s. So the C
+helper is **`%count-lines`** now, the `%kill-buffer` treatment (the
+mechanism takes the mark; the Lisp-visible name is Emacs's), and the
+Lisp function is `count-lines` in `simple.scm`, exported to the user
+environment through `imports.scm`.
+
+## What the port carries, and the two things it cannot
+
+The body is Emacs's in its order: `save-excursion` over
+`save-restriction` over `narrow-to-region`, then the branches.
+
+- **The default branch** - `point-max`, `bolp`, `line-number-at-pos` -
+  is whole. `narrow-to-region` sorts its arguments itself (the C's
+  `if (e < s)` swap, `editfns.c:2974`), which is how a reversed range
+  counts the same as the sorted one: measured, `(count-lines 6 1)` is 3.
+- **`ignore-invisible-lines` is whole**, including the
+  `buffer-invisibility-spec` test in both shapes (`t` means any non-nil
+  `invisible` property hides; a list means `memq` for the symbols and
+  `assq` for the `(SYMBOL . BOOL)` pairs). Two readings are this tree's:
+  - `buffer-invisibility-spec` is `buffer.c`'s per-buffer variable with
+    no definition site here, so it is read with `buffer-local-value` and
+    Emacs's **default `t`** (measured: `(with-temp-buffer
+    buffer-invisibility-spec)` is `t`). With the default, a buffer whose
+    lines carry `invisible` answers the reduced count - measured 2 for a
+    four-line buffer with two invisible lines, which is Emacs's answer
+    too.
+  - **The renderer does not honour `invisible`** (`indentc.scm` and
+    `xdisp.scm` both say so where the C reads it). So the branch's count
+    is Emacs's answer *about the buffer's text properties*, not about
+    what this screen shows; dired does write the property, so the
+    difference is reachable. When the redisplay learns invisibility the
+    two agree again without a change here.
+- **`selective-display` is not carried, and that is a named gap.**
+  Emacs's first branch counts with a `\r` ending a line when the
+  variable is `t`. The variable's default is nil, so the branch is dead
+  for every buffer state this tree can produce - and it would stay
+  *wrong* if a user set it, because the redisplay has no selective
+  display to agree with. `%count-lines` carries the same omission for
+  its C walk. Closing it means the redisplay's `\r` handling first.
+
+## `%assq`: Emacs's `assq` cannot be called `assq` here
+
+The invisible-lines branch needs Emacs's `assq`, whose docstring ends
+"Elements of ALIST that are not conses are ignored" (`fns.c:1967`).
+Measured on Emacs 31.1: `(assq 'bar '(foo))` is nil and
+`(assq 'bar '(foo (bar . 2)))` is `(bar . 2)`. R7RS's `assq` - and
+Guile's - raises on a non-pair element, which is exactly the shape
+`buffer-invisibility-spec` has (symbols and conses in one list).
+
+**A library in this Guile cannot shadow the core `assq`.** Measured
+three ways with a clean `~/.cache/guile/ccache`: a library that
+`(except (scheme base) assq)`s and imports another library's `assq`
+still calls the core one at run time; the module's `assq` is
+`not eq?` to the imported procedure; and reordering the imports changes
+nothing. So Emacs's `assq` is ported into its Emacs file, `fns.c`'s
+`fns.scm`, as **`%assq`** - the `%` because the host claims the plain
+name, the mirror image of `%kill-buffer`'s case.
+
+It also keeps the C's tail rule: `FOR_EACH_TAIL` then `CHECK_LIST_END`,
+measured as `(wrong-type-argument listp (a . b))`. That raises the
+tree's ordinary type error with the whole ALIST as the irritant, and
+reads Elisp's nil as either of the tree's two spellings (`#f` or `()`).
+
+**The rest of the tree still calls the core `assq`** - 37 files - and
+`assoc` has the identical tolerance gap. Converting them is the
+follow-up this pass did not do: it is one import line per caller
+(`(only (schemacs editor fns) %assq)`) and a careful read of the ones
+where a non-cons element is possible. `window.scm`'s
+`window--state-assq` and `tab-bar.scm`'s `tab-bar--assq` are two
+hand-written copies of exactly this C behaviour, written because it was
+missing; they are where that work starts.
+
+## `count-lines-page`'s note, corrected
+
+`pages.scm` listed `count-lines-page` as blocked on `count-lines`' "Lisp
+half, which is not ported". It is ported now, and the note says what is
+actually left: `page--count-lines-page` is portable, but the command's
+`message` is Emacs's `ngettext` call (the C library's plural selection,
+libintl.c), and this tree has no message catalogs. Same rule as the
+overstated gap notes before it: say what remains and what it takes,
+rather than leaving a reason that has expired.
+
+## The measured table
+
+Every expectation in `fns-tests.scm`'s two new groups is
+`emacs -Q --batch`'s answer, measured first:
+
+| | Emacs 31.1 | port |
+|---|---|---|
+| `(count-lines 1 6)` over `"a\nb\nc"` | 3 | same |
+| `(1 1)` `(1 4)` `(1 5)` `(2 6)` | 0 2 2 3 | same |
+| `(2 2)` `(4 4)` `(2 3)` `(5 6)` `(6 6)` `(1 2)` `(1 3)` | 0 0 1 1 0 1 1 | same |
+| reversed `(6 1)` `(4 2)` | 3 2 | same |
+| point after the call | unmoved | same |
+| markers as START and END | works | same |
+| empty buffer | 0 0 | same |
+| inside a narrowing: `(2 6)` `(3 5)` | 3 1 | same |
+| ... and `(1 7)` | args-out-of-range | same message |
+| invisible "a\n" "b\n", flag given, spec default/`'(foo)`/`'(bar)`/nil/`'()` | 2 3 3 4 4 | same |
+| the same without the flag | 4 | same |
+| `(assq 'bar '(foo (bar . 2)))` | `(bar . 2)` | same |
+| `(assq 'bar '(foo))` | nil | `#f` |
+| `(assq 'x '(a . b))` | wrong-type-argument | same message |
+
+One expectation in the suite is Emacs's *default* invisibility spec
+(`t`) rather than a measured varietal: the suite measures it through
+the port, and Emacs's own default was measured separately
+(`(with-temp-buffer buffer-invisibility-spec)` is `t`).

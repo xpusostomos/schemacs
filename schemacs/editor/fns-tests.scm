@@ -6,14 +6,20 @@
  ;; `plist-member` is intervals.scm's - see the note in fns.scm.
  (only (schemacs editor intervals) plist-member)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- ;; the buffer a line count needs: `count-lines' and `line-number-at-pos'
- ;; are both `fns.scm''s now and both work on a buffer's text.
+ ;; the buffer a line count needs: `%count-lines' and `line-number-at-pos'
+ ;; are both `fns.scm''s now and both work on a buffer's text. The Lisp
+ ;; `count-lines' of the same subject is `simple.scm''s, and its
+ ;; `ignore-invisible-lines' branch reads text properties.
  (only (schemacs editor buffer)
        *current-buffer* allocate-buffer current-buffer erase-buffer
-       get-buffer-create set-buffer)
+       get-buffer-create set-buffer set-buffer-local-value!)
  (only (schemacs editor frame) *current-frame* new-frame)
- (only (schemacs editor editfns) goto-char insert)
+ (only (schemacs editor editfns)
+       goto-char insert narrow-to-region point point-min point-max
+       save-restriction)
  (only (schemacs editor marker) copy-marker)
+ (only (schemacs editor textprop) put-text-property)
+ (only (schemacs editor simple) count-lines)
  (only (ice-9 exceptions) exception-message)
  )
 
@@ -100,19 +106,20 @@
 (test-equal '#t (string-collate-lessp "a" "b" "en_US.UTF-8"))
 
 ;; ------------------------------------------------------------------
-;; count-lines and line-number-at-pos
+;; %count-lines and line-number-at-pos
 ;;
 ;; Both live in this library now. `line-number-at-pos' is `fns.c:6688' - a
 ;; DEFUN of *this* file - and it was in `editfns.scm' under a comment
 ;; citing `editfns.c', which is where it is not; the `count_lines' it
-;; counts with is `xdisp.c:29892' and is placed beside it (the note on it
-;; there says why, and why its name is not the Lisp `count-lines'').
+;; counts with is `xdisp.c:29903' and is placed beside it (the note on it
+;; there says why, and why the C helper now carries the `%').
 ;;
-;; **`count-lines' here is the C *helper*, not Emacs's Lisp function of
-;; the same spelling.** `simple.el:1800''s narrows to the range and can
-;; answer one more: measured on Emacs 31.1, `(count-lines 1 6)' over
+;; **`%count-lines' here is the C *helper*, not Emacs's Lisp function of
+;; nearly the same spelling.** `simple.el:1800''s narrows to the range and
+;; can answer one more: measured on Emacs 31.1, `(count-lines 1 6)' over
 ;; "a\nb\nc" is 3, where this walk from 1 to 6 finds the two newlines and
-;; answers 2. So the values below are `display_count_lines''s, and the
+;; answers 2. That one is ported now, in `simple.scm' - the group below is
+;; its. So the values here are `display_count_lines''s, and the
 ;; `line-number-at-pos' ones are the DEFUN's.
 ;;
 ;; Every `line-number-at-pos' expectation is `emacs -Q --batch' on this
@@ -134,12 +141,12 @@
   (with-text "a\nb\nc"
     (lambda ()
       (let ((b (current-buffer)))
-        (list (count-lines b 1 6)
-              (count-lines b 1 1)
-              (count-lines b 3 5)
-              (count-lines b 4 4)
-              (count-lines b 1 5)
-              (count-lines b 5 6))))))
+        (list (%count-lines b 1 6)
+              (%count-lines b 1 1)
+              (%count-lines b 3 5)
+              (%count-lines b 4 4)
+              (%count-lines b 1 5)
+              (%count-lines b 5 6))))))
 
 ;; `line-number-at-pos' is that walk from `point-min' plus one, so the two
 ;; agree: 2 newlines before `point-max' is line 3.
@@ -147,7 +154,7 @@
   (with-text "a\nb\nc"
     (lambda ()
       (let ((b (current-buffer)))
-        (let ((from-walk (+ 1 (count-lines b 1 6))))
+        (let ((from-walk (+ 1 (%count-lines b 1 6))))
           (goto-char 6)
           (list from-walk (line-number-at-pos)))))))
 
@@ -208,6 +215,107 @@
   (with-text "a\nb\nc"
     (lambda ()
       (guard (e (#t (exception-message e))) (line-number-at-pos "x")))))
+
+;; ------------------------------------------------------------------
+;; fns.c's `assq' - `%assq' in this tree, because Guile's core binding
+;; cannot be shadowed by a library import (see the note in fns.scm).
+;; Every expectation is `emacs -Q --batch`'s own answer.
+;; ------------------------------------------------------------------
+
+;; The docstring's last sentence: "Elements of ALIST that are not conses
+;; are ignored." Emacs answers `(bar . 2)` for the first and nil for the
+;; rest; Guile's `assq' raises on the first.
+(test-equal '((bar . 2) (a . 1) #f #f #f)
+  (list (%assq 'bar '(foo (bar . 2)))
+        (%assq 'a '((a . 1) (b . 2)))
+        (%assq 'c '((a . 1)))
+        (%assq 'a '())
+        (%assq 'a #f)))                 ; Elisp's nil, this tree's other spelling
+
+;; The C walks with `FOR_EACH_TAIL' and then `CHECK_LIST_END': an improper
+;; tail is `wrong-type-argument listp' with the whole ALIST as data -
+;; measured, `(wrong-type-argument listp (a . b))'. The tree's type error
+;; is the message alone.
+(test-equal "Wrong type argument"
+  (guard (e (#t (exception-message e))) (%assq 'x '(a . b))))
+
+;; ------------------------------------------------------------------
+;; simple.el's `count-lines' - the Lisp function, ported in simple.scm.
+;; Every expectation below is `emacs -Q --batch`'s answer on the same
+;; text, measured first.
+;; ------------------------------------------------------------------
+
+;; "a\nb\nc": the plain answer, an empty range, an end at a line start and
+;; one in mid-line, a range that starts mid-line, and the last line with
+;; no trailing newline.
+(test-equal '(3 0 2 2 3 0 0 1 1 0 1 1)
+  (with-text "a\nb\nc"
+    (lambda ()
+      (list (count-lines 1 6) (count-lines 1 1) (count-lines 1 4)
+            (count-lines 1 5) (count-lines 2 6) (count-lines 2 2)
+            (count-lines 4 4) (count-lines 2 3) (count-lines 5 6)
+            (count-lines 6 6) (count-lines 1 2) (count-lines 1 3)))))
+
+;; `narrow-to-region' sorts its arguments, which is how "the greater of
+;; them" comes out right for a reversed range: measured, 3 for 6..1 and 2
+;; for 4..2.
+(test-equal '(3 2)
+  (with-text "a\nb\nc"
+    (lambda () (list (count-lines 6 1) (count-lines 4 2)))))
+
+;; `save-excursion' is the body's first form, so point does not move.
+(test-equal '(3 3)
+  (with-text "a\nb\nc"
+    (lambda ()
+      (goto-char 3)
+      (list (count-lines 1 6) (point)))))
+
+;; The arguments may be markers, as they may be for `narrow-to-region'.
+(test-equal 3
+  (with-text "a\nb\nc"
+    (lambda () (count-lines (copy-marker 1) (copy-marker 6)))))
+
+(test-equal '(0 0)
+  (with-text ""
+    (lambda () (list (count-lines 1 1)
+                     (count-lines (point-min) (point-max))))))
+
+;; Inside an existing narrowing the function narrows to its own range, and
+;; a range outside the buffer's text is `narrow-to-region''s
+;; args-out-of-range - measured, 3 and 1, then "Args out of range".
+(test-equal '(3 1 "Args out of range")
+  (with-text "a\nb\nc"
+    (lambda ()
+      (save-restriction
+        (narrow-to-region 2 6)
+        (list (count-lines 2 6)
+              (count-lines 3 5)
+              (guard (e (#t (exception-message e)))
+                     (count-lines 1 7)))))))
+
+;; IGNORE-INVISIBLE-LINES: a line counts as invisible when its *newline*
+;; carries an `invisible' property that `buffer-invisibility-spec' says
+;; hides. Measured with "a\n" and "b\n" marked, over "a\nb\nc\nd": 4
+;; without the flag (the branch is not taken), then 2 with the spec at its
+;; default (t - any non-nil property hides), 3 with '(foo) and with
+;; '(bar), and 4 with nil and with '().
+(test-equal '(4 2 3 3 4 4)
+  (with-text "a\nb\nc\nd"
+    (lambda ()
+      (let ((b (current-buffer)))
+        (put-text-property 1 3 'invisible 'foo)
+        (put-text-property 3 5 'invisible 'bar)
+        (let ((no-flag (count-lines 1 8))      ; no slot: spec default t
+              (default (count-lines 1 8 #t)))
+          (set-buffer-local-value! b 'buffer-invisibility-spec '(foo))
+          (let ((foo (count-lines 1 8 #t)))
+            (set-buffer-local-value! b 'buffer-invisibility-spec '(bar))
+            (let ((bar (count-lines 1 8 #t)))
+              (set-buffer-local-value! b 'buffer-invisibility-spec #f)
+              (let ((nil-spec (count-lines 1 8 #t)))
+                (set-buffer-local-value! b 'buffer-invisibility-spec '())
+                (list no-flag default foo bar nil-spec
+                      (count-lines 1 8 #t))))))))))
 
 ;;------------------------------------------------------------------
 ;; fns.c's plist primitives - every expectation `emacs -Q --batch`'s own

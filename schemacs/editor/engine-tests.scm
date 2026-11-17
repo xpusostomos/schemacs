@@ -1,7 +1,7 @@
 (import
  (only (schemacs editor undo) record-insert record-delete text-editor-undo-boundary! text-editor-undo-disable! text-editor-undo-enable! text-editor-undo-recording? *undo-limit* undo-insertion-entry? undo-deletion-entry? undo-modified-entry? *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
  (only (schemacs editor insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches)
- (only (schemacs editor fns) count-lines)
+ (only (schemacs editor fns) %count-lines)
  (scheme base)
  (scheme file)
  
@@ -1042,7 +1042,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc"))
     (set-point ed (buffer-z ed))
-    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
+    (list (+ 1 (%count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed)
           (text-editor-get-start-of-line ed)
@@ -1067,7 +1067,7 @@
          (pos (begin (with-current-buffer ed (insert "ab\ncd"))
                      (set-point ed 5)
                      (buffer-pt ed))))
-    (list (+ 1 (count-lines ed (buffer-beg ed) pos))
+    (list (+ 1 (%count-lines ed (buffer-beg ed) pos))
           (- pos (text-editor-get-start-of-line ed pos)))))
 
 ;; Point at that end still reaches the beginning of the line, which is
@@ -1086,7 +1086,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abc\n"))
     (set-point ed (buffer-z ed))
-    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
+    (list (+ 1 (%count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed)
           (text-editor-get-start-of-line ed)
@@ -1117,7 +1117,7 @@
     (set-point ed (buffer-z ed))
     (list (text-editor-cursor-line ed)
           (buffer-pt ed)
-          (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed))))))
+          (+ 1 (%count-lines ed (buffer-beg ed) (buffer-z ed))))))
 
 ;; Typing a line break at the end of a buffer with no trailing break
 ;; starts a line, and point is on it.
@@ -1126,7 +1126,7 @@
     (with-current-buffer ed (insert "abc"))
     (set-point ed (buffer-z ed))
     (with-current-buffer ed (insert "\n"))
-    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
+    (list (+ 1 (%count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed))))
 
@@ -1136,7 +1136,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "one\ntwo\n"))
     (set-point ed (buffer-z ed))
-    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
+    (list (+ 1 (%count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed))))
 
@@ -1158,7 +1158,7 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd"))
     (set-point ed 5)
-    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
+    (list (+ 1 (%count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-column ed)
           (buffer-pt ed))))
 
@@ -1193,7 +1193,7 @@
 (test-equal '(2 2 0)
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcd\n"))
-    (list (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed)))
+    (list (+ 1 (%count-lines ed (buffer-beg ed) (buffer-z ed)))
           (text-editor-cursor-line ed)
           (text-editor-cursor-column ed))))
 

@@ -120,7 +120,7 @@
     ;; `line-number-at-pos' is `fns.c''s DEFUN (`fns.c:6688') and lives in
     ;; that library now, with the `count_lines' it calls; it is imported
     ;; and re-exported below so that this library's readers do not move.
-    (only (schemacs editor fns) copy-sequence line-number-at-pos count-lines)
+    (only (schemacs editor fns) copy-sequence line-number-at-pos %count-lines)
     ;; `(only (schemacs editor intervals) copy-intervals-to-string)` stood
     ;; here for `buffer-substring`'s hand-copied properties; the copy is
     ;; `make_buffer_string_both`'s body and moved into `engine.scm` with
@@ -618,7 +618,7 @@ point-marker
       ;; `line-number-at-pos' (`fns.c:6688'), which is
       ;; `(count_lines BEGV PT) + 1'.
       ;;--------------------------------------------------------------
-      (+ 1 (count-lines ed (buffer-beg ed) (buffer-pt ed))))
+      (+ 1 (%count-lines ed (buffer-beg ed) (buffer-pt ed))))
 
     (define (text-editor-cursor-column ed)
       ;; How many characters point is from the start of its line,

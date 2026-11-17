@@ -9,7 +9,10 @@
   ;; `forward-page' is what `backward-page' is written in terms of, and
   ;; the pair is ported together. `narrow-to-page' (`C-x n p') is here
   ;; now that narrowing is. **Not carried**: `mark-page', `count-lines-page'
-  ;; (`count-lines'' Lisp half, which is not ported), `C-x [ / C-x ]'
+  ;; (its line-counting half is `page--count-lines-page', which is
+  ;; portable now that `simple.el''s `count-lines' is - what is left is
+  ;; `ngettext', the C library's plural selection, and this tree has no
+  ;; message catalogs for it to select from), `C-x [ / C-x ]'
   ;; (`forward-page'/`backward-page' as commands - this tree has no
   ;; binding for them and Emacs gets them from bindings.el).
 

@@ -116,10 +116,12 @@
     (schemacs editor window-x)
     )
   (export
+    %assq
     %blank-line?
     %buffer-modtime
     %buffer-modtime-size
     %class-in
+    %count-lines
     %for-each-marker
     %frame-menu-bar-lines
     %frame-tab-bar-lines

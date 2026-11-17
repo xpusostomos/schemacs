@@ -1,5 +1,5 @@
 (import
- (only (schemacs editor fns) count-lines)
+ (only (schemacs editor fns) %count-lines)
  (scheme base)
  (scheme char)
  (scheme file)
@@ -2277,7 +2277,7 @@
               ;; the answer counted from scratch, which is what the
               ;; cache must never disagree with
               (number->string
-               (+ 1 (count-lines ed (buffer-beg ed)
+               (+ 1 (%count-lines ed (buffer-beg ed)
                                  (buffer-pt ed)))))))))
 
 (test-end "schemacs_ncurses_editor_mode_line_format")
@@ -3986,14 +3986,14 @@
         (for-each (lambda (ev) (dispatch-input-event frame ev))
                   (list C-v C-v C-v))
         (scroll-to-cursor! w)
-        (let ((before (count-lines ed (buffer-beg ed)
+        (let ((before (%count-lines ed (buffer-beg ed)
                                    (window-start w))))
           ;; now move up one line, which puts point above the window
           (dispatch-input-event frame C-p)
           (scroll-to-cursor! w)
-          (let* ((here (count-lines ed (buffer-beg ed)
+          (let* ((here (%count-lines ed (buffer-beg ed)
                                     (buffer-pt ed)))
-                 (start (count-lines ed (buffer-beg ed)
+                 (start (%count-lines ed (buffer-beg ed)
                                      (window-start w))))
             ;; the start went back half a window, not to point's own line
             (list (= start (- here half))
@@ -4030,9 +4030,9 @@
             (dispatch-input-event frame C-n)
             (scroll-to-cursor! w)
             (loop (+ n 1))))
-        (let* ((here (count-lines ed (buffer-beg ed)
+        (let* ((here (%count-lines ed (buffer-beg ed)
                                   (buffer-pt ed)))
-               (start (count-lines ed (buffer-beg ed)
+               (start (%count-lines ed (buffer-beg ed)
                                    (window-start w))))
           (list (= start (- here half))
                 (> start start-before)))))))

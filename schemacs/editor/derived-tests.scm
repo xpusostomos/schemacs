@@ -1,7 +1,7 @@
 (import
  (only (schemacs editor undo) record-insert record-delete text-editor-undo-boundary! text-editor-undo-disable! text-editor-undo-enable! text-editor-undo-recording? *undo-limit* undo-insertion-entry? undo-deletion-entry? undo-modified-entry? *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
  (only (schemacs editor insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches)
- (only (schemacs editor fns) count-lines)
+ (only (schemacs editor fns) %count-lines)
  (scheme base)
  (scheme char)
  

@@ -54,9 +54,9 @@
     ;; are what a row is measured in.
     (only (schemacs editor disp-table)
           char-display-glyph char-display-width display-text-width)
-    ;; `count-lines' is `xdisp.c:29892`'s and is `fns.c`'s here; the row
+    ;; `%count-lines' is `xdisp.c:29903`'s and is `fns.c`'s here; the row
     ;; walk uses it for the `%l` cache's arithmetic.
-    (only (schemacs editor fns) count-lines)
+    (only (schemacs editor fns) %count-lines)
     (only (schemacs editor textprop)
           get-text-property next-single-property-change)
     (only (schemacs editor syntax) skip-chars-forward)
@@ -418,7 +418,7 @@
       ;;--------------------------------------------------------------
       (let* ((ed (window-buffer window))
              (start (and (<= 1 line-index)
-                         (<= line-index (+ 1 (count-lines ed (buffer-beg ed) (buffer-z ed))))
+                         (<= line-index (+ 1 (%count-lines ed (buffer-beg ed) (buffer-z ed))))
                          (window-line-start ed line-index))))
         (and start (buffer-line-texts-at window start))))
 

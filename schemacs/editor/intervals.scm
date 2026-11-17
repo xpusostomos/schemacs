@@ -70,7 +70,7 @@
     ;; library *up* into the engine facade, and it is what stood between
     ;; `(schemacs editor fns)' and the engine: `fns' imports this library,
     ;; so a facade import here would have made `engine -> fns' a cycle the
-    ;; day `count-lines' moved down to `fns' (it is `xdisp.c''s, and
+    ;; day `%count-lines' moved down to `fns' (it is `xdisp.c''s, and
     ;; `fns.c''s `line-number-at-pos' is its only real user).
     (only (schemacs editor buffer)
           buffer-beg buffer-z text-editor-text

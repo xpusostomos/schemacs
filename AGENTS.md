@@ -10741,6 +10741,40 @@ it is the honest size to plan against.
 
 The rest of the list stands: the disabled-command machinery
 (`C-x n n`'s "Use this command?" prompt, which needs
-`substitute-command-keys` - `doc.c`'s ~1000-line walk), labeled
+`substitute-command-keys` - `doc.c`'s ~1000-line walk) and labeled
 restrictions (`with-restriction`/`without-restriction`,
-`narrowing-locked`), and `simple.el`'s Lisp `count-lines`.
+`narrowing-locked`). `simple.el`'s Lisp `count-lines` is done - see the
+section below.
+
+# `count-lines`, and the `assq` that could not keep its name (2026-11-18)
+
+`simple.el:1800`'s `count-lines` is in `simple.scm`, with the three
+readings worth carrying forward:
+
+* **The C helper is `%count-lines` now.** Emacs has two line counters:
+  `count_lines` (`xdisp.c:29903`, no Lisp name) and the Lisp
+  `count-lines`. The tree had given the C one the plain name with a note
+  saying the Lisp one was not ported; with it ported, the Lisp name is
+  `simple.el`'s and the C helper takes the `%` (`%kill-buffer`'s rule).
+  Every importer is updated, and `%count-lines` moved into
+  `(only (schemacs editor fns) ...)` lists in `editfns`, `indentc`,
+  `xdisp`, `minibuffer` and `loadup`.
+* **The `ignore-invisible-lines` branch is real here** - dired writes
+  the property - but **the renderer does not honour `invisible`**, so
+  the count is about the buffer and not the screen. Emacs's first
+  branch, `selective-display`, is not carried: the redisplay has no
+  selective display for it to agree with. Both named in the source and
+  in DEPARTURES.md.
+* **`assq` cannot be ported under its own name.** Guile's core `assq` is
+  not shadowable by a library import (measured three ways), and Emacs's
+  differs exactly where `buffer-invisibility-spec` needs it - non-cons
+  elements are ignored, where R7RS raises. So Emacs's is `%assq` in
+  `fns.scm`. The rest of the tree still uses the core one; converting
+  it (and `assoc`) is the named follow-up, starting at
+  `window--state-assq` and `tab-bar--assq`.
+
+`fns-tests.scm` grew both groups (38 passes now), every expectation
+Emacs 31.1's own, including the invisible-line table and the
+improper-tail `assq` error. Also corrected: `pages.scm`'s note that said
+`count-lines-page` waited on `count-lines` - what it waits on is
+`ngettext`.
