@@ -2249,6 +2249,8 @@
     pop-to-mark-command
     popup-menu
     popup-menu-normalize-position
+    pos-bol
+    pos-eol
     pos-visible-in-window-p
     posn-area
     posn-at-x-y
@@ -2276,7 +2278,13 @@
     previous-single-char-property-change
     previous-single-property-change
     primitive-undo
+    prog--text-at-point-or-region-p
+    prog--text-at-point-p
+    prog-fill-reindent-defun
+    prog-fill-reindent-defun-default
+    prog-fill-reindent-defun-function
     prog-first-column
+    prog-indent-sexp
     prog-mode
     prog-mode-hook
     prog-mode-map

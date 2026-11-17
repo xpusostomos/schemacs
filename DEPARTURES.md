@@ -6005,3 +6005,71 @@ here, and its nil - which `listp` accepts - is `'()` for the
   *prefixed* import's back door (Guile's `module-ref` reaches the
   unprefixed name even though the compiler cannot see it). It is
   imported plainly now.
+
+# `prog-fill-reindent-defun`, and the two position primitives under it
+# (2026-11-17)
+
+`prog-mode.el`'s two map entries are carried: `prog-indent-sexp`
+(`prog-mode.el:131`, `C-M-q`) and `prog-fill-reindent-defun`
+(`:194`, `M-q`), with `prog--text-at-point-p` (`:144`),
+`prog--text-at-point-or-region-p` (`:169`), the
+`prog-fill-reindent-defun-function` seam (`:177`) and its default
+(`:182`). In a `prog-mode`-derived buffer, `M-q` in code reindents the
+defun, and `M-q` in a comment or string fills the paragraph - which is
+the behaviour the mode's empty keymap had been naming as a gap.
+
+## `pos-bol` and `pos-eol` (`editfns.c:684`, `:740`)
+
+`prog--text-at-point-p` asks `pos-eol` where the line ends *ignoring
+fields*; the tree only had `line-end-position`, which constrains. Both
+C functions are now ported beside their constrained twins, in the C's
+order:
+
+| | C body | here |
+|---|---|---|
+| `pos-bol` | `(make_fixnum (bol (n, NULL)))` | `(bol ed n)` |
+| `line-beginning-position` | `constrain_to_field (bol ...)` | the same |
+| `pos-eol` | `(make_fixnum (eol (n)))` | `(eol ed n)` |
+| `line-end-position` | `constrain_to_field (eol ...)` | the same |
+
+The difference is the field machinery, so a test for a field boundary
+cannot use the `pos-` pair and a test of the pair must not sit in a
+minibuffer prompt.
+
+## The layering move, named
+
+`prog-mode.scm` now imports `fill`, `lisp`, `indent`, `newcomment`,
+`syntax`, `search`, `cmds` and `editfns`, where Emacs's `prog-mode.el`
+needs nothing at load time. Two of its rules force it: a binding must
+come *after* the command it binds (so the map's two `define-key`s sit
+at the bottom of the file), and the commands call `fill-paragraph`,
+`forward-sexp` and `indent-region`.
+
+It is safe because **nothing the new imports reach imports `prog-mode`,
+`lisp-mode` or `scheme`** - those are the only two importers of this
+library, and the `files.scm` hit on `lisp-mode` is the auto-mode
+autoload table, not an import. (The one real importer of `scheme` is
+`scheme` itself; `lisp.scm`'s hit is a comment.)
+
+`prog-fill-reindent-defun-function` is a **plain variable**, not a
+parameter: Emacs declares it with `defvar`, nothing `let`-binds it, and
+it is set with `(set! ...)` after the function it names exists - the
+`normal-auto-fill-function` shape, forward reference and compiler
+mutation marker included. Its default is set below the definition
+because a `set!` above it would read the name before it is bound.
+
+## The measured answers
+
+Every expectation in `prog-mode-tests.scm` is Emacs 31.1's own output
+for the same text in `emacs-lisp-mode`:
+
+- `C-M-q` at point 1 of a badly indented defun produces the fully
+  indented one, and `C-u C-M-q` from inside the defun the same;
+- `M-q` in code reindents the defun;
+- `M-q` in a comment at `fill-column` 30 fills it and continues the
+  `;;`;
+- `prog--text-at-point-p` answers **positions, not `t`**: nil in code
+  and at a bare `(`, `1` at a `;;` start and inside a comment, `4` at a
+  string's opening quote. The first test run compared against booleans
+  and failed against the port's correct answers - the measurement, not
+  the port, is what the expectation must copy.

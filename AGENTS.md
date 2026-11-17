@@ -10698,3 +10698,49 @@ line's `move-to-left-margin`, and the page-start guard. Under it,
 has `electric-newline-and-maybe-indent`), the abbrev expansion inside
 `internal_self_insert`, and the `use-hard-newlines` *mode* (the variable
 is a `define-custom` for now).
+
+# `prog-fill-reindent-defun` is in, and prog-mode moved up (2026-11-17)
+
+`C-M-q` (`prog-indent-sexp`) and `M-q` (`prog-fill-reindent-defun`) are
+in `prog-mode.scm`, with the four helpers under the second. So M-q in a
+programming buffer now reindents the defun in code and fills the
+paragraph in a comment or string - Emacs 31's split.
+
+* **`prog-mode.scm` moved above `fill`, `lisp`, `indent` and
+  `newcomment`**, because a binding must come after its command and the
+  commands call `fill-paragraph`, `forward-sexp` and `indent-region`.
+  Nothing in those libraries imports `prog-mode`, `lisp-mode` or
+  `scheme`, so there is no cycle - but `lisp-mode` (which imports this
+  library) now drags `fill` in transitively. That is the price and it
+  is named in the file header.
+* **`pos-bol`/`pos-eol` are new in `editfns.scm`** - the C's
+  *unconstrained* twins of `line-beginning-position`/`line-end-position`
+  (`editfns.c:684`, `:740`). `prog--text-at-point-p` needs `pos-eol`.
+* **The two `define-key`s sit at the bottom of the file**, after both
+  commands; Emacs's `defvar-keymap` can name functions it has not
+  defined yet and a Scheme binding cannot.
+* **`prog-fill-reindent-defun-function` is a plain variable** with its
+  default `set!` after the definition (the `normal-auto-fill-function`
+  shape), not a parameter: Emacs `defvar`s it and nothing `let`-binds
+  it.
+* **`prog--text-at-point-p` answers positions, not `t`** - nil, 1, 4 in
+  the measured cases - and my first test expectations compared booleans
+  and failed against correct answers.
+
+`prog-mode-tests.scm` (9) is in `tools/run-suites.py`; every expectation
+is Emacs 31.1's output for the same text.
+
+## What is left of the named list
+
+`replace-buffer-contents` turned out to be **obsolete in Emacs 31**: the
+machinery is `replace-region-contents` (`editfns.c:1922`, a 310-line
+DEFUN) over gnulib's `diffseq.h` (578 lines of Myers diff), plus the
+small statics. `replace-string-in-region`/`replace-regexp-in-region`
+(`subr.el`) call it. That is a project-sized port, not a small one, and
+it is the honest size to plan against.
+
+The rest of the list stands: the disabled-command machinery
+(`C-x n n`'s "Use this command?" prompt, which needs
+`substitute-command-keys` - `doc.c`'s ~1000-line walk), labeled
+restrictions (`with-restriction`/`without-restriction`,
+`narrowing-locked`), and `simple.el`'s Lisp `count-lines`.

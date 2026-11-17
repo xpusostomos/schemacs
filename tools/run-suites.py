@@ -38,6 +38,7 @@ SUITES = [
     'schemacs/editor/dired-mode-tests.scm',
     'schemacs/editor/font-lock-tests.scm',
     'schemacs/editor/lisp-mode-tests.scm',
+    'schemacs/editor/prog-mode-tests.scm',
     'schemacs/editor/lisp-tests.scm',
     'schemacs/editor/scheme-tests.scm',
     'schemacs/editor/cl-indent-tests.scm',

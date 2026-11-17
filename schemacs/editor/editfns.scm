@@ -168,6 +168,10 @@ bobp
    preceding-char
    line-beginning-position
    line-end-position
+   ;; The C's field-free pair (`editfns.c:684', `:740'), which the two
+   ;; above are the constrained versions of.
+   pos-bol
+   pos-eol
    ;; The internal pair the two above are built on (`editfns.c:665', `:723'),
    ;; exported as the C's are non-static, and the facade spellings of the
    ;; line arithmetic - all moved here from the engine 2026-10-12.
@@ -836,6 +840,19 @@ point-marker
                 (goto-char new-pos))
               new-pos))))
 
+    (define (pos-bol . rest)
+      ;; GNU Emacs's `pos-bol' (`editfns.c:684'): "Return the position
+      ;; of the first character on the current line. ... This function
+      ;; does not move point. Also see `line-beginning-position'."
+      ;;
+      ;; The C's whole body is `(make_fixnum (bol (n, NULL)))' - the
+      ;; *unconstrained* answer, where `line-beginning-position' below
+      ;; applies `constrain_to_field'. That difference is the whole
+      ;; point of the pair, and it is why the field machinery's
+      ;; presence cannot be tested with it.
+      ;;--------------------------------------------------------------
+      (bol (current-buffer) (if (pair? rest) (car rest) #f)))
+
     (define (line-beginning-position . rest)
       ;; GNU Emacs's `line-beginning-position' (`editfns.c:700'), whose
       ;; whole body is
@@ -875,6 +892,17 @@ point-marker
          (and (number? n) (not (= n 1))))
        #t
        #f))
+
+    (define (pos-eol . rest)
+      ;; GNU Emacs's `pos-eol' (`editfns.c:740'): "Return the position
+      ;; of the last character on the current line. ... This function
+      ;; does not move point. Also see `line-end-position'."
+      ;;
+      ;; The C's whole body is `(make_fixnum (eol (n)))' - the
+      ;; unconstrained answer, `line-end-position' below being the
+      ;; field-constrained one.
+      ;;--------------------------------------------------------------
+      (eol (current-buffer) (if (pair? rest) (car rest) #f)))
 
     (define (line-end-position . rest)
       ;; GNU Emacs's `line-end-position' (`editfns.c:755'), whose whole
