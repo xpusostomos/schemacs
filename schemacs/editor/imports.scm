@@ -788,6 +788,7 @@
     buffer-modified-tick
     buffer-name
     buffer-name-history
+    buffer-narrowed-p
     buffer-overlay-modified-tick
     buffer-overlays
     buffer-overwrite-mode
@@ -3055,6 +3056,7 @@
     what-cursor-position
     where-is-internal
     widen
+    widen-automatically
     widget-value-button-type
     widget-value-call-data
     widget-value-contents

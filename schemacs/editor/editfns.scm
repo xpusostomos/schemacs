@@ -174,7 +174,7 @@ point-marker
    point
    save-excursion
    ;; the restriction, `narrow-to-region` and its friends
-   narrow-to-region widen save-restriction
+   narrow-to-region widen save-restriction buffer-narrowed-p
    region-beginning
    region-end
    region-limit
@@ -908,6 +908,18 @@ point-marker
       ;;--------------------------------------------------------------
       (let ((text (text-editor-text (current-buffer))))
         (- (buffer-text-z text) (buffer-text-base text))))
+
+    (define (buffer-narrowed-p)
+      ;; GNU Emacs's `buffer-narrowed-p` (`subr.el:4566', a `defsubst`):
+      ;; "Return non-nil if the current buffer is narrowed."
+      ;; `(/= (- (point-max) (point-min)) (buffer-size))' - the accessible
+      ;; length against the whole one.
+      ;;
+      ;; **`subr.el`'s, and it lives here** because `subr.scm` is below
+      ;; this library and the three answers it compares are this one's.
+      ;; The same seam `locate-file-internal` took into `fileio.scm`.
+      ;;--------------------------------------------------------------
+      (not (= (- (point-max) (point-min)) (buffer-size))))
 
     (define (buffer-string)
       ;; GNU Emacs's `buffer-string' (editfns.c): "Return the contents

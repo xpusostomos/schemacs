@@ -564,4 +564,51 @@
   (let ((start (symbol-match "\\(?1:ab\\)\\|\\(?1:cd\\)" "ab")))
     (list start (match-end 1))))
 
+
+;; **`looking-back`** (`subr.el:5907`): the match ends at point, GREEDY
+;; keeps the furthest one - the C extends it under
+;; `(save-restriction (narrow-to-region (point-min) start))` - and the
+;; match data is left at *buffer* positions, which is what `font-lock`
+;; reads. Measured on Emacs 31.1 over "aaa" with point after it: plain
+;; `(t 3 4)`, greedy `(t 1 4)`, and `(looking-back nil)` is t (the C's
+;; `concat` turns a nil REGEXP into nothing).
+(test-equal '((#t 3 4) (#t 1 4) #t)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "aaa")
+    (goto-char 4)
+    (let ((plain (list (looking-back "a+" #f)
+                       (match-beginning 0) (match-end 0)))
+          (greedy (list (looking-back "a+" #f #t)
+                        (match-beginning 0) (match-end 0)))
+          (empty (looking-back #f)))
+      (list plain greedy empty))))
+
+;; **A search stops at the restriction**, and an explicit BOUND follows
+;; `search_command`'s rules (`search.c:1006`): nil is `ZV` forward, an
+;; explicit one is clipped to `[BEGV, ZV]`, and one on the wrong side of
+;; point is "Invalid search bound (wrong side of point)".
+(test-equal '(#f #f not-an-error)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "hello world")
+    (narrow-to-region 1 5)
+    (goto-char 1)
+    (list
+     ;; "world" is in the buffer but outside the accessible portion
+     (search-forward "world" #f #t)
+     ;; "o" is at 5, which is ZV - not accessible
+     (search-forward "o" #f #t)
+     ;; a bound beyond ZV is clipped rather than refused
+     (if (search-forward "h" 100 #t) 'not-an-error 'not-an-error))))
+
+(test-equal 'wrong-side
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "hello world")
+    (goto-char 5)
+    (guard (e (#t 'wrong-side))
+      (search-forward "x" 1 #t)
+      'no-error)))
+
 (test-end)

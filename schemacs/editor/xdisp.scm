@@ -82,6 +82,8 @@
          *message-log-function*
          buffer-substring-no-properties delete-region goto-char insert
          point point-max point-min
+         ;; `%n`, the narrowing indicator (`decode_mode_spec`'s `'n'`)
+         buffer-narrowed-p
          ;; `:propertize' in the mode line is Emacs's `propertize',
          ;; `editfns.c:3296'.
          propertize
@@ -829,14 +831,22 @@
       ;; with their own space, so nothing separates the name from them.
       ;;
       ;; Not ported from that construct: `mode-line-process` (no process
-      ;; support), the `%n` narrowing indicator (no narrowing) and the
-      ;; mouse maps on the name.
+      ;; support) and the mouse maps on the name.
+      ;;
+      ;; **`%n` sits between the lighters and the `)`**, as the C's
+      ;; construct has it, and is written out here rather than left as a
+      ;; `%`-construct: this function builds the string the formatter
+      ;; already expanded, so a `"%n"` in it would be printed as it
+      ;; stands. A user's own `*mode-line-format*` that names `%n` gets it
+      ;; from `mode-line-construct`.
       ;;--------------------------------------------------------------
       (let ((window (*mode-line-window*)))
         (if (not window)
             ""
             (string-append "(" (mode-name (window-buffer window))
-                           (mode-line-minor-modes) ")"))))
+                           (mode-line-minor-modes)
+                           (if (buffer-narrowed-p) " Narrow" "")
+                           ")"))))
 
 
     (define (minor-mode-indicator-value buffer indicator)
@@ -1279,6 +1289,12 @@
                   (+ 1 (line-texts-column
                         (line-display-texts ed line-start)
                         column))))
+          ;; **`%n` is the narrowing indicator** (`xdisp.c:29737`): "Narrow"
+          ;; with a leading space when the buffer is narrowed, and nothing
+          ;; at all otherwise - `if (BUF_BEGV (b) > BUF_BEG (b) || BUF_ZV
+          ;; (b) < BUF_Z (b)) return " Narrow";' and a fall-through to the
+          ;; empty answer.
+          ((#\n) (if (buffer-narrowed-p) " Narrow" ""))
           ;; `%*' is `%' read-only, `*' modified, `-' neither; `%+' is `*'
           ;; modified, `%' read-only, `-' neither; `%&' is `*' modified
           ((#\*) (if (buffer-read-only? ed)

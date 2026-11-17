@@ -42,7 +42,10 @@
           point point-min point-max goto-char insert insert-char forward-line
           line-beginning-position line-end-position bobp eobp bolp
           point-marker preceding-char following-char save-excursion
-          region-beginning region-end)
+          region-beginning region-end
+          ;; `beginning-of-defun-raw` scans the whole buffer and clamps
+          ;; the answer back into the restriction (`lisp.el:465`).
+          save-restriction widen)
     (only (schemacs editor cmds) beginning-of-line end-of-line forward-char)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
           parse-partial-sexp)
@@ -383,11 +386,10 @@ to the ARGth following beginning of defun."
       ;; GNU Emacs's `beginning-of-defun-raw' (`lisp.el:411'): "Move point
       ;; to the character that starts a defun."
       ;;
-      ;; Departures, both named where they bite: `narrow-to-region' does
-      ;; not exist here, so the `save-restriction'/`widen' pair has
-      ;; nothing to undo; and the C's `wrong-number-of-arguments'
-      ;; fallback catches every error, because this tree has one
-      ;; condition type for errors.
+      ;; The `save-restriction'/`widen' pair around the scanner's branch
+      ;; is carried now that narrowing exists (`lisp.el:465`). The C's
+      ;; `wrong-number-of-arguments' fallback catches every error,
+      ;; because this tree has one condition type for errors.
       ;;--------------------------------------------------------------
       (let ((arg (if (pair? rest) (car rest) #f)))
         (if (not arg) (set! arg 1))
@@ -428,6 +430,12 @@ to the ARGth following beginning of defun."
                 (ceiling (point-max))
                 (arg-+ve (> arg 0))
                 (encl-pos #f))
+            ;; **`(save-restriction (widen))`** (`lisp.el:465`): the scan
+            ;; runs over the whole buffer, and FLOOR/CEILING - read from
+            ;; `point-min`/`point-max` *before* it - are what clamps the
+            ;; answer back into the restriction.
+            (save-restriction
+             (widen)
             (let ((ppss (parameterize ((*syntax-begin-function* #f))
                           (syntax-ppss))))
               ;; "Back out of any comment/string, so that encl-pos will
@@ -453,7 +461,7 @@ to the ARGth following beginning of defun."
                       (goto-char (- (scan-lists (point) 1 -1) 1))
                       (if (<= (point) ceiling)
                           #t
-                          (begin (goto-char ceiling) #f)))))))))))
+                          (begin (goto-char ceiling) #f))))))))))))
 
     (define (beginning-of-defun--in-emptyish-line-p)
       ;; GNU Emacs's `beginning-of-defun--in-emptyish-line-p'

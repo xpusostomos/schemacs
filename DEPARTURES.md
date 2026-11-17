@@ -4228,6 +4228,77 @@ to 3..5 is "Args out of range" there, and now here.
 the recorded column mean nothing" - is `set-windows-or-buffers-changed!`
 from `dispnew.scm`, the flag the renderer already reads.
 
+# What narrowing now reaches that it did not before (2026-11-17)
+
+Chris: "are there areas of the code that should use narrowing but don't
+because it wasn't available before?" There are, and the tree says so
+itself - a dozen comments read "there is no narrowing here". This is the
+audit, what was corrected, and what is left.
+
+## The C each of these was taken from
+
+* **`search_command`'s bound rule** (`search.c:1006`), which every search
+  entry point shares: a nil BOUND is `ZV` forward and `BEGV` backward; an
+  explicit one is refused with "Invalid search bound (wrong side of
+  point)" when it is on the wrong side of point, and then *clipped* to
+  `[BEGV, ZV]`. The default bound had always been the whole buffer end;
+  it is the accessible end now, which is what a search inside a
+  `save-restriction` must see. (`%re-search` had the wrong-side check and
+  nothing else; `search-forward`/`search-backward` had neither.)
+* **`indent-according-to-mode`** (`indent.el`): the whole body is inside
+  `(save-restriction (unless inhibit-widen (widen)) ...)`, so indenting a
+  line in a narrowed buffer sees the text outside it. Ours had a comment
+  saying the widen was not needed.
+* **`line-number-at-pos`** (`fns.c`): with ABSOLUTE the count starts at
+  `BEG` and POS is taken as it stands; without it POS is clipped to
+  `[BEGV, ZV]` and the count starts at `BEGV`. The port accepted ABSOLUTE
+  and ignored it.
+* **`set_marker_internal`** (`marker.c:564`): the clip is
+  `(restricted ? BUF_BEGV : BUF_BEG)` .. `(restricted ? BUF_ZV : BUF_Z)`,
+  which is exactly `set_marker_restricted`'s flag.
+* **`goto-line`** (`simple.el:1690`): the move is made in a widened
+  buffer, the widening is undone unless `widen-automatically`, and a
+  position outside what was visible widens for good.
+* **`%n`** (`xdisp.c:29737`): `" Narrow"` when BEGV/ZV differ from BEG/Z.
+* **`beginning-of-defun-raw`** (`lisp.el:465`): the scanner's branch runs
+  inside `(save-restriction (widen))`, with `floor`/`ceiling` read from
+  `point-min`/`point-max` *before* the widen and used to clamp the answer
+  back into the restriction.
+* **`looking-back`'s GREEDY** (`subr.el:5929`): the C extends the match
+  backwards under `(save-restriction (narrow-to-region (point-min)
+  start))` while the text still matches `\(?:REGEXP\)\''. This engine
+  refuses `\=` and `\'' (`%emacs-ere`), so both halves are the same walk
+  the other way up - try every start from point backwards, keep the match
+  that ends at point, and GREEDY keeps the *furthest* one instead of the
+  nearest. Two things fell out of porting it: the match data is now left
+  at buffer positions (`%set-search-regs`), which is what `font-lock`
+  reads from it, and a nil REGEXP is an *empty* one, because the C's
+  `concat` drops nil - `(looking-back nil)` is t.
+
+Also new, both because the above need them: `buffer-narrowed-p`
+(`subr.el:4566`, `(/= (- (point-max) (point-min)) (buffer-size))`, placed
+in `editfns.scm` because `subr.scm` is below it) and `widen-automatically`
+(`simple.el:7691`, a plain variable - nothing `let`-binds it).
+
+## Found, and still open
+
+Each of these says in its own comment that it is waiting for narrowing,
+and each is now portable:
+
+* **`scheme-syntax-propertize` / `elisp-mode-syntax-propertize`** -
+  Emacs narrows around the sexp it scans; this tree checks where
+  `forward-sexp` landed instead.
+* **`dired`**'s widen, and `elisp--preceding-sexp`,
+  `lisp-comment-indent`, `lisp--el-funcall-position-p`.
+* **`simple.el`'s `count-lines`** - the Lisp one, which is written over
+  `narrow-to-region` and `re-search-forward` and is a *different function*
+  from the `xdisp.c` helper this tree already has under that name.
+* **`eval-region`** reads the region as a string where the C narrows and
+  reads from point.
+* **`replace-string-in-region` / `replace-regexp-in-region`** (`subr.el`)
+  are not ported; both are built on narrowing.
+* **`fill.el`** itself, which is what started this.
+
 # Window states: the size registers, and the pixel/total split
 (2026-11-16)
 

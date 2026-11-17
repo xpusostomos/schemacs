@@ -54,6 +54,9 @@
     ;; the setters that walk it - it declares them, this installs them.
     (only (schemacs editor buffer)
           current-buffer buffer-beg buffer-z buffer-markers
+          ;; `set_marker_restricted` clips to the accessible portion
+          ;; (`marker.c:564`), which is what narrowing makes differ.
+          buffer-begv buffer-zv
           *make-marker-function* *build-marker-function*
           *marker-position-function* *set-marker-function*
           *set-marker-insertion-type-function*)
@@ -215,15 +218,19 @@
       ;;--------------------------------------------------------------
       (set-marker marker #f))
 
-    (define (%clip-to-bounds buffer position)
+    (define (%clip-to-bounds buffer position . rest)
       ;; GNU Emacs's `clip_to_bounds` (`lisp.h`): `(min (max position
       ;; lower) upper)` - a position outside the buffer is brought to the
-      ;; nearer end rather than refused. The `BEGV`/`ZV` pair the C can
-      ;; clip to instead is `BEG`/`Z` here, there being no narrowing, and
-      ;; the buffer is passed rather than taken from the current one
-      ;; because the C's two callers here clip to *their own* buffer.
+      ;; nearer end rather than refused.
+      ;;
+      ;; The bounds are the C's: `BEG`/`Z`, or `BEGV`/`ZV` when
+      ;; RESTRICTED (`marker.c:564`) - which is `set_marker_restricted`'s
+      ;; flag, and what narrowing makes different.
       ;;--------------------------------------------------------------
-      (min (max position (buffer-beg buffer)) (buffer-z buffer)))
+      (let ((restricted (and (pair? rest) (car rest))))
+        (min (max position (if restricted (buffer-begv buffer)
+                               (buffer-beg buffer)))
+             (if restricted (buffer-zv buffer) (buffer-z buffer)))))
 
     (define (%set-marker-internal marker position buffer restricted)
       ;; GNU Emacs's `set_marker_internal' (`marker.c:509'), the body
@@ -245,9 +252,9 @@
       ;;     or a marker), clipped to the buffer, and the marker attached
       ;;     to BUFFER there.
       ;;
-      ;; `RESTRICTED` is the C's flag for `BEGV`/`ZV` clipping; there is
-      ;; no narrowing here, so it changes nothing and exists so that
-      ;; `set-marker-restricted` reads as Emacs's does.
+      ;; `RESTRICTED` is the C's flag for `BEGV`/`ZV` clipping
+      ;; (`marker.c:564`): `set-marker-restricted` passes it, and it is
+      ;; what narrowing makes matter.
       ;;--------------------------------------------------------------
       (let ((b (or buffer (current-buffer))))
         (if (or (not position)
@@ -262,7 +269,8 @@
                                      ((markerp position) (%marker-charpos position))
                                      (else (error "Invalid position" position)))))
                   (set!marker-buffer marker b)
-                  (set!%marker-charpos marker (%clip-to-bounds b charpos))
+                  (set!%marker-charpos marker (%clip-to-bounds b charpos
+                                                              restricted))
                   (hashq-set! (buffer-markers b) marker #t))))
         marker))
 
@@ -288,10 +296,7 @@
       ;; above, but won't let the position be outside the visible part" -
       ;; that is, it clips to `BEGV`/`ZV` rather than `BEG`/`Z`.
       ;;
-      ;; **There is no narrowing in this tree**, so `BEGV`/`ZV` are
-      ;; `BEG`/`Z` and this is `set-marker`. It exists because the C's
-      ;; callers name it and a port of one of them should be able to name
-      ;; it too; the day narrowing arrives it becomes the other clip.
+      ;; This is the `BEGV`/`ZV` clip, where `set-marker` uses `BEG`/`Z`.
       ;;--------------------------------------------------------------
       (%set-marker-internal marker position
                             (if (pair? rest) (car rest) #f)

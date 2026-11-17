@@ -10216,3 +10216,50 @@ nobreak predicates, `canonically-space-region`, the justification half)
 can now be ported whole, including the four functions that narrow
 (`justify-current-line`'s full mode, `fill-comment-paragraph`,
 `set-justification`, `fill-individual-paragraphs`).
+
+# What narrowing now reaches (2026-11-17, second pass)
+
+Chris: "are there areas of the code that should use narrowing but don't
+because it wasn't available before? Search and replace maybe?" Yes - the
+tree had a dozen comments reading "there is no narrowing here". This pass
+took the ones whose Emacs source is unambiguous; DEPARTURES.md has the C
+for each. In one line each:
+
+* **the searches** follow `search_command`'s bound rule now (`search.c:1006`):
+  nil BOUND is `ZV`/`BEGV`, an explicit one must be on the right side of
+  point and is then clipped to `[BEGV, ZV]`. That is the "search and
+  replace" half: a search inside a `save-restriction` stops at it.
+* `indent-according-to-mode` widens (unless INHIBIT-WIDEN), as `indent.el`
+  does;
+* `line-number-at-pos`'s ABSOLUTE picks `BEG` and takes POS as it stands;
+  without it POS is clipped to `[BEGV, ZV]`;
+* `set-marker-restricted` clips to `BEGV`/`ZV` (`marker.c:564`);
+* `goto-line` has the `save-restriction`/`widen-automatically` block;
+* `%n` says `" Narrow"`;
+* `beginning-of-defun-raw` scans widened with `floor`/`ceiling` clamps;
+* `looking-back` GREEDY is ported, and with it two bugs went: its match
+  data was relative to a *copy* of the text (so `font-lock`'s
+  `(match-beginning 0)` was wrong), and a nil REGEXP was an error where
+  the C's `concat` makes it an empty pattern - `(looking-back nil)` is t.
+
+New primitives: `buffer-narrowed-p` (`subr.el`, in `editfns.scm` because
+`subr.scm` is below it) and `widen-automatically` (`simple.el:7691`, a
+plain variable - nothing `let`-binds it).
+
+**Still waiting on narrowing, named in DEPARTURES.md**: the
+syntax-propertize pair (`scheme`/`elisp-mode` narrow around the sexp they
+scan), `dired`'s widen, `elisp--preceding-sexp`, `lisp-comment-indent`,
+`lisp--el-funcall-position-p`, `simple.el`'s `count-lines`,
+`eval-region`'s string read, and `replace-string-in-region` /
+`replace-regexp-in-region`.
+
+## The trap in `looking-back` GREEDY
+
+The C's extension stops at the **first** position that does not match
+(`subr.el:5936`). Written as "try every start and keep the furthest" the
+answer is the same and the walk is the whole buffer - and each step
+copied the text from S to `ZV`, so font-lock (which calls this with
+GREEDY on every comment end) went quadratic and the editor wedged. The
+pty battery caught it as a 90-second REPL timeout inside
+`completion-scroll`. The walk is contiguous now, and the copy stops at
+PT - which is the C's own `(narrow-to-region (point-min) start)`.

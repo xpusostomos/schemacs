@@ -129,6 +129,8 @@
           line-end-position
           line-number-at-pos message point point-max point-min
           save-excursion
+          ;; `goto-line`'s restriction handling (`simple.el:1690`)
+          save-restriction widen buffer-narrowed-p
           text-editor-cursor-column text-editor-cursor-line)
     (only (schemacs editor fns) count-lines)
     ;; `forward-char' is `cmds.c''s and lives in `(schemacs editor cmds)'.
@@ -163,7 +165,10 @@
        scroll-up-command scroll-down-command
        ;; `M-<down>` past the last candidate wraps to the first unless
        ;; this is nil (`next-column-completion`, simple.el:10169).
-       *completion-auto-wrap*)
+       *completion-auto-wrap*
+       ;; `goto-line`'s: whether it may widen for good when the line it
+       ;; is asked for is outside the visible portion (`simple.el:7691`).
+       widen-automatically)
     ;; `minibuffer-message` is an *overlay* with an `after-string`
     ;; (`minibuffer.el:836`), which is what draws it after the input
     ;; instead of over it - and the two message hooks in
@@ -3592,10 +3597,11 @@ previous element of the minibuffer history in the minibuffer."
       ;; cursor going to the end of the buffer instead of the start of
       ;; the last line, which is where the engine's clamp stays.
       ;;
-      ;; Not ported: `selective-display' and the narrowing -
-      ;; `re-search-forward' and `save-restriction' have nothing to act
-      ;; on here - `widen-automatically', and the buffer switch the
-      ;; cons prefix asks for.
+      ;; The narrowing half is ported now that narrowing exists - the
+      ;; move runs in a widened buffer and `widen-automatically` decides
+      ;; whether the widening is kept - see the body. Not ported:
+      ;; `selective-display', and the buffer switch the cons prefix asks
+      ;; for.
       ;;--------------------------------------------------------------
       "Go to LINE, counting from line 1 at beginning of buffer."
       (interactive (append (goto-line-read-args) (list #f #t)))
@@ -3623,13 +3629,33 @@ previous element of the minibuffer history in the minibuffer."
       ;; So the guard and the clamp both go, and what is left is exactly
       ;; what Emacs runs.
       ;;
-      ;; The `widen`/`save-restriction` half is not ported: nothing here
-      ;; is narrowed, which is the note the docstring above already
-      ;; carries.
-      (let ((ed (current-buffer)))
-        (with-current-buffer ed
-          (goto-char (point-min))
-          (forward-line (- line 1)))))
+      ;; **The restriction**, as the C's two steps: the move is made in
+      ;; a *widened* buffer, and the widening is undone on the way out
+      ;; unless `widen-automatically' says the caller may keep it - in
+      ;; which case a position outside what was visible widens for good.
+      ;;
+      ;;     (let ((pos (save-restriction
+      ;;                  (unless relative (widen))
+      ;;                  (goto-char (point-min)) (forward-line (1- line))
+      ;;                  (point))))
+      ;;       (when (and (not relative) (buffer-narrowed-p)
+      ;;                  widen-automatically
+      ;;                  (or (> (point-min) pos) (> pos (point-max))))
+      ;;         (widen))
+      ;;       (goto-char pos))
+      ;;--------------------------------------------------------------
+      (with-current-buffer (current-buffer)
+        (let ((pos (save-restriction
+                     (unless relative (widen))
+                     (goto-char (point-min))
+                     (forward-line (- line 1))
+                     (point))))
+          (when (and (not relative)
+                     (buffer-narrowed-p)
+                     widen-automatically
+                     (or (> (point-min) pos) (> pos (point-max))))
+            (widen))
+          (goto-char pos))))
 
     ;; The keys GNU Emacs binds it to (M-g g, and M-g M-g, which is the
     ;; same command), beside the command as the other libraries state

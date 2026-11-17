@@ -55,7 +55,7 @@
           buffer-beg buffer-pt buffer-z current-buffer text-editor-text)
     ;; the characters themselves - `count_lines' is a walk over them, as
     ;; the C's `display_count_lines' is a walk over the buffer's bytes.
-    (only (schemacs editor buffer-text) buffer-text-ref)
+    (only (schemacs editor buffer-text) buffer-text-ref buffer-text-base)
     (only (schemacs editor marker) marker-position markerp)
     (only (guile) LC_COLLATE LC_CTYPE)
     )
@@ -188,18 +188,16 @@
       ;; `[BEG, Z]', and the C raises `args-out-of-range' when it is not;
       ;; and then the answer is `count_lines (BEGV, POS) + 1'.
       ;;
-      ;; **ABSOLUTE cannot change the answer here, and is still taken.**
-      ;; The C chooses between `BEG_BYTE' and `BEGV_BYTE' for the start
-      ;; of the count, and it is the *narrowing* that makes those differ:
-      ;; "If the buffer is narrowed, the return value by default counts
-      ;; the lines from the beginning of the accessible portion ... But
-      ;; if the second optional argument ABSOLUTE is non-nil, the value
-      ;; counts the lines from the absolute start of the buffer."
-      ;; Nothing is narrowed in this tree, so the two starts are the same
-      ;; start. The argument is accepted rather than dropped so that the
-      ;; DEFUN's shape is Emacs's - both arguments are optional there,
-      ;; `0, 2, 0' - and the day narrowing arrives this becomes the C's
-      ;; two-branch start.
+      ;; **ABSOLUTE picks the start of the count**, and narrowing is what
+      ;; makes the two starts differ: "If the buffer is narrowed, the
+      ;; return value by default counts the lines from the beginning of
+      ;; the accessible portion ... But if the second optional argument
+      ;; ABSOLUTE is non-nil, the value counts the lines from the absolute
+      ;; start of the buffer."
+      ;;
+      ;; The C's two branches, in its order: an absolute count starts at
+      ;; `BEG` and takes POS as it stands; otherwise POS is *clipped* to
+      ;; `[BEGV, ZV]` and the count starts at `BEGV`.
       ;;--------------------------------------------------------------
       (let* ((position (if (pair? args) (car args) #f))
              (ed (current-buffer))
@@ -211,8 +209,15 @@
                              position
                              (error "Args out of range" position
                                     (buffer-beg ed) (buffer-z ed))))
-                        (else (error "Wrong type argument" position)))))
-        (+ 1 (count-lines ed (buffer-beg ed) pos))))
+                        (else (error "Wrong type argument" position))))
+             (absolute (and (pair? args) (pair? (cdr args)) (cadr args))))
+        (if absolute
+            (+ 1 (count-lines ed
+                              (buffer-text-base (text-editor-text ed))
+                              pos))
+            (+ 1 (count-lines ed (buffer-beg ed)
+                              (min (max pos (buffer-beg ed))
+                                   (buffer-z ed)))))))
 
     (define (concat . args)
       ;; GNU Emacs's `concat' (fns.c): "Concatenate all the arguments and

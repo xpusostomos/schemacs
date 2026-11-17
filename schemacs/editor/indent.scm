@@ -34,7 +34,10 @@
           current-prefix-arg define-command uarg->integer)
     (only (schemacs editor editfns)
           bobp bolp delete-region eolp forward-line goto-char point point-marker
-          region-beginning region-end line-end-position save-excursion)
+          region-beginning region-end line-end-position save-excursion
+          ;; `indent-according-to-mode` widens first, so that indenting a
+          ;; line in a narrowed buffer sees the text outside it.
+          save-restriction widen)
     (only (schemacs editor marker) copy-marker marker-position set-marker)
     (only (schemacs editor indentc)
           current-column current-indentation indent-to move-to-column)
@@ -89,28 +92,36 @@ in that case, indent by aligning to the previous non-blank line.
 
 Ignore restriction, unless the optional argument INHIBIT-WIDEN is
 non-nil."
-      (interactive '())
-      ;; `(save-restriction (widen))' is not here: this tree has no
-      ;; narrowing, so there is nothing to widen.
-      (syntax-propertize (line-end-position))
-      (let ((fn (indent-line-function)))
-        (if (memq fn (indent-line-ignored-functions))
-            ;; These functions are used for tabbing, but can't be used
-            ;; for indenting.  Replace with something ad-hoc.
-            (let ((column (save-excursion
-                            (beginning-of-line)
-                            (if (bobp)
-                                0
-                                (begin
-                                  (beginning-of-line 0)
-                                  (if (looking-at "[ \t]*$")
-                                      0
-                                      (current-indentation)))))))
-              (if (<= (current-column) (current-indentation))
-                  (indent-line-to column)
-                  (save-excursion (indent-line-to column))))
-            ;; The normal case.
-            (fn))))
+      (interactive (list (current-prefix-arg)))
+      ;; **The whole body is narrowed off first**: "Ignore restriction,
+      ;; unless the optional argument INHIBIT-WIDEN is non-nil"
+      ;; (`indent.el`): `(save-restriction (unless inhibit-widen
+      ;; (widen)) ...)` - so indenting a line in a narrowed buffer sees
+      ;; the text outside the restriction.
+      (save-restriction
+        ;; `(&optional inhibit-widen)` in Emacs, and a caller here passes
+        ;; nothing - `indent-according-to-mode` is called from
+        ;; `indent-for-tab-command` and from modes.
+        (unless (and (pair? rest) (car rest)) (widen))
+        (syntax-propertize (line-end-position))
+        (let ((fn (indent-line-function)))
+          (if (memq fn (indent-line-ignored-functions))
+              ;; These functions are used for tabbing, but can't be used
+              ;; for indenting.  Replace with something ad-hoc.
+              (let ((column (save-excursion
+                              (beginning-of-line)
+                              (if (bobp)
+                                  0
+                                  (begin
+                                    (beginning-of-line 0)
+                                    (if (looking-at "[ \t]*$")
+                                        0
+                                        (current-indentation)))))))
+                (if (<= (current-column) (current-indentation))
+                    (indent-line-to column)
+                    (save-excursion (indent-line-to column))))
+              ;; The normal case.
+              (fn)))))
 
     (define-command (indent-rigidly start end arg)
       "Indent all lines starting in the region forward by ARG columns.

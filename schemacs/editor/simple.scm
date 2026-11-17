@@ -213,7 +213,7 @@
    ;; (`simple.el:7811-7866'). `next-line' and `previous-line' are
    ;; `line-move' with a sign, as they are in Emacs.
    line-move line-move-1 line-move-visual
-   *line-move-visual* *goal-column* *track-eol*
+   *line-move-visual* *goal-column* *track-eol* widen-automatically
    ;; completion.el's - `simple.el`'s `completion-auto-wrap`
    *completion-auto-wrap*
    ;; Visual Line mode (`simple.el:8580-8785') and the commands its map
@@ -449,6 +449,17 @@ a specialization of overwrite mode, entered by setting the
     ;; ^ GNU Emacs's `temporary-goal-column' (`simple.el:7827'): "Current
     ;; goal column for vertical motion. It is the column where point was at
     ;; the start of the current run of vertical motion commands."
+
+    (define widen-automatically #t)
+    ;; ^ GNU Emacs's `widen-automatically` (`simple.el:7691'): "Non-nil
+    ;; means it is ok for commands to call `widen' when they want to. ...
+    ;; If `widen-automatically' is nil, these commands will do something
+    ;; else as a fallback, and won't change the buffer bounds."
+    ;;
+    ;; **A plain variable, not a parameter**: Emacs makes it a `defvar`,
+    ;; nothing `let`-binds it, and the one thing that ever binds it per
+    ;; buffer (`info.el`'s `setq-local`) writes the buffer-local slot this
+    ;; tree reads separately.
 
     (define-custom *line-move-visual* #t
       "When non-nil, `line-move' moves point by visual lines.

@@ -1576,29 +1576,64 @@
                 #t)))))))
 
     (define (looking-back regexp . args)
-      ;; GNU Emacs's `looking-back' (subr.el): "Return non-nil if text
-      ;; before point matches regular expression REGEXP." The C's
-      ;; shape is a backward search for `\<REGEXP\>\=' which the
-      ;; substrate has no `\=' to spell; the honest stand-in searches
-      ;; every start from point backward for a match that ends at
-      ;; point, which is what GREEDY-less `looking-back' means. LIMIT
-      ;; is the lowest start worth trying; GREEDY is not ported
-      ;; (`save-restriction' and the extension walk are not here).
+      ;; GNU Emacs's `looking-back' (`subr.el:5907'): "Return non-nil if
+      ;; text before point matches regular expression REGEXP. Like
+      ;; `looking-at' except matches before point, and is slower."
+      ;;
+      ;; The C searches backward for `\(?:REGEXP\)\=' - a match
+      ;; *ending* at point - and with GREEDY extends it under
+      ;; `(save-restriction (narrow-to-region (point-min) start))':
+      ;;
+      ;;   (while (and (> pos (point-min))
+      ;;               (save-excursion (goto-char pos) (backward-char 1)
+      ;;                               (looking-at (concat regexp "\'"))))
+      ;;     (setq pos (1- pos)))
+      ;;
+      ;; **It stops at the first position that does not match**, so the
+      ;; extension is contiguous - not "try every start and keep the
+      ;; furthest", which is the same answer and walks the whole buffer
+      ;; to find it. (The first version of this port did exactly that and
+      ;; took the editor down in font-lock, which calls this with GREEDY
+      ;; on every comment end.)
+      ;;
+      ;; This engine refuses `\=' (`%emacs-ere'), so both halves are the
+      ;; same question asked the other way up: does REGEXP match the
+      ;; *whole* of S..PT? The C's narrowing to `(point-min)..start` is
+      ;; the same text, so the copy stops at PT.
+      ;;
+      ;; The match data is translated to buffer positions, as
+      ;; `looking-at` leaves it: `font-lock` reads `(match-beginning 0)`
+      ;; from this call.
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
+             ;; **A nil REGEXP is an *empty* one**, because the C builds
+             ;; `(concat "\\(?:" regexp "\\)\\=")' and `concat` drops
+             ;; nil: `font-lock` calls this with
+             ;; `(or font-lock-comment-end-skip comment-end-skip)`, which
+             ;; is nil outside a comment. Measured: `(looking-back nil)'
+             ;; is t.
+             (regexp (or regexp ""))
              (limit (if (pair? args) (car args) (buffer-beg ed)))
+             (greedy (and (pair? args) (pair? (cdr args)) (cadr args)))
              (pt (buffer-pt ed))
-             (start (max limit (buffer-beg ed))))
-        (let loop ((s (- pt 1)))
+             (start (max (or limit (buffer-beg ed)) (buffer-beg ed)))
+             (match-at? (lambda (s)
+                          (and (string-match regexp (make-buffer-string ed s pt) 0)
+                               (= (match-end 0) (- pt s))))))
+        (let loop ((s pt))
           (cond
            ((< s start) #f)
-           ;; `search.c` reads the buffer directly (`PT`, `BEGV`, `ZV`)
-           ;; and so does this; the text is wanted for a regexp, so its
-           ;; properties are not.
-           ((string-match regexp (make-buffer-string ed s (buffer-z ed)) 0)
-            ;; the match must reach point: the text from S to PT is
-            ;; what matches
-            (and (= (match-end 0) (- pt s)) s))
+           ((match-at? s)
+            (let ((s (if greedy
+                         ;; `(while (and (> pos (point-min)) ...))`, with
+                         ;; the walk stopping at the first failure
+                         (let extend ((s s))
+                           (if (and (> s (buffer-beg ed)) (match-at? (- s 1)))
+                               (extend (- s 1))
+                               s))
+                         s)))
+              (%set-search-regs s (- pt s))
+              #t))
            (else (loop (- s 1)))))))
 
     (define (%set-search-regs beg len)
@@ -2069,7 +2104,7 @@
                             (pair? (cddr args)) (pair? (cdddr args)))
                        (cadddr args)
                        (*case-fold-search*)))
-             (limit (or bound (buffer-z ed))))
+             (limit (%search-limit ed bound #f)))
         (if (< count 0)
             (search-backward string bound noerror (- count) fold)
             (let loop ((left (max 1 count)) (from (buffer-pt ed)))
@@ -2109,7 +2144,7 @@
                             (pair? (cddr args)) (pair? (cdddr args)))
                        (cadddr args)
                        (*case-fold-search*)))
-             (limit (or bound (buffer-beg ed))))
+             (limit (%search-limit ed bound #t)))
         (if (< count 0)
             (search-forward string bound noerror (- count) fold)
             (let loop ((left (max 1 count)) (from (buffer-pt ed)))
@@ -2127,6 +2162,29 @@
               (set-point ed found)
               (%set-search-regs found (string-length string))
               found)))))))
+
+    (define (%search-limit ed bound backward)
+      ;; `search_command`'s BOUND arithmetic (`search.c:1006`), which is
+      ;; the same for every search entry point:
+      ;;
+      ;;   if (NILP (bound)) lim = n > 0 ? ZV : BEGV;
+      ;;   else { lim = fix_position (bound);
+      ;;          if (n > 0 ? lim < PT : lim > PT)
+      ;;            error ("Invalid search bound (wrong side of point)");
+      ;;          if (lim > ZV) lim = ZV;
+      ;;          else if (lim < BEGV) lim = BEGV; }
+      ;;
+      ;; The default is the *accessible* end, so a search in a narrowed
+      ;; buffer stops at the restriction; an explicit bound is checked
+      ;; against point and then clipped to it.
+      ;;--------------------------------------------------------------
+      (let ((pt (buffer-pt ed)))
+        (cond
+         ((not bound) (if backward (buffer-beg ed) (buffer-z ed)))
+         (else
+          (when (if backward (> bound pt) (< bound pt))
+            (error "Invalid search bound (wrong side of point)"))
+          (min (max bound (buffer-beg ed)) (buffer-z ed))))))
 
     (define %search-chunk 512)
     ;; ^ The smallest stretch of text a search copies for Guile's regexp
@@ -2277,13 +2335,11 @@
              (backward (< n 0))
              (count (abs n))
              (ed (current-buffer))
-             (limit (or bound
-                        (if backward (buffer-beg ed)
-                                     (buffer-z ed))))
              (from (buffer-pt ed))
-             (regexp (%compile-emacs-regexp regexp (*case-fold-search*))))
-        (when (and bound (if (> n 0) (< bound from) (> bound from)))
-          (error "Invalid search bound (wrong side of point)"))
+             (regexp (%compile-emacs-regexp regexp (*case-fold-search*)))
+             ;; `search_command`'s bound rule, in the C's order: the
+             ;; wrong-side check is against the *unclipped* argument.
+             (limit (%search-limit ed bound backward)))
         (let loop ((left (max 1 count)) (at from))
           (let ((found (if backward
                            (%re-search-backward-1 regexp at limit)
@@ -2297,8 +2353,9 @@
                   (error "Search failed" regexp)
                   (begin
                     (when (not (eq? noerror #t))
-                      (set-point ed (or bound (if backward (buffer-beg ed)
-                                                  (buffer-z ed)))))
+                      ;; "just move point to the limit" - the *clipped*
+                      ;; one, which is what `lim` is by then in the C.
+                      (set-point ed limit))
                     #f)))
              ((> left 1) (loop (- left 1) (if backward (cadr found)
                                               (caddr found))))
