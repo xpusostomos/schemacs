@@ -47,11 +47,25 @@
 
   (export
    internal-self-insert auto-fill-chars *internal-auto-fill-function*
+   *post-self-insert-hook*
    backward-char beginning-of-line delete-char end-of-line forward-char
    self-insert-command self-insert-tab
    )
 
   (begin
+
+    (define *post-self-insert-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `post-self-insert-hook' (`cmds.c:524'): "Hook run at
+    ;; the end of `self-insert-command'.  This is run after inserting the
+    ;; character." A parameter because Elisp `let`-binds it (`newline`
+    ;; binds it to one entry for a programmatic call) and because a hook
+    ;; list here is a value, not a symbol's function cell.
+    ;;
+    ;; **It lives here, beside the one thing that runs it**, and for the
+    ;; same reason `auto-fill-chars` does: `subr.scm` - where `run-hooks`
+    ;; is - is above `buffer.scm`, which this library imports, so the
+    ;; hook is run by a plain `for-each`, as `insdel.scm` runs the change
+    ;; hooks.
 
     (define (internal-self-insert c n)
       ;; GNU Emacs's `internal_self_insert' (`cmds.c:312'): "Insert N
@@ -193,8 +207,11 @@
                            (char=? (char-after (buffer-pt ed)) #\newline))
                       (set-point ed (+ (buffer-pt ed) 1)))
                   (if result (set! hairy 2)))))
-          ;; `post-self-insert-hook` is still not run - it is the last
-          ;; thing the C does and no mode here has a use for it yet.
+          ;; `post-self-insert-hook` (`cmds.c:498'): "Run hooks for
+          ;; electric keys." - the last thing the C does, and after the
+          ;; auto-fill branch, so `newline`'s own post-processing runs
+          ;; when the insertion it triggered has settled.
+          (for-each (lambda (f) (f)) (*post-self-insert-hook*))
           hairy)))
 
     (define auto-fill-chars

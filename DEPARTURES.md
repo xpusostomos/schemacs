@@ -5911,3 +5911,97 @@ belonged to the new position.
 All three together are what `M-j` and `narrow-to-defun` were failing on
 ("Wrong type argument in position 2: #f" from `(<= #f pos)` in
 `syntax-ppss`'s OLD-PPSS branch).
+
+# A typed RET: `newline`, and the hook under it (2026-11-17)
+
+`newline` is `simple.el:621`'s in Emacs 31 - it moved out of `cmds.c`.
+It is not a loop over `insert`: it sets `last-command-event` to the line
+break and calls `self-insert-command`, so the break goes through
+`internal_self_insert` like any typed character - property inheritance,
+the `auto-fill-chars` branch (`internal-auto-fill` fills the line the
+break ended), and `post-self-insert-hook`.
+
+## `post-self-insert-hook` (`cmds.c:524`, run at `:498`)
+
+Ported as a parameter and run at the end of `internal-self-insert` - the
+C's `run_hook (Qpost_self_insert_hook)` is its last act, after the
+auto-fill branch. It is run with a plain `for-each`, as the change hooks
+are in `insdel.scm`: `(schemacs editor subr)` is above `buffer.scm`,
+which `cmds.scm` imports, so `run-hooks` is not reachable from there.
+That is the same reason `auto-fill-chars` lives in `cmds.scm`.
+
+## `newline`'s post-processing is a hook entry, and first on it
+
+Emacs conses a closure onto `post-self-insert-hook` so that the hard
+newline, the blank line's lost margin and the new line's
+`move-to-left-margin` all happen *before* any other hook function. Two
+spellings are this tree's:
+
+- **`parameterize`, not `add-hook`/`remove-hook`.** Emacs's comment at
+  bug#46326 explains why it does not let-bind the hook: `add-hook`
+  affects the symbol-default value while a let-binding may protect only
+  the buffer-local one. A parameter has no such split - everything that
+  runs the hook reads the parameter - so binding it around the call is
+  the same extent Emacs's add/remove gives, and the `unwind-protect`
+  has nothing to do.
+- **The entry still removes itself** from the parameterized list before
+  its work, as the C's `(remove-hook 'post-self-insert-hook procsym t)`
+  does: a nested self-insert (from some other hook function) then does
+  not run this one twice. It is a `letrec` lambda rather than an `fset`
+  on a gensym, because a hook list here holds procedures.
+
+The two branches are kept separate, as the C keeps them: a
+**non-interactive** `(newline)` binds the hook to `(list postproc)`, so
+only `newline`'s own entry runs - "for non-interactive uses ... avoid
+the risk of filling or running abbrevs unexpectedly" - while an
+interactive RET conses its entry in front of the caller's functions.
+Measured on Emacs 31.1: with a `(lambda () (insert "|"))` on the hook,
+`(newline)` gives `"ab\n"` and `(call-interactively 'newline)` gives
+`"ab\n|"`. Both pinned in `fill-tests.scm`.
+
+## Three options moved down, because `newline` is their lowest reader
+
+`newline` reads three variables that Emacs declares above this tree's
+`simple.scm`:
+
+| variable | Emacs | here |
+|---|---|---|
+| `inhibit-auto-fill` | `simple.el:9247` | `simple.scm` (was `fill.scm`) |
+| `page-delimiter` | `paragraphs.el:213` | `simple.scm` (was `paragraphs.scm`) |
+| `use-hard-newlines` | `paragraphs.el:37` (a `define-minor-mode`) | `simple.scm` (was `paragraphs.scm`) |
+
+They moved rather than being reached through a seam because Emacs has no
+layering to cross: the variable belongs where its lowest reader is, and
+`newline` is in `simple.el`'s own file. `fill.scm` and `paragraphs.scm`
+import and re-export them, so nothing above either library changed -
+the move `*minor-mode-alist*` made into `subr.scm`.
+
+`use-hard-newlines`' **mode** is still not ported; the variable is a
+`define-custom` here, with the mode's own docstring. `set-hard-newline-
+properties` (`simple.el:692`) is ported with it: Emacs's `'t` is `#t`
+here, and its nil - which `listp` accepts - is `'()` for the
+`rear-nonsticky` test.
+
+## Not carried
+
+- **`electric-indent-mode`**, so `newline` binds nothing around the
+  self-insert and `C-j` is bound to `insert-newline` where Emacs 31 has
+  `electric-newline-and-maybe-indent` (`bindings.el`; measured in a
+  fundamental-mode buffer).
+- **The abbrev expansion** at the top of `internal_self_insert`
+  (`abbrev-mode` is not ported).
+
+## Two pre-existing bugs fixed on the way
+
+- **`fill.scm` called `equal`, which nothing in the tree defines.** It
+  is Emacs's `equal` on two strings; Scheme's `equal?` is the answer.
+  The compiler had said "possibly unbound"; the comment-fill path that
+  reads it was never taken by a test.
+- **`newcomment.scm`'s `comment-enter-backward` called `logand` without
+  importing it, and `(char-after)` with no argument** - this tree's
+  `char-after` requires its position (Emacs's defaults to point). Both
+  on the two-character-comment-ender branch.
+- `custom-tests.scm` referenced `custom-theme-recalc-variable` through a
+  *prefixed* import's back door (Guile's `module-ref` reaches the
+  unprefixed name even though the compiler cannot see it). It is
+  imported plainly now.

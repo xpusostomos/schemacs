@@ -87,6 +87,7 @@
     ;; `region-beginning' and `region-end' are `editfns.c''s, and
     ;; `add-to-history' is `subr.el''s.
     (only (schemacs editor buffer) buffer-overwrite-mode set!buffer-overwrite-mode
+          barf-if-buffer-read-only
           get-buffer get-buffer-create
           with-current-buffer set-buffer-modified-p
           *show-trailing-whitespace*
@@ -142,11 +143,17 @@
           ;; library re-exports it so every caller and `M-x` still find it
           ;; here.
           back-to-indentation
-          indent-according-to-mode *delete-horizontal-space-function*)
+          indent-according-to-mode *delete-horizontal-space-function*
+          ;; `newline`'s post-processing indents the new line to the
+          ;; margin (`indent.el:70`) and measures the margin it deletes
+          ;; from a blank line.
+          move-to-left-margin current-left-margin)
     ;; `transpose-chars' reads the `read-only' property of the character
     ;; before point, which is `textprop.c`'s - Emacs's own test, added
     ;; with the `text-editor-move-cursor' removal 2026-10-13.
-    (only (schemacs editor textprop) get-text-property)
+    ;; `set-hard-newline-properties` writes the `hard` property, added
+    ;; with `newline`'s hard-newline half.
+    (only (schemacs editor textprop) get-text-property put-text-property)
     ;; `casify-region` is `casefiddle.c`'s, and `upcase-region` and
     ;; `downcase-region` - which read the region and so cannot live in
     ;; `casefiddle.scm` - are defined in this file and call it.
@@ -160,7 +167,9 @@
     (only (schemacs editor cmds)
           backward-char beginning-of-line delete-char end-of-line
           forward-char self-insert-command
-          self-insert-tab)
+          self-insert-tab
+          ;; `newline` puts its post-processing on this hook, first.
+          *post-self-insert-hook*)
     ;; `define-minor-mode' is `easy-mmode.el`'s, and it is what builds
     ;; `overwrite-mode' and `binary-overwrite-mode' below.
     (only (schemacs editor easy-mmode) define-minor-mode)
@@ -209,6 +218,10 @@
    ;; so the command is named `insert-newline' here; see below.
    insert-newline
    newline-and-indent
+   ;; The three options `newline' reads. `*paragraphs.el*`'s two are
+   ;; here because this file's `newline' is their lowest reader;
+   ;; `paragraphs.scm` and `fill.scm` import and re-export them.
+   *inhibit-auto-fill* *page-delimiter* *use-hard-newlines*
    back-to-indentation
    place-undo-boundary! previous-line read-only-mode
    ;; `bindings.el`'s arrow-key commands (there is no `bindings.sld`
@@ -707,46 +720,163 @@ This has no effect when the variable `line-move-visual' is non-nil."
                                  (goto-char end)))))
                      (point))))
 
-    (define-command (insert-newline count)
-      ;; GNU Emacs's `newline' (`simple.el:616'), as far as it goes here.
+    ;; ---------------------------------------------------------------
+    ;; The options `newline' reads, and why they live in this file.
+    ;; ---------------------------------------------------------------
+    (define *inhibit-auto-fill* (make-parameter #f))
+    ;; ^ GNU Emacs's `inhibit-auto-fill' (`simple.el:9247'): "Non-nil
+    ;; means to do as if `auto-fill-mode' was disabled." Emacs declares
+    ;; it in `simple.el`'s auto-fill section, **which is `fill.scm`'s
+    ;; here** - this library is below `paragraphs.scm`, which that one
+    ;; imports. But its only binder is `newline`, and `newline` is in
+    ;; *this* file, so the variable lives where the lowest reader is and
+    ;; `fill.scm` imports it: the move `*minor-mode-alist*` made into
+    ;; `subr.scm`.
+
+    (define *page-delimiter* (make-parameter "^\f"))
+    ;; ^ GNU Emacs's `page-delimiter' (`paragraphs.el:213'): "Regexp
+    ;; describing line-beginnings that separate pages." Emacs spells it
+    ;; `"^\014"' and `\f' is Guile's form feed.
+    ;;
+    ;; **`paragraphs.el`'s, and it lives here** because `newline` is the
+    ;; lowest reader of it (its "did we add the newline at the beginning
+    ;; of a line that starts a page" test); `paragraphs.scm` imports and
+    ;; re-exports it, so every page and paragraph command is unchanged.
+    ;;
+    ;; It was spelled `"^\014"' once, with a comment claiming that is the
+    ;; same string in octal. **It is not**: *neither* reader has an octal
+    ;; escape, so `\014' is a NUL followed by the two characters `1' and
+    ;; `4'. Measured both ways.
+
+    (define-custom *use-hard-newlines* #f
+      "Non-nil means to distinguish hard and soft newlines.
+When enabled, the functions `newline' and `open-line' add the
+text-property `hard' to newlines that they insert, and a line is
+only considered as a candidate to match `paragraph-start' or
+`paragraph-separate' if it follows a hard newline.
+
+Newlines not marked hard are called \"soft\", and are always internal
+to paragraphs.  The fill functions insert and delete only soft newlines."
+      :type 'boolean
+      :group 'paragraphs)
+    ;; ^ `paragraphs.el`'s, here for the same reason `*page-delimiter*`
+    ;; is: `newline` reads it (`set-hard-newline-properties` below) and
+    ;; this is the lowest reader. **The `use-hard-newlines` *mode*** -
+    ;; the `define-minor-mode` that sets this - is still not ported;
+    ;; `paragraphs.scm`'s header says so.
+
+    (define-command (insert-newline . rest)
+      ;; GNU Emacs's `newline' (`simple.el:621'): "Insert a newline, and
+      ;; move to left margin of the new line."
       ;;
-      ;; **The C is not a loop over `insert'**: `newline' sets
+      ;; **It is not a loop over `insert'**: it sets
       ;; `last-command-event' to the line break and calls
       ;; `self-insert-command', so a newline goes through
       ;; `internal_self_insert` like any other typed character - which is
-      ;; what gives it property inheritance, the `post-self-insert-hook',
-      ;; and (in the C) auto-fill, electric-indent and the left margin.
+      ;; what gives it property inheritance, auto-fill
+      ;; (`internal-auto-fill` fills the line the break ended) and
+      ;; `post-self-insert-hook`.
       ;;
-      ;; **What is carried** is the insert that half ends in:
-      ;; `insert_and_inherit`, so a line break takes the properties of the
-      ;; text around it, as Emacs's does. **What is not**, each named:
-      ;; `use-hard-newlines` and `set-hard-newline-properties`; the
-      ;; `prefix-numeric-value` check and the negative-argument error;
-      ;; `inhibit-auto-fill` and `auto-fill-mode`, neither being ported;
-      ;; the left-margin deletion from a newly blank line and
-      ;; `move-to-left-margin`; and `post-self-insert-hook`, which
-      ;; `self-insert-command` does not run here.
+      ;; **The post-processing is on that hook, and first on it.** Emacs
+      ;; conses a closure onto `post-self-insert-hook` so that the hard
+      ;; newline, the blank line's lost margin and the new line's
+      ;; `move-to-left-margin` all happen *before* any other hook
+      ;; function. This tree's hook is a parameter, so binding it around
+      ;; the call is the same extent `add-hook`/`remove-hook` gives Emacs
+      ;; (bug#46326's let-binding worry does not arise: nothing reads a
+      ;; symbol-default of a parameter).
+      ;;
+      ;; **Not carried**: `electric-indent-mode`, which does not exist
+      ;; here (so there is nothing to bind around the call), and the
+      ;; abbrev expansion `internal_self_insert` would do - `abbrev-mode`
+      ;; is not ported.
       ;;
       ;; It is `insert-newline` and not `newline` because `(scheme base)`
       ;; exports `newline`; see the export note on the command.
       ;;--------------------------------------------------------------
-      ;; **The line break goes through `self-insert-command`**, which is
-      ;; where Emacs sends it - `newline` sets `last-command-event` to the
-      ;; break and calls `self-insert-command`, so the insertion that
-      ;; finally happens is `internal_self_insert`'s `insert_and_inherit`.
-      ;; (Emacs needs the `last-command-event` line because its
-      ;; `self-insert-command` is a one-argument DEFUN that reads the
-      ;; character out of that variable; this tree's takes it as an
-      ;; argument, so there is nothing to set.)
-      ;;
-      ;; **The character is the integer 10**, Emacs's `?\n` - a character
-      ;; in that model *is* an integer, and `self-insert-command` tests
-      ;; its argument with `characterp`, which asks for an integer. A
-      ;; Scheme `#\newline` there is not a character to that test and the
-      ;; command silently does nothing.
-      "Insert N line breaks at point."
-      (interactive "p")
-      (self-insert-command count (char->integer #\newline)))
+      "Insert a newline, and move to left margin of the new line.
+With prefix argument ARG, insert that many newlines.
+
+If `auto-fill-mode' is enabled, this may cause automatic line
+breaking of the preceding line.  A non-nil ARG inhibits this.
+
+If `use-hard-newlines' is enabled, the newline is marked with the
+text-property `hard'.
+
+A non-nil INTERACTIVE argument means to run the `post-self-insert-hook'."
+      (interactive "*P\np")
+      (let ((arg (and (pair? rest) (car rest)))
+            (interactive (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+        (barf-if-buffer-read-only)
+        (when (and arg (< (uarg->integer 1 arg) 0))
+          (error "Repetition argument has to be non-negative"))
+        ;; Call self-insert so that auto-fill, abbrev expansion etc.
+        ;; happen. Set `last-command-event' to tell self-insert what to
+        ;; insert.
+        ;; **The three dynamic variables are bound with `parameterize`,
+        ;; not in the `letrec`**: a `let` over a parameter's name binds
+        ;; the *name* to a value, leaves the parameter alone, and the
+        ;; body's `(*inhibit-auto-fill*)` then applies that value -
+        ;; "Wrong type to apply". `letrec` is for `postproc`, which
+        ;; removes *itself* from the hook and so names the binding being
+        ;; created.
+        (letrec ((was-page-start (and (bolp) (looking-at (*page-delimiter*))))
+               (beforepos (point))
+               (n (uarg->integer 1 arg))
+               (postproc
+                (lambda ()
+                  ;; Do the rest in `post-self-insert-hook', because we
+                  ;; want to do it *before* other functions on that hook.
+                  ;; (Emacs removes a gensym; here the parameterize is
+                  ;; the extent, and the removal keeps a nested insert
+                  ;; from running this one twice.)
+                  (*post-self-insert-hook*
+                   (let loop ((lst (*post-self-insert-hook*)) (acc '()))
+                     (cond ((null? lst) (reverse acc))
+                           ((eq? (car lst) postproc) (loop (cdr lst) acc))
+                           (else (loop (cdr lst) (cons (car lst) acc))))))
+                  ;; Mark the newline(s) `hard'.
+                  (if (*use-hard-newlines*)
+                      (set-hard-newline-properties (- (point) n) (point)))
+                  ;; If the newline leaves the previous line blank, and
+                  ;; we have a left margin, delete that from the blank
+                  ;; line.
+                  (save-excursion
+                    (goto-char beforepos)
+                    (beginning-of-line)
+                    (when (and (looking-at "[ \t]+$")
+                               (> (current-left-margin) 0))
+                      (delete-region (point) (line-end-position))))
+                  ;; Indent the line after the newline, except in one
+                  ;; case: when we added the newline at the beginning of
+                  ;; a line that starts a page.
+                  (or was-page-start
+                      (move-to-left-margin #f #t)))))
+          (parameterize ((*last-command-event* (char->integer #\newline))
+                         ;; "Don't auto-fill if we have a prefix argument."
+                         (*inhibit-auto-fill* (or (*inhibit-auto-fill*) arg))
+                         (*post-self-insert-hook*
+                          (if (not interactive)
+                              ;; "For non-interactive uses ... avoid the
+                              ;; risk of filling or running abbrevs
+                              ;; unexpectedly": only `newline`'s own
+                              ;; entry runs.
+                              (list postproc)
+                              (cons postproc (*post-self-insert-hook*)))))
+            (self-insert-command n (char->integer #\newline)))
+          #f)))
+
+    (define (set-hard-newline-properties from to)
+      ;; GNU Emacs's `set-hard-newline-properties' (`simple.el:692').
+      ;; Emacs's `'t' is `#t' here, and its nil - which `listp' accepts -
+      ;; is `'()' for the `rear-nonsticky' test.
+      (let ((sticky (let ((s (get-text-property from 'rear-nonsticky)))
+                      (if s s '()))))
+        (put-text-property from to 'hard #t)
+        ;; If rear-nonsticky is not "t", add 'hard to rear-nonsticky list
+        (if (and (list? sticky) (not (memq 'hard sticky)))
+            (put-text-property from (point) 'rear-nonsticky
+                               (cons 'hard sticky)))))
 
     ;; `keyboard-quit', `read-only-mode' and
     ;; `exchange-point-and-mark' are simple.el's; they were

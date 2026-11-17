@@ -10640,3 +10640,61 @@ Emacs answer.
   assumed the region was [13,18) when `C-SPC C-n C-n` makes it [1,13)).
   It "failed" while the editor was right. Work out what the keys select
   before writing assertions about them.
+
+# A typed RET, and the hook under it (2026-11-17)
+
+`newline` (Emacs 31's `simple.el:621`, not `cmds.c`'s any more) is
+ported whole: the `self-insert-command` routing, the `last-command-event`
+line, `inhibit-auto-fill`, `use-hard-newlines` +
+`set-hard-newline-properties`, the blank line's lost margin, the new
+line's `move-to-left-margin`, and the page-start guard. Under it,
+`post-self-insert-hook` (`cmds.c:524`) exists and runs.
+
+## What to know before touching it
+
+* **`post-self-insert-hook` is a parameter run with a plain
+  `for-each`** - `subr.scm`'s `run-hooks` is above `buffer.scm`, which
+  `cmds.scm` imports, so it is not reachable there (same reason
+  `auto-fill-chars` lives in `cmds.scm`). It runs at the end of
+  `internal-self-insert`, after the auto-fill branch.
+* **`newline`'s post-processing is an entry on that hook, and first on
+  it**, which is how Emacs gets the hard-newline/margin work done before
+  any other hook function. The entry removes itself with a `letrec`
+  lambda, as the C removes its gensym.
+* **A programmatic `(newline)` runs only that entry; an interactive RET
+  runs the caller's functions too.** Measured on Emacs 31.1 and pinned in
+  `fill-tests.scm`: `"ab\n"` versus `"ab\n|"` with an insertion hook.
+* **Three variables moved down into `simple.scm`**: `inhibit-auto-fill`
+  (from `fill.scm`), `page-delimiter` and `use-hard-newlines` (from
+  `paragraphs.scm`) - `newline` is their lowest reader, and Emacs has no
+  layering. Both libraries import and re-export them; `imports.scm` is
+  regenerated.
+
+## The traps this pass paid for
+
+* **A `let`/`letrec` over a parameter's name is not a dynamic binding**
+  - it shadows the parameter object with a value, and the next
+  `(*name*)` in the body applies that value: "Wrong type to apply".
+  `newline` binds all three with `parameterize`; only `postproc` is a
+  `letrec`.
+* **A test that types its text auto-fills on the way in.** The RET tests
+  must `insert` the line and then call `insert-newline`, as Emacs's
+  measurement did - `type-text` had already wrapped the line at
+  `fill-column`, so the RET had nothing to fill.
+* **`(char-after)` with no argument is an error here** (Emacs's defaults
+  to point), and it had sat in `newcomment.scm`'s
+  `comment-enter-backward` since that file was written. `logand` was
+  unbound there too. Both fixed; the compiler's "possibly unbound" and
+  "possibly wrong number of arguments" warnings were the only evidence,
+  and the full-tree sweep used in earlier sessions had been filtering
+  them out.
+* **A prefixed import still resolves unprefixed through `module-ref`.**
+  `custom-tests.scm` passed a test that the compiler called "possibly
+  unbound". Import the name plainly; do not rely on the back door.
+
+## Still not carried
+
+`electric-indent-mode` (so `C-j` is `insert-newline` here where Emacs 31
+has `electric-newline-and-maybe-indent`), the abbrev expansion inside
+`internal_self_insert`, and the `use-hard-newlines` *mode* (the variable
+is a `define-custom` for now).

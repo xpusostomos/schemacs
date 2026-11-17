@@ -125,7 +125,8 @@
     ;; `default-indent-new-line`'s non-soft break is `newline`, which
     ;; this tree spells `insert-newline` - `(scheme base)` took the plain
     ;; name - and the horizontal-space deletion beside it.
-    (only (schemacs editor simple) delete-horizontal-space insert-newline)
+    (only (schemacs editor simple) delete-horizontal-space insert-newline
+          *inhibit-auto-fill*)
     (only (schemacs editor newcomment)
           comment-start comment-end comment-start-skip
           comment-search-forward comment-search-backward
@@ -2189,12 +2190,10 @@ details."
       :type '(choice (const :tag "None" nil) regexp)
       :group 'fill)
 
-    (define *inhibit-auto-fill* (make-parameter #f))
-    ;; ^ GNU Emacs's `inhibit-auto-fill' (`simple.el:9204'): "Non-nil
-    ;; means to do as if `auto-fill-mode' was disabled." A parameter,
-    ;; because `newline' `let`-binds it around the self-insert that does
-    ;; the filling - the convention's test, and the binding has to reach
-    ;; `internal-auto-fill` several frames down.
+    ;; `inhibit-auto-fill` is **imported from `simple.scm`**, not defined
+    ;; here: `newline` is its only binder and lives there (`simple.el`'s
+    ;; own file), and this library is above `simple.scm`. Emacs declares
+    ;; it in `simple.el`'s auto-fill section; the departure is the move.
 
     (define normal-auto-fill-function #f)
     ;; ^ GNU Emacs's `normal-auto-fill-function' (`simple.el:9215'):
@@ -2396,11 +2395,14 @@ Returns t if it really did any work."
                               ;; "Check the indentation in two different
                               ;; ways, just to try and avoid most of the
                               ;; potential funny cases."
-                              (equal prefix-space
-                                     (buffer-substring
-                                      (point)
-                                      (begin (move-to-left-margin)
-                                             (point)))))))))
+                              ;; `equal` was unbound here - nothing in
+                              ;; the tree defines it; Emacs's `equal` on
+                              ;; two strings is Scheme's `equal?`.
+                              (equal? prefix-space
+                                      (buffer-substring
+                                       (point)
+                                       (begin (move-to-left-margin)
+                                              (point)))))))))
                #f))))
 
     (define (%with-comment-indent-bindings col fn comstart comend thunk)

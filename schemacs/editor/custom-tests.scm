@@ -6,6 +6,12 @@
  ;; The themes are `(schemacs editor theme)`'s - `custom.el`'s second
  ;; half, in its own module so it can sit above the minibuffer.
  (prefix (schemacs editor theme) th:)
+ ;; Named without the prefix below, and **imported** without it: a
+ ;; prefixed import leaves the module reachable under `module-ref`, so
+ ;; the test passed while the compiler warned that the name was
+ ;; "possibly unbound". Importing it plainly is what the reference
+ ;; should have said.
+ (only (schemacs editor theme) custom-theme-recalc-variable)
  (only (schemacs editor custom)
        define-custom custom-declare-variable custom-initialize-set
        custom-add-option custom-add-dependencies custom-handle-keyword

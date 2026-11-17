@@ -94,7 +94,7 @@
     (schemacs editor chartab)
     (schemacs editor data)
     (except (schemacs editor menu-bar)  *tty-menu-open-use-tmm*)
-    (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char back-to-indentation self-insert-command self-insert-tab)
+    (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char *inhibit-auto-fill* *page-delimiter* *use-hard-newlines* back-to-indentation self-insert-command self-insert-tab)
     (schemacs editor mule-cmds)
     (schemacs editor buffer-text)
     (schemacs editor region-cache)
@@ -517,6 +517,7 @@
     *pending-undo-list*
     *point-before-last-command-or-undo*
     *point-marker-function*
+    *post-self-insert-hook*
     *pre-command-hook*
     *prefix-cu*
     *prefix-digits*

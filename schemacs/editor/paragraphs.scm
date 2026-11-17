@@ -57,9 +57,13 @@
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward)
     (only (schemacs editor textprop) get-text-property)
     ;; the line ends and the blank-line question are simple.sld's -
-    ;; `paragraph-separate''s default is a blank line.
+    ;; `paragraph-separate''s default is a blank line. The two page
+    ;; options are Emacs's own here (`paragraphs.el`) but live in
+    ;; `simple.scm` because `newline` reads them; they are imported and
+    ;; re-exported.
     (only (schemacs editor simple)
-          kill-region mark set-mark push-mark)
+          kill-region mark set-mark push-mark
+          *page-delimiter* *use-hard-newlines*)
     ;; the mark-active and transient-mark-mode of the extend branch are
     ;; `buffer.c''s variables, beside `*last-command*' which is
     ;; simple.sld's (the command loop binds it there)
@@ -191,37 +195,19 @@ to obtain the value of this variable."
            "\\)"
            "[ \u00a0\t\n]*")))
 
-    (define *page-delimiter* (make-parameter "^\f"))
-    ;; ^ GNU Emacs's `page-delimiter' (page.el:25): "Regexp describing
-    ;; line that separates pages. The ^L is a form feed." Emacs spells it
-    ;; `"^\f"' and that is what this is - Guile's reader has `\f' for a
-    ;; form feed.
-    ;;
-    ;; It was spelled `"^\014"' here, with a comment claiming that is the
-    ;; same string in octal. **It is not**: *neither* reader has an octal
-    ;; escape, so `\014' is a NUL followed by the two characters `1' and
-    ;; `4' - `"^" NUL "14"' - in the default reader and under `--r7rs'
-    ;; alike. Measured both ways. A page delimiter that never matched
-    ;; anything, which is why `forward-page' would run to the end of the
-    ;; buffer.
+    ;; `page-delimiter` and `use-hard-newlines` are **imported from
+    ;; `simple.scm`**, not defined here: `simple.el`'s `newline` is their
+    ;; lowest reader, and this library is above it. Emacs declares both
+    ;; in `paragraphs.el`; the departure is the move, the same one
+    ;; `*minor-mode-alist*` made into `subr.scm`. This library
+    ;; re-exports them, so `pages.scm`, `lisp.scm` and `fill.scm` are
+    ;; unchanged.
 
     (define-custom *paragraph-ignore-fill-prefix* #f
       "Non-nil means the paragraph commands are not affected by `fill-prefix'.
 This is desirable in modes where blank lines are the paragraph delimiters."
       :type 'boolean
       :safe 'booleanp
-      :group 'paragraphs)
-
-    (define-custom *use-hard-newlines* #f
-      "Non-nil means to distinguish hard and soft newlines.
-When enabled, the functions `newline' and `open-line' add the
-text-property `hard' to newlines that they insert, and a line is
-only considered as a candidate to match `paragraph-start' or
-`paragraph-separate' if it follows a hard newline.
-
-Newlines not marked hard are called \"soft\", and are always internal
-to paragraphs.  The fill functions insert and delete only soft newlines."
-      :type 'boolean
       :group 'paragraphs)
 
     (define-command (forward-paragraph . args)

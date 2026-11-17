@@ -34,7 +34,7 @@
     (scheme base)
     (only (schemacs editor custom) define-custom)
     (scheme char)
-    (only (guile) string-trim-right)
+    (only (guile) string-trim-right logand)
     (only (schemacs editor buffer)
           current-buffer buffer-local-value set-buffer-local-value!
           buffer-fill-column)
@@ -496,7 +496,9 @@ behavior for explicit filling, you might as well use \\[newline-and-indent]."
                      (= 0 (logand (%syntax-code-or-0 (- (point) 2))
                                   (car (string-to-syntax "  3"))))))
             (backward-char 2)
-            (skip-chars-backward (string (char-after)))
+            ;; `char-after` takes its position here (Emacs's defaults to
+            ;; point; this tree's is the required form).
+            (skip-chars-backward (string (char-after (point))))
             (skip-syntax-backward " "))
            ;; "No clue what's going on: maybe we're really not right after
            ;; the end of a comment."

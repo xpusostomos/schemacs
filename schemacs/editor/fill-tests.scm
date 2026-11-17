@@ -10,7 +10,8 @@
 (import (scheme base) (scheme write) (srfi 64)
         (only (schemacs editor buffer)
               allocate-buffer set-buffer buffer-fill-column
-              set!buffer-fill-column *current-buffer*)
+              set!buffer-fill-column *current-buffer*
+              set!buffer-left-margin)
         (only (schemacs editor editfns)
               buffer-string point-min point-max goto-char insert
               point-marker char-after save-excursion
@@ -22,7 +23,14 @@
               auto-fill-mode)
         ;; `auto-fill-mode` is `internal_self_insert`'s caller, so the
         ;; test types the text rather than inserting it.
-        (only (schemacs editor cmds) self-insert-command)
+        (only (schemacs editor cmds) self-insert-command
+              *post-self-insert-hook*)
+        ;; `newline` and the two page options it reads.
+        (only (schemacs editor simple) insert-newline
+              *use-hard-newlines* *page-delimiter*)
+        (only (schemacs editor textprop) get-text-property)
+        (only (schemacs editor command) command-record-named
+              command-procedure)
         ;; `fill-comment-paragraph` needs a mode that sets a comment
         ;; syntax - `scheme-mode` is the one this tree has.
         (only (schemacs editor scheme) scheme-mode)
@@ -179,6 +187,111 @@
     (buffer-string)))
 
 (test-end "schemacs_editor_fill_auto")
+
+;;--------------------------------------------------------------------
+;; A typed RET - `newline' (`simple.el:621')
+;;--------------------------------------------------------------------
+;;
+;; `newline` is not a loop over `insert`: it calls `self-insert-command`
+;; with the line break, so the break goes through `internal_self_insert`
+;; like any typed character. Each expectation is Emacs 31.1's own answer
+;; for the same buffer and the same call, measured with
+;; `emacs -Q --batch` first.
+
+(test-begin "schemacs_editor_fill_newline")
+
+;; The long line is filled by the RET, then the RET's own break lands.
+(test-equal "aaa bbb ccc ddd eee\nfff ggg hhh\n"
+  (let ((b (with-text "")))
+    (set-buffer b)
+    (auto-fill-mode 1)
+    (set!buffer-fill-column b 20)
+    ;; `insert`, not `type-text`: Emacs's measurement was `(insert ...)`
+    ;; then `(newline)`, and typing the text would auto-fill it on the
+    ;; way in and leave nothing for the RET to fill.
+    (insert "aaa bbb ccc ddd eee fff ggg hhh")
+    (insert-newline)
+    (buffer-string)))
+
+;; A prefix argument inhibits the filling - Emacs's
+;; `(let ((inhibit-auto-fill (or inhibit-auto-fill arg))) ...)'.
+(test-equal "aaa bbb ccc ddd eee fff ggg hhh\n\n\n\n"
+  (let ((b (with-text "")))
+    (set-buffer b)
+    (auto-fill-mode 1)
+    (set!buffer-fill-column b 20)
+    (insert "aaa bbb ccc ddd eee fff ggg hhh")
+    (insert-newline 4 #t)
+    (buffer-string)))
+
+;; `post-self-insert-hook` runs after a typed character.
+(test-equal "abc|"
+  (let ((b (with-text "ab")))
+    (set-buffer b)
+    (goto-char (point-max))
+    (parameterize ((*post-self-insert-hook*
+                    (list (lambda () (insert "|")))))
+      (self-insert-command 1 (char->integer #\c)))
+    (buffer-string)))
+
+;; A *programmatic* `(newline)' runs that hook's `newline` entry only, not
+;; the caller's functions - the C's `(let ((post-self-insert-hook (list
+;; postproc))) ...)'.
+(test-equal "ab\n"
+  (let ((b (with-text "ab")))
+    (set-buffer b)
+    (goto-char (point-max))
+    (parameterize ((*post-self-insert-hook*
+                    (list (lambda () (insert "|")))))
+      (insert-newline))
+    (buffer-string)))
+
+;; An interactive RET does run them.
+(test-equal "ab\n|"
+  (let ((b (with-text "ab")))
+    (set-buffer b)
+    (goto-char (point-max))
+    (parameterize ((*post-self-insert-hook*
+                    (list (lambda () (insert "|")))))
+      ((command-procedure (command-record-named "insert-newline")) #f))
+    (buffer-string)))
+
+;; With `use-hard-newlines' the break carries the `hard' property.
+(test-equal #t
+  (let ((b (with-text "ab")))
+    (set-buffer b)
+    (goto-char (point-max))
+    (parameterize ((*use-hard-newlines* #t))
+      (insert-newline))
+    (get-text-property 3 'hard)))
+
+;; A newline that leaves the previous line blank deletes its indentation,
+;; and the new line is indented to the left margin.
+(test-equal "\n  "
+  (let ((b (with-text "   ")))
+    (set-buffer b)
+    (goto-char (point-max))
+    (set!buffer-left-margin b 2)
+    (insert-newline)
+    (buffer-string)))
+
+(test-equal "ab\n   "
+  (let ((b (with-text "ab")))
+    (set-buffer b)
+    (goto-char (point-max))
+    (set!buffer-left-margin b 3)
+    (insert-newline)
+    (buffer-string)))
+
+;; ... unless the break is inserted at the beginning of a page.
+(test-equal "\n\f\nx"
+  (let ((b (with-text "\f\nx")))
+    (set-buffer b)
+    (set!buffer-left-margin b 3)
+    (insert-newline)
+    (buffer-string)))
+
+(test-end "schemacs_editor_fill_newline")
 
 ;;--------------------------------------------------------------------
 ;; `comment-indent-new-line' - the comment continuation
