@@ -8,7 +8,8 @@
  (only (schemacs editor dispnew) current-display)
  (only (schemacs editor test-display) <test-display>)
  (only (schemacs editor frame)
-       *current-frame* *current-buffer* *default-frame-alist*
+       *current-frame* *current-buffer* *default-frame-alist* *frame-list*
+       *frame-creation-function*
        new-frame frame-parameter frame-selected-window window-top
        window-height window-list frame-inner-width %frame-tab-bar-lines)
  (only (schemacs editor window) switch-to-buffer split-window
@@ -30,7 +31,9 @@
        tab-bar-format-menu-bar tab-bar-menu-bar-button
        tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
        tab-switcher-mode-map
-       *tab-bar-auto-width*
+       *tab-bar-auto-width* tab-bar-map tab-bar-mouse-move-tab
+       tab-bar-mouse-context-menu tab-bar-move-tab-to-frame
+       tab-bar-detach-tab tab-bar--alist-get
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*
        *tab-bar-new-tab-choice* tab-bar-split-tab tab-bar-merge-tabs
        tab-bar-move-window-to-tab split-tab merge-tabs tab-new tab-list)
@@ -40,6 +43,7 @@
  (only (schemacs editor keyboard) tab-bar-items *last-read-event*)
  (only (schemacs editor menu-bar) menu-bar-keymap)
  (only (schemacs editor keymap) keymap-type? keymap-lookup)
+ (only (schemacs editor subr) kbd)
  (only (schemacs editor xdisp) render! posn-at-x-y)
  (only (schemacs editor editfns) point buffer-string)
  (only (schemacs editor textprop) get-text-property)
@@ -213,6 +217,56 @@
     (parameterize ((*current-frame* frame) (*current-buffer* #f))
       (let ((item (list-ref (tab-bar-items) 1)))
         (list (car item) (list-ref item 1))))))
+
+;; **The tab bar's own map** carries the drag and the right button, as
+;; `tab-bar-map` does (`tab-bar.el:562`): `<drag-mouse-1>` moves a tab and
+;; `<down-mouse-3>` opens the context menu.
+(test-equal '(#t #t)
+  (list (eq? (keymap-lookup tab-bar-map (kbd "<drag-mouse-1>"))
+             tab-bar-mouse-move-tab)
+        (eq? (keymap-lookup tab-bar-map (kbd "<down-mouse-3>"))
+             tab-bar-mouse-context-menu)))
+
+;; **A tab moves to another frame** - `tab-bar-move-tab-to-frame`
+;; (`tab-bar.el:1912`): it leaves the source frame's list and joins the
+;; target's, keeping only its window *state*, because a saved
+;; configuration holds window objects that belong to the frame it came
+;; from (`(assq-delete-all 'wc ...)`).
+(test-equal '(1 2 "tab-three")
+  (let ((one (new-frame (get-buffer-create "frame-one") 24 80))
+        (two (new-frame (get-buffer-create "frame-two") 24 80)))
+    (parameterize ((*current-frame* one) (*current-buffer* #f))
+      (tab-bar-mode 1)
+      (tab-bar-new-tab #f #f)
+      (switch-to-buffer (get-buffer-create "tab-three"))
+      (tab-bar-rename-tab "tab-three" #f)
+      (tab-bar-move-tab-to-frame #f one 2 two 1)
+      (list (length (tab-bar-tabs one))
+            (length (tab-bar-tabs two))
+            (tab-bar--alist-get 'name (car (tab-bar-tabs two)))))))
+
+;; **`tab-bar-detach-tab`** (`:1949`) puts a tab on a frame of its own:
+;; the tab leaves the frame it was on and the new frame carries it.
+(test-equal '(1 1 "carried")
+  (let ((frame (new-frame (get-buffer-create "detach-one") 24 80)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f)
+                   ;; The test display makes no frames of its own; the
+                   ;; creation function is what `make-frame` calls.
+                   (*frame-creation-function*
+                    (lambda () (new-frame (get-buffer-create "detach-two")
+                                          24 80))))
+      (tab-bar-mode 1)
+      (tab-bar-new-tab #f #f)
+      (tab-bar-rename-tab "carried" #f)
+      (tab-bar-detach-tab 2)
+      (let* ((fresh (let loop ((rest (*frame-list*)))
+                      (cond ((null? rest) #f)
+                            ((eq? (car rest) frame) (loop (cdr rest)))
+                            (else (car rest)))))
+             (tabs (tab-bar-tabs fresh)))
+        (list (length (tab-bar-tabs frame))
+              (length tabs)
+              (tab-bar--alist-get 'name (car tabs)))))))
 
 ;; A click in the tab bar selects the tab under it. The click is built the
 ;; way the display reports one - `posn-at-x-y` on the bar's row - and run

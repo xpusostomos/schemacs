@@ -64,10 +64,19 @@
   ;;     carried** - what Emacs pads with is a space that carries the
   ;;     name's properties, not a `display` specification, so a renderer
   ;;     that draws cells is sized the same way.
-  ;;   * **touch input, tab drag and detach** (`tab-bar-mouse-move-tab`,
-  ;;     `tab-bar-detach-tab`): no touch events, and detaching needs a
-  ;;     new frame built *from* a window configuration, which
-  ;;     `new-frame` does not take.
+  ;;   * **touch input** (`tab-bar-touchscreen-begin`, and the
+  ;;     `context-menu` throw it uses): there are no touch events in
+  ;;     either front end. The drag (`tab-bar-mouse-move-tab`) and detach
+  ;;     (`tab-bar-detach-tab`, `tab-bar-move-tab-to-frame`) are carried,
+  ;;     and so is the right-click `tab-bar-mouse-context-menu`.
+  ;;   * **`tab-bar--load-buttons`**: the three icons
+  ;;     (`tab-bar-new`, `tab-bar-close`, `tab-bar-menu-bar`) are built at
+  ;;     load time as the same `text` strings the icon specification falls
+  ;;     back to; `define-icon`/`icon-string` are here, so a display with
+  ;;     images could carry them.
+  ;;   * **`tab-bar-get-buffer-tab`/`tab-bar--reusable-frames`**, which
+  ;;     answer "which tab shows this buffer" for `display-buffer`-style
+  ;;     callers this tree does not have.
   ;;   * **`tab-switcher-mode`'s `?` binding**: `describe-mode` is not
   ;;     ported. The map's `:suppress t` is carried (`suppress-keymap`),
   ;;     so a letter typed in the `*Tabs*` list is `undefined` rather
@@ -104,6 +113,9 @@
           window-internal? window-parent window-height window-top
           window-left window-width resize-frame-windows!
           frame-height frame-width frame-inner-width *pre-command-hook*
+          ;; `tab-bar-detach-tab` makes the frame a tab moves to, and
+          ;; `tab-bar-move-tab-to-frame` walks the frame ring
+          make-frame next-frame with-selected-frame
           ;; the automatic tab widths: the cell size a tab's width is
           ;; measured in (see `string-pixel-width` in `xdisp.scm`)
           frame-char-height frame-char-width)
@@ -131,7 +143,7 @@
           default-directory get-buffer-create)
     (only (schemacs editor subr) run-hook-with-args
           run-hook-with-args-until-success run-hooks add-hook remove-hook
-          assq-delete-all delq posn-string posn-x-y event-start event-end
+          assq-delete-all delq nth posn-string posn-x-y event-start event-end
           posn-window posn-point
           ;; `tab-switcher-mode-map`'s `:suppress t` (`tab-bar.el:2772`)
           suppress-keymap)
@@ -228,6 +240,8 @@
    tab-bar--format-tab
    ;; the mouse
    tab-bar-mouse-down-1 tab-bar-mouse-1 tab-bar-mouse-close-tab
+   tab-bar-mouse-move-tab tab-bar-mouse-context-menu
+   tab-bar-detach-tab tab-bar-move-tab-to-frame tab-bar--alist-get
    tab-bar--event-to-item tab-bar--key-to-number
    ;; tab history - `tab-bar.el:2566`
    tab-bar-history-mode tab-bar-history-mode-variable
@@ -1391,8 +1405,11 @@ list of menu-item elements, or nil."
                (ws
                 (window-state-put ws #f 'safe)
                 (when tab-bar-history-mode-variable
-                  (hashq-set! tab-bar-history-back (selected-frame) '())
-                  (hashq-set! tab-bar-history-forward (selected-frame) '())))))
+                  ;; **The `-table` names**: the bare `tab-bar-history-back`
+                  ;; is the *command*, and the command's definition has
+                  ;; replaced the hash table this line used to name.
+                  (hashq-set! tab-bar-history-back-table (selected-frame) '())
+                  (hashq-set! tab-bar-history-forward-table (selected-frame) '())))))
             (let ((tabs ((*tab-bar-tabs-function*))))
               (when from-index
                 (set-car! (list-tail tabs from-index) from-tab))
@@ -1737,6 +1754,67 @@ Negative TO-NUMBER counts tabs from the end of the tab bar."
     (define (copy-list lst)
       (if (pair? lst) (cons (car lst) (copy-list (cdr lst))) '()))
 
+    (define-command (tab-bar-move-tab-to-frame arg from-frame from-number
+                                               to-frame to-number)
+      "Move tab from FROM-NUMBER position to new position at TO-NUMBER.
+FROM-NUMBER defaults to the current tab number.
+FROM-NUMBER and TO-NUMBER count from 1.
+FROM-FRAME specifies the source frame and defaults to the selected frame.
+TO-FRAME specifies the target frame and defaults the next frame.
+Interactively, ARG selects the ARGth next frame on the same terminal,
+to which to move the tab; ARG defaults to 1."
+      (interactive (list (current-prefix-arg) #f #f #f #f))
+      (let ((from-frame (or from-frame (selected-frame))))
+        (unless to-frame
+          ;; `(dotimes (_ (prefix-numeric-value arg)) (setq to-frame
+          ;; (next-frame to-frame)))` - `next-frame` with nil starts from
+          ;; the selected frame.
+          (let loop ((n (uarg->integer 1 arg)))
+            (unless (<= n 0)
+              (set! to-frame (next-frame to-frame))
+              (loop (- n 1)))))
+        (unless (eq? from-frame to-frame)
+          (let* ((from-tabs ((*tab-bar-tabs-function*) from-frame))
+                 (from-number (or from-number
+                                  (1+ (tab-bar--current-tab-index from-tabs))))
+                 (from-tab (list-ref from-tabs (1- from-number)))
+                 (to-tabs ((*tab-bar-tabs-function*) to-frame))
+                 (to-index (max 0 (min (- (or to-number 1) 1)
+                                       (- (length to-tabs) 1)))))
+            ;; "Delete the window configuration (wc) that has frame
+            ;; references, and leave only the window state (ws) to restore
+            ;; it on another frame."
+            (let ((moved (assq-delete-all
+                          'wc
+                          (if (eq? (car from-tab) 'current-tab)
+                              (tab-bar--tab from-frame)
+                              from-tab))))
+              (tab-bar-tabs-set (tab-bar--insert-at to-tabs to-index moved)
+                                to-frame))
+            (with-selected-frame from-frame
+              (parameterize ((*inhibit-message* #t)
+                             (*tab-bar-close-last-tab-choice* 'delete-frame)
+                             (tab-bar-closed-tabs '()))
+                (tab-bar-close-tab from-number #f)))
+            (force-mode-line-update #t)))))
+
+    (define-command (tab-bar-detach-tab from-number)
+      "Move tab number FROM-NUMBER to a new frame.
+FROM-NUMBER defaults to the current tab (which happens interactively)."
+      (interactive (list (1+ (tab-bar--current-tab-index))))
+      (let* ((tabs ((*tab-bar-tabs-function*)))
+             (tab-index (1- (or from-number
+                                (1+ (tab-bar--current-tab-index tabs)))))
+             (tab-name (tab-bar--alist-get 'name (list-ref tabs tab-index)))
+             ;; "On some window managers, `make-frame' selects the new
+             ;; frame, so previously selected frame is saved to
+             ;; `from-frame'."
+             (from-frame (selected-frame))
+             (new-frame (make-frame (list (cons 'name tab-name)))))
+        (tab-bar-move-tab-to-frame #f from-frame from-number new-frame #f)
+        (with-selected-frame new-frame
+          (tab-bar-close-tab #f #f))))
+
     ;;--------------------------------------------------------------
     ;; The mouse - `tab-bar--event-to-item` and its commands
     ;;--------------------------------------------------------------
@@ -1854,6 +1932,58 @@ Used by `tab-bar-format-menu-bar'."
              (tab-number (tab-bar--key-to-number (if item (car item) #f))))
         (unless (eq? tab-number #t)
           (tab-bar-close-tab tab-number #f))))
+
+    (define-command (tab-bar-mouse-move-tab event)
+      "Move a tab to a different position on the tab bar.
+This command should be bound to a drag event.  It moves the tab
+at the mouse-down event to the position at mouse-up event."
+      (interactive "e")
+      ;; Emacs also clears `tab-bar--dragging-in-progress` here; that
+      ;; variable is written in three places there and read nowhere, so it
+      ;; is not carried.
+      (let ((from (tab-bar--key-to-number
+                   (nth 0 (tab-bar--event-to-item (event-start event)))))
+            (to (tab-bar--key-to-number
+                 (nth 0 (tab-bar--event-to-item (event-end event))))))
+        (unless (or (eq? from to) (eq? from #t) (eq? to #t))
+          (tab-bar-move-tab-to
+           (if (not to) (1+ (tab-bar--current-tab-index)) to) from))))
+
+    (define-command (tab-bar-mouse-context-menu event posn)
+      "Pop up the context menu for the tab on which you click.
+EVENT is a mouse or touch screen event.  POSN is nil or the
+position of EVENT."
+      (interactive (list (*last-read-event*) #f))
+      (let* ((item (tab-bar--event-to-item (or posn (event-start event))))
+             (tab-number (tab-bar--key-to-number (nth 0 item)))
+             (menu (make-sparse-keymap (propertize "Context Menu" 'hide #t))))
+        (cond
+         ((eq? tab-number #t)
+          ;; The click was not on a tab: offer to make one.
+          (define-key-after menu (vector 'new-tab)
+            '(menu-item "New tab" tab-bar-new-tab :help "Create a new tab"))
+          (when (pair? (tab-bar-closed-tabs))
+            (define-key-after menu (vector 'undo-close)
+              '(menu-item "Reopen closed tab" tab-bar-undo-close-tab
+                          :help "Undo closing the tab"))))
+         (else
+          (define-key-after menu (vector 'duplicate-tab)
+            (list 'menu-item "Duplicate"
+                  (lambda () (tab-bar-duplicate-tab #f tab-number))
+                  ':help "Clone the tab"))
+          (define-key-after menu (vector 'detach-tab)
+            (list 'menu-item "Detach"
+                  (lambda () (tab-bar-detach-tab tab-number))
+                  ':help "Move the tab to new frame"))
+          (define-key-after menu (vector 'close)
+            (list 'menu-item "Close"
+                  (lambda () (tab-bar-close-tab tab-number #f))
+                  ':help "Close the tab"))
+          (define-key-after menu (vector 'close-other)
+            (list 'menu-item "Close other tabs"
+                  (lambda () (tab-bar-close-other-tabs tab-number))
+                  ':help "Close all other tabs"))))
+        (popup-menu menu event #f #f)))
 
     ;;--------------------------------------------------------------
     ;; Tab groups - `tab-bar.el:1084`
@@ -2581,8 +2711,10 @@ marked for deletion."
     (define tab-bar-mode-map (make-sparse-keymap))
 
     (define-key tab-bar-map (kbd "<down-mouse-1>") tab-bar-mouse-down-1)
+    (define-key tab-bar-map (kbd "<drag-mouse-1>") tab-bar-mouse-move-tab)
     (define-key tab-bar-map (kbd "<mouse-1>") tab-bar-mouse-1)
     (define-key tab-bar-map (kbd "<mouse-2>") tab-bar-mouse-close-tab)
+    (define-key tab-bar-map (kbd "<down-mouse-3>") tab-bar-mouse-context-menu)
 
     (define (tab-bar--define-keys)
       ;; "Install key bindings to switch between tabs if so configured."

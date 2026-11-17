@@ -1367,7 +1367,14 @@
         ;; a discarded `(skip ...)' walked the original and never
         ;; unlinked anything.
         (let* ((alist (let skip ((rest alist))
-                        (if (and (pair? rest) (test (car (car rest)) key))
+                        ;; **`(pair? (car rest))`, which the C's guard has
+                        ;; and this did not**: `(consp (car alist))` is
+                        ;; what keeps an alist whose elements are not all
+                        ;; conses - a tab is `(tab (name . "x") ...)`, and
+                        ;; its first element is a symbol - from being
+                        ;; walked into `(car 'tab)`, which raises.
+                        (if (and (pair? rest) (pair? (car rest))
+                                 (test (car (car rest)) key))
                             (skip (cdr rest))
                             rest))))
           ;; The splice is guarded on `pair?' and not on truth: the cdr

@@ -2948,12 +2948,17 @@
       ;; `frame-creation-function', then `after-make-frame-functions'
       ;; (`frame.el:1127', `:1129', `:1179').
       ;;
-      ;; **Frame parameters are not carried**, and that is most of what
-      ;; Emacs's `make-frame' does: it merges `window-system-default-
-      ;; frame-alist', `default-frame-alist' and `frame-inherited-
-      ;; parameters' (`frame.el:1096'-`:1109') before creating anything.
-      ;; A frame here has no parameters to merge, so ARGS is taken for
-      ;; shape and ignored. That is the named gap, not an oversight.
+      ;; **The caller's parameters are applied after the frame is made**,
+      ;; which is this tree's nearest shape to Emacs's: there they are an
+      ;; argument to `frame-creation-function', which merges
+      ;; `window-system-default-frame-alist' and `default-frame-alist'
+      ;; *under* them (`frame.el:1094'-`:1109') so the caller wins. Here
+      ;; `new-frame-on` has already merged the defaults and
+      ;; `set-frame-parameter` is what a front end would have done with
+      ;; the caller's own - including `name`, which renames the frame.
+      ;; `window-system-default-frame-alist` and
+      ;; `frame-inherited-parameters` are still not carried; the duplicate
+      ;; a caller overrides stays in the alist rather than being replaced.
       ;;--------------------------------------------------------------
       ;; `(*before-make-frame-hook*)' and not `*before-make-frame-hook*':
       ;; a hook is a *parameter* here, so the bare name is the procedure
@@ -2964,6 +2969,10 @@
         (unless create
           (error "This display cannot make more frames"))
         (let ((frame (create)))
+          (for-each (lambda (parameter)
+                      (set-frame-parameter frame (car parameter)
+                                           (cdr parameter)))
+                    (if (pair? args) (car args) '()))
           (run-hook-with-args (*after-make-frame-functions*) frame)
           frame)))
 

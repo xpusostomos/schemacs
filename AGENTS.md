@@ -10151,3 +10151,31 @@ The first of the tab-bar/tab-line remainder. `tab-bar-auto-width`
 `tab-bar-minibuffer-restore-tab`/`tab-bar-select-restore-windows`, the
 `frameset` persistence, the Gtk tab bar as a widget, and touch (no touch
 events exist in either front end).
+
+# The tab bar's drag / right-click / detach (2026-11-17)
+
+`tab-bar-mouse-move-tab`, `tab-bar-mouse-context-menu`,
+`tab-bar-move-tab-to-frame` and `tab-bar-detach-tab` are in, with the
+`<drag-mouse-1>` and `<down-mouse-3>` bindings the C's `tab-bar-map` has.
+DEPARTURES.md has the shape; three things are worth carrying forward:
+
+* **`make-frame` now applies its parameter alist** (after creation, via
+  `set-frame-parameter`), because detaching needs the new frame to carry
+  the tab's name. The creation functions take no arguments here, so this
+  is the nearest shape to Emacs's `frame-creation-function` merge.
+* **`assoc-delete-all` had a real bug**: its skip loop tested
+  `(car (car rest))` without the C's `(consp ...)` guard, so an alist
+  whose head is a symbol - a tab is `(tab (name . ...) ...)` - raised.
+  Found by `tab-bar-move-tab-to-frame`, which is the first caller to
+  hand it one. `subr-tests` pins it.
+* **A variable and a command of the same name bit again**:
+  `tab-bar-new-tab-to` used `tab-bar-history-back` as a hash table, and
+  the command of that name had replaced it. The tables are the `-table`
+  names; grep for the bare name when touching that section.
+
+## Still open in tab-bar
+
+`frameset-*` persistence, `tab-bar-select-restore-context`, the Gtk tab
+bar as a widget, `tab-bar-get-buffer-tab`, `tab-bar--load-buttons`
+(the buttons are the same `text` strings the icon spec falls back to),
+and touch (no touch events in either front end).

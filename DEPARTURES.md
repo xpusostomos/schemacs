@@ -4116,6 +4116,59 @@ reasoning that put `locate-file-internal` in `fileio.scm`.
 `buffer-text-pixel-size` itself is not ported: there is no font metric to
 ask, so it would be a multiplication behind a glyph walk.
 
+# The tab bar's drag, its right-click menu, and detaching a tab
+# (2026-11-17)
+
+The rest of `tab-bar.el`'s mouse surface and the two commands that move a
+tab to another frame:
+
+| Emacs | here |
+|---|---|
+| `tab-bar-mouse-move-tab` (`:473`) and the `<drag-mouse-1>` binding (`:566`) | same, `tab-bar-map` |
+| `tab-bar-mouse-context-menu` (`:431`) and `<down-mouse-3>` (`:569`) | same, over `popup-menu` |
+| `tab-bar-move-tab-to-frame` (`:1912`) | same |
+| `tab-bar-detach-tab` (`:1949`) | same |
+
+`tab-bar-move-tab-to-frame` keeps only the tab's window *state*: a saved
+configuration holds window objects that belong to the frame it was made
+on, so `(assq-delete-all 'wc ...)` drops it, exactly as the C does. The
+source frame is left through `with-selected-frame`, with
+`tab-bar-close-last-tab-choice` bound to `delete-frame` and
+`tab-bar-closed-tabs` to nil - which is why moving the last tab is a
+frame deletion and not an error.
+
+**Not carried**: `tab-bar--dragging-in-progress`, which Emacs writes in
+three places and reads nowhere.
+
+## `make-frame` now applies its parameters
+
+Emacs's `make-frame` hands the caller's alist to
+`frame-creation-function`, which merges `window-system-default-frame-alist`
+and `default-frame-alist` *under* it (`frame.el:1094`-`:1109`) so the
+caller wins. This tree's creation functions take no arguments, so the
+parameters are applied with `set-frame-parameter` after the frame is made
+- which is what a front end would have done with them, `name` included.
+`window-system-default-frame-alist` and `frame-inherited-parameters` are
+still not carried, and a caller's value leaves the `default-frame-alist`
+duplicate in the alist rather than replacing it.
+
+## Two bugs underneath, both pre-existing
+
+1. **`assoc-delete-all` was missing the C's `consp` guard in its skip
+   loop.** `subr.el:1066`'s walk is `(while (and (consp (car alist))
+   (funcall test (car (car alist)) key)) ...)`; the port tested
+   `(car (car rest))` unguarded, so an alist whose first element is not a
+   cons raised. A tab is `(tab (name . "x") ...)` - its head is the
+   *symbol* `tab` - so `tab-bar-move-tab-to-frame` died on
+   `(car 'tab)`. `subr-tests` has both functions on such an alist now.
+
+2. **`tab-bar-new-tab-to` still named the history hash tables by the bare
+   names** (`tab-bar-history-back`), which the *commands* of the same
+   names later overwrite. Restoring a tab from a window state therefore
+   died in `hashq-set!` on a procedure. The tables are
+   `tab-bar-history-back-table`/`-forward-table`, and the two sites say so
+   now.
+
 # Window states: the size registers, and the pixel/total split
 (2026-11-16)
 

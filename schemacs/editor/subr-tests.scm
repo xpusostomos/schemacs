@@ -5,7 +5,8 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor subr) kbd event-modifiers event-basic-type
        event-convert-list event-symbol-elements with-silent-modifications
-       define-key-after keymap-canonicalize)
+       define-key-after keymap-canonicalize
+       assoc-delete-all assq-delete-all)
  (only (schemacs editor keymap)
        keymap-index keymap-index->events
        make-sparse-keymap define-key set-keymap-parent keymap-parent
@@ -318,5 +319,16 @@
       (and (keymap-type? merged)
            (equal? '((120 cx) (121 py)) (subr-keymap-pairs merged))
            (keymap-type? (keymap-parent merged))))))
+
+;; **`assoc-delete-all` walks an alist whose elements are not all
+;; conses.** Emacs's guard is `(consp (car alist))`, and its `assq` is
+;; `Fassq`, which answers nil for a non-cons element rather than raising.
+;; A tab is `(tab (name . "x") ...)` - its first element is the symbol
+;; `tab` - and the missing guard made deleting a key from one raise
+;; `(car 'tab)`.
+(test-equal '((name . "x") tab (group . "g"))
+  (assoc-delete-all 'wc '((name . "x") tab (wc . 1) (group . "g"))))
+(test-equal '((name . "x") tab)
+  (assq-delete-all 'wc '((name . "x") tab (wc . 1))))
 
 (test-end "schemacs_editor_subr")

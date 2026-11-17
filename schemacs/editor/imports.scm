@@ -2694,6 +2694,7 @@
     syntax-table
     syntax-table-p
     system-type
+    tab-bar--alist-get
     tab-bar--current-tab
     tab-bar--current-tab-find
     tab-bar--current-tab-index
@@ -2718,6 +2719,7 @@
     tab-bar-close-tab
     tab-bar-close-tab-by-name
     tab-bar-closed-tabs
+    tab-bar-detach-tab
     tab-bar-duplicate-tab
     tab-bar-format-add-tab
     tab-bar-format-align-right
@@ -2745,10 +2747,13 @@
     tab-bar-mode-variable
     tab-bar-mouse-1
     tab-bar-mouse-close-tab
+    tab-bar-mouse-context-menu
     tab-bar-mouse-down-1
+    tab-bar-mouse-move-tab
     tab-bar-move-tab
     tab-bar-move-tab-backward
     tab-bar-move-tab-to
+    tab-bar-move-tab-to-frame
     tab-bar-move-tab-to-group
     tab-bar-move-window-to-tab
     tab-bar-new-button
