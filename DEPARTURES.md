@@ -6371,3 +6371,85 @@ alphabet pass both. Two further cases force the heuristic paths: a
 `too-expensive` of 5, and a 250-character pair sharing a 40-character
 tail (the `big_snake` search); both must still apply. `diffseq-tests.scm`
 is in `tools/run-suites.py`.
+
+# `replace-region-contents`, and the `replace-match` bug under it (2026-11-18)
+
+The DEFUN is in `editfns.scm`, over the `diffseq.scm` engine landed
+before it; `replace_range` grew the C's buffer and `[BUFFER BEG END]`
+NEW forms; and `replace-buffer-contents`, `replace-string-in-region`
+and `replace-regexp-in-region` (`subr.el:4948-5040`) are in
+`replace.scm`.
+
+## What the DEFUN does, and the readings it takes
+
+- **SOURCE** is a string, a buffer, a `[BUFFER BEG END]` vector, or a
+  function called with the buffer narrowed to BEG..END. A string's
+  characters are read straight from the string, a buffer's with
+  `buffer-text-ref` from its accessible portion, and a vector's after
+  `validate-region` in that buffer's own context (`parameterize` on
+  `*current-buffer*`, the C's temporary `set_buffer_internal`).
+- **The trivial paths** - either side empty, `MAX-SECS 0`, `MAX-COSTS
+  0` - are the C's: one `replace_range` of the source, answer t.
+- **The diff** compares two vectors of code points (properties ignored,
+  as the C's `buffer_chars_equal` ignores them), records deletions and
+  insertions in two bytevectors with the C's bit arithmetic
+  (`set_bit`/`bit_is_set`), and the escape out of the engine is
+  `call/cc` - taken every 65536 comparisons after `maybe-quit`, and at
+  each `EARLY_ABORT` check, when the `MAX-SECS` deadline passes.
+- **The apply phase** walks backwards as the C does, replacing each run
+  with a `replace_range` of the source slice, inside one
+  `prepare_to_modify_buffer`/`inhibit_modification_hooks` bracket with
+  one `signal_after_change` at the end - unless the caller had already
+  inhibited the hooks. `Fundo_boundary` is the
+  `text-editor-undo-boundary!` call before it.
+- **A string source's slice** is `(substring source j (1- end-b))`:
+  `j`/`end-b` are Emacs buffer positions (1-based), `substring` counts
+  from 0. The first probe used `end-b` as it stood and asked for one
+  character past the source; the fix is the `1-`.
+
+## The `replace_match` bug this exposed
+
+`replace-regexp-in-region` with `\2\1` answered `b1` where Emacs
+answers `1a` for the first match of `a1`: `%substitute-replacement` -
+`replace-match`'s **buffer** path - added one to every register before
+slicing (`(+ 1 (car pair))`), a leftover from before the 2026-10-05
+conversion to Emacs's one-based coordinates. The string path was
+already right (its registers are zero-based), which is why nothing had
+noticed: the tree's own replace tests exercised the string path and
+`perform-replace`'s typed replacements, not a buffer `\N`.
+
+Fixed at the source (the C hands `Fbuffer_substring` the registers as
+they stand), with two `search-tests` regressions - `\&` and `\2\1` -
+whose expectations are `emacs -Q --batch`'s. This is the file's oldest
+lesson again: the new caller was a correct port, and it failed because a
+primitive underneath did not do what the C does.
+
+## The measured table
+
+Every expectation in `replace-tests.scm`'s new block is
+`emacs -Q --batch`'s own, measured first:
+
+| case | Emacs 31.1 | port |
+|---|---|---|
+| point at END / before BEG / inside, replacing 7..12 with "there" | (t "hello there" 12) / (t ... 1) / (t ... 7) / (t ... 10) | same |
+| buffer source / `[buf 3 5]` vector | (t "xxAAbbCCxx" 11) / (t "xxbbxx" 7) | same |
+| empty replacement / `MAX-SECS 0` / `MAX-COSTS 0` | (t "abc" 2) / (t "aXYc" 2) / (t "aXYc" 2) | same |
+| two hunks / function source | (t "abc123def456ghi" 16) / (t "aQc" 4) | same |
+| buffer as its own source | error "Cannot replace a buffer with itself" | same |
+| `replace-string-in-region` | (2 "XX"), (nil "abcabc"), (1 "ABCX"), the two range errors | same |
+| `replace-regexp-in-region` | (2 "a#b#c"), (2 "1a2b2c"), (nil "xyz") | same |
+| `replace-buffer-contents` | (t "axc") | same |
+
+## Named gaps
+
+- A **byte character** in a buffer source renders as U+FFFD through
+  `buffer-text-substring` (the tree's named departure) when it is
+  inserted; nothing replaced here holds one yet.
+- The C's temporary work buffer for a string source is not made - the
+  string's characters are read directly, which is the same comparison
+  and the same insertions.
+- `MAX-SECS` is compared as a floating-point deadline
+  (`float-time (current-time)` against `lisp_time_arguments`), where
+  the C compares timespecs exactly.
+- `replace_range`'s vector form checks nothing of its own beyond the
+  buffer's type; its only maker is the DEFUN, which validated the range.

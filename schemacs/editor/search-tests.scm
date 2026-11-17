@@ -626,4 +626,37 @@
       (search-forward "x" 1 #t)
       'no-error)))
 
+
+;; ------------------------------------------------------------------
+;; `replace-match`'s buffer path substitutes registers by Emacs's own
+;; positions. Found through `replace-regexp-in-region`: its `\2\1`
+;; case answered `b1' for a match of `a1' because the substitution
+;; added one to positions that are already 1-based - a leftover from
+;; before the 2026-10-05 conversion. Both expectations measured on
+;; Emacs 31.1.
+
+(test-equal "replace-match buffer: \\& is the whole match"
+  "<a>bc"
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*replace-match-buf*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "abc")
+       (re-search-forward "\\([a-z]\\)" #f #t)
+       (replace-match "<\\&>" #t)
+       (buffer-substring (point-min) (point-max))))))
+
+(test-equal "replace-match buffer: \\N are the subexpressions"
+  "1ab22c"
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*replace-match-buf*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "a1b22c")
+       (re-search-forward "\\([a-z]\\)\\([0-9]\\)" #f #t)
+       (replace-match "\\2\\1" #t)
+       (buffer-substring (point-min) (point-max))))))
+
 (test-end)

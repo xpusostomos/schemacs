@@ -18,6 +18,7 @@
  (only (schemacs editor subr) kbd)
  (prefix (schemacs editor keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
+ (only (ice-9 exceptions) exception-message)
  )
 
 ;; replace.el's tests: the answer map, the caret description, and the
@@ -131,5 +132,138 @@
      ;; the region 1..5 is the first "aa" and the space; the second
      ;; "b" run is outside it
      (buffer-substring (point-min) (point-max)))))
+
+
+;; ------------------------------------------------------------------
+;; `replace-region-contents' and the three `subr.el' functions over it
+;;
+;; **Every expectation below is `emacs -Q --batch`'s own answer** on the
+;; same input, measured before the port - final text, point and return
+;; value.
+
+(define (rrc-buffer text)
+  (let ((b (get-buffer-create "*rrc-tests*")))
+    (set-buffer b)
+    (erase-buffer)
+    (insert text)
+    b))
+
+;; Point's three placements: at END it follows the replacement; before
+;; BEG it stays; inside the region it lands where `replace_range` puts
+;; it. Measured (t "hello there" 12), (t ... 1), (t ... 7), (t ... 10).
+(test-equal '((#t "hello there" 12) (#t "hello there" 1)
+              (#t "hello there" 7) (#t "hello there" 10))
+  (in-buffer
+   (lambda ()
+     (map (lambda (at)
+            (rrc-buffer "hello world")
+            (goto-char at)
+            (let ((ret (replace-region-contents 7 12 "there")))
+              (list ret (buffer-string) (point))))
+          (list 12 1 7 9)))))
+
+;; A buffer source contributes its accessible portion; a `[buf beg end]'
+;; vector that stretch of it. Measured (t "xxAAbbCCxx" 11) and
+;; (t "xxbbxx" 7) - the vector's range is identical text, so the diff
+;; finds nothing to do.
+(test-equal '((#t "xxAAbbCCxx" 11) (#t "xxbbxx" 7))
+  (in-buffer
+   (lambda ()
+     (let ((src (get-buffer-create "*rrc-src*")))
+       (set-buffer src) (erase-buffer) (insert "AAbbCC")
+       (set-buffer (get-buffer-create "*rrc-tests*"))
+       (let ((one
+              (begin (rrc-buffer "xxbbxx") (goto-char 7)
+                     (let ((ret (replace-region-contents 3 5 src)))
+                       (list ret (buffer-string) (point)))))
+             (two
+              (begin (rrc-buffer "xxbbxx") (goto-char 7)
+                     (let ((ret (replace-region-contents 3 5 (vector src 3 5))))
+                       (list ret (buffer-string) (point))))))
+         (list one two))))))
+
+;; The trivial paths - an empty replacement, MAX-SECS 0 and MAX-COSTS 0
+;; all skip the diff and go straight to replace/replace_range. Measured
+;; (t "abc" 2), (t "aXYc" 2), (t "aXYc" 2).
+(test-equal '((#t "abc" 2) (#t "aXYc" 2) (#t "aXYc" 2))
+  (in-buffer
+   (lambda ()
+     (list (begin (rrc-buffer "abc") (goto-char 2)
+                  (list (replace-region-contents 2 2 "") (buffer-string) (point)))
+           (begin (rrc-buffer "abc") (goto-char 2)
+                  (list (replace-region-contents 2 3 "XY" 0) (buffer-string) (point)))
+           (begin (rrc-buffer "abc") (goto-char 2)
+                  (list (replace-region-contents 2 3 "XY" #f 0)
+                        (buffer-string) (point)))))))
+
+;; Two hunks through the diff path, and a function source. Measured
+;; (t "abc123def456ghi" 16) and (t "aQc" 4).
+(test-equal '((#t "abc123def456ghi" 16) (#t "aQc" 4))
+  (in-buffer
+   (lambda ()
+     (list (begin (rrc-buffer "abcXXXdefYYYghi") (goto-char 16)
+                  (list (replace-region-contents 1 16 "abc123def456ghi")
+                        (buffer-string) (point)))
+           (begin (rrc-buffer "abc") (goto-char 4)
+                  (list (replace-region-contents 2 3 (lambda () "Q"))
+                        (buffer-string) (point)))))))
+
+;; A buffer is not its own source - measured `(error "Cannot replace a
+;; buffer with itself")'.
+(test-equal "Cannot replace a buffer with itself"
+  (in-buffer
+   (lambda ()
+     (rrc-buffer "abc")
+     (guard (e (#t (exception-message e)))
+       (replace-region-contents 1 3 (current-buffer))))))
+
+;; `replace-string-in-region': fixed case, the range, and the two range
+;; errors. Measured (2 "XX"), (#f "abcabc"), (1 "ABCX"),
+;; "Start before start of buffer", "End after end of buffer".
+(test-equal '(2 "XX" #f "abcabc" 1 "ABCX"
+                "Start before start of buffer" "End after end of buffer")
+  (in-buffer
+   (lambda ()
+     (list (begin (rrc-buffer "abcabc") (goto-char 1)
+                  (replace-string-in-region "abc" "X"))
+           (begin (buffer-string))
+           (begin (rrc-buffer "abcabc") (goto-char 1)
+                  (replace-string-in-region "abc" "X" 2 5))
+           (begin (buffer-string))
+           (begin (rrc-buffer "ABCabc") (goto-char 1)
+                  (replace-string-in-region "abc" "X"))
+           (begin (buffer-string))
+           (begin (guard (e (#t (exception-message e)))
+                    (replace-string-in-region "a" "X" 0)))
+           (begin (guard (e (#t (exception-message e)))
+                    (replace-string-in-region "a" "X" 1 99)))))))
+
+;; `replace-regexp-in-region': measured (2 "a#b#c"), (2 "1a2b2c") and
+;; (nil "xyz").
+(test-equal '(2 "a#b#c" 2 "1a2b2c" #f "xyz")
+  (in-buffer
+   (lambda ()
+     (list (begin (rrc-buffer "a1b22c") (goto-char 1)
+                  (replace-regexp-in-region "[0-9]+" "#"))
+           (begin (buffer-string))
+           (begin (rrc-buffer "a1b22c") (goto-char 1)
+                  (replace-regexp-in-region "\\([a-z]\\)\\([0-9]\\)"
+                                            "\\2\\1"))
+           (begin (buffer-string))
+           (begin (rrc-buffer "xyz") (goto-char 1)
+                  (replace-regexp-in-region "[0-9]" "#"))
+           (begin (buffer-string))))))
+
+;; `replace-buffer-contents' is the obsolete wrapper over the whole
+;; buffer - measured (t "axc").
+(test-equal '(#t "axc")
+  (in-buffer
+   (lambda ()
+     (rrc-buffer "abc")
+     (let ((src (get-buffer-create "*rrc-src2*")))
+       (set-buffer src) (erase-buffer) (insert "axc")
+       (set-buffer (get-buffer-create "*rrc-tests*"))
+       (let ((ret (replace-buffer-contents src)))
+         (list ret (buffer-string)))))))
 
 (test-end)

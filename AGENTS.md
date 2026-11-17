@@ -10821,12 +10821,19 @@ Tests: `editfns-tests.scm`'s `schemacs_editor_editfns_labeled` (15),
 every expectation Emacs 31.1's own; the redisplay bracket is pinned by
 its C contract, since no Emacs-level call can reach it.
 
-# `replace-region-contents`: the engine is in; the DEFUN is next (2026-11-18)
+# `replace-region-contents`: done, with the engine under it (2026-11-18)
 
-The only project-sized named item left. The engine (`lib/diffseq.h`) is
-**landed** in `schemacs/editor/diffseq.scm` - see DEPARTURES.md for the
-shape, the trap, and the verification. What is left, in the order it has
-to be done:
+The engine (`lib/diffseq.h`) is `schemacs/editor/diffseq.scm`; the
+DEFUN is `editfns.scm`'s; `replace_range` grew the C's buffer and
+`[buf beg end]` forms; and `replace-buffer-contents`,
+`replace-string-in-region` and `replace-regexp-in-region` (subr.el's)
+are in `replace.scm`, a named placement departure. DEPARTURES.md has
+the measured table and the named gaps. **This found a real bug**:
+`replace-match`'s buffer path added 1 to registers that are already
+1-based, so `\N`/`\&` were shifted one character; fixed with two
+`search-tests` regressions.
+
+The recon that preceded it, kept for the trap it records:
 
 * **The C is two pieces.** `replace-region-contents`
   (`editfns.c:1922`, ~310 lines) and gnulib's `lib/diffseq.h` (578
@@ -10870,3 +10877,14 @@ bit vectors are applied to a buffer, and the `max-secs`/`max-costs`
 plumbing are all the next step's, and the end-to-end comparison against
 `emacs -Q --batch` belongs there - final text, point and marker
 positions, and the return value, on the same input pairs.
+
+## What the integration proved, and the one thing it cannot
+
+The DEFUN's twelve-case matrix and the three callers' ten cases all
+match `emacs -Q --batch` on final text, point and return value. What is
+not tested: marker and overlay *identity* across a non-destructive
+replacement (the C's reason for the diff) - `replace_range` moves them
+as the C does, but no test pins a marker's position across a hunk;
+worth adding when something here depends on it. The `max-secs`
+escalation is measured only at 0 (the trivial path); no test forces a
+mid-diff abort, which needs a deliberately slow comparison.

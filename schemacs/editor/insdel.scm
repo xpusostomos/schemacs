@@ -162,6 +162,7 @@
     ;; here asks for.
     (only (schemacs editor region-cache) invalidate-region-cache)
     (only (schemacs editor buffer)
+          bufferp
           current-buffer buffer-beg buffer-z buffer-pt set!buffer-pt
           ;; `ZV` grows and shrinks with the text (`insdel.c:935`, `:1597`).
           buffer-begv buffer-zv set!buffer-begv set!buffer-zv
@@ -744,11 +745,26 @@
       ;;
       ;; The C's NEW may also be a buffer or a `(buffer beg end)` vector -
       ;; `replace-region-contents`' way of saying "this stretch of that
-      ;; buffer". Only the string case is carried, because it is the only
-      ;; one anything here asks for.
+      ;; buffer". The C keeps the source contiguous in the other buffer's
+      ;; gap; this tree copies the characters out first, which is what its
+      ;; insert path takes. A byte character in the source renders as
+      ;; U+FFFD through `buffer-text-substring` (its named departure);
+      ;; a replacement whose source holds one is the case to revisit.
       ;;--------------------------------------------------------------
       (let* ((buffer (current-buffer))
              (text (text-editor-text buffer))
+             (new (cond ((string? new) new)
+                        ((bufferp new)
+                         (buffer-text-substring (text-editor-text new)
+                                                (buffer-begv new)
+                                                (buffer-zv new)))
+                        (else
+                         ;; The vector's own checks are the caller's: its
+                         ;; only maker here is `replace-region-contents`.
+                         (let ((b (vector-ref new 0))
+                               (s (vector-ref new 1))
+                               (e (vector-ref new 2)))
+                           (buffer-text-substring (text-editor-text b) s e)))))
              (inschars (string-length new)))
         (if run-mod-hooks
             (let ((range-length (- to from)))

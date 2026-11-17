@@ -2387,12 +2387,16 @@
     rename-buffer
     rename-file
     render!
+    replace-buffer-contents
     replace-match
     replace-range
     replace-range-2
     replace-regexp
+    replace-regexp-in-region
     replace-regexp-in-string
+    replace-region-contents
     replace-string
+    replace-string-in-region
     report-command-error!
     reproduce-interval
     reproduce-tree

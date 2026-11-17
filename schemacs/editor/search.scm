@@ -2507,11 +2507,19 @@
               (let ((c (string-ref newtext (+ i 1))))
                 (cond
                  ((char=? c #\&)
+                   ;; The registers are Emacs's own 1-based buffer
+                   ;; positions - the C hands them to
+                   ;; `Fbuffer_substring' as they stand. The `+ 1's that
+                   ;; stood here were from before the 2026-10-05
+                   ;; conversion to Emacs's coordinates, and they
+                   ;; shifted every `\&' and `\N' one character right:
+                   ;; found through `replace-regexp-in-region', whose
+                   ;; `\2\1' answered `b1' for a match of `a1'.
                    (loop (+ i 2)
                          (cons (make-buffer-string
                                 (current-buffer)
-                                (+ 1 (car (list-ref regs sub)))
-                                (+ 1 (cdr (list-ref regs sub))))
+                                (car (list-ref regs sub))
+                                (cdr (list-ref regs sub)))
                                acc)))
                  ((and (char<=? #\1 c #\9)
                        (< (- (char->integer c) 48) (length regs)))
@@ -2521,7 +2529,7 @@
                       (loop (+ i 2)
                             (cons (make-buffer-string
                                    (current-buffer)
-                                   (+ 1 (car pair)) (+ 1 (cdr pair)))
+                                   (car pair) (cdr pair))
                                   acc)))
                      ;; that subexp did not match: nothing
                      (else (loop (+ i 2) acc)))))

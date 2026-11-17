@@ -32,7 +32,7 @@
     ;; `(let* ((case-fold-search ...)))').
     (only (schemacs editor buffer)
           *case-fold-search* current-buffer
-          erase-buffer get-buffer-create
+          erase-buffer get-buffer get-buffer-create
           with-current-buffer buffer-z)
     (only (schemacs editor frame)
           *current-frame* frame-selected-window recenter set!frame-message
@@ -40,7 +40,10 @@
     (only (schemacs editor editfns)
           bobp char-after
           eobp goto-char insert message point point-min point-max
-          save-excursion)
+          save-excursion
+          ;; `replace-region-contents` and the narrowing the three
+          ;; `subr.el` functions below open around their loops.
+          replace-region-contents save-restriction narrow-to-region)
     ;; `barf-if-buffer-read-only' is `buffer.c`'s and lives in
     ;; `buffer.scm' now - see the note in `keyboard.scm'.
     (only (schemacs editor buffer) barf-if-buffer-read-only)
@@ -121,6 +124,9 @@
    query-replace-regexp
    replace-regexp
    replace-string
+   ;; `subr.el`'s three, placed here - see the note at their definitions.
+   replace-buffer-contents replace-string-in-region
+   replace-regexp-in-region
    )
 
   (begin
@@ -1424,5 +1430,96 @@ This is a generic function; see `replace-regexp'."
     (define-key *default-keymap* (kbd "M-%") query-replace)
     (define-key *default-keymap* (kbd "M-C-%")
       query-replace-regexp)
+
+    ;;----------------------------------------------------------------
+    ;; `replace-buffer-contents', `replace-string-in-region' and
+    ;; `replace-regexp-in-region' - `subr.el:4948', `:4961', `:4990'.
+    ;;
+    ;; **A placement departure**: these are `subr.el`'s, and all three
+    ;; call `replace-region-contents' (`editfns.c`'s), so they cannot
+    ;; live in `subr.scm`, which is below it. They sit in `replace.scm'
+    ;; with the rest of the replace commands.
+    ;;----------------------------------------------------------------
+
+    (define (replace-buffer-contents source . rest)
+      ;; GNU Emacs's `replace-buffer-contents' (`subr.el:4948'): "Replace
+      ;; accessible portion of current buffer with that of SOURCE. ...
+      ;; The replacement is performed using `replace-region-contents'
+      ;; which also describes the MAX-SECS and MAX-COSTS arguments and
+      ;; the return value."
+      ;;
+      ;; `(declare (obsolete replace-region-contents "31.1"))' - it is
+      ;; kept, as Emacs keeps it, for callers written against 30.
+      ;;--------------------------------------------------------------
+      (replace-region-contents (point-min) (point-max) (get-buffer source)
+                               (and (pair? rest) (car rest))
+                               (and (pair? rest) (pair? (cdr rest))
+                                    (cadr rest))))
+
+    (define (replace-string-in-region string replacement . rest)
+      ;; GNU Emacs's `replace-string-in-region' (`subr.el:4961'):
+      ;; "Replace STRING with REPLACEMENT in the region from START to
+      ;; END. The number of replaced occurrences are returned, or nil if
+      ;; STRING doesn't exist in the region."
+      ;;
+      ;; Each occurrence is replaced by `replace-region-contents' with a
+      ;; MAX-SECS of 0 - the C's "disables the comparison step, so this
+      ;; function immediately falls back to a plain delete/insert" - and
+      ;; "Comparisons and replacements are done with fixed case."
+      ;;--------------------------------------------------------------
+      (let ((start (and (pair? rest) (car rest)))
+            (end (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+        (when start
+          (when (< start (point-min))
+            (error "Start before start of buffer")))
+        (unless start (set! start (point)))
+        (when end
+          (when (> end (point-max))
+            (error "End after end of buffer")))
+        (unless end (set! end (point-max)))
+        (save-excursion
+          (goto-char start)
+          (save-restriction
+            (narrow-to-region start end)
+            (parameterize ((*case-fold-search* #f))
+              (let ((matches 0))
+                (let loop ()
+                  (when (search-forward string #f #t)
+                    (replace-region-contents (match-beginning 0)
+                                             (match-end 0)
+                                             replacement 0)
+                    (set! matches (+ matches 1))
+                    (loop)))
+                (and (not (zero? matches)) matches)))))))
+
+    (define (replace-regexp-in-region regexp replacement . rest)
+      ;; GNU Emacs's `replace-regexp-in-region' (`subr.el:4990'):
+      ;; "Replace REGEXP with REPLACEMENT in the region from START to
+      ;; END. The number of replaced occurrences are returned, or nil if
+      ;; REGEXP doesn't exist in the region. ... Comparisons and
+      ;; replacements are done with fixed case."
+      ;;--------------------------------------------------------------
+      (let ((start (and (pair? rest) (car rest)))
+            (end (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+        (when start
+          (when (< start (point-min))
+            (error "Start before start of buffer")))
+        (unless start (set! start (point)))
+        (when end
+          (when (> end (point-max))
+            (error "End after end of buffer")))
+        (unless end (set! end (point-max)))
+        (save-excursion
+          (goto-char start)
+          (save-restriction
+            (narrow-to-region start end)
+            (parameterize ((*case-fold-search* #f))
+              (let ((matches 0))
+                (let loop ()
+                  (when (re-search-forward regexp #f #t)
+                    (replace-match replacement #t)
+                    (set! matches (+ matches 1))
+                    (loop)))
+                (and (not (zero? matches)) matches)))))))
 
     ))

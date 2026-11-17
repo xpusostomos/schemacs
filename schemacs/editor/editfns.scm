@@ -34,9 +34,16 @@
     ;; `current-buffer' and `set-buffer', which `save-excursion' saves
     ;; and restores beside point.
     (only (guile) caddr cadddr cadr cdddr call-with-output-string
-          exact->inexact string-index)
+          exact->inexact string-index
+          ;; the two bit vectors `replace-region-contents` records its
+          ;; edits in (`set_bit`/`bit_is_set`, `editfns.c:2222`)
+          logior logand ash)
     (only (schemacs editor buffer) bufferp current-buffer set-buffer
           *inhibit-read-only*
+          ;; validating a *source* buffer's region is `validate_region`
+          ;; with that buffer current, as the C's temporary
+          ;; `set_buffer_internal` does (`editfns.c:2021`).
+          *current-buffer*
           ;; `BUFFER_LIVE_P` - the labeled-restriction lookups answer nil
           ;; for a buffer that has been killed (`editfns.c:2748`).
           buffer-live-p
@@ -112,11 +119,23 @@
     ;; own library - `insert_1_both` and `del_range` are that file's, the
     ;; same way `Finsert` and `Fdelete_region` below are this one's.
     (only (schemacs editor insdel) del-range del-range-1 insert-from-string
-          modify-text signal-after-change)
+          modify-text signal-after-change
+          ;; `replace-region-contents`' apply phase: `replace_range` per
+          ;; run, inside one `prepare_to_modify_buffer` /
+          ;; `inhibit_modification_hooks` bracket.
+          replace-range prepare-to-modify-buffer *inhibit-modification-hooks*)
     ;; `record_change` is what a *replacement* records, and
     ;; `subst-char-in-region` is its one caller here as it is in the C.
     ;; Its two halves are `undo.scm`'s; the function itself is below.
-    (only (schemacs editor undo) record-insert record-delete)
+    ;; `replace-region-contents` is `lib/diffseq.h`'s engine over two
+    ;; vectors of code points.
+    (only (schemacs editor diffseq) make-diff-context compareseq)
+    ;; `Fundo_boundary` before the apply loop (`editfns.c:2165`).
+    (only (schemacs editor undo)
+          record-insert record-delete text-editor-undo-boundary!)
+    ;; `max-secs` is a Lisp time value, and the escape it arms compares
+    ;; `current_timespec ()` against the deadline.
+    (only (schemacs editor timefns) current-time float-time lisp-time-arguments)
     ;; `propertize' and the string paths: `propertize' copies through
     ;; `copy-sequence', and `buffer-substring' is the way text properties
     ;; cross from a buffer to a string. The other direction - a string
@@ -133,6 +152,8 @@
     ;; the PROPS argument (2026-10-12).
     (only (schemacs editor command)
           *mark-even-if-inactive*
+          ;; the diff engine's per-character quit check
+          maybe-quit
           *point-marker-function* *mark-marker-function*
           *format-message-function* *message-clear-function*
           ;; `narrow-to-region' and `widen' are commands in `editfns.c'
@@ -216,6 +237,9 @@ point-marker
    point-min-marker point-max-marker
    point
    save-excursion
+   ;; `replace-region-contents` - the DEFUN, and the two bit-vector
+   ;; helpers under its apply loop are not exported.
+   replace-region-contents
    ;; the restriction, `narrow-to-region` and its friends
    narrow-to-region widen narrow-map save-restriction buffer-narrowed-p
    ;; the labeled restrictions those three understand, the two internal
@@ -1068,6 +1092,222 @@ point-marker
                    (else 5)))
             ((<= code #x3FFFFF) 2)
             (else 5)))
+
+    ;;----------------------------------------------------------------
+    ;; `replace-region-contents' - editfns.c:1922
+    ;;----------------------------------------------------------------
+
+    (define (%set-bit! v i)
+      ;; `set_bit' (`editfns.c:2222'): "eassume (0 <= i); a[i / CHAR_BIT]
+      ;; |= (1 << (i % CHAR_BIT));".
+      ;;--------------------------------------------------------------
+      (let ((byte (quotient i 8)))
+        (bytevector-u8-set! v byte
+                            (logior (bytevector-u8-ref v byte)
+                                    (ash 1 (remainder i 8))))))
+
+    (define (%bit-set? v i)
+      ;; `bit_is_set' (`editfns.c:2229').
+      ;;--------------------------------------------------------------
+      (not (zero? (logand (bytevector-u8-ref v (quotient i 8))
+                          (ash 1 (remainder i 8))))))
+
+    (define (replace-region-contents beg end source . rest)
+      ;; GNU Emacs's `replace-region-contents' (`editfns.c:1922'):
+      ;; "Replace the region between BEG and END with that of SOURCE.
+      ;; ... As far as possible the replacement is non-destructive, i.e.
+      ;; existing buffer contents, markers, point, properties, and
+      ;; overlays in the current buffer stay intact."
+      ;;
+      ;; SOURCE is a buffer, a string, a `[BUFFER BEG END]' vector, or a
+      ;; function called with the buffer narrowed to BEG..END. The diff
+      ;; itself is `lib/diffseq.h' (`diffseq.scm'): two vectors of code
+      ;; points, one bytevector of deleted indices and one of inserted
+      ;; ones, and the engine's partitions choosing where to replace.
+      ;;
+      ;; MAX-SECS, when a number, arms the C's time limit: the escape
+      ;; goes through `call/cc' (`buffer_chars_equal`'s `sys_longjmp`),
+      ;; and the whole thing falls back to a plain `replace_range` of
+      ;; the source, answering nil. MAX-COSTS is the engine's
+      ;; `too_expensive'. INHERIT is `graft_intervals_into_buffer`'s.
+      ;;--------------------------------------------------------------
+      (let ((max-secs (and (pair? rest) (car rest)))
+            (max-costs (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+            (inherit (and (pair? rest) (pair? (cdr rest))
+                          (pair? (cddr rest)) (caddr rest))))
+        (let-values (((beg end) (validate-region beg end)))
+          (let* ((buffer (current-buffer))
+                 (min-a beg)
+                 (size-a (- end beg))
+                 (a-empty? (= size-a 0))
+                 (source (if (procedure? source)
+                             ;; "SOURCE can also be a function that will
+                             ;; be called with no arguments and with
+                             ;; current buffer narrowed to BEG..END."
+                             (save-excursion
+                               (save-restriction
+                                 (narrow-to-region beg end)
+                                 (source)))
+                             source)))
+            ;; SOURCE now has one of the three data forms.
+            (let* ((b (cond ((string? source) #f)
+                            ((bufferp source) source)
+                            (else
+                             (let ((v (vector-ref source 0)))
+                               (unless (bufferp v)
+                                 (error "Wrong type argument" v))
+                               v))))
+                   (min-b (cond ((string? source) 1)
+                                ((bufferp source) (buffer-begv source))
+                                (else 0)))
+                   (size-b
+                    (cond ((string? source) (string-length source))
+                          ((bufferp source)
+                           (- (buffer-zv source) (buffer-begv source)))
+                          (else
+                           (let-values (((sbeg send)
+                                         (parameterize ((*current-buffer* b))
+                                           (validate-region (vector-ref source 1)
+                                                            (vector-ref source 2)))))
+                             (set! min-b (+ 0 sbeg))
+                             (- send sbeg))))))
+              (when (and b (not (buffer-live-p b)))
+                (error "Selecting deleted buffer"))
+              (if (or a-empty? (= size-b 0)
+                      (eqv? max-secs 0) (eqv? max-costs 0))
+                  (begin
+                    (replace-range min-a (+ min-a size-a) source
+                                   #t #f (and inherit #t))
+                    #t)
+                  (begin
+                    (when (eq? buffer b)
+                      (error "Cannot replace a buffer with itself"))
+                    (let* ((too-expensive
+                            (cond ((not max-costs) 1000000)
+                                  ((not (integer? max-costs))
+                                   (error "Wrong type argument" max-costs))
+                                  ((< max-costs 0) 0)
+                                  (else max-costs)))
+                           (time-limit
+                            (and max-secs
+                                 (let ((t (lisp-time-arguments max-secs)))
+                                   (+ (float-time (current-time))
+                                      (car t)
+                                      (/ (cdr t) 1000000000000.0)))))
+                           (a-text (text-editor-text buffer))
+                           (b-text (and b (text-editor-text b)))
+                           (chars-a
+                            (let ((v (make-vector size-a 0)))
+                              (let loop ((i 0))
+                                (when (< i size-a)
+                                  (vector-set! v i (buffer-text-ref a-text (+ min-a i)))
+                                  (loop (+ i 1))))
+                              v))
+                           (chars-b
+                            (let ((v (make-vector size-b 0)))
+                              (if b
+                                  (let loop ((i 0))
+                                    (when (< i size-b)
+                                      (vector-set! v i (buffer-text-ref b-text (+ min-b i)))
+                                      (loop (+ i 1))))
+                                  (let loop ((i 0))
+                                    (when (< i size-b)
+                                      (vector-set! v i (char->integer (string-ref source i)))
+                                      (loop (+ i 1)))))
+                              v))
+                           (deletions (make-bytevector (+ (quotient size-a 8) 1) 0))
+                           (insertions (make-bytevector (+ (quotient size-b 8) 1) 0))
+                           (diags (+ size-a size-b 3))
+                           (off (+ size-b 1))
+                           (fdiag (make-vector diags -1))
+                           (bdiag (make-vector diags 9223372036854775807))
+                           (quitcounter 0)
+                           (abort #f)
+                           (ctx (make-diff-context
+                                 chars-a chars-b fdiag bdiag off off #t too-expensive
+                                 (lambda (x y)
+                                   ;; `buffer_chars_equal': count, and
+                                   ;; every 65536th comparison look at
+                                   ;; the quit flag and the clock.
+                                   (set! quitcounter (logand (+ quitcounter 1) #xffff))
+                                   (when (= quitcounter 0)
+                                     (maybe-quit)
+                                     (when (and time-limit
+                                                (< time-limit
+                                                   (float-time (current-time))))
+                                       (abort #t)))
+                                   (= (vector-ref chars-a x)
+                                      (vector-ref chars-b y)))
+                                 (lambda (x) (%set-bit! deletions x))
+                                 (lambda (y) (%set-bit! insertions y))
+                                 (lambda ()
+                                   (and time-limit
+                                        (< time-limit
+                                           (float-time (current-time))))))))
+                      (let ((early
+                             (call/cc
+                              (lambda (k)
+                                (set! abort k)
+                                (compareseq 0 size-a 0 size-b #f ctx)))))
+                        (if early
+                            ;; "falls back to a plain `delete-region'
+                            ;; and `insert-buffer-substring'" - the
+                            ;; C's `replace_range' of the source.
+                            (begin
+                              (replace-range min-a (+ min-a size-a) source
+                                             #t #f (and inherit #t))
+                              #f)
+                            (begin
+                              (text-editor-undo-boundary! buffer)
+                              ;; "We are going to make a lot of small
+                              ;; modifications ... we announce a single
+                              ;; modification for the entire modified
+                              ;; region", unless the caller inhibited
+                              ;; the hooks itself.
+                              (let ((inhibited? (not (*inhibit-modification-hooks*))))
+                                (when inhibited?
+                                  (prepare-to-modify-buffer min-a (+ min-a size-a)))
+                                (parameterize ((*inhibit-modification-hooks*
+                                                (or inhibited?
+                                                    (*inhibit-modification-hooks*))))
+                                  ;; "Walk backwards through the lists of
+                                  ;; changes." This also walks past the
+                                  ;; matched character in front of each
+                                  ;; run, which stays in the buffer
+                                  ;; untouched.
+                                  (let loop ((i size-a) (j size-b))
+                                    (when (or (> i 0) (> j 0))
+                                      (when (or (and (> i 0)
+                                                     (%bit-set? deletions (- i 1)))
+                                                (and (> j 0)
+                                                     (%bit-set? insertions (- j 1))))
+                                        (let ((end-a (+ min-a i))
+                                              (end-b (+ min-b j)))
+                                          (let shrink-a ()
+                                            (when (and (> i 0)
+                                                       (%bit-set? deletions (- i 1)))
+                                              (set! i (- i 1))
+                                              (shrink-a)))
+                                          (let shrink-b ()
+                                            (when (and (> j 0)
+                                                       (%bit-set? insertions (- j 1)))
+                                              (set! j (- j 1))
+                                              (shrink-b)))
+                                          (replace-range
+                                           (+ min-a i) end-a
+                                           (if b
+                                               (vector b (+ min-b j) end-b)
+                                               ;; `j'/`end-b' are buffer
+                                               ;; positions; `substring'
+                                               ;; counts from 0.
+                                               (substring source j (- end-b 1)))
+                                           #f (and inherit #t) #f)))
+                                      (set! i (- i 1))
+                                      (set! j (- j 1))
+                                      (loop i j))))
+                                (when inhibited?
+                                  (signal-after-change min-a size-a size-b)))
+                              #t)))))))))))
 
     (define (subst-char-in-region start end fromchar tochar . rest)
       ;; GNU Emacs's `subst-char-in-region' (`editfns.c:2294'): "From
