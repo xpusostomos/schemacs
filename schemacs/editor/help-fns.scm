@@ -50,7 +50,7 @@
     (only (schemacs editor fill) fill-region-as-paragraph fill-paragraph)
     (only (schemacs editor paragraphs) forward-paragraph)
     (only (schemacs editor buffer) buffer-local-value current-buffer
-          *current-buffer* with-current-buffer)
+          *current-buffer* with-current-buffer *inhibit-read-only*)
     (only (schemacs editor subr) *minor-mode-alist* *global-minor-modes*
           replace-regexp-in-string)
     (only (schemacs editor casefiddle) capitalize)
@@ -59,12 +59,16 @@
           minor-mode-lighter)
     (only (schemacs editor command)
           define-command command-type? command-name command-record-named
-          command-record-of command-procedure called-interactively?)
-    (only (schemacs editor minibuffer) read-command read-variable)
+          command-record-of command-procedure called-interactively?
+          *command-table*)
+    ;; the readers the commands' interactive expressions name - evaluated
+    ;; in *this* library's module, so they must be imported here
+    (only (schemacs editor minibuffer) read-command read-variable
+          completing-read)
     (only (schemacs editor help)
           with-help-window help-buffer help-setup-xref
           help--key-description-fontified *describe-function-1-function*
-          help-map %help-arg)
+          help-map %help-arg *help-xref-stack-item*)
     (only (schemacs editor keyboard)
           where-is-internal command-remapping *overriding-local-map* undefined)
     (only (schemacs editor keymap) keymapp define-key *default-keymap*)
@@ -73,7 +77,8 @@
     (only (schemacs editor intervals) get)
     (only (schemacs editor doc) documentation documentation-property)
     (only (schemacs editor custom)
-          custom-variable-p custom--standard-value define-custom)
+          custom-variable-p custom-variable-names custom--standard-value
+          define-custom)
     (only (schemacs editor textprop) put-text-property)
     ;; `internal-describe-syntax-value` and `describe-syntax`
     (only (schemacs editor syntax)
@@ -85,11 +90,12 @@
           %prefix-flag? %styleb-bit %stylec2 %nested?)
     (only (schemacs editor chartab) char-table? char-table-parent)
     (only (schemacs editor help) substitute-command-keys describe-vector)
-    (only (schemacs editor cmds) self-insert-command beginning-of-line))
+    (only (schemacs editor cmds) self-insert-command beginning-of-line)
+    (only (schemacs editor simple) make-separator-line))
 
   (export *describe-mode-outline*
           describe-mode describe-mode--minor-modes
-          describe-syntax internal-describe-syntax-value
+          describe-syntax internal-describe-syntax-value describe-symbol
           describe-function describe-function-1 help-fns--key-bindings
           help-fns--insert-bindings help-fns--obsolete
           help-fns--ensure-empty-line ensure-empty-lines
@@ -579,6 +585,96 @@ BUFFER defaults to the current buffer."
                 (loop (char-table-parent parent))))
             #f))))
 
+    (define (%describe-symbol-backends)
+      ;; `describe-symbol-backends' (`help-mode.el:540`) - the pairs of
+      ;; "is this symbol one" and "describe it". Emacs has four arms
+      ;; (function, variable, face, cl type); this tree has the two its
+      ;; data model can answer, and their NAME column is nil, as the
+      ;; function and variable arms' is in Emacs.
+      ;;--------------------------------------------------------------
+      (list (list #f
+                  (lambda (sym) (and (symbol? sym) (command-record-named sym)))
+                  (lambda (sym . args) (describe-function sym)))
+            (list #f
+                  (lambda (sym) (and (symbol? sym) (custom-variable-p sym)))
+                  (lambda (sym . args) (describe-variable sym)))))
+
+    (define-command (describe-symbol symbol . rest)
+      ;; GNU Emacs's `describe-symbol' (`help-fns.el:1957'): "Display
+      ;; the full documentation of SYMBOL. Will show the info of SYMBOL
+      ;; as a function, variable, and/or face."
+      ;;
+      ;; **The multi-backend assembly is carried but unreachable here**:
+      ;; Emacs's two docs for one symbol exist because a symbol has a
+      ;; function cell and a value cell; in this tree a command is a
+      ;; procedure binding and a custom is a parameter binding, so a
+      ;; name is one or the other, never both. The separator-and-"also"
+      ;; loop stays so the day a name can be both it behaves.
+      ;;
+      ;; **The prompt completes over this tree's two indexes** - the
+      ;; command table and `custom-variable-names` - where Emacs filters
+      ;; its one obarray through the backends. **It must not use
+      ;; `read-string`**: `(scheme base)` exports Guile's port reader of
+      ;; that name, which wins the import over minibuffer's prompt
+      ;; reader without a word (measured: the call reached
+      ;; `(make-string "Describe symbol: " ...)` and raised "Wrong type
+      ;; (expecting exact integer)").
+      ;;--------------------------------------------------------------
+      "Display the full documentation of SYMBOL.
+Will show the info of SYMBOL as a function, variable, and/or face."
+      (interactive
+       (list
+        (let ((names (append (map car (*command-table*))
+                             (map symbol->string custom-variable-names))))
+          (string->symbol (completing-read "Describe symbol: " names
+                                           #f #t #f #f)))))
+      (unless (symbol? symbol)
+        (error "You didn't specify a function or variable"))
+      (with-current-buffer (help-buffer)
+        ;; "Push the previous item on the stack before clobbering the
+        ;; output buffer."
+        (help-setup-xref #f #f)
+        (let ((docs '()))
+          ;; Each backend's describer opens the help buffer itself
+          ;; (`with-help-window` empties it), so each doc is captured
+          ;; from the buffer right after its run - the C's `(funcall
+          ;; descfn symbol buffer frame)` + `(buffer-string)`.
+          (for-each
+           (lambda (backend)
+             (when ((cadr backend) symbol)
+               (set! *help-xref-stack-item* #f)
+               ((caddr backend) symbol)
+               (set! docs
+                     (cons (cons (car backend)
+                                 (with-current-buffer (help-buffer)
+                                   (buffer-string)))
+                           docs))))
+           (%describe-symbol-backends))
+          (when (null? docs)
+            (error (format "Unknown symbol: %s" symbol)))
+          ;; The captures come back most-recent-first, and the buffer
+          ;; holds the most recent one; the rest go in at the top.
+          (let loop ((docs (reverse docs)))
+            (when (pair? (cdr docs))
+              (goto-char (point-min))
+              (let ((name (car (car docs)))
+                    (doc (cdr (cadr docs))))
+                (parameterize ((*inhibit-read-only* #t))
+                  (when doc
+                    (insert doc)
+                    (insert "\n")
+                    (insert (make-separator-line))
+                    (when name
+                      (insert (symbol->string symbol)
+                              " is also a " name ".\n\n")))))
+              (loop (cdr docs))))
+          ;; "Don't record the `describe-variable' item in the stack."
+          (when (pair? (cdr (reverse docs)))
+            (set! *help-xref-stack-item* #f)
+            (help-setup-xref (list describe-symbol symbol) #f))
+          (goto-char (point-max))
+          #f)))
+
     (define-command (describe-function function)
       ;; GNU Emacs's `describe-function' (`help-fns.el:298`): "Display
       ;; the full documentation of FUNCTION (a symbol)."
@@ -666,4 +762,6 @@ Returns the documentation as a string, also."
     (define-key help-map (kbd "m") describe-mode)
     (define-key *default-keymap* (kbd "C-h m") describe-mode)
     (define-key help-map (kbd "s") describe-syntax)
-    (define-key *default-keymap* (kbd "C-h s") describe-syntax)))
+    (define-key *default-keymap* (kbd "C-h s") describe-syntax)
+    (define-key help-map (kbd "o") describe-symbol)
+    (define-key *default-keymap* (kbd "C-h o") describe-symbol)))

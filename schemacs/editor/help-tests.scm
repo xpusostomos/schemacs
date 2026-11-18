@@ -42,7 +42,7 @@
         help--binding-undefined-p help-map)
   (only (schemacs editor help-fns) describe-function describe-variable
         describe-mode *describe-mode-outline* describe-syntax
-        internal-describe-syntax-value)
+        internal-describe-syntax-value describe-symbol)
   ;; the modes `describe-mode` is tested on
   (schemacs editor text-mode)
   (only (schemacs editor fill) auto-fill-mode)
@@ -478,5 +478,34 @@
 (test-equal '(#t #t)
   (list (eq? (lookup-key *default-keymap* (kbd "C-h s")) describe-syntax)
         (eq? (lookup-key help-map (kbd "s")) describe-syntax)))
+
+;; ------------------------------------------------------------------
+;; `C-h o` `describe-symbol` - the function or variable, whichever the
+;; name is. (In this tree a name is one or the other, never both; see
+;; the library's note.)
+
+(test-assert "describe-symbol describes a command"
+  (let ((s (help-tests-yield
+            (lambda ()
+              (describe-symbol 'forward-char)
+              (with-current-buffer (get-buffer-create "*Help*")
+                (buffer-string))))))
+    (string-contains s "forward-char is an interactive command.")))
+
+(test-assert "describe-symbol describes a custom variable"
+  (let ((s (help-tests-yield
+            (lambda ()
+              (describe-symbol '*help-test-option*)
+              (with-current-buffer (get-buffer-create "*Help*")
+                (buffer-string))))))
+    (string-contains s "*help-test-option*'s value is 42")))
+
+(test-equal "Unknown symbol: no-such-thing-xyz"
+  (guard (e (#t (exception-message e)))
+    (help-tests-yield (lambda () (describe-symbol 'no-such-thing-xyz)))))
+
+(test-equal '(#t #t)
+  (list (eq? (lookup-key *default-keymap* (kbd "C-h o")) describe-symbol)
+        (eq? (lookup-key help-map (kbd "o")) describe-symbol)))
 
 (test-end "schemacs_editor_help")

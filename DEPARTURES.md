@@ -7113,3 +7113,46 @@ a note; the same wall as `insert` in `describe-key-briefly` and
 
 `help-tests.scm` 41 (the exact rows, the describer's three arms, the
 binding). The pty `help-describe` check drives `C-h s` too.
+
+# `C-h o` describe-symbol (2026-11-18)
+
+`describe-symbol` (help-fns.el:1957) with this tree's two backends - a
+name is a command (and its record) or a custom variable. The C's
+four-backend registry also has face and cl-type arms; neither type
+exists here, and `describe-symbol-backends`' face entry would need
+`facep`, which is `faces.scm`'s - not imported by help-fns, and there
+are no cl structs.
+
+**The multi-backend assembly is carried but unreachable**: Emacs's two
+docs for one symbol exist because a symbol has a function cell and a
+value cell; in this tree a command is a procedure binding and a custom
+is a parameter binding, so one name is one or the other. The
+separator-and-"also" loop stays for the day that changes.
+
+**The prompt completes over this tree's two indexes** - the command
+table and `custom-variable-names` - where Emacs filters its obarray
+through the backends.
+
+## The trap that cost this one: `(scheme base)` owns `read-string`
+
+The first spec was `(read-string "Describe symbol: ")`. That called
+**Guile's port reader** - `(scheme base)` exports a `read-string` of
+its own, `(len #:optional port)`, and it wins the import against
+`(schemacs editor minibuffer)`'s prompt reader without a word. The
+echo area said "Wrong type (expecting exact integer): \"Describe
+symbol: \"", which is `make-string` getting the prompt as its length.
+
+Two ways out, and the second is the one taken: `(except (scheme base)
+read-string)` **did not work** (measured: the arity of the binding was
+still the port reader's), and the command uses `completing-read`
+instead - which is what Emacs's own spec calls anyway. **No library in
+this tree can call `read-string` and get the prompt reader unless its
+`(scheme base)` import is narrowed; prefer `completing-read`, or the
+seam `*read-string-function*` the `s` interactive code uses.**
+
+## Verification
+
+`help-tests.scm` 45 (a command, a custom variable, the unknown-symbol
+message, the binding); the pty `help-describe` check drives `C-h o`
+too - all nine keys (`b f v k c w m s o`) through the real command
+loop now.

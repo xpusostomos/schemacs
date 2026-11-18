@@ -1223,6 +1223,7 @@
     describe-map--fill-columns
     describe-mode
     describe-mode--minor-modes
+    describe-symbol
     describe-syntax
     describe-variable
     describe-vector

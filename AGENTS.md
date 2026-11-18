@@ -11129,3 +11129,19 @@ char-tables, the `help-fns--insert-menu-bindings` menu walk.
 Left in the help pass: `C-h o` describe-symbol, `C-h ?`/help-for-help's
 `C-h i` alternatives, the menu walk in `help-fns--insert-menu-bindings`,
 and `describe-categories` (the category table itself is not ported).
+
+# `C-h o` describe-symbol, and `(scheme base)`'s read-string (2026-11-18)
+
+- `describe-symbol` is in help-fns.scm with two backends (command,
+  custom variable); the multi-backend loop is carried but unreachable -
+  in a Lisp-1 a name cannot be both. Its prompt completes over the
+  command table + `custom-variable-names`.
+- **`(scheme base)` exports Guile's `read-string` `(len #:optional
+  port)`, and it silently wins an import against minibuffer's prompt
+  `read-string`.** Calling it as `(read-string "PROMPT")` raises "Wrong
+  type (expecting exact integer)" from `make-string`. `(except (scheme
+  base) read-string)` on the importing library **does not fix it**
+  (measured). Use `completing-read`, or the `*read-string-function*`
+  seam.
+- C-h o is pty-checked; all nine help keys (`b f v k c w m s o`) now
+  run through the real command loop.

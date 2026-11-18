@@ -2541,6 +2541,12 @@ def check_help_describe():
     if "which means:" not in out or "punctuation" not in out:
         problems.append("C-h s did not describe the syntax table: %r"
                         % out[-300:])
+
+    # C-h o: the symbol's function or variable description.
+    out = drive([C_h + b"o", WAIT(b"Describe symbol: "),
+                 b"forward-char", RET], path)
+    if "forward-char is an interactive command." not in out:
+        problems.append("C-h o did not describe the command: %r" % out[-300:])
     return problems
 
 
