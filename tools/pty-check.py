@@ -2944,9 +2944,16 @@ def check_completion_scroll():
         answer = {}
 
         def during():
-            r = subprocess.run(["repl", "-e", state_expr, name],
-                               capture_output=True, text=True, timeout=90)
-            answer["state"] = r.stdout + r.stderr
+            # A client that loses the door's one-session race (or a
+            # wedged editor) must record a problem, not abort the
+            # battery - `drive` cannot catch what a check's own
+            # subprocess call raises.
+            try:
+                r = subprocess.run(["repl", "-e", state_expr, name],
+                                   capture_output=True, text=True, timeout=90)
+                answer["state"] = r.stdout + r.stderr
+            except subprocess.TimeoutExpired:
+                answer["state"] = "<repl timeout>"
 
         drive([("resize", 10, 40)] + find + keys, path, settle=2.5,
               during=during, gap=gap)
