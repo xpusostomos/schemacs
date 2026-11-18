@@ -44,7 +44,8 @@
           ;; comparator was for, and `hash-map->list' is the alist walk
           ;; (`hash-table->alist' is not a binding in any module here -
           ;; `(ice-9 hash-table)' exports only the alist *converters*).
-          make-hash-table hashv-ref hashv-set! hash-map->list)
+          make-hash-table hashv-ref hashv-set! hash-map->list hashq-ref
+          hashq-set!)
     ;; The event model: the modifier bits `push-key-description' tests,
     ;; and `event-convert-list' for the Lucid form `single-key-description'
     ;; converts first. `kbd' is `read-kbd-macro''s own input, and the reader
@@ -69,7 +70,7 @@
    ;; functions in Emacs that touch a keymap - and both are keyed by ONE
    ;; *event*.
    keymap make-sparse-keymap keymap-type? keymap-lookup
-   keymapp lookup-key
+   keymapp lookup-key keymap-by-name
    define-key
    store-in-keymap access-keymap
    keymap-parent set-keymap-parent keymap-prompt
@@ -234,6 +235,37 @@
       (parent    keymap-parent    %set-keymap-parent!)
       (label     keymap-label     set!keymap-label))
 
+    (define *keymap-name-table* (make-hash-table))
+    ;; ^ The tree's answer to `(symbol-value NAME)` for
+    ;; `substitute-command-keys`' `\{NAME}` form: a keymap remembers the
+    ;; name it was made with - its label - because a Scheme binding
+    ;; cannot be reached from a symbol. Emacs's docstrings name the
+    ;; *variable* (`\{help-mode-map}') while this tree's labels carry the
+    ;; parameter convention's stars, so a `*name*' label is registered
+    ;; under `name' as well. Built where the map is (a label is a
+    ;; `make-sparse-keymap` argument); nothing sets a label afterwards.
+
+    (define (register-keymap-name! label map)
+      ;; LABEL, and its star-stripped spelling when it has one, name MAP.
+      ;;--------------------------------------------------------------
+      (when (symbol? label)
+        (hashq-set! *keymap-name-table* label map)
+        (let* ((s (symbol->string label))
+               (n (string-length s)))
+          (when (and (> n 2)
+                     (char=? (string-ref s 0) #\*)
+                     (char=? (string-ref s (- n 1)) #\*))
+            (hashq-set! *keymap-name-table*
+                        (string->symbol (substring s 1 (- n 1)))
+                        map))))
+      map)
+
+    (define (keymap-by-name name)
+      ;; The keymap NAME was made with, or #f - what `\{NAME}` asks
+      ;; where Emacs asks `(symbol-value NAME)`.
+      ;;--------------------------------------------------------------
+      (and (symbol? name) (hashq-ref *keymap-name-table* name #f)))
+
     (define (make-sparse-keymap . rest)
       ;; GNU Emacs's `make-sparse-keymap' (`keymap.c:1122'): "Return a
       ;; newly created, empty, sparse keymap. ... The argument PROMPT is a
@@ -264,7 +296,9 @@
        ;; something quietly ignored.
        ((and (or (string? (car rest)) (symbol? (car rest)))
              (null? (cdr rest)))
-        (make<keymap> (make-hash-table) '() #f #f (car rest)))
+        (register-keymap-name!
+         (car rest)
+         (make<keymap> (make-hash-table) '() #f #f (car rest))))
        ((and (keymap-type? (car rest)) (null? (cdr rest)))
         ;; `(keymap MAP)' is MAP - what `(keymap kml)' meant before, when
         ;; a keymap argument stood for its layers.

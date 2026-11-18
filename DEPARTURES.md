@@ -6891,3 +6891,88 @@ battery gained **`help-describe`**, which drives all three keys through
 the real command loop. One trap in writing it: `C-f` in the output is
 fontified with `help-key-binding`, so the raw byte stream has escape
 sequences *inside* "It is bound to C-f." - assert on the plain runs.
+
+# `\{MAPVAR}`, `C-h c`, `C-h w` - the rest of substitute-command-keys and two echo commands (2026-11-18)
+
+## `\{NAME}` and `\<NAME>` are carried, with a named stand-in for `symbol-value`
+
+The 1E form needs Emacs's `(symbol-value NAME)` - and this tree has no
+variable namespace, by decision (`command.scm`'s note: "There is no
+universal registry here, and none is wanted"; each subsystem keeps an
+index and hands the reader out - `custom-declare-variable` keeps
+`custom-reader` on the symbol for exactly this reason).
+
+So the index is the **keymap's own label**: `make-sparse-keymap` already
+takes a name, every library keymap in this tree is made with the
+symbol `'*name-map*`, and the record's own comment calls the label "the
+name `define-key` and the mode machinery use to tell one map from
+another". `keymap.scm` now registers each labelled map in
+`*keymap-name-table*`, **under the label and under its star-stripped
+spelling** - because Emacs's docstrings name the *variable*
+(`\{help-mode-map}`) and this tree's labels carry the parameter
+convention's stars. `keymap-by-name` answers the map.
+
+Consequences, named:
+
+- `\{special-mode-map}` substitutes the same table `C-h b` shows for
+  that map, range merging included - measured in help-tests.
+- A map whose label is a *string* (`help-map`'s "Help", the menu maps)
+  is not reachable by a `\{name}`; Emacs's variables would be. Nothing
+  in this tree's ported docstrings names one.
+- Nothing sets a label after construction (`set!keymap-label` has no
+  caller), so nothing can miss the registry.
+
+The unresolved message is Emacs's own:
+"Uses keymap \`NAME', which is not currently defined."
+(`substitute-quotes` applied, as the C applies it).
+
+`\<NAME>` sets the map `\[COMMAND]` is looked up in, and `\[` now
+consults it first - `where-is-internal fun (and keymap (list keymap)) t`,
+then a second pass without the keymap when that finds nothing -
+`override-local-map` initialises it, as the Elisp's `let` does.
+Measured: `\<test-map>\[cmd]` answers the key in that map even though
+the global map binds the command elsewhere.
+
+## `C-h c` `describe-key-briefly` (help.el:1029)
+
+A direct port over `help--analyze-key` and `help--filter-info-list`.
+**The C's `INSERT` argument is `insert-flag` here**: a parameter named
+`insert` shadows `editfns.scm`'s `insert` in a Lisp-1, the same
+renaming `minibuffer-message`'s TEXT took. Measured outputs:
+"C-f runs the command forward-char" and the insert form the same.
+
+**Not carried**: `help--read-key-sequence`'s mouse-movement filter (the
+read cannot produce one without `track-mouse`).
+
+## `C-h w` `where-is` (help.el:897)
+
+Ported: `where-is-internal` over `overriding-local-map`, the
+"(KEYS)" / "is not on any key"'s replacement "M-x NAME RET" lines, the
+remapping sentence, and the insert form.
+
+**Not carried**: the alias scan (`mapatoms` over the obarray - the
+command table's second names share the record; they will come back the
+day an alias list is exposed), and `function-called-at-point`'s default
+at the prompt (needs elisp-mode's reader). The interactive prompt is
+`read-command`'s.
+
+## Two bugs this increment found, both the tree's old hazards
+
+1. **The missing-import class, again**: `where-is`'s interactive
+   expression is evaluated in *its defining library's module*
+   (`help.scm`), which did not import `read-command` - so `C-h w` raised
+   "Unbound variable: read-command" into the echo area, the command did
+   nothing, and a pty check's keys went into the buffer. This is the
+   third time the rule has bitten: **a command's interactive expression
+   can only use names its own library imports**.
+2. **`(insert ...)` shadowed by a parameter named `insert`** - the
+   Lisp-1 wall, fixed by the rename above.
+
+## Verification
+
+`help-tests.scm` 35 (the 1E substitution of `special-mode-map` including
+`0 .. 9`, the unresolved-map message, `\<map>\[cmd]`, the star stripping,
+and the two commands' exact strings and five bindings). The pty
+`help-describe` check now drives `C-h k`, `C-h c` and `C-h w` too, with
+Emacs's long read prompt ("Describe the following key, mouse click, or
+menu item: ") which `C-h k` shares.

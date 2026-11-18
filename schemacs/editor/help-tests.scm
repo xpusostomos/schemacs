@@ -37,12 +37,13 @@
   (only (schemacs editor command) define-command)
   ;; C-h f/v/k and the analysis under describe-key
   (only (schemacs editor help)
-        describe-key help--analyze-key help--filter-info-list
+        describe-key describe-key-briefly where-is
+        help--analyze-key help--filter-info-list
         help--binding-undefined-p help-map)
   (only (schemacs editor help-fns) describe-function describe-variable)
   (only (schemacs editor custom) define-custom)
   (only (schemacs editor keymap) keymap define-key *default-keymap*
-        lookup-key keymapp)
+        lookup-key keymapp keymap-by-name)
   (only (schemacs editor buffer) get-buffer-create buffer-local-keymap
         buffer-read-only? buffer-local-value buffer-name erase-buffer
         set-buffer set!buffer-local-keymap with-current-buffer)
@@ -322,5 +323,67 @@
         (eq? (lookup-key *default-keymap* (kbd "C-h k")) describe-key)
         (eq? (lookup-key help-map (kbd "f")) describe-function)
         (eq? (lookup-key help-map (kbd "k")) describe-key)))
+
+;; ------------------------------------------------------------------
+;; `\{NAME}' and `\<NAME>' in `substitute-command-keys'.
+;;
+;; The name resolves through the keymap's label - this tree's stand-in
+;; for `(symbol-value NAME)`; measured output for `special-mode-map`
+;; below is the same table `C-h b` shows for that map (`q` and SPC from
+;; `special-mode-map`'s own bindings, the digit range merged the way
+;; `describe-map` merges it).
+
+;; A `*name*' label is reachable under the plain name Emacs's
+;; docstrings use.
+(test-assert "keymap-by-name strips the parameter stars"
+  (eq? (keymap-by-name 'special-mode-map)
+       (keymap-by-name '*special-mode-map*)))
+
+(test-assert "\\{MAP}' substitutes the map's summary"
+  (let ((s (with-buffer
+            (lambda () (substitute-command-keys "\\{special-mode-map}")))))
+    (and (string-contains s "Key             Binding")
+         (string-contains s "q")
+         (string-contains s "quit-window")
+         (string-contains s "0 .. 9")
+         (string-contains s "digit-argument"))))
+
+(test-equal "\nUses keymap ‘no-such-map’, which is not currently defined.\n"
+  (with-buffer (lambda () (substitute-command-keys "\\{no-such-map}"))))
+
+;; `\\<MAP>' scopes `\\[COMMAND]' to that map: C-c z is where the map
+;; binds forward-char, though the global map has C-f.
+(test-equal "C-c z"
+  (let ((m (keymap 'test-mode-map)))
+    (define-key m (kbd "C-c z") help-test-forward)
+    (with-buffer
+     (lambda ()
+       (substitute-command-keys
+        "\\<test-mode-map>\\[help-test-forward]")))))
+
+;; ------------------------------------------------------------------
+;; `C-h c` and `C-h w` - the two echo-area answers.
+;;
+;; Emacs 31.1 prints exactly these strings for the same calls.
+
+(test-equal '("C-f runs the command forward-char"
+              "forward-char (C-f)"
+              "M-x no-such-command-xyz RET")
+  (help-tests-yield
+   (lambda ()
+     (describe-key-briefly (list (cons (kbd "C-f") #f)) #t)
+     (let ((a (buffer-string)))
+       (erase-buffer)
+       (where-is 'forward-char #t)
+       (let ((b (buffer-string)))
+         (erase-buffer)
+         (where-is 'no-such-command-xyz #t)
+         (list a b (buffer-string)))))))
+
+(test-equal '(#t #t #t #t)
+  (list (eq? (lookup-key *default-keymap* (kbd "C-h c")) describe-key-briefly)
+        (eq? (lookup-key *default-keymap* (kbd "C-h w")) where-is)
+        (eq? (lookup-key help-map (kbd "c")) describe-key-briefly)
+        (eq? (lookup-key help-map (kbd "w")) where-is)))
 
 (test-end "schemacs_editor_help")

@@ -2508,9 +2508,24 @@ def check_help_describe():
         problems.append("C-h v did not print the documentation: %r"
                         % out[-300:])
 
-    out = drive([C_h + b"k", WAIT(b"Describe key: "), b"\x06"], path)
+    # The prompt is `help--read-key-sequence`'s own sentence, measured
+    # on Emacs 31.1.
+    prompt = b"Describe the following key, mouse click, or menu item: "
+    out = drive([C_h + b"k", WAIT(prompt), b"\x06"], path)
     if "runs the command " not in out or "forward-char" not in out:
         problems.append("C-h k did not describe C-f: %r" % out[-300:])
+
+    # C-h c answers in the echo area with the same sentence.
+    out = drive([C_h + b"c", WAIT(prompt), b"\x06"], path)
+    if "runs the command " not in out or "forward-char" not in out:
+        problems.append("C-h c did not name C-f's command: %r" % out[-300:])
+
+    # C-h w: "forward-char (C-f)" - C-f is fontified, so assert the
+    # plain run before it.
+    out = drive([C_h + b"w", WAIT(b"Where is command: "),
+                 b"forward-char", RET], path)
+    if "forward-char (" not in out:
+        problems.append("C-h w did not list C-f: %r" % out[-300:])
     return problems
 
 

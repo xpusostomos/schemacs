@@ -36,7 +36,7 @@
     ;; `sort` for `describe-map`'s sorted sparse entries; `format` is
     ;; Guile's (`~a`, destination first); `procedure-name` is how a
     ;; definition that is not a command is still named.
-    (only (guile) sort procedure-name hashv-ref caddr)
+    (only (guile) sort procedure-name hashv-ref caddr string-join)
     (only (schemacs editor subr) split-string keymap-canonicalize
           *minor-mode-map-alist*)
     ;; the temporary buffer the walk edits in place
@@ -61,17 +61,17 @@
     ;; `where-is-internal` is `keymap.c`'s, and `key-description` with it.
     (only (schemacs editor keyboard)
           where-is-internal command-remapping key-binding read-key-sequence
-          undefined
+          lookup-keymaps undefined
           *overriding-terminal-local-map* *overriding-local-map*)
     (only (schemacs editor keymap)
           key-description keymapp lookup-key keymap-order keymap-bindings
           keymap-index get-keyelt make-sparse-keymap define-key
-          *default-keymap*)
+          keymap-by-name *default-keymap*)
     ;; a command's name for `help-fns-function-name`, and the
     ;; "was this called from a key?" test `describe-bindings` records.
     (only (schemacs editor command)
           define-command command-type? command-name command-record-of
-          called-interactively?)
+          called-interactively? current-prefix-arg)
     (only (schemacs editor custom) define-custom)
     (only (schemacs editor derived) derived-mode-p)
     (only (schemacs editor fns) string-version-lessp)
@@ -84,6 +84,9 @@
     ;; `describe-key`'s mouse coordinates and the key it runs.
     (only (schemacs editor subr) event-start event-end)
     (only (schemacs editor mouse) posn-set-point)
+    ;; `where-is`'s interactive expression is evaluated in *this*
+    ;; library's module, so the reader it names must be imported here.
+    (only (schemacs editor minibuffer) read-command)
     ;; `format` is `editfns.scm`'s Emacs `format`, not Guile's.
     (only (schemacs editor editfns) message format)
     ;; the face and the property store
@@ -105,7 +108,8 @@
           help-map *help-mode-function* *help-xref-following*
           *help-xref-stack-item* *describe-bindings-show-prefix-commands*
           *describe-function-1-function*
-          describe-key help--analyze-key help--filter-info-list
+          describe-key describe-key-briefly where-is
+          help--analyze-key help--filter-info-list
           help--binding-undefined-p help-key-description)
 
   (begin
@@ -227,7 +231,8 @@
       ;;--------------------------------------------------------------
       (let ((no-face (and (pair? rest) (car rest)))
             (include-menus (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
-            (keymap #f))
+            ;; Emacs's `(let ((keymap overriding-local-map)) ...)`.
+            (keymap (*overriding-local-map*)))
         (if (not string)
             string
             (let ((orig-buf (current-buffer)))
@@ -319,9 +324,53 @@
                                      (if no-face
                                          (key-description key)
                                          (help--key-description-fontified key)))))))
-                           ;; 1E is not carried (see the header): the
-                           ;; forms are left as they stand, and the next
-                           ;; pass treats the `{' or `<` as ordinary.
+                           ;; 1E. `\{NAME}' is replaced with a
+                           ;; summary of the keymap NAME, and `\<NAME>'
+                           ;; sets the keymap `\[COMMAND]' is looked up
+                           ;; in.
+                           ;;
+                           ;; **The name is resolved from the keymap's
+                           ;; label**, because a Scheme binding cannot be
+                           ;; reached from a symbol; `keymap-by-name`'s
+                           ;; note says what that means and which
+                           ;; spellings work.
+                           ((and c (or (char=? c #\{) (char=? c #\<))
+                                 (save-match-data
+                                   (let ((at (save-excursion
+                                               (search-forward
+                                                (if (char=? c #\{) "}" ">")
+                                                #f #t))))
+                                     (when at
+                                       (set! end-point (- at 2))
+                                       #t))))
+                            (goto-char orig-point)
+                            (delete-region (point) (+ (point) 2))
+                            (let* ((name (string->symbol
+                                          (buffer-substring-no-properties
+                                           (point) (- end-point 1))))
+                                   (this-keymap (keymap-by-name name)))
+                              (delete-region (point) end-point)
+                              (cond
+                               ((not this-keymap)
+                                (insert "\nUses keymap ")
+                                (insert (substitute-quotes "`"))
+                                (insert (symbol->string name))
+                                (insert (substitute-quotes "'"))
+                                (insert ", which is not currently defined.\n")
+                                (when (char=? c #\<)
+                                  (set! keymap #f)))
+                               ((char=? c #\<)
+                                (set! keymap this-keymap))
+                               (else
+                                ;; "Get the list of active keymaps that
+                                ;; precede this one. If this one's not
+                                ;; active, get nil."
+                                (let ((r (memq this-keymap
+                                               (reverse (lookup-keymaps)))))
+                                  (help--describe-map-tree
+                                   this-keymap #t
+                                   (and r (reverse (cdr r)))
+                                   #f #f (not include-menus) #f #f #t))))))
                            (else #f))))
                        ;; 2. Quotes, under `curve' and `straight'.
                        ((and (eq? (text-quoting-style) 'curve)
@@ -1025,7 +1074,8 @@ a key-sequence and RAW-SEQ is its untranslated form.
 
 BUFFER is the buffer in which to lookup those keys; it defaults to
 the current buffer."
-      (interactive (list (list (cons (read-key-sequence "Describe key: ")
+      (interactive (list (list (cons (read-key-sequence
+                                     "Describe the following key, mouse click, or menu item: ")
                                      #f))))
       (let* ((buffer (or (%help-arg rest 0) (current-buffer)))
              (info-list
@@ -1069,5 +1119,76 @@ the current buffer."
 
     (define-key help-map (kbd "k") describe-key)
     (define-key *default-keymap* (kbd "C-h k") describe-key)
+
+    (define-command (describe-key-briefly key-list insert-flag . rest)
+      ;; GNU Emacs's `describe-key-briefly' (`help.el:1029'): "Print the
+      ;; name of the functions KEY-LIST invokes."
+      ;;
+      ;; The prompt is `help--read-key-sequence`'s own sentence, which
+      ;; `describe-key` uses too; the C's mouse-movement filtering is
+      ;; not carried (there are no mouse-movement events without
+      ;; `track-mouse`, and the read never returns one).
+      ;;--------------------------------------------------------------
+      "Print the name of the functions KEY-LIST invokes.
+KEY-LIST is a list of pairs (SEQ . RAW-SEQ) of key sequences, where
+RAW-SEQ is the untranslated form of the key sequence SEQ.
+If INSERT (the prefix arg) is non-nil, insert the message in the buffer."
+      (interactive (list (list (cons (read-key-sequence
+                                      "Describe the following key, mouse click, or menu item: ")
+                                     #f))
+                         (current-prefix-arg)))
+      ;; **The C's INSERT is `insert-flag` here**: a parameter named
+      ;; `insert` would shadow `editfns.scm`'s `insert` in this Lisp-1,
+      ;; which is the same renaming `minibuffer-message`'s TEXT took.
+      (let ((buffer (%help-arg rest 0)))
+        (with-current-buffer (if buffer buffer (current-buffer))
+          (let* ((info-list (map (lambda (kr)
+                                   (help--analyze-key (car kr) (cdr kr) buffer))
+                                 key-list))
+                 (msg (string-join
+                       (map car (help--filter-info-list info-list 1))
+                       "\n")))
+            (if insert-flag (insert msg) (message "%s" msg))
+            #f))))
+
+    (define-command (where-is definition insert-flag)
+      ;; GNU Emacs's `where-is' (`help.el:897'): "Print message listing
+      ;; key sequences that invoke the command DEFINITION."
+      ;;
+      ;; **The alias scan is not carried**: Emacs walks the obarray for
+      ;; symbols whose function is DEFINITION's; there is no obarray
+      ;; here, and the command table's second names share the same
+      ;; record - the day an alias list is exposed this loop comes back.
+      ;; The remapping sentence is carried, through
+      ;; `command-remapping`.
+      ;;--------------------------------------------------------------
+      "Print message listing key sequences that invoke the command DEFINITION.
+Argument is a command definition, usually a symbol with a function definition.
+If INSERT (the prefix arg) is non-nil, insert the message in the buffer."
+      (interactive (list (read-command "Where is command: ") (current-prefix-arg)))
+      (unless definition (error "No command"))
+      (let* ((remapped (and (symbol? definition)
+                            (command-remapping definition)))
+             (keys (where-is-internal (or remapped definition)
+                                      (*overriding-local-map*) #f #f #f))
+             (keys-string (string-join
+                           (map help--key-description-fontified (or keys '()))
+                           ", "))
+             (string
+              (cond
+               ((> (length (or keys '())) 0)
+                (if remapped
+                    (format "%s is remapped to %s, which is on %s"
+                            definition remapped keys-string)
+                    (format "%s (%s)" definition keys-string)))
+               (else
+                (format "M-x %s RET" definition)))))
+        (if insert-flag (insert string) (message "%s" string))
+        #f))
+
+    (define-key help-map (kbd "c") describe-key-briefly)
+    (define-key *default-keymap* (kbd "C-h c") describe-key-briefly)
+    (define-key help-map (kbd "w") where-is)
+    (define-key *default-keymap* (kbd "C-h w") where-is)
 
 ))

@@ -1206,6 +1206,7 @@
     describe-function
     describe-function-1
     describe-key
+    describe-key-briefly
     describe-map
     describe-map--align-section
     describe-map--fill-columns
@@ -1915,6 +1916,7 @@
     keyboard-quit
     keymap
     keymap-bindings
+    keymap-by-name
     keymap-canonicalize
     keymap-char-table
     keymap-index
@@ -3275,6 +3277,7 @@
     walk-window-tree
     walk-window-tree-1
     what-cursor-position
+    where-is
     where-is-internal
     widen
     widen-automatically

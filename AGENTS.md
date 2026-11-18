@@ -11062,3 +11062,23 @@ variable, not the call's return value.**
   do it).
 - `\{MAPVAR}`'s wiring now that `help--describe-map-tree` exists.
 - The menu walk in `help-fns--insert-menu-bindings`.
+
+# `\{MAPVAR}`, `C-h c`, `C-h w` (2026-11-18)
+
+- **`\{NAME}` resolves through the keymap's label** (`keymap-by-name`,
+  `keymap.scm`): Emacs reads `symbol-value`, which this tree does not
+  have; every library keymap is made with a `'*name-map*` label and the
+  registry accepts both the label and its star-stripped spelling, which
+  is what docstrings name. String-labelled maps (menus, `help-map`) are
+  not reachable - named in DEPARTURES.md.
+- **`\<NAME>` scopes `\[COMMAND]`** to that map; measured in help-tests.
+- **`C-h c` and `C-h w`** are in, `where-is` without the alias scan.
+- **Two traps paid for (again)**: a command's interactive expression
+  runs in its *defining* module - `where-is` needed `read-command`
+  imported into help.scm, and without it `C-h w` was a silent echo-area
+  error; and a parameter named `insert` shadows `insert` (renamed
+  `insert-flag`, the `minibuffer-message` TEXT precedent).
+
+Left in the help pass: `C-h o` describe-symbol, `C-h m` describe-mode,
+`C-h s`/`describe-vector` over char-tables (a chartab walk), and the
+menu walk in `help-fns--insert-menu-bindings`.
