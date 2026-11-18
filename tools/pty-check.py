@@ -157,7 +157,7 @@ EXITED = ("exited",)
 
 
 
-def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000",
+def drive(keys, path, settle=0.3, gap=0.3, term=None, background="0000/0000/0000",
           report_exit=False, during=None, config=None, colorterm=None):
     """Run the editor on PATH, send KEYS, and return everything it drew.
 
@@ -258,10 +258,13 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
         return got
 
     # **The editor is ready when it has drawn and gone quiet, not when a
-    # fixed time has run out.** SETTLE stays as the *floor* every check has
-    # always had (the terminal queries arrive during it), and on top of
-    # that the startup wait ends when a screen has been drawn and the
-    # editor has been quiet for QUIET - the same rule the waits below use.
+    # fixed time has run out.** SETTLE stays as a *floor* - 0.3 s, not
+    # the old 1.5 - and what actually ends the wait is a screen drawn and
+    # QUIET seconds of silence, the same rule the waits below use. The
+    # 1.5 was the pre-quiet guess at "libraries loaded"; with the
+    # draw-and-quiet criterion in place it only *added* a second of dead
+    # time to every one of the ~200 drive() calls in the battery. A check
+    # that needs longer can still pass `settle=`.
     #
     # It matters because a key sent before ncurses has put the terminal
     # into raw mode is eaten by the line discipline, silently: `C-u' is
@@ -317,7 +320,17 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
 
     exited_early = False
 
-    for k in keys:
+    # **The last ordinary key is not settled per key.** Its settle is
+    # `settle(gap, ...)` - a wait for the same quiet the end-of-drive loop
+    # below waits for, over the same bytes - so paying both charged every
+    # check 0.3 s for nothing. The conditions (WAIT/EXITED) are not keys
+    # and are handled in order regardless.
+    last_key = -1
+    for i, k in enumerate(keys):
+        if not isinstance(k, tuple):
+            last_key = i
+
+    for i, k in enumerate(keys):
         if isinstance(k, tuple):
             if k[0] == "wait":
                 # **the test of the condition, not a pause**: drain until
@@ -359,7 +372,8 @@ def drive(keys, path, settle=1.5, gap=0.3, term=None, background="0000/0000/0000
             # after this one have nowhere to go; the assertions will say
             # what happened from the screen collected so far.
             break
-        settle(gap, KEY_MAX)
+        if i != last_key:
+            settle(gap, KEY_MAX)
     # **Wait for the editor to go quiet, not for a fixed time.** The keys
     # have been sent; what the check is about to assert on is whatever
     # the editor drew in response. Sleeping a fixed 0.6 s and reading
@@ -1887,8 +1901,13 @@ def check_completion_ui():
                         "`minibuffer-message'")
 
     # ...and gone once `minibuffer-message-timeout' (two seconds) has
-    # passed with nothing typed. The gap after the last key is what waits.
-    screen = screen_of(drive(find + [b"zz", b"\t"], path, gap=3.0))
+    # passed with nothing typed. **The wait is an explicit `sleep` key,
+    # not a large `gap`**: `gap` is the *pacing* between keys, and a
+    # check that leans on it for a semantic wait breaks the day the
+    # harness stops settling after the last key - which is exactly what
+    # happened here. `sleep` does not drain, so the timeout's redraw is
+    # still queued and the final quiet wait collects it.
+    screen = screen_of(drive(find + [b"zz", b"\t", ("sleep", 3.0)], path))
     if "[No match]" in screen:
         problems.append("the message is still there three seconds later, so "
                         "it does not time out")

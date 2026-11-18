@@ -11175,3 +11175,42 @@ is ~2.5 s a suite here.
 **The pty battery is not part of this and must still run alone** - it is
 timing-sensitive (the settle logic), and running it beside the suites
 is the documented flake.
+
+# The pty battery is 21% faster, and what the rest of it costs (2026-11-18)
+
+Two fixed sleeps in `drive()` were removed, and nothing else changed:
+
+- **The startup floor `settle=1.5` is now 0.3.** The floor predates the
+  draw-and-quiet rule; with that rule in place it was a second of dead
+  time on every one of the ~200 `drive()` calls - the readiness test is
+  "a screen has been drawn and the editor has been quiet for QUIET",
+  which the 1.5 was only ever a guess at.
+- **The last ordinary key is no longer settled per key.** Its
+  `settle(gap)` waited for exactly the quiet the end-of-drive loop waits
+  for, over the same bytes, so every check paid 0.3 s twice.
+
+Measured full battery, same tree, same machine:
+**981 s before, 770 s after, 95/95 both times.** `grep gap=` showed the
+`gap` values other checks pass are 0.12-0.4, all ≤ QUIET, so dropping
+the last key's settle is equivalent-or-longer for every one of them -
+**except `completion-ui`, which used `gap=3.0` on its last key as a
+semantic wait for `minibuffer-message-timeout`**, and went red the
+moment the harness stopped sleeping there. It waits with an explicit
+`("sleep", 3.0)` key now. The rule to carry: **`gap` is pacing; a check
+that needs a wait says `WAIT`/`sleep`/`EXITED`, never a big `gap`.**
+
+## What the remaining 770 s is
+
+Per `drive()`: the editor's own start, one `settle(gap=0.3)` per key
+*element* (bulk of it - ~1.5-2.5 s a drive), and the end quiet wait
+(0.4 s). So the two ways down further are known and both are bigger
+jobs than this one:
+
+1. **Per-check `WAIT` threading** - the documented fix: every check says
+   what its next key is about instead of letting the harness pace.
+   Saves the per-key 0.3 s on the *first* key after each expectation
+   arrives, but only where the check can name it; ~90 call sites.
+2. **Reuse one editor across a check's `drive()` calls** - several
+   checks call `drive()` four times and pay four editor starts; each
+   call's fresh state is deliberate, so this is a redesign of those
+   checks, not a harness tweak.
