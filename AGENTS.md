@@ -11145,3 +11145,33 @@ and `describe-categories` (the category table itself is not ported).
   seam.
 - C-h o is pty-checked; all nine help keys (`b f v k c w m s o`) now
   run through the real command loop.
+
+# The suite runner is parallel by default (2026-11-18)
+
+`tools/run-suites.py` now runs suites in a `ThreadPoolExecutor`
+(`-j N`, default 4; `SUITES_JOBS` sets it; `-j 1` is the old serial
+run), and it is safe for a measured reason:
+
+- **Every suite is its own `guile --no-auto-compile` process** and
+  writes *nothing* to the shared `XDG_CACHE_HOME` - that is the same
+  flag that makes a suite run from source, so there is no compiled file
+  to race over.
+- **The fixed `/tmp` paths are per-suite**: every duplicated path in
+  the test files (`/tmp/x.txt`, `/tmp/mbext/...`) belongs to exactly
+  one suite (checked with `grep -rho '"/tmp/...' | sort | uniq -c`).
+  Two suites never share one, so parallel processes cannot clobber each
+  other's fixtures.
+- **Output stays in the list's order** - all suites are submitted at
+  once and the lines are collected in `paths` order - so two runs'
+  logs still diff, and a straggler only delays the lines after it.
+
+Measured on this 16-core machine, full run: serial (`-j 1`) **108 s**,
+`-j 4` **38 s**, `-j 8` **29 s**, with the per-suite pass counts
+identical in all three (diffed line by line). `pgtk-tests` (8.6 s, the
+lone GTK suite) sets the parallel floor. The suite runner's old "~10
+minutes" reputation was measured on a loaded machine; the work itself
+is ~2.5 s a suite here.
+
+**The pty battery is not part of this and must still run alone** - it is
+timing-sensitive (the settle logic), and running it beside the suites
+is the documented flake.

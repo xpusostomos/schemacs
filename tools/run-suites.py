@@ -11,8 +11,19 @@ A suite counts as having run when it reports at least one expected pass.
 SRFI-64 prints `*** # of expected passes : N` for every group, so a suite
 with no passes either failed to load or has no tests - both worth knowing.
 
-    tools/run-suites.py            # the engine and frontend suites
-    tools/run-suites.py <file>...  # named suites
+**Suites run in parallel by default** (`-j 4`): each is its own `guile`
+process, and the run is safe because nothing is shared that is written -
+`--no-auto-compile` means no compiled file is written to the shared
+`XDG_CACHE_HOME`, the suites' fixed `/tmp` paths are each used by one
+suite only (checked), and every suite builds its own frames and
+displays. Output is still printed in the list's order, so two runs'
+logs diff. `-j 1` is the old serial run; a machine short of memory can
+ask for fewer workers. The pty battery is NOT part of this - it is
+timing-sensitive and runs alone.
+
+    tools/run-suites.py                 # the engine and frontend suites
+    tools/run-suites.py <file>...       # named suites
+    tools/run-suites.py -j 8 ...        # more or fewer workers
 
 Exit status is 1 if a suite failed to run or reported a failure.
 """
@@ -21,6 +32,7 @@ import re
 import subprocess
 import tempfile
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
@@ -221,36 +233,75 @@ def run(path):
     return passes, failures, finished, out
 
 
-def main():
-    paths = [a for a in sys.argv[1:] if not a.startswith('-')] or SUITES
-    bad = 0
-    for p in paths:
-        try:
-            passes, failures, finished, out = run(p)
-        except subprocess.TimeoutExpired:
-            print('%-44s TIMED OUT' % os.path.basename(p))
-            bad += 1
-            continue
-        name = os.path.basename(p)
-        if passes == 0:
-            # not a pass: the suite never ran
-            print('%-44s DID NOT RUN' % name)
-            for line in out.strip().split('\n')[-6:]:
-                print('      %s' % line)
-            bad += 1
-        elif failures or not finished:
-            if finished:
-                print('%-44s %d passed, %d FAILED' % (name, passes, failures))
-            else:
-                print('%-44s %d passed, then ABORTED' % (name, passes))
-                for line in out.strip().split('\n')[-4:]:
-                    print('      %s' % line)
-            for line in out.split('\n'):
-                if 'source-line' in line or 'actual-value' in line:
-                    print('      %s' % line.strip())
-            bad += 1
+def report(p, result):
+    """Print one suite's line, and answer 1 when it did not pass."""
+    try:
+        passes, failures, finished, out = result
+    except subprocess.TimeoutExpired:
+        print('%-44s TIMED OUT' % os.path.basename(p))
+        return 1
+    name = os.path.basename(p)
+    if passes == 0:
+        # not a pass: the suite never ran
+        print('%-44s DID NOT RUN' % name)
+        for line in out.strip().split('\n')[-6:]:
+            print('      %s' % line)
+        return 1
+    elif failures or not finished:
+        if finished:
+            print('%-44s %d passed, %d FAILED' % (name, passes, failures))
         else:
-            print('%-44s %d passed' % (name, passes))
+            print('%-44s %d passed, then ABORTED' % (name, passes))
+            for line in out.strip().split('\n')[-4:]:
+                print('      %s' % line)
+        for line in out.split('\n'):
+            if 'source-line' in line or 'actual-value' in line:
+                print('      %s' % line.strip())
+        return 1
+    else:
+        print('%-44s %d passed' % (name, passes))
+        return 0
+
+
+def parse_jobs(argv):
+    """`-j N`, `--jobs N`, `--jobs=N`, `-jN`; the rest are suite paths."""
+    jobs = int(os.environ.get('SUITES_JOBS', '4'))
+    paths = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ('-j', '--jobs') and i + 1 < len(argv):
+            jobs = int(argv[i + 1])
+            i += 2
+        elif a.startswith('--jobs='):
+            jobs = int(a.split('=', 1)[1])
+            i += 1
+        elif a.startswith('-j') and len(a) > 2:
+            jobs = int(a[2:])
+            i += 1
+        else:
+            if not a.startswith('-'):
+                paths.append(a)
+            i += 1
+    return max(1, jobs), paths
+
+
+def main():
+    jobs, paths = parse_jobs(sys.argv[1:])
+    paths = paths or SUITES
+    bad = 0
+    if jobs == 1:
+        for p in paths:
+            bad += report(p, run(p))
+        return 1 if bad else 0
+    # Output stays in the list's order: every suite is submitted at
+    # once, and the answers are collected in `paths` order - so a slow
+    # straggler delays the lines after it but the log of a run reads
+    # the same as a serial run's.
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [pool.submit(run, p) for p in paths]
+        for p, future in zip(paths, futures):
+            bad += report(p, future.result())
     return 1 if bad else 0
 
 
