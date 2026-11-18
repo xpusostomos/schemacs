@@ -40,7 +40,11 @@
         describe-key describe-key-briefly where-is
         help--analyze-key help--filter-info-list
         help--binding-undefined-p help-map)
-  (only (schemacs editor help-fns) describe-function describe-variable)
+  (only (schemacs editor help-fns) describe-function describe-variable
+        describe-mode *describe-mode-outline*)
+  ;; the modes `describe-mode` is tested on
+  (schemacs editor text-mode)
+  (only (schemacs editor fill) auto-fill-mode)
   (only (schemacs editor custom) define-custom)
   (only (schemacs editor keymap) keymap define-key *default-keymap*
         lookup-key keymapp keymap-by-name)
@@ -385,5 +389,46 @@
         (eq? (lookup-key *default-keymap* (kbd "C-h w")) where-is)
         (eq? (lookup-key help-map (kbd "c")) describe-key-briefly)
         (eq? (lookup-key help-map (kbd "w")) where-is)))
+
+;; ------------------------------------------------------------------
+;; `C-h m` `describe-mode`.
+;;
+;; Emacs 31.1's default output is the outline variant
+;; (`describe-mode-outline` is t, `help-fns.el:2216`): a "Major mode
+;; NAME" heading, "The major mode is NAME mode:", then a "Local minor
+;; mode NAME" heading and "PRETTY minor mode (indicator):". Measured on
+;; Emacs for a text-mode buffer with auto-fill on; the two clauses this
+;; tree cannot print - "defined in FILE" and the usage lines - are the
+;; documented departures.
+
+(define (describe-mode-string outline)
+  (help-tests-yield
+   (lambda ()
+     (let ((b (get-buffer-create "*help-mode-test*")))
+       (with-current-buffer b
+         (text-mode)
+         (auto-fill-mode 1))
+       (parameterize ((*describe-mode-outline* outline))
+         (describe-mode b))
+       (with-current-buffer (get-buffer-create "*Help*")
+         (buffer-string))))))
+
+(test-assert "describe-mode's outline default"
+  (let ((s (describe-mode-string #t)))
+    (and (string-contains s "Major mode text-mode")
+         (string-contains s "The major mode is Text mode:")
+         (string-contains s "Local minor mode auto-fill-mode")
+         (string-contains s "Auto-Fill minor mode (no indicator):")
+         (string-contains s "Toggle automatic line breaking"))))
+
+(test-assert "describe-mode without the outline"
+  (let ((s (describe-mode-string #f)))
+    (and (string-contains s "Minor mode enabled in this buffer:")
+         (string-contains s "The major mode is Text mode:")
+         (string-contains s "Minor mode enabled in this buffer: Auto-Fill")
+         (string-contains s "Auto-Fill minor mode (no indicator):"))))
+
+(test-equal #t
+  (eq? (lookup-key *default-keymap* (kbd "C-h m")) describe-mode))
 
 (test-end "schemacs_editor_help")

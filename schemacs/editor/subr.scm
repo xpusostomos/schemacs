@@ -114,7 +114,8 @@
    ;; `minor-mode-alist' and the function that fills it. See the note on
    ;; `add-minor-mode' for why the alist lives here and not with the mode
    ;; line that reads it.
-   *minor-mode-alist* *minor-mode-list* *minor-mode-map-alist* add-minor-mode
+   *minor-mode-alist* *minor-mode-list* *minor-mode-map-alist*
+   *global-minor-modes* add-minor-mode
    regexp-unmatchable
    string-prefix-p
    make-syntax-table
@@ -659,6 +660,16 @@
     ;;------------------------------------------------------------------
 
     (define *minor-mode-list* (make-parameter '()))
+
+    (define *global-minor-modes* (make-parameter '()))
+    ;; ^ GNU Emacs's `global-minor-modes' (`subr.el:3200'): "List of
+    ;; minor mode variables for modes that are currently enabled
+    ;; globally." `define-minor-mode`'s generated command keeps it (the
+    ;; C's `(add-to-list 'global-minor-modes ...)` / `(setq
+    ;; global-minor-modes (delq ...))`), and `describe-mode` reads it.
+    ;; A parameter like its sibling `*minor-mode-list*`, because the
+    ;; command sets it with a call and `describe-mode` reads it with a
+    ;; call.
     ;; ^ GNU Emacs's `minor-mode-list' (`bindings.el`): "List of
     ;; variables of minor modes. Each element is a variable symbol, whose
     ;; value is t when the minor mode is enabled." The list is not read

@@ -377,6 +377,10 @@
    ;; `bindings.el''s other mode-line variable, and the construct that
    ;; reads it. A minor mode with a lighter adds itself to the alist.
    mode-line-minor-modes
+   ;; the two steps of one minor-mode indicator's evaluation, which
+   ;; `describe-mode` reads too (`help-fns.el:2348`'s
+   ;; `(format-mode-line (assq mode minor-mode-alist))`).
+   minor-mode-indicator-value minor-mode-lighter
    face-at-buffer-position
    overlay-strings-at
    face->attribute

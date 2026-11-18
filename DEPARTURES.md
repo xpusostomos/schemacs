@@ -6976,3 +6976,68 @@ and the two commands' exact strings and five bindings). The pty
 `help-describe` check now drives `C-h k`, `C-h c` and `C-h w` too, with
 Emacs's long read prompt ("Describe the following key, mouse click, or
 menu item: ") which `C-h k` shares.
+
+# `C-h m` `describe-mode`, and the minor-mode lists under it (2026-11-18)
+
+## `local-minor-modes` and `global-minor-modes`
+
+`describe-mode` reads the two lists Emacs keeps of the enabled minor
+modes: `local-minor-modes` is `DEFVAR_PER_BUFFER` (`buffer.c:5249`) and
+`global-minor-modes` a `defvar` (`subr.el:3200`), and **the generated
+command of `define-minor-mode` is what maintains them**
+(`easy-mmode.el:368-376`: an `add-to-list` when on, a `delq` when off).
+The tree had neither list; `define-minor-mode` now keeps them, in the
+C's shape - the buffer's slots for a local mode, `*global-minor-modes*`
+(a parameter, like its sibling `*minor-mode-list*`) for a `:global`
+one.
+
+**One spelling difference**: the C stores the mode's *function* symbol;
+here the list holds the mode's *symbol*, because that is what
+`minor-mode-alist` is keyed by and what `documentation` finds the
+mode's command record from.
+
+## `describe-mode` (help-fns.el:2223, :2312)
+
+Ported: the local-minor-modes line, the major mode's name and
+documentation (its `\{mode-map}` now substitutes - the 1E form is what
+this needed), the global-minor-modes section, and
+`describe-mode--minor-modes` with the C's pretty-name rule, the
+form-feed page breaks, the indicator line (through xdisp's two
+evaluation steps, now exported) and the final paragraph fill.
+
+**`describe-mode-outline` is t, Emacs 31's default** (`help-fns.el:2216`),
+so the default output is the outline variant: a "Major mode %S"
+heading, "The major mode is NAME mode:", and a "Local minor mode %S"
+heading per minor mode - carried as text and with the heading's
+`outline-level` property. What is *not* carried is `outline-minor-mode`
+itself (the folding), because there is no outline mode here; the
+properties are inert data. With the option off, the C's other layout
+(the "Minor mode enabled in this buffer:" sentence and the `` page
+breaks) is the one printed.
+
+**Also not carried**: the file/line clause, `help-fns--list-local-commands`
+(it needs `mapatoms` and `command-modes`), buttons, and
+`help-split-fundoc` (no usage lines here).
+
+Measured: a text-mode buffer with `auto-fill-mode` on describes as
+"The major mode is Text mode:" plus the mode's documentation, and
+"Minor mode enabled in this buffer: Auto Fill minor mode (indicator
+Fill):\n..." - the same sentences Emacs prints.
+
+## The two environment traps this cost
+
+1. **`delq` was not imported into `easy-mmode.scm`.** The macro's
+   template resolves identifiers in the *expanding* library, and under
+   interpretation an unimported core binding is "Unbound variable:
+   delq" - while the same tree with a warm compile cache ran fine
+   (psyntax had resolved it in the compiled image). The suite runner
+   uses a fresh `XDG_CACHE_HOME`, so it runs everything interpreted and
+   caught what a direct `guile -s` did not. **When the runner and a
+   direct run disagree, believe the runner: it is the source build.**
+2. **A macro change needs every *user* of the macro recompiled.** After
+   `define-minor-mode` gained the list maintenance, `auto-fill-mode`
+   still behaved the old way because `fill.scm`'s `.go` had the old
+   expansion baked in - the source was unchanged, so `--no-auto-compile`
+   happily loaded the stale image. The cure is the tree-wide sweep
+   (`find schemacs -name '*.scm'` through `compile-file`), not deleting
+   the cache.

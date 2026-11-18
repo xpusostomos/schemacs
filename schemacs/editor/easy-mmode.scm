@@ -55,11 +55,11 @@
     ;; and `syntax->datum' how a clause's keyword is read.
     ;; `quasisyntax' and `unsyntax' are what the templates below are
     ;; written with - `#`' and `#,' - and `(scheme base)' has neither.
-    (only (guile) datum->syntax format identifier? quasisyntax syntax
+    (only (guile) datum->syntax delq format identifier? quasisyntax syntax
           syntax->datum syntax-case unsyntax unsyntax-splicing)
     (only (schemacs editor subr)
           add-hook add-minor-mode remove-hook run-hooks string-replace
-          *after-change-major-mode-hook*)
+          *after-change-major-mode-hook* *global-minor-modes*)
     (only (schemacs editor buffer)
           buffer-list buffer-local-value current-buffer
           set-buffer-local-value! with-current-buffer)
@@ -374,6 +374,48 @@
                                     (if (eq? arg 'toggle)
                                         (not (#,get))
                                         (not (and (number? arg) (< arg 1)))))
+                                   ;; "Keep minor modes list up to date."
+                                   ;; (`easy-mmode.el:371`): the enabled
+                                   ;; local modes go in the buffer's
+                                   ;; `local-minor-modes`, the `:global`
+                                   ;; ones in `global-minor-modes`, and
+                                   ;; off is a `delq`. The list holds the
+                                   ;; mode's *symbol* here - what
+                                   ;; `minor-mode-alist` is keyed by and
+                                   ;; what `documentation` finds the
+                                   ;; mode's command record from.
+                                   #,(if globalp
+                                         #`(if (#,get)
+                                               (unless (memq #,quoted-mode
+                                                             (*global-minor-modes*))
+                                                 (*global-minor-modes*
+                                                  (cons #,quoted-mode
+                                                        (*global-minor-modes*))))
+                                               (*global-minor-modes*
+                                                (delq #,quoted-mode
+                                                      (*global-minor-modes*))))
+                                         #`(if (#,get)
+                                               (unless (memq #,quoted-mode
+                                                             (buffer-local-value
+                                                              (current-buffer)
+                                                              'local-minor-modes
+                                                              '()))
+                                                 (set-buffer-local-value!
+                                                  (current-buffer)
+                                                  'local-minor-modes
+                                                  (cons #,quoted-mode
+                                                        (buffer-local-value
+                                                         (current-buffer)
+                                                         'local-minor-modes
+                                                         '()))))
+                                               (set-buffer-local-value!
+                                                (current-buffer)
+                                                'local-minor-modes
+                                                (delq #,quoted-mode
+                                                      (buffer-local-value
+                                                       (current-buffer)
+                                                       'local-minor-modes
+                                                       '())))))
                                    #,@body
                                    ;; a hook here is a parameter holding
                                    ;; its list, so what `run-hooks' is

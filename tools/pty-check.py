@@ -2526,6 +2526,15 @@ def check_help_describe():
                  b"forward-char", RET], path)
     if "forward-char (" not in out:
         problems.append("C-h w did not list C-f: %r" % out[-300:])
+
+    # C-h m: the .txt buffer is in text-mode, so the outline heading
+    # (`describe-mode-outline` is t in Emacs 31 too) names it.
+    out = drive([C_h + b"m"], path)
+    if "Major mode text-mode" not in out:
+        problems.append("C-h m did not name the major mode: %r" % out[-300:])
+    if "The major mode is " not in out:
+        problems.append("C-h m did not describe the major mode: %r"
+                        % out[-300:])
     return problems
 
 

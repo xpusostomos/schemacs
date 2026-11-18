@@ -32,6 +32,7 @@
     (except (schemacs editor files)  default-directory)
     (schemacs editor replace)
     (schemacs editor diredc)
+    (schemacs editor help-fns)
     (schemacs editor dired)
     (schemacs editor mule)
     (schemacs editor fill)
@@ -79,7 +80,6 @@
     (schemacs editor icons)
     (schemacs editor easy-mmode)
     (except (schemacs editor window)  *cursor-in-echo-area* window-live-p window-normal-size window-size)
-    (schemacs editor help-fns)
     (schemacs editor novice)
     (schemacs editor warnings)
     (schemacs editor doc)
@@ -133,6 +133,7 @@
     %for-each-marker
     %frame-menu-bar-lines
     %frame-tab-bar-lines
+    %help-arg
     %kill-buffer
     %lisp-el-special-forms-and-macros
     %mark-marker
@@ -276,6 +277,7 @@
     *delete-horizontal-space-function*
     *describe-bindings-show-prefix-commands*
     *describe-function-1-function*
+    *describe-mode-outline*
     *directory-abbrev-alist*
     *directory-files-no-dot-files-regexp*
     *dired-actual-switches*
@@ -377,6 +379,7 @@
     *gap-bytes-dfl*
     *gap-bytes-min*
     *get-text-property-function*
+    *global-minor-modes*
     *global-mode-string*
     *goal-column*
     *graft-intervals-function*
@@ -1210,6 +1213,8 @@
     describe-map
     describe-map--align-section
     describe-map--fill-columns
+    describe-mode
+    describe-mode--minor-modes
     describe-variable
     detach-marker
     detect-coding-bytes
@@ -2205,6 +2210,8 @@
     minibuffer-window-active-p
     minibuffer-with-setup-hook
     minibufferp
+    minor-mode-indicator-value
+    minor-mode-lighter
     modal-lookup-state-key-index
     modal-lookup-state-keymaps
     modal-lookup-state-step!

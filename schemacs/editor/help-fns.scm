@@ -41,12 +41,22 @@
 
   (import
     (scheme base)
-    (only (guile) caddr)
+    (only (guile) caddr sort string<?)
     (only (schemacs editor editfns)
           insert point point-min eolp bolp delete-region save-excursion goto-char
-          char-before line-beginning-position buffer-string format)
-    (only (schemacs editor search) re-search-backward)
-    (only (schemacs editor fill) fill-region-as-paragraph)
+          char-before line-beginning-position buffer-string format forward-line
+          point-max)
+    (only (schemacs editor search) re-search-backward re-search-forward)
+    (only (schemacs editor fill) fill-region-as-paragraph fill-paragraph)
+    (only (schemacs editor paragraphs) forward-paragraph)
+    (only (schemacs editor buffer) buffer-local-value current-buffer
+          *current-buffer* with-current-buffer)
+    (only (schemacs editor subr) *minor-mode-alist* *global-minor-modes*
+          replace-regexp-in-string)
+    (only (schemacs editor casefiddle) capitalize)
+    ;; the two steps of a minor mode's indicator, `xdisp.scm`'s
+    (only (schemacs editor xdisp) minor-mode-indicator-value
+          minor-mode-lighter)
     (only (schemacs editor command)
           define-command command-type? command-name command-record-named
           command-record-of command-procedure called-interactively?)
@@ -54,7 +64,7 @@
     (only (schemacs editor help)
           with-help-window help-buffer help-setup-xref
           help--key-description-fontified *describe-function-1-function*
-          help-map)
+          help-map %help-arg)
     (only (schemacs editor keyboard)
           where-is-internal command-remapping *overriding-local-map* undefined)
     (only (schemacs editor keymap) keymapp define-key *default-keymap*)
@@ -63,10 +73,13 @@
     (only (schemacs editor intervals) get)
     (only (schemacs editor doc) documentation documentation-property)
     (only (schemacs editor custom)
-          custom-variable-p custom--standard-value)
-    (only (schemacs editor cmds) self-insert-command))
+          custom-variable-p custom--standard-value define-custom)
+    (only (schemacs editor textprop) put-text-property)
+    (only (schemacs editor cmds) self-insert-command beginning-of-line))
 
-  (export describe-function describe-function-1 help-fns--key-bindings
+  (export *describe-mode-outline*
+          describe-mode describe-mode--minor-modes
+          describe-function describe-function-1 help-fns--key-bindings
           help-fns--insert-bindings help-fns--obsolete
           help-fns--ensure-empty-line ensure-empty-lines
           describe-variable)
@@ -305,6 +318,144 @@
         (insert (or doc-raw "Not documented."))
         #f))
 
+    (define-custom *describe-mode-outline* #t
+      "Non-nil enables outlines in the output buffer of `describe-mode'."
+      :type 'boolean
+      :group 'help)
+
+    (define (describe-mode--minor-modes modes global? buffer)
+      ;; GNU Emacs's `describe-mode--minor-modes' (`help-fns.el:2312`):
+      ;; one line naming the mode, then its full documentation under a
+      ;; form-feed page break. The pretty name drops a trailing
+      ;; `-minor-mode'/`-mode' (`(capitalize (replace-regexp-in-string
+      ;; "\\(\\(-minor\\)?-mode\\)?\\'" "" ...))').
+      ;;
+      ;; Emacs's file-sorted `seq-sort #'string<' is a sort on the
+      ;; *symbol names*, as ours is.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (mode)
+         (let ((pretty (capitalize
+                        (replace-regexp-in-string
+                         "\\(\\(-minor\\)?-mode\\)?\\'"
+                         ""
+                         (symbol->string mode)))))
+           (if (not (*describe-mode-outline*))
+               (insert " " pretty)
+               (begin
+                 (goto-char (point-max))
+                 (put-text-property
+                  (point)
+                  (begin
+                    (insert (if global? "Global" "Local")
+                            (format " minor mode %s" mode))
+                    (point))
+                  'outline-level
+                  1)
+                 (insert "\n\n")))
+           (save-excursion
+             (unless (*describe-mode-outline*)
+               (goto-char (point-max))
+               (insert "\n\n\f\n"))
+             (insert pretty)
+             (let* ((entry (assq mode (*minor-mode-alist*)))
+                    (indicator (if entry
+                                   (minor-mode-lighter
+                                    (minor-mode-indicator-value
+                                     buffer (cdr entry)))
+                                   "")))
+               (insert (format " minor mode (%s):\n"
+                               (if (zero? (string-length indicator))
+                                   "no indicator"
+                                   (format "indicator%s" indicator))))
+               (insert (or (parameterize ((*current-buffer* buffer))
+                             (documentation mode))
+                           "No docstring"))
+               (when (*describe-mode-outline*)
+                 (insert "\n\n"))))))
+       (sort (append modes '())
+             (lambda (a b) (string<? (symbol->string a) (symbol->string b)))))
+      (unless (*describe-mode-outline*)
+        (forward-line -1)
+        (fill-paragraph #f)
+        (forward-paragraph 1)
+        (ensure-empty-lines 1))
+      #f)
+
+    (define-command (describe-mode . rest)
+      ;; GNU Emacs's `describe-mode' (`help-fns.el:2223'): "Display
+      ;; documentation of current major mode and minor modes. A brief
+      ;; summary of the minor modes comes first, followed by the major
+      ;; mode description. This is followed by detailed descriptions of
+      ;; the minor modes, each on a separate page."
+      ;;
+      ;; **`local-minor-modes` and `global-minor-modes` are the lists
+      ;; `define-minor-mode`'s generated command now keeps** - before
+      ;; this, nothing in the tree tracked them.
+      ;;
+      ;; **Not carried**: `describe-mode-outline`, the file/line
+      ;; clause, `help-fns--list-local-commands` (it needs `mapatoms`
+      ;; and `command-modes`), buttons, and `help-split-fundoc` (no
+      ;; usage lines here).
+      ;;--------------------------------------------------------------
+      "Display documentation of current major mode and minor modes.
+A brief summary of the minor modes comes first, followed by the
+major mode description.  This is followed by detailed
+descriptions of the minor modes, each on a separate page.
+
+For this to work correctly for a minor mode, the mode's indicator
+variable \(listed in `minor-mode-alist') must also be a function
+whose documentation describes the minor mode.
+
+If called from Lisp with a non-nil BUFFER argument, display
+documentation for the major and minor modes of that buffer."
+      (interactive)
+      (let* ((buffer (or (%help-arg rest 0) (current-buffer)))
+             (local-minors (buffer-local-value buffer 'local-minor-modes '())))
+        (help-setup-xref (list describe-mode buffer)
+                         (called-interactively? describe-mode))
+        (with-help-window (help-buffer)
+          (with-current-buffer (help-buffer)
+            ;; "Add the local minor modes at the start."
+            (when (pair? local-minors)
+              (unless (*describe-mode-outline*)
+                (insert (format "Minor mode%s enabled in this buffer:"
+                                (if (> (length local-minors) 1) "s" ""))))
+              (describe-mode--minor-modes local-minors #f buffer))
+            ;; "Document the major mode."
+            (let ((major (buffer-local-value buffer 'major-mode
+                                             'fundamental-mode)))
+              (when (*describe-mode-outline*)
+                (goto-char (point-min))
+                (put-text-property
+                 (point)
+                 (begin
+                   (insert (format "Major mode %s" major))
+                   (point))
+                 'outline-level
+                 1)
+                (insert "\n\n"))
+              (insert "The major mode is ")
+              (insert (buffer-local-value buffer 'mode-name "Fundamental"))
+              (insert " mode:\n\n")
+              (insert (or (parameterize ((*current-buffer* buffer))
+                            (documentation major))
+                          "Not documented.")))
+            (ensure-empty-lines 1)
+            ;; "Insert the global minor modes after the major mode."
+            (when (pair? (*global-minor-modes*))
+              (unless (*describe-mode-outline*)
+                (insert (format "Global minor mode%s enabled:"
+                                (if (> (length (*global-minor-modes*)) 1)
+                                    "s"
+                                    ""))))
+              (describe-mode--minor-modes (*global-minor-modes*) #t buffer)
+              (unless (*describe-mode-outline*)
+                (when (re-search-forward "^\f" #f #t)
+                  (beginning-of-line)
+                  (ensure-empty-lines 1))))
+            #f))))
+
     (define-command (describe-function function)
       ;; GNU Emacs's `describe-function' (`help-fns.el:298`): "Display
       ;; the full documentation of FUNCTION (a symbol)."
@@ -388,4 +539,6 @@ Returns the documentation as a string, also."
     (define-key help-map (kbd "f") describe-function)
     (define-key help-map (kbd "v") describe-variable)
     (define-key *default-keymap* (kbd "C-h f") describe-function)
-    (define-key *default-keymap* (kbd "C-h v") describe-variable)))
+    (define-key *default-keymap* (kbd "C-h v") describe-variable)
+    (define-key help-map (kbd "m") describe-mode)
+    (define-key *default-keymap* (kbd "C-h m") describe-mode)))

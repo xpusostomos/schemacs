@@ -11082,3 +11082,26 @@ variable, not the call's return value.**
 Left in the help pass: `C-h o` describe-symbol, `C-h m` describe-mode,
 `C-h s`/`describe-vector` over char-tables (a chartab walk), and the
 menu walk in `help-fns--insert-menu-bindings`.
+
+# `C-h m` describe-mode (2026-11-18)
+
+- **`define-minor-mode` now keeps `local-minor-modes`/`global-minor-modes`**
+  as Emacs's generated command does - the lists hold the mode's *symbol*
+  here (the alist's key), not the function symbol. `*global-minor-modes*`
+  is a parameter in subr.scm beside `*minor-mode-list*`.
+- **`describe-mode`** reads them for the "Minor mode enabled in this
+  buffer:" section, then the major mode's name and documentation - which
+  is where `\{mode-map}` finally substitutes - then the global modes.
+  The indicator line reuses xdisp's `minor-mode-indicator-value` /
+  `minor-mode-lighter` (now exported) rather than re-walking the alist.
+- **Two traps, both about compiled images**:
+  1. a macro template resolves names in the *expanding* library, and
+     under interpretation an unimported core binding is unbound
+     (`delq`); the suite runner's fresh cache runs source, so **when the
+     runner and a direct run disagree, the runner is right**;
+  2. after changing a macro, every library that *uses* it must be
+     recompiled - `fill.scm`'s `.go` kept the old expansion and made
+     `auto-fill-mode` look broken until the tree-wide sweep ran.
+
+Left: `C-h o` describe-symbol, `C-h s`/`describe-vector` over
+char-tables, the `help-fns--insert-menu-bindings` menu walk.

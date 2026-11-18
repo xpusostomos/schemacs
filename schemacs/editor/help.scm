@@ -107,6 +107,7 @@
           describe-buffer-bindings describe-bindings
           help-map *help-mode-function* *help-xref-following*
           *help-xref-stack-item* *describe-bindings-show-prefix-commands*
+          %help-arg
           *describe-function-1-function*
           describe-key describe-key-briefly where-is
           help--analyze-key help--filter-info-list
