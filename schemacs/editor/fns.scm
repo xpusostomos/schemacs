@@ -59,6 +59,9 @@
     (only (schemacs editor buffer-text)
           buffer-text-ref buffer-text-base buffer-text-for-each)
     (only (schemacs editor marker) marker-position markerp)
+    ;; the version comparison `string-version-lessp' is written over -
+    ;; gnulib's `lib/filevercmp.c'.
+    (only (schemacs editor filevercmp) %filevercmp)
     (only (guile) LC_COLLATE LC_CTYPE logxor)
     )
 
@@ -74,6 +77,7 @@
           plist-get plist-put
           string-collate-lessp
           string-lessp
+          string-version-lessp
           )
 
   (begin
@@ -391,6 +395,33 @@
       ;;--------------------------------------------------------------
       (let ((u (compare-strings s1 0 #f s2 0 #f #f)))
         (and (integer? u) (< u 0))))
+
+    (define (string-version-lessp s1 s2)
+      ;; GNU Emacs's `string-version-lessp' (fns.c:577): "Return non-nil
+      ;; if S1 is less than S2, as version strings.
+      ;;
+      ;; This function compares version strings S1 and S2:
+      ;;    1) By prefix lexicographically.
+      ;;    2) Then by version (similarly to version comparison of
+      ;;       Debian's dpkg). Leading zeros in version numbers are
+      ;;       ignored.
+      ;;    3) If both prefix and version are equal, compare as ordinary
+      ;;       strings.
+      ;;
+      ;; For example, \"foo2.png\" compares less than \"foo12.png\".
+      ;; Case is significant. Symbols are also allowed; their print
+      ;; names are used instead."
+      ;;
+      ;; The C hands the two strings' bytes to `filenvercmp'
+      ;; (`filevercmp.c:140'); the comparison itself is
+      ;; `(schemacs editor filevercmp)'. The symbol coercion is the
+      ;; C's: a symbol's print name, then `CHECK_STRING' on each.
+      ;;--------------------------------------------------------------
+      (let ((s1 (if (symbol? s1) (symbol->string s1) s1))
+            (s2 (if (symbol? s2) (symbol->string s2) s2)))
+        (unless (string? s1) (error "Wrong type argument: stringp" s1))
+        (unless (string? s2) (error "Wrong type argument: stringp" s2))
+        (< (%filevercmp s1 s2) 0)))
 
     (define (string-collate-lessp s1 s2 . args)
       ;; GNU Emacs's `string-collate-lessp' (fns.c): "Return t if first

@@ -25,6 +25,7 @@
 
 (define-library (schemacs editor imports)
   (import
+    (schemacs editor filevercmp)
     (schemacs editor frame)
     (schemacs editor insdel)
     (except (schemacs editor buffer)  *current-buffer*)
@@ -126,6 +127,7 @@
     %buffer-modtime-size
     %class-in
     %count-lines
+    %filevercmp
     %for-each-marker
     %frame-menu-bar-lines
     %frame-tab-bar-lines
@@ -2836,6 +2838,7 @@
     string-trim
     string-trim-left
     string-trim-right
+    string-version-lessp
     string-width
     strip-undo-boundaries
     subregexp-context-p

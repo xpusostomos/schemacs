@@ -156,6 +156,7 @@
         (schemacs editor env)
         (schemacs editor faces)
         (schemacs editor fileio)
+        (schemacs editor filevercmp)
         (schemacs editor files)
         (schemacs editor fns)
         (schemacs editor font)
