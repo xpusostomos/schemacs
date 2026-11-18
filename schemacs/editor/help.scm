@@ -79,8 +79,11 @@
     (only (schemacs editor frame) selected-window window-body-width)
     (only (schemacs editor window) display-buffer set-window-hscroll!)
     (only (schemacs editor simple) make-separator-line)
-    (only (schemacs editor character) kbd *tab-width* event-modifiers)
-    (only (schemacs editor indentc) current-column)
+    (only (schemacs editor character) kbd *tab-width* event-modifiers
+          *max-char* *max-5-byte-char*)
+    (only (schemacs editor chartab)
+          char-table? char-table-ref-and-range char-table-default)
+    (only (schemacs editor indentc) current-column indent-to)
     ;; `describe-key`'s mouse coordinates and the key it runs.
     (only (schemacs editor subr) event-start event-end)
     (only (schemacs editor mouse) posn-set-point)
@@ -109,6 +112,7 @@
           *help-xref-stack-item* *describe-bindings-show-prefix-commands*
           %help-arg
           *describe-function-1-function*
+          describe-vector
           describe-key describe-key-briefly where-is
           help--analyze-key help--filter-info-list
           help--binding-undefined-p help-key-description)
@@ -773,6 +777,67 @@
                            (insert "\n")
                            (insert-char #\tab 2))))
                    columns))))))))
+
+    (define (describe-vector vector . rest)
+      ;; GNU Emacs's `describe-vector' (`keymap.c:3042'): "Insert a
+      ;; description of contents of VECTOR. This is text showing the
+      ;; elements of vector matched against indices. DESCRIBER is the
+      ;; output function used; nil means use `princ'."
+      ;;
+      ;; **A placement departure**: the C keeps this in keymap.c, but
+      ;; its body inserts into the current buffer and walks a char-table
+      ;; with `chartab.scm`'s range reader, so it lives here with the
+      ;; other describers.
+      ;;
+      ;; This is the static `describe_vector`'s char-table path
+      ;; (`keymap.c:3147`): the walk is in two passes over the character
+      ;; space - `MAX_5_BYTE_CHAR' and below, then the eight-bit range -
+      ;; and each pass runs `char_table_ref_and_range`, which answers a
+      ;; whole run of equal values at once. The vector path (`!CHAR_TABLE`)
+      ;; has no counterpart here: this tree has no Lisp-visible plain
+      ;; vectors as keymaps, only char-tables and keymap records.
+      ;;--------------------------------------------------------------
+      (let* ((describer (or (%help-arg rest 0) #f))
+             (fun (or describer
+                      (lambda (elt)
+                        (insert (if (string? elt) elt (format "%S" elt))))))
+             (stop (+ *max-5-byte-char* 1))
+             (to (+ *max-char* 1)))
+        (let loop ((i 0) (limit stop) (first #t))
+          (cond
+           ((>= i to) #f)
+           (else
+            (let* ((starting i)
+                   (from-box (cons i #f))
+                   (to-box (cons (- limit 1) #f))
+                   (val (char-table-ref-and-range vector i from-box to-box))
+                   (range-beg (car from-box))
+                   (range-end (car to-box))
+                   (definition (get-keyelt val #f)))
+              (unless (or (not definition) (null? definition))
+                (when first (insert "\n"))
+                (insert (help--key-description-fontified (list starting)))
+                (when (not (eqv? range-end starting))
+                  (insert " .. ")
+                  (insert (help--key-description-fontified (list range-end))))
+                ;; `describe_vector_princ`: "Findent_to (16, 1)" then the
+                ;; describer, then a newline.
+                (indent-to 16)
+                (fun definition)
+                (insert "\n")
+                (set! first #f))
+              (let ((next (+ range-end 1)))
+                (loop next
+                      (if (= next limit) to limit)
+                      first))))))
+        ;; "If CHAR_TABLE_P && ! NILP (XCHAR_TABLE (vector)->defalt)".
+        (let ((default (char-table-default vector)))
+          (unless (or (not default) (null? default))
+            (insert "default")
+            (indent-to 16)
+            (fun default)
+            (insert "\n")))
+        #f))
 
     (define (%help--menu-bar-prefix? prefix)
       ;; `help--describe-map-tree`'s "element that is for the menu bar":

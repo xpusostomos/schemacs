@@ -2535,6 +2535,12 @@ def check_help_describe():
     if "The major mode is " not in out:
         problems.append("C-h m did not describe the major mode: %r"
                         % out[-300:])
+
+    # C-h s: the syntax table's rows, with the describer's text.
+    out = drive([C_h + b"s"], path)
+    if "which means:" not in out or "punctuation" not in out:
+        problems.append("C-h s did not describe the syntax table: %r"
+                        % out[-300:])
     return problems
 
 

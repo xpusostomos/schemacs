@@ -41,7 +41,8 @@
         help--analyze-key help--filter-info-list
         help--binding-undefined-p help-map)
   (only (schemacs editor help-fns) describe-function describe-variable
-        describe-mode *describe-mode-outline*)
+        describe-mode *describe-mode-outline* describe-syntax
+        internal-describe-syntax-value)
   ;; the modes `describe-mode` is tested on
   (schemacs editor text-mode)
   (only (schemacs editor fill) auto-fill-mode)
@@ -430,5 +431,52 @@
 
 (test-equal #t
   (eq? (lookup-key *default-keymap* (kbd "C-h m")) describe-mode))
+
+;; ------------------------------------------------------------------
+;; `C-h s` `describe-syntax` and the char-table walk under it.
+;;
+;; The rows quoted are Emacs 31.1's own for the standard syntax table -
+;; measured with `describe-syntax` in `--batch`, byte for byte for the
+;; first three dozen rows (the walk's range merging, the tab padding to
+;; column 16 and the "which means:" text). What is *not* byte-identical
+;; further down is the table's data, not the walk: this tree's
+;; `standard-syntax-runs` stop at the BMP, so the high planes come out
+;; as one run where Emacs has script runs, and the eight-bit characters
+;; print as this tree's `[N]` spelling (the standing byte-character
+;; display departure).
+
+(define (describe-syntax-string)
+  (help-tests-yield
+   (lambda ()
+     (describe-syntax)
+     (with-current-buffer (get-buffer-create "*Help*")
+       (buffer-string)))))
+
+(test-assert "describe-syntax's rows are Emacs's"
+  (let ((s (describe-syntax-string)))
+    (and (string-contains s "C-@ .. C-h\t. \twhich means: punctuation")
+         (string-contains s "TAB .. C-j\t  \twhich means: whitespace")
+         (string-contains s "SPC\t\t  \twhich means: whitespace")
+         (string-contains s "(\t\t()\twhich means: open, matches )")
+         (string-contains s ")\t\t)(\twhich means: close, matches (")
+         (string-contains s "0 .. 9\t\tw \twhich means: word")
+         (string-contains s "default\t\t  \twhich means: whitespace"))))
+
+;; The describer itself: a hand-built entry in each of its arms.
+(test-equal '("default" "invalid" "w \twhich means: word")
+  (help-tests-yield
+   (lambda ()
+     (internal-describe-syntax-value #f)
+     (let ((a (buffer-string)))
+       (erase-buffer)
+       (internal-describe-syntax-value 42)
+       (let ((b (buffer-string)))
+         (erase-buffer)
+         (internal-describe-syntax-value (cons 2 #f))
+         (list a b (buffer-string)))))))
+
+(test-equal '(#t #t)
+  (list (eq? (lookup-key *default-keymap* (kbd "C-h s")) describe-syntax)
+        (eq? (lookup-key help-map (kbd "s")) describe-syntax)))
 
 (test-end "schemacs_editor_help")

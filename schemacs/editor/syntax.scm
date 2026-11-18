@@ -91,6 +91,10 @@
    ;; syntax.c's DEFUNs
    syntax-table-p syntax-table standard-syntax-table copy-syntax-table
    set-syntax-table char-syntax syntax-class-to-char matching-paren
+   ;; the flag readers `internal-describe-syntax-value` (help-fns.scm)
+   ;; prints - `SYNTAX_FLAGS_*` (`syntax.c:61`)
+   %comstart-first? %comstart-second? %comend-first? %comend-second?
+   %prefix-flag? %styleb-bit %stylec2 %nested?
    ;; `syntax-after` is `subr.el:6563`'s, not `syntax.c`'s - placed here
    ;; because it reads the `syntax-table` text property through
    ;; `get-char-property`, which is this library's neighbour.

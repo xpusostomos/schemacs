@@ -7041,3 +7041,75 @@ Fill):\n..." - the same sentences Emacs prints.
    happily loaded the stale image. The cure is the tree-wide sweep
    (`find schemacs -name '*.scm'` through `compile-file`), not deleting
    the cache.
+
+# `C-h s` describe-syntax, and describe-vector over a char-table (2026-11-18)
+
+## `describe-vector` is in `help.scm`
+
+**A placement departure**: the C DEFUN is `keymap.c:3042`, but its body
+inserts into the current buffer and walks the char-table with this
+tree's `chartab.scm`, so it lives beside the other describers. It
+carries the C's static `describe_vector`'s **char-table path**: the
+two-pass walk (`MAX_5_BYTE_CHAR` then the eight-bit range),
+`char_table_ref_and_range` for each run, the `" .. "` range rows, the
+`indent_to (16, 1)` + describer + newline, and the final `default` row.
+
+**Only the char-table path is carried.** The C's vector path is for
+Lisp-visible plain vectors used as keymaps; this tree's keymaps are
+records and its key walk already covers them (`describe-map`'s sparse
+walk).
+
+**The C's `Findent_to (16, 1)` is `indent-to`** (`indentc.scm`), which
+means the padding is a *column* count - and that is where one of the
+two measured differences in `C-h s`'s output comes from: for the raw
+C1 characters Emacs counts them two columns wide and this tree one, so
+one row's tab count differs. A width question in the column machinery,
+not in the describer.
+
+## `internal-describe-syntax-value` is in `help-fns.scm`
+
+**A placement departure**: `syntax.c:1305`'s DEFUN, but it inserts into
+the current buffer and its last line calls `substitute-command-keys` -
+both above `syntax.scm`. The flag readers it needs
+(`SYNTAX_FLAGS_*`, `syntax.c:61`) are exported from `syntax.scm` for it.
+
+## `describe-syntax` (help-fns.el:2027)
+
+A direct port: the buffer's `syntax-table`, `describe-vector` with the
+describer, then each parent table under "The parent syntax table is:".
+
+Measured against Emacs 31.1 on the standard table: **the first three
+dozen rows are byte-identical**, including the range merging
+(`C-@ .. C-h`), the tab padding and the `( )` matches text. Two
+classes of difference remain, and neither is the walk:
+
+1. **The high planes are one run where Emacs has script runs.** This
+   tree's `standard-syntax-runs` (`characters.scm`, transcribed from
+   Emacs's `char-syntax` answers) stop around U+1F3FF, so every
+   character above that falls to the table default and the walk
+   correctly reports one long run. **A data gap worth closing** by
+   re-running the transcription over the whole character space - the
+   walk will show it the moment the table has it.
+2. **Eight-bit characters print as `[N]`** in the row's key
+   description, where Emacs writes the raw bytes - the standing
+   byte-character display departure, not this command's.
+
+Nothing else in `describe-syntax` is scoped down: the parent-table loop
+and the describer's every arm (default / deeper char-table / invalid /
+the class letter and flags, the "which means:" words, matches, the
+comment-start/end sentences, the style and nestable notes and the
+prefix line) are the C's.
+
+## The bug this cost: `(vector starting)` applied the *parameter*
+
+`describe-vector`'s first argument is named `vector`, as Emacs names
+it - and the body builds a one-element key with `(vector starting)`.
+In a Lisp-1 that applies the char-table. The key is built as a *list*
+now (`keymark-index` reads a list of events as well as a vector), with
+a note; the same wall as `insert` in `describe-key-briefly` and
+`minibuffer-message`'s TEXT.
+
+## Verification
+
+`help-tests.scm` 41 (the exact rows, the describer's three arms, the
+binding). The pty `help-describe` check drives `C-h s` too.

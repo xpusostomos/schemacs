@@ -41,7 +41,7 @@
 
   (import
     (scheme base)
-    (only (guile) caddr sort string<?)
+    (only (guile) caddr sort string<? logand most-positive-fixnum)
     (only (schemacs editor editfns)
           insert point point-min eolp bolp delete-region save-excursion goto-char
           char-before line-beginning-position buffer-string format forward-line
@@ -75,10 +75,21 @@
     (only (schemacs editor custom)
           custom-variable-p custom--standard-value define-custom)
     (only (schemacs editor textprop) put-text-property)
+    ;; `internal-describe-syntax-value` and `describe-syntax`
+    (only (schemacs editor syntax)
+          syntax-table syntax-class-to-char
+          swhitespace spunct sword ssymbol sopen sclose squote sstring
+          smath sescape scharquote scomment sendcomment sinherit
+          scomment-fence sstring-fence smax
+          %comstart-first? %comstart-second? %comend-first? %comend-second?
+          %prefix-flag? %styleb-bit %stylec2 %nested?)
+    (only (schemacs editor chartab) char-table? char-table-parent)
+    (only (schemacs editor help) substitute-command-keys describe-vector)
     (only (schemacs editor cmds) self-insert-command beginning-of-line))
 
   (export *describe-mode-outline*
           describe-mode describe-mode--minor-modes
+          describe-syntax internal-describe-syntax-value
           describe-function describe-function-1 help-fns--key-bindings
           help-fns--insert-bindings help-fns--obsolete
           help-fns--ensure-empty-line ensure-empty-lines
@@ -456,6 +467,118 @@ documentation for the major and minor modes of that buffer."
                   (ensure-empty-lines 1))))
             #f))))
 
+    (define (internal-describe-syntax-value syntax)
+      ;; GNU Emacs's `internal-describe-syntax-value' (`syntax.c:1305'):
+      ;; "Insert a description of the internal syntax description
+      ;; SYNTAX at point."
+      ;;
+      ;; **A placement departure**: the C keeps this in syntax.c, but it
+      ;; inserts into the current buffer and its last line calls
+      ;; `substitute-command-keys` - both above `syntax.scm`; the flag
+      ;; readers it needs are exported from there.
+      ;;--------------------------------------------------------------
+      (let ((value syntax))
+        (cond
+         ((not value) (insert "default"))
+         ((char-table? value) (insert "deeper char-table ..."))
+         ((not (pair? value)) (insert "invalid"))
+         (else
+          (let* ((first (car value))
+                 (match (cdr value)))
+            (if (not (integer? first))
+                (insert "invalid")
+                (let* ((syntax-code (logand first most-positive-fixnum))
+                       (code (logand syntax-code 255))
+                       (start1 (%comstart-first? syntax-code))
+                       (start2 (%comstart-second? syntax-code))
+                       (end1 (%comend-first? syntax-code))
+                       (end2 (%comend-second? syntax-code))
+                       (prefix (%prefix-flag? syntax-code))
+                       (comstyleb (not (zero? (%styleb-bit syntax-code))))
+                       (comstylec (not (zero? (%stylec2 syntax-code))))
+                       (comnested (%nested? syntax-code)))
+                  (if (>= code smax)
+                      (insert "invalid")
+                      (begin
+                        (insert (string (syntax-class-to-char code)))
+                        (if (not match)
+                            (insert " ")
+                            (insert (string (if (char? match)
+                                                match
+                                                (integer->char match)))))
+                        (when start1 (insert "1"))
+                        (when start2 (insert "2"))
+                        (when end1 (insert "3"))
+                        (when end2 (insert "4"))
+                        (when prefix (insert "p"))
+                        (when comstyleb (insert "b"))
+                        (when comstylec (insert "c"))
+                        (when comnested (insert "n"))
+                        (insert "\twhich means: ")
+                        (insert
+                         (cond ((= code swhitespace) "whitespace")
+                               ((= code spunct) "punctuation")
+                               ((= code sword) "word")
+                               ((= code ssymbol) "symbol")
+                               ((= code sopen) "open")
+                               ((= code sclose) "close")
+                               ((= code squote) "prefix")
+                               ((= code sstring) "string")
+                               ((= code smath) "math")
+                               ((= code sescape) "escape")
+                               ((= code scharquote) "charquote")
+                               ((= code scomment) "comment")
+                               ((= code sendcomment) "endcomment")
+                               ((= code sinherit) "inherit")
+                               ((= code scomment-fence) "comment fence")
+                               ((= code sstring-fence) "string fence")
+                               (else "invalid")))
+                        (when match
+                          (insert ", matches ")
+                          (insert (string (if (char? match)
+                                              match
+                                              (integer->char match)))))
+                        (when start1
+                          (insert ",\n\t  is the first character of a comment-start sequence"))
+                        (when start2
+                          (insert ",\n\t  is the second character of a comment-start sequence"))
+                        (when end1
+                          (insert ",\n\t  is the first character of a comment-end sequence"))
+                        (when end2
+                          (insert ",\n\t  is the second character of a comment-end sequence"))
+                        (when comstyleb (insert " (comment style b)"))
+                        (when comstylec (insert " (comment style c)"))
+                        (when comnested (insert " (nestable)"))
+                        (when prefix
+                          (insert (substitute-command-keys
+                                   ",\n\t  is a prefix character for `backward-prefix-chars'"))))))))))
+        syntax))
+
+    (define-command (describe-syntax . rest)
+      ;; GNU Emacs's `describe-syntax' (`help-fns.el:2027'): "Describe
+      ;; the syntax specifications in the syntax table of BUFFER. The
+      ;; descriptions are inserted in a help buffer, which is then
+      ;; displayed."
+      ;;--------------------------------------------------------------
+      "Describe the syntax specifications in the syntax table of BUFFER.
+The descriptions are inserted in a help buffer, which is then displayed.
+BUFFER defaults to the current buffer."
+      (interactive)
+      (let* ((buffer (or (%help-arg rest 0) (current-buffer)))
+             (table (parameterize ((*current-buffer* buffer))
+                      (syntax-table))))
+        (help-setup-xref (list describe-syntax buffer)
+                         (called-interactively? describe-syntax))
+        (with-help-window (help-buffer)
+          (with-current-buffer (help-buffer)
+            (describe-vector table internal-describe-syntax-value)
+            (let loop ((parent (char-table-parent table)))
+              (when parent
+                (insert "\nThe parent syntax table is:")
+                (describe-vector parent internal-describe-syntax-value)
+                (loop (char-table-parent parent))))
+            #f))))
+
     (define-command (describe-function function)
       ;; GNU Emacs's `describe-function' (`help-fns.el:298`): "Display
       ;; the full documentation of FUNCTION (a symbol)."
@@ -541,4 +664,6 @@ Returns the documentation as a string, also."
     (define-key *default-keymap* (kbd "C-h f") describe-function)
     (define-key *default-keymap* (kbd "C-h v") describe-variable)
     (define-key help-map (kbd "m") describe-mode)
-    (define-key *default-keymap* (kbd "C-h m") describe-mode)))
+    (define-key *default-keymap* (kbd "C-h m") describe-mode)
+    (define-key help-map (kbd "s") describe-syntax)
+    (define-key *default-keymap* (kbd "C-h s") describe-syntax)))

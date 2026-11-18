@@ -11105,3 +11105,27 @@ menu walk in `help-fns--insert-menu-bindings`.
 
 Left: `C-h o` describe-symbol, `C-h s`/`describe-vector` over
 char-tables, the `help-fns--insert-menu-bindings` menu walk.
+
+# `C-h s` describe-syntax (2026-11-18)
+
+- **`describe-vector` (help.scm, a placement departure) walks
+  char-tables**: the two-pass range walk, `char-table-ref-and-range`,
+  `indent-to 16`, the `default` row. Its vector path is not carried -
+  this tree's keymaps are records.
+- **`internal-describe-syntax-value`** is help-fns.scm's (syntax.c's
+  DEFUN, but it inserts and calls substitute-command-keys); syntax.scm
+  now exports the `SYNTAX_FLAGS_*` readers for it.
+- **`C-h s`** is bound and pty-checked. Measured: the standard table's
+  first three dozen rows are byte-identical to Emacs's.
+- **The two tail differences, both named in DEPARTURES.md**: the
+  high-plane syntax runs stop around U+1F3FF in `characters.scm`
+  (`standard-syntax-runs` - a transcription gap worth re-running over
+  the whole character space), and eight-bit characters print as
+  `[N]` where Emacs writes raw bytes (the standing departure).
+- **Trap**: a parameter named `vector` shadows the `vector`
+  constructor - `(vector x)` applied the char-table. Build keys as
+  lists.
+
+Left in the help pass: `C-h o` describe-symbol, `C-h ?`/help-for-help's
+`C-h i` alternatives, the menu walk in `help-fns--insert-menu-bindings`,
+and `describe-categories` (the category table itself is not ported).

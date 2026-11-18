@@ -128,6 +128,10 @@
     %buffer-modtime
     %buffer-modtime-size
     %class-in
+    %comend-first?
+    %comend-second?
+    %comstart-first?
+    %comstart-second?
     %count-lines
     %filevercmp
     %for-each-marker
@@ -138,12 +142,16 @@
     %lisp-el-special-forms-and-macros
     %mark-marker
     %marker-charpos
+    %nested?
     %nonexistent-modtime-nsecs
+    %prefix-flag?
     %row-beginning
     %row-of-position
     %run-command
     %set!keymap-order!
     %setup-syntax-table
+    %styleb-bit
+    %stylec2
     %text-editor-incr-modiff!
     %text-editor-newline-cache
     %transpose-subr
@@ -1215,7 +1223,9 @@
     describe-map--fill-columns
     describe-mode
     describe-mode--minor-modes
+    describe-syntax
     describe-variable
+    describe-vector
     detach-marker
     detect-coding-bytes
     detect-coding-system
@@ -1807,6 +1817,7 @@
     internal-auto-fill
     internal-complete-buffer
     internal-complete-buffer-except
+    internal-describe-syntax-value
     internal-get-lisp-face-attribute
     internal-lisp-face-attributes
     internal-pop-keymap
