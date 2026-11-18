@@ -6586,3 +6586,190 @@ error, the hook path, hook-nil-means-off, the query form's two
 answers, and `%run-command`'s bypass. The pty battery gained
 `disabled-command` (n refuses, SPC runs once, `!` enables for the
 session) and `narrow` now answers the prompt it pins.
+
+# `C-h b`: `describe-bindings` and the tree beneath it (2026-11-18)
+
+GNU Emacs's chain for the first of the help commands is
+`describe-bindings` (help.el:849) -> `describe-buffer-bindings`
+(keymap.c:2834) -> `help--describe-map-tree` (help.el:1638) ->
+`describe-map` (help.el:1770) -> `help--describe-vector`
+(keymap.c:3074) -> the static `describe_vector` (keymap.c:3147). What
+is ported, and the departures it carries, in the order a reader meets
+them.
+
+## `lookup-key` and `keymapp` (keymap.c:1264, :3012)
+
+`lookup-key` is `lookup_key_1`'s walk, with ACCEPT-DEFAULT's rule:
+a specific binding wins, and `(t . DEF)` is the fallback - but the
+`t` entry is the *specific* binding when the event asked for is the
+symbol `t` (`EQ (key, idx)` comes before `(t_ok && EQ (key, Qt))` in
+`access_keymap_1`). Measured in a probe, all four cases:
+
+| call | answer |
+|---|---|
+| event `f1` without ACCEPT-DEFAULT | nil |
+| event `f1` with ACCEPT-DEFAULT | the `(t . DEF)` binding |
+| event `t` without ACCEPT-DEFAULT | the `(t . DEF)` binding |
+| a map with no default, ACCEPT-DEFAULT | nil |
+
+**KEYMAP as a list of maps** is supported (the docstring's "KEYMAP can
+also be a list of keymaps"), in the C's order: a specific binding in
+any map wins, the *earliest* map's default is the fallback.
+
+**Not carried**: `possibly_translate_key_sequence` (there is no
+keyboard-translate-table here) and the menu-bar case-folding
+compatibility below the DEFUN (nothing here builds mixed-case menu
+symbols).
+
+`keymapp` is the record test. The C also answers t for a *symbol*
+whose function definition is a keymap; a symbol has no function here
+(`access-keymap`'s note says the same).
+
+## `get-local-map` (intervals.c:2176)
+
+Ported into `editfns.scm` - a **placement departure**: its two readers
+are `get-char-property` (`textprop.scm`) and `get-pos-property` (this
+library), and `intervals.scm` is below both. The C's widening around
+the two lookups is not carried because this tree's property readers
+take an absolute position and do not consult BEGV/ZV, so there is
+nothing to widen around.
+
+## `describe-map` has no vector half
+
+Emacs keeps ordinary-character bindings in a keymap's char-table or
+vector and walks them with `help--describe-vector`; every binding,
+character events included, is a sparse entry in this tree's keymap
+record, so the sparse walk covers them all. The vector half's own
+rules - the suppress test, the shadow test, the range merge - are the
+same rules the sparse walk applies.
+
+**The visible cost**: the char-table slot here is a *procedure* (the
+self-insert fallback), which nothing can enumerate. So `C-h b` lacks
+Emacs's `SPC .. ~  self-insert-command` row. This is the same
+deviation `map_keymap_internal` records, showing through the help
+buffer; closing it means giving `<keymap-type>` a describable
+representation for its fallback range, which is the representation
+change that note has always been about.
+
+`(eq definition (lookup-key map (vector event) t))` - the C's "ignore
+this definition if it is shadowed by an earlier one in the same
+keymap" - is carried but is vacuous for a hash-keyed map: an event
+appears once.
+
+## `describe-buffer-bindings` is in `help.scm` (keymap.c:2834)
+
+**A placement departure**: its whole body is calls to
+`help--describe-map-tree` plus the buffer state each section shows.
+
+The sections this tree can back: `overriding-terminal-local-map`,
+`overriding-local-map`, the `keymap` text property, each minor mode's
+map (`*minor-mode-map-alist*` with `buffer-local-value`), the buffer's
+own map (headed by the major mode's name), and `Global Bindings`.
+
+**Not carried, and why**:
+
+- the **keyboard-translate-table report** - there is no such table;
+- the **`key-translation-map` section** - no such variable here;
+- the **`input-decode-map` section** - it is the *terminal's*
+  (`xterm.scm`), which no editor library may import;
+- **`local-function-key-map`** - this tree's counterpart is
+  `*function-key-map*`, an alist of translations, not a keymap, so
+  there is nothing `help--describe-map-tree` can walk.
+
+Measured against Emacs 31.1 for the same crafted local map, the local
+section is character for character the same (entries, order, tab
+padding, the `C-c x` sub-entry in its own block). The separator line is
+the blank-line form on both: `emacs -nw` answers t to
+`(display-supports-face-attributes-p '(:underline t))` (measured in a
+pty), where `--batch` answers nil and prints dashes - which is why a
+batch differential shows dashes in Emacs's output and not here.
+
+A map with **no bindings** gets no section, in Emacs and here: a `.txt`
+buffer's text-mode map contributes no heading (measured on Emacs).
+
+## `help--describe-command`'s translation branch writes ASCII only
+
+`char-to-name` (`mule-cmds.el`) needs the Unicode name table, which is
+not carried, so the translation branch prints the key description
+alone where Emacs adds a tab and the character's name. Nothing in this
+tree reaches that branch yet (it needs a key-translation map).
+
+## `help-fns-function-name` without buttons
+
+Emacs's returns a *buttonized* string (an xref). The xref machinery is
+not carried, so the answer is the plain name: a symbol's name, a
+command's name from its record, `#<procedure NAME>` for a named
+procedure, `#<procedure>` for an anonymous one - this tree's shapes,
+since a keymap's binding is a procedure or a command record here and
+never a subr.
+
+## `with-help-window`, `help-buffer`, `help-setup-xref`
+
+`help--window-setup` carries the C's nesting including
+`inhibit-read-only` around the body (a help command inserts into a
+read-only buffer), and `temp-buffer-window-show`'s tail
+(`window.el:113`): unmodified and read-only, point at `point-min`
+*before* the display, then `display-buffer` and the window's hscroll
+reset to 0. The point-before-display step is what makes the help
+window open at the top; without it the window showed the buffer's end
+(the point the inserts left).
+
+**Not carried**: `help-window-point-marker`, the
+`temp-buffer-window-setup-hook` run, `help-make-xrefs` (no buttons),
+`buffer-disable-undo` (undo is not on in a fresh buffer here),
+`help-window-setup`'s reselect rules, and the xref stack in
+`help-setup-xref` (the item is recorded; there is nowhere to push a
+stack). `describe-bindings-outline` and its outline-mode setup are not
+carried either, and with them the hiding of the ^L separators.
+
+`help-buffer`'s `help-xref-following` is a **plain variable** here
+(Emacs `setq`s it; nothing `let`-binds it) - and reading it as a
+parameter cost a round of "Wrong type to apply: #f".
+
+## `help-mode`
+
+The mode and its map only: `special-mode`'s parent map gives `q`,
+SPC/DEL, `<`/`>` and `g`. Emacs's own entries (n/p/l/r, C-c C-b/f,
+s/I/i/c) name the xref, info and customize commands that are not
+carried, as are the context menu, the tool bar, bookmarks, the
+composite `:parent` (no `make-composed-keymap` here) and
+`help-mode-revert-buffer`.
+
+**The seam**: `help-mode` is installed into `*help-mode-function*` as
+`help-mode.scm` loads, because help-mode.el requires help.el and the
+mode is above it. **A front end must import `(schemacs editor
+help-mode)` for `C-h b` to land in the mode** - both do now - which is
+Emacs's autoload in this tree's spelling. A unit test that imports
+only `help` gets an unmoded `*Help*`, correctly.
+
+## `make-separator-line` (simple.el:760)
+
+Ported into `simple.scm`. Its terminal branch pads to `(window-width)`,
+which here is `window-body-width` - **this tree's `window-width` is the
+window record's slot accessor**, not window.c's DEFUN, so the Elisp's
+call has to be spelled differently in both this function and
+`describe-map--align-section`. A naming collision worth knowing about.
+
+## The `C-h b` key is flat
+
+`help-map` exists as Emacs's object with `b` in it, and the key the
+command loop finds is the flat `C-h b` - the standing submap
+departure (`narrow-map`, `mule-keymap`). The rest of `help-map`'s
+entries name commands this tree does not have yet.
+
+## Verification
+
+`help-tests.scm` grew 8 checks (23 passes): the comparator's six cases,
+`help-fns-function-name`'s two shapes, `describe-map`'s exact text, the
+local section character for character, `describe-bindings`'s `*Help*`
+in help-mode and read-only, the window it goes to, and `C-h b`'s
+binding. The pty battery gained **`help-bindings`**: `C-h b` shows
+`Global Bindings`, the column heading and the first sorted rows, gives
+no section to an empty map (Emacs's own answer), and `C-x o q` closes
+the help window.
+
+Probe traps this pass paid for: `*overriding-terminal-local-map*` is a
+plain variable (calling it applies a list); `(not '())` is false, so
+every Elisp `(null x)` must be `null?` in this tree - a `(not shadow)`
+test silently skipped every section; and `(/=` does not exist in this
+Guile at all.

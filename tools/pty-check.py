@@ -75,6 +75,7 @@ open(os.path.join(_CFG, 'init.scm'), 'w').write(NO_SPLASH_INIT)
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 C_x = b"\x18"
+C_h = b"\x08"
 RET = b"\r"
 C_c = b"\x03"
 C_f = b"\x06"
@@ -2421,6 +2422,58 @@ def check_switch_buffer():
                         % out[-300:])
     return problems
 
+
+
+def check_help_bindings():
+    """`C-h b' shows the key bindings, and `q` closes the help window.
+
+    `describe-bindings` (help.el:849) writes the sections in precedence
+    order through `describe-buffer-bindings` (keymap.c:2834) and
+    `help--describe-map-tree` (help.el:1638): a `MAJOR MODE Major Mode
+    Bindings` heading, a `Global Bindings` one, the `Key             Binding`
+    column heading, and one row per key sorted with integers first and
+    symbols in the natural version order. What is asserted here is what
+    Emacs 31.1 in a pty prints for the same keys: the heading, the two
+    sections, and the rows this tree binds - `C-x b` for
+    `switch-to-buffer` and `C-h b` for `describe-bindings` itself.
+    """
+    path = "/tmp/pty-check-help.txt"
+    open(path, "w").write("help me\n")
+    problems = []
+
+    out = drive([C_h + b"b"], path)
+    if "Global Bindings" not in out:
+        problems.append("C-h b did not show Global Bindings: %r" % out[-300:])
+    if "Key             Binding" not in out:
+        problems.append("C-h b did not print the column heading: %r"
+                        % out[-300:])
+    # The rows the help window actually shows: the map is sorted, so the
+    # control keys come first. `set-mark-command` and
+    # `beginning-of-line` are Emacs's own first two on a terminal too.
+    if "set-mark-command" not in out:
+        problems.append("C-@'s row is missing from the listing: %r"
+                        % out[-300:])
+    if "beginning-of-line" not in out:
+        problems.append("C-a's row is missing from the listing: %r"
+                        % out[-300:])
+    # A map with no bindings of its own gets no section - measured on
+    # Emacs 31.1: a `.txt' buffer in text-mode prints "Global Bindings"
+    # and no major-mode section at all.
+    if "Major Mode Bindings" in out:
+        problems.append("text-mode's empty map was given a section: %r"
+                        % out[-300:])
+
+    # `q` is `special-mode-map`'s, reached through `help-mode-map`'s
+    # parent - but it is the *selected* window's key, and the display
+    # does not select the help window (`help-window-select` is nil, as
+    # in Emacs), so `C-x o` goes there first.
+    out = drive([C_h + b"b", WAIT(b"Global Bindings"), C_x + b"o", b"q",
+                 WAIT(b"pty-check-help.txt")], path)
+    if WAIT_TIMED_OUT in out:
+        problems.append("the help window did not close on q: %r" % out[-300:])
+    if "*Help*" in screen_of(out):
+        problems.append("q left the *Help* window up: %r" % screen_of(out)[-200:])
+    return problems
 
 
 def check_indent():
@@ -5241,6 +5294,7 @@ CHECKS = {
     "back-door": check_back_door,
     "splash": check_splash,
     "switch-buffer": check_switch_buffer,
+    "help-bindings": check_help_bindings,
     "indent": check_indent,
     "abbreviate": check_abbreviate,
     "kill-buffer": check_kill_buffer,

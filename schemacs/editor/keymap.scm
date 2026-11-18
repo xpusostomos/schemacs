@@ -69,6 +69,7 @@
    ;; functions in Emacs that touch a keymap - and both are keyed by ONE
    ;; *event*.
    keymap make-sparse-keymap keymap-type? keymap-lookup
+   keymapp lookup-key
    define-key
    store-in-keymap access-keymap
    keymap-parent set-keymap-parent keymap-prompt
@@ -634,6 +635,100 @@
            (else
             (let ((ct (keymap-char-table keymap)))
               (and ct (ct event))))))))
+
+    (define (keymapp object)
+      ;; GNU Emacs's `keymapp' (`keymap.c:3012'): "Return t if OBJECT is
+      ;; a keymap."
+      ;;
+      ;; The C also answers t for a symbol whose function definition is a
+      ;; keymap; this tree's keymaps are values and a symbol has no
+      ;; function here (`access-keymap`'s note says the same), so the
+      ;; answer is the record test alone.
+      ;;--------------------------------------------------------------
+      (keymap-type? object))
+
+    (define (%keymap-t-default keymap)
+      ;; The `(t . DEF)' default binding of one keymap - what the C's
+      ;; `access_keymap_1' remembers in `t_binding'.  Nothing in this tree
+      ;; stores one; the rule exists because `lookup-key''s
+      ;; ACCEPT-DEFAULT is defined in terms of it, and `describe-map'
+      ;; calls with ACCEPT-DEFAULT set.
+      ;;--------------------------------------------------------------
+      (hashv-ref (keymap-bindings keymap) 't #f))
+
+    (define (%keymap-event-binding keymap event accept-default)
+      ;; One event's binding in KEYMAP with the C's ACCEPT-DEFAULT rule.
+      ;; A specific binding wins - and the `(t . DEF)' entry is the
+      ;; *specific* binding when the event asked for IS `t'; accept-default
+      ;; is what lets a lookup of some *other* event fall back to it
+      ;; (`access_keymap_1''s `(EQ (key, idx))' before its `(t_ok && EQ
+      ;; (key, Qt))').
+      ;;--------------------------------------------------------------
+      (cond
+       ((not (keymap-type? keymap)) #f)
+       ((access-keymap keymap event))
+       (accept-default (%keymap-t-default keymap))
+       (else #f)))
+
+    (define (%maps-event-binding maps event accept-default)
+      ;; The binding of EVENT in a *list of keymaps* (Emacs's "KEYMAP can
+      ;; also be a list of keymaps"), in `access_keymap_1''s order: a
+      ;; specific binding in any of the maps wins, and the *earliest*
+      ;; map's `(t . DEF)' default is the fallback - the C's
+      ;; `t_ok = 0' after the first one found, which is why an earlier
+      ;; map's default beats a later one's.
+      ;;--------------------------------------------------------------
+      (let specific ((rest maps))
+        (cond ((null? rest)
+               (and accept-default
+                    (let default ((rest maps))
+                      (cond ((null? rest) #f)
+                            ((not (keymap-type? (car rest))) (default (cdr rest)))
+                            ((%keymap-t-default (car rest)))
+                            (else (default (cdr rest)))))))
+              ((not (keymap-type? (car rest))) (specific (cdr rest)))
+              ((access-keymap (car rest) event))
+              (else (specific (cdr rest))))))
+
+    (define (lookup-key keymap key . rest)
+      ;; GNU Emacs's `lookup-key' (`keymap.c:1264'): "Look up key
+      ;; sequence KEY in KEYMAP.  Return the definition. ... A number as
+      ;; value means KEY is \"too long\"; that is, characters or symbols in
+      ;; it except for the last one fail to be a valid sequence of prefix
+      ;; characters in KEYMAP.  The number is how many characters at the
+      ;; front of KEY it takes to reach a non-prefix key.  KEYMAP can also
+      ;; be a list of keymaps.
+      ;;
+      ;; Normally, `lookup-key' ignores bindings for t, which act as
+      ;; default bindings, used when nothing else in the keymap applies
+      ;; ... However, if the third optional argument ACCEPT-DEFAULT is
+      ;; non-nil, `lookup-key' will recognize the default bindings, just
+      ;; as `read-key-sequence' does."
+      ;;
+      ;; This is `lookup_key_1''s walk (`keymap.c:1210'); the C's
+      ;; `possibly_translate_key_sequence' and the menu-bar case-folding
+      ;; compatibility below the DEFUN are not carried.
+      ;;--------------------------------------------------------------
+      (let ((accept-default (and (pair? rest) (car rest))))
+        (let ((events (keymap-index key)))
+          (cond
+           ;; `if (length == 0) return keymap;'
+           ((not events) keymap)
+           (else
+            (let loop ((rest events) (map keymap) (n 0))
+              (let* ((event (car rest))
+                     (cmd (cond ((keymap-type? map)
+                                 (%keymap-event-binding map event accept-default))
+                                ((pair? map)
+                                 (%maps-event-binding map event accept-default))
+                                (else #f))))
+                (cond
+                 ;; `if (idx == length) return cmd;'
+                 ((null? (cdr rest)) cmd)
+                 ;; `keymap = get_keymap (cmd, 0, 1); if (!CONSP (keymap))
+                 ;; return make_fixnum (idx);'
+                 ((not (keymap-type? cmd)) (+ n 1))
+                 (else (loop (cdr rest) cmd (+ n 1)))))))))))
 
     (define (keymap-lookup keymap key)
       ;; GNU Emacs's `Flookup_key' (`keymap.c:1264'): "Look up the

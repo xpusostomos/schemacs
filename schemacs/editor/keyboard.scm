@@ -212,7 +212,7 @@
    exit-recursive-edit
    quoted-insert
    read-quoted-char
-   *overriding-terminal-local-map*
+   *overriding-terminal-local-map* *overriding-local-map*
    *this-command-keys*
    ;; `keyboard.c`'s menu-bar half. `menu_bar_items` and `parse_menu_item`
    ;; are C-internal in Emacs (the front end calls them); here the front
@@ -311,6 +311,17 @@
     ;; and `lookup-keymaps' splices it in. `add-keymap-witness' exists in
     ;; Emacs to tell a bare keymap from a composed one in this same
     ;; variable, and nothing here sets it to a bare keymap.
+
+    (define *overriding-local-map* (make-parameter #f))
+    ;; ^ GNU Emacs's `overriding-local-map' (`keyboard.c',
+    ;; `Voverriding_local_map'): a keymap packages `let`-bind to make it
+    ;; the only map consulted besides `global-map' for the extent of the
+    ;; binding. `current_active_maps` (`keymap.c:1694`) is where the rule
+    ;; lives, and `lookup-keymaps` below is this tree's copy of it.
+    ;;
+    ;; **A parameter**, because Emacs binds it dynamically - that is its
+    ;; whole contract - and `describe-buffer-bindings` reads it, which is
+    ;; why it exists here now.
 
     (define (internal-push-keymap keymap)
       ;; GNU Emacs's `internal-push-keymap' (`subr.el:6976'), which takes
@@ -742,6 +753,19 @@
         ;; lookup is reached, which is where Emacs does it (`read_char',
         ;; `keyboard.c:3113') and is what keeps a frame event out of the
         ;; command loop's head.
+        ;; **`overriding-local-map` suppresses everything else**, which
+        ;; is `current_active_maps`'s rule (`keymap.c:1694`): "The doc
+        ;; said that overriding-terminal-local-map should override
+        ;; overriding-local-map.  The code used them both, but it seems
+        ;; clearer to use just one.  rms, jan 2005." So when it is set -
+        ;; and the terminal one is not - the lookup is that map and
+        ;; `global-map` alone.
+        (if (and (not *overriding-terminal-local-map*)
+                 (*overriding-local-map*))
+            (append (if (list? (*overriding-local-map*))
+                        (*overriding-local-map*)
+                        (list (*overriding-local-map*)))
+                    (%keymap-and-parents *default-keymap*))
         (append
          (or *overriding-terminal-local-map* '())
          (if position-map (list position-map) '())
@@ -752,7 +776,7 @@
          (minor-mode-keymaps)
          (if buffer-keys (%keymap-and-parents buffer-keys) '())
          (if mode-keys (%keymap-and-parents mode-keys) '())
-         (%keymap-and-parents *default-keymap*)))))
+         (%keymap-and-parents *default-keymap*))))))
 
     ;;----------------------------------------------------------------
     ;; The modal lookup state - `read_key_sequence''s feel for a chord

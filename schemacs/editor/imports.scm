@@ -89,6 +89,7 @@
     (schemacs editor font)
     (schemacs editor face-remap)
     (schemacs editor glyph)
+    (schemacs editor help-mode)
     (schemacs editor indent)
     (schemacs editor cmds)
     (schemacs editor keymap)
@@ -272,6 +273,7 @@
     *delayed-mode-hooks*
     *delete-by-moving-to-trash*
     *delete-horizontal-space-function*
+    *describe-bindings-show-prefix-commands*
     *directory-abbrev-alist*
     *directory-files-no-dot-files-regexp*
     *dired-actual-switches*
@@ -380,6 +382,9 @@
     *gui--last-selected-text-primary*
     *gui-last-cut-in-clipboard*
     *gui-last-cut-in-primary*
+    *help-mode-function*
+    *help-xref-following*
+    *help-xref-stack-item*
     *history-add-new-input*
     *history-delete-duplicates*
     *history-length*
@@ -515,6 +520,7 @@
     *next-selection-coding-system*
     *old-selected-window*
     *open-paren-in-column-0-is-defun-start*
+    *overriding-local-map*
     *overriding-local-map-menu-flag*
     *overriding-terminal-local-map*
     *overwrite-mode-binary*
@@ -1193,6 +1199,11 @@
     derived-mode-p
     derived-mode-set-parent
     derived-mode-syntax-table-name
+    describe-bindings
+    describe-buffer-bindings
+    describe-map
+    describe-map--align-section
+    describe-map--fill-columns
     detach-marker
     detect-coding-bytes
     detect-coding-system
@@ -1627,6 +1638,7 @@
     get-char-property
     get-free-disk-space
     get-keyelt
+    get-local-map
     get-pos-property
     get-selection
     get-specified-cursor-type
@@ -1697,7 +1709,19 @@
     gui-set-selection
     handle-delete-frame
     handle-interrupt
+    help--describe-command
+    help--describe-map-compare
+    help--describe-map-tree
     help--key-description-fontified
+    help--shadow-lookup
+    help--window-setup
+    help-buffer
+    help-fns-function-name
+    help-map
+    help-mode
+    help-mode-hook
+    help-mode-map
+    help-setup-xref
     history-entries
     history?
     hscroll-line-slice
@@ -1887,6 +1911,7 @@
     keymap-parent
     keymap-prompt
     keymap-type?
+    keymapp
     keyword?
     keywordp
     kill-all-local-variables
@@ -1997,6 +2022,7 @@
     looking-back
     lookup-char-property
     lookup-face
+    lookup-key
     lookup-keymaps
     ls-lisp--insert-directory
     ls-lisp--sanitize-switches
@@ -2036,6 +2062,7 @@
     make-menu-state
     make-overlay
     make-scan-error
+    make-separator-line
     make-sparse-keymap
     make-syntax-table
     make-widget-value
@@ -3421,6 +3448,7 @@
     with-buffer-unmodified-if-unchanged
     with-current-buffer
     with-current-buffer-window
+    with-help-window
     with-restriction
     with-selected-frame
     with-selected-window

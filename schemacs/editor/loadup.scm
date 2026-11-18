@@ -161,6 +161,7 @@
         (schemacs editor fns)
         (schemacs editor font)
         (schemacs editor help)
+        (schemacs editor help-mode)
         (schemacs editor font-core)
         (schemacs editor fill)
         (schemacs editor font-lock)

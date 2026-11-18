@@ -53,6 +53,11 @@
     (only (schemacs editor timefns) time-equal-p)
     (only (schemacs editor frame)
          *current-frame* *echo-area-buffer* display-selections-p
+         ;; `make-separator-line` asks `(display-graphic-p)`, and its
+         ;; terminal branch pads to `(window-width)` - which here is
+         ;; `window-body-width`, the frame's *function*; the record's
+         ;; `window-width` slot accessor is not it.
+         display-graphic-p window-body-width
          set-message!
          frame-keymap-state
          selected-window set!frame-keymap-state
@@ -69,6 +74,10 @@
          gui-select-text gui-selection-value gui-set-selection
          gui-backend-selection-owner-p gui-backend-selection-exists-p
          *saved-region-selection*)
+    ;; `make-separator-line`'s `(display-supports-face-attributes-p
+    ;; '(:underline t))` - the terminal branch decision, `simple.el`'s
+    ;; own call.
+    (only (schemacs editor faces) display-supports-face-attributes-p)
     ;; `toggle-truncate-lines' resets the `hscroll' of every window
     ;; showing the buffer, which is `set-window-hscroll''s
     ;; `quit-window' is what `special-mode-map''s `q' is.
@@ -111,6 +120,9 @@
           *region-end-function* *use-region-p-function*)
     (only (schemacs editor editfns)
           bobp bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
+          ;; `make-separator-line` builds its string with `propertize`
+          ;; and pads with `insert-char`.
+          propertize insert-char
           eolp following-char forward-line insert insert-and-inherit
           line-beginning-position
           line-end-position goto-char mark-marker message point point-max
@@ -277,6 +289,7 @@ prefix-argument-description
    ;; `eval-region' is `lread.c''s, M-x only as it is in Emacs -
    ;; `(where-is-internal 'eval-region)' is nil.
    eval-region
+   make-separator-line
    open-line open-line-command delete-indentation-command
 just-one-space delete-horizontal-space delete-blank-lines
    *kill-whole-line*
@@ -2761,6 +2774,36 @@ If N is omitted or nil, move point 1 character to the left."
     (define-key *default-keymap* (kbd "M-y") yank-pop)
     (define-key *default-keymap* (kbd "C-w") kill-region)
     (define-key *default-keymap* (kbd "M-w") kill-ring-save)
+
+    (define (make-separator-line . rest)
+      ;; GNU Emacs's `make-separator-line' (`simple.el:760'): "Make a
+      ;; string appropriate for usage as a visual separator line. This
+      ;; uses the `separator-line' face. If LENGTH is nil, use the
+      ;; window width."
+      ;;
+      ;; The first test is Emacs's: a graphic display or one that can
+      ;; draw a strike-through or an underline gets a blank line in the
+      ;; `separator-line' face; one that can do neither gets literal
+      ;; dashes.
+      ;;--------------------------------------------------------------
+      (let ((length (and (pair? rest) (car rest))))
+        (if (or (display-graphic-p)
+                (display-supports-face-attributes-p '(:strike-through #t))
+                (display-supports-face-attributes-p '(:underline #t)))
+            (if length
+                (string-append (propertize (make-string length #\space)
+                                           'face 'separator-line)
+                               "\n")
+                (propertize "\n" 'face '(:inherit separator-line :extend #t)))
+            ;; "In terminals that don't support underline or
+            ;; strike-through, use a line of dashes."
+            (string-append
+             (propertize (make-string (or length (- (window-body-width
+                                                     (selected-window))
+                                                    1))
+                                      #\-)
+                         'face 'separator-line)
+             "\n"))))
 
     ;;----------------------------------------------------------------
     ;; Line surgery and whitespace - simple.el

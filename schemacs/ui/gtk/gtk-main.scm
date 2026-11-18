@@ -39,6 +39,9 @@
     (only (schemacs editor paragraphs))
     ;; `fill.el`'s commands and the M-q binding it makes
     (only (schemacs editor fill))
+    ;; Help mode installs `*help-mode-function*`, which is what puts
+    ;; `*Help*` in `help-mode`; `C-h b` is bound by `help.scm`.
+    (only (schemacs editor help-mode))
     ;; `novice.el`'s disabled-command prompt; loading it installs
     ;; `disabled-command-function` and the `query` form's asker, which
     ;; `command.scm`'s `run-command` reads.

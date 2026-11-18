@@ -10938,3 +10938,78 @@ which `run-command` derives with `(string->symbol (command-name cmd))`
 - a command reached as a procedure (a menu item holding one, or
 `%run-command`) never consults the check, as Emacs's Lisp callers
 never reach `command-execute`.
+
+# `C-h b` — the describe machinery, and the help buffer (2026-11-18)
+
+The first of the help commands. DEPARTURES.md's 2026-11-18 section has
+the C each rule came from and every named gap; this is what the next
+session needs to know before touching it.
+
+## What landed
+
+- **`keymap.scm`**: `keymapp` and `lookup-key` (`lookup_key_1`'s walk
+  with ACCEPT-DEFAULT and keymap-lists; the "too long" answer is the
+  event count). Measured: a `(t . DEF)` entry is a *specific* binding
+  when the looked-up event IS `t`, and only the fallback otherwise.
+- **`keyboard.scm`**: `*overriding-local-map*` (a parameter), and
+  `lookup-keymaps` now applies `current_active_maps`' rule — when it is
+  set and the terminal map is not, the lookup is that map and
+  `global-map` alone.
+- **`editfns.scm`**: `get-local-map` (`intervals.c:2176`), beside
+  `get-pos-property`; `buffer-local-value` imported.
+- **`faces.scm`**: the `separator-line` face.
+- **`simple.scm`**: `make-separator-line`. **`window-width` in this
+  tree is the window record's slot accessor, not window.c's DEFUN** —
+  the Elisp's `(window-width)` is `window-body-width` here.
+- **`help.scm`**: `help-buffer`, `help-setup-xref`, `help--window-setup`,
+  `with-help-window`, `help-fns-function-name`, `help--describe-command`,
+  `help--describe-map-compare`, `help--shadow-lookup`, `describe-map`,
+  `describe-map--align-section`/`-fill-columns`,
+  `help--describe-map-tree`, `describe-buffer-bindings`,
+  `describe-bindings`, `help-map`, and `C-h b`.
+- **`help-mode.scm`** (NEW): the mode and its map, and
+  `(*help-mode-function* help-mode)` at load. **A front end must import
+  it** — both now do — or `*Help*` is left in fundamental-mode; help.el
+  is *below* help-mode.el so the seam is the only way up.
+- Tests: `help-tests.scm` 23; pty `help-bindings`.
+
+## The traps this pass paid for, all four of them
+
+1. **`(not '())` is `#f`.** Elisp's `(null x)` must be `null?` here. A
+   `(when (or (not shadow) ...))` skipped every map whose shadow was
+   the empty list, and the whole description came out blank with no
+   error.
+2. **A parameter called, a plain variable read.** `*help-mode-function*`
+   was written `(define ... #f)` and then called; so was
+   `*help-xref-following*`, and `*overriding-terminal-local-map*` (which
+   is *deliberately* a plain variable) — each is "Wrong type to
+   apply: #f" from inside `with-current-buffer`, several frames away.
+3. **`inhibit-read-only` wraps the body.** The C's
+   `(let ((inhibit-read-only t)) (erase-buffer) (funcall callback))` —
+   putting the callback outside the `parameterize` made every help
+   command insert into a read-only buffer.
+4. **The help window must be given point-min *before* the display.**
+   `temp-buffer-window-show` does `(goto-char (point-min))` before
+   `display-buffer`; otherwise the new window shows the buffer's end —
+   which for a 200-line description is the last section, and looks like
+   "the top of my help is missing".
+
+And one about the key itself: **`q` closes the help window only when
+that window is selected** — `display-buffer` does not select
+(`help-window-select` is nil, Emacs's too), so the pty check does
+`C-x o` first. A check that sends `q` straight after `C-h b` types `q`
+into the file.
+
+## What is left in the help pass
+
+- **`C-h f`** `describe-function`, **`C-h v`** `describe-variable`
+  (help-fns.el) — `help-fns--signature`, the docstring's usage line,
+  `prin1` of a value, the file/line xref (not carried).
+- **`C-h k`** `describe-key` (help.el:1045) — `read-key-sequence`, the
+  key's binding through `key-binding`, the `M-x NAME` fallback.
+- `describe-vector` on a *char-table* (disp-table, syntax tables,
+  category sets) — a chartab walk, and the reason `help--describe-vector`
+  as a public function does not exist here.
+- The `\{MAPVAR}` form of `substitute-command-keys` now has its
+  machinery (`help--describe-map-tree`); wiring it is the next piece of
+  help.scm's header's first gap.

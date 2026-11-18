@@ -62,6 +62,9 @@
           ;; also the engine's until 2026-10-13, where it was
           ;; `text-editor-set-cursor`.
           set-point buffer-read-only? buffer-beg buffer-z buffer-pt
+          ;; `buffer-local-value' is what `get-local-map''s
+          ;; `local-map' fallback reads (`BVAR (buffer, keymap)').
+          buffer-local-value
           ;; `BEGV' and `ZV' - what `narrow-to-region' sets and
           ;; `point-min'/`point-max' answer.
           buffer-begv set!buffer-begv buffer-zv set!buffer-zv
@@ -164,7 +167,7 @@
     ;; commands it binds; `goto-line-relative` - its third key - is
     ;; `minibuffer.scm`'s, which adds it to this map.
     (only (schemacs editor keymap)
-          make-sparse-keymap define-key *default-keymap*)
+          make-sparse-keymap define-key *default-keymap* keymapp)
     ;; `kbd` is `character.scm`'s (`subr.scm` is above this library).
     (only (schemacs editor character) kbd)
     ;; **This library no longer imports `frame.scm'.**
@@ -221,6 +224,7 @@ point-marker
    *inhibit-field-text-motion*
    constrain-to-field field-beginning field-end
    get-pos-property
+   get-local-map
    delete-region
    eobp
    goto-char
@@ -730,6 +734,40 @@ point-marker
                             (> position (buffer-beg (current-buffer))))
                        (get-text-property (- position 1) prop object))
                       (else #f))))))))
+
+    (define (get-local-map position buffer type)
+      ;; GNU Emacs's `get_local_map' (`intervals.c:2176'): "Return the
+      ;; local keymap that should be used for POSITION in BUFFER."
+      ;;
+      ;; It reads the `keymap' or `local-map' *text property* at
+      ;; POSITION - first as a character property ("when we click with
+      ;; the mouse, the mouse pointer is really pointing to the CHAR
+      ;; after POS"), then as a position property ("when editing a field
+      ;; with a `local-map' property, we want insertion at the end to
+      ;; obey the `local-map' property"). A value that is not a keymap is
+      ;; ignored; with no property, `keymap' answers nil and `local-map'
+      ;; answers the buffer's own map (`BVAR (buffer, keymap)').
+      ;;
+      ;; **A placement departure**: the C keeps this in intervals.c. Its
+      ;; two readers, `get-char-property' and `get-pos-property', are
+      ;; `textprop.scm''s and this library's respectively, and
+      ;; `intervals.scm' is below both.
+      ;;
+      ;; The C widens around the two lookups ("Ignore narrowing, so that
+      ;; a local map continues to be valid even if the visible region
+      ;; contains no characters and hence no properties"); this tree's
+      ;; property readers take an absolute position and do not consult
+      ;; BEGV/ZV, so there is nothing to widen around.
+      ;;--------------------------------------------------------------
+      (let ((position (max (buffer-beg buffer)
+                           (min position (buffer-z buffer)))))
+        (let ((prop (get-char-property position type buffer)))
+          (unless prop
+            (set! prop (get-pos-property position type buffer)))
+          (cond
+           ((keymapp prop) prop)
+           ((eq? type 'keymap) #f)
+           (else (buffer-local-value buffer 'buffer-local-keymap #f))))))
 
     (define (find-field pos merge-at-boundary beg-limit end-limit)
       ;; GNU Emacs's `find_field' (`editfns.c:374'): "Find the field

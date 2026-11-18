@@ -33,26 +33,70 @@
     (only (schemacs editor search)
           string-match string-match-p match-end match-beginning save-match-data)
     ;; `split-string`, `kbd`-free - the strokes come as text.
-    (only (schemacs editor subr) split-string)
+    ;; `sort` for `describe-map`'s sorted sparse entries; `format` is
+    ;; Guile's (`~a`, destination first); `procedure-name` is how a
+    ;; definition that is not a command is still named.
+    (only (guile) sort format procedure-name hashv-ref caddr)
+    (only (schemacs editor subr) split-string keymap-canonicalize
+          *minor-mode-map-alist*)
     ;; the temporary buffer the walk edits in place
-    (only (schemacs editor buffer) allocate-buffer *current-buffer* current-buffer)
+    ;; `with-current-buffer` is `save-current-buffer` with a
+    ;; `set-buffer`, and the rest is what a help buffer is made of.
+    (only (schemacs editor buffer)
+          allocate-buffer *current-buffer* current-buffer buffer-name
+          get-buffer-create erase-buffer delete-all-overlays
+          with-current-buffer buffer-local-value buffer-local-keymap
+          buffer-pt *inhibit-read-only* set!buffer-read-only
+          set-buffer-modified-p)
     (only (schemacs editor editfns)
           buffer-string buffer-substring-no-properties insert goto-char point
           point-min point-max char-after propertize save-excursion
           text-quoting-style)
     ;; the movement and deletion the walk spells the Elisp way
-    (only (schemacs editor cmds) forward-char)
-    (only (schemacs editor editfns) delete-region)
+    (only (schemacs editor cmds) forward-char self-insert-command)
+    (only (schemacs editor editfns) delete-region get-local-map eolp
+          insert-char)
     ;; `search-forward` is the tree's, from `search.c`.
     (only (schemacs editor search) search-forward)
     ;; `where-is-internal` is `keymap.c`'s, and `key-description` with it.
-    (only (schemacs editor keyboard) where-is-internal)
-    (only (schemacs editor keymap) key-description)
+    (only (schemacs editor keyboard)
+          where-is-internal command-remapping
+          *overriding-terminal-local-map* *overriding-local-map*)
+    (only (schemacs editor keymap)
+          key-description keymapp lookup-key keymap-order keymap-bindings
+          get-keyelt make-sparse-keymap define-key *default-keymap*)
+    ;; a command's name for `help-fns-function-name`, and the
+    ;; "was this called from a key?" test `describe-bindings` records.
+    (only (schemacs editor command)
+          define-command command-type? command-name command-record-of
+          called-interactively?)
+    (only (schemacs editor custom) define-custom)
+    (only (schemacs editor derived) derived-mode-p)
+    (only (schemacs editor fns) string-version-lessp)
+    ;; the window a description is laid out in, and the separator line
+    (only (schemacs editor frame) selected-window window-body-width)
+    (only (schemacs editor window) display-buffer set-window-hscroll!)
+    (only (schemacs editor simple) make-separator-line)
+    (only (schemacs editor character) kbd *tab-width*)
+    (only (schemacs editor indentc) current-column)
     ;; the face and the property store
-    (only (schemacs editor textprop) add-text-properties))
+    (only (schemacs editor textprop) add-text-properties)
+    ;; `get` is the `suppress-keymap` property test, `accessible-keymaps`
+    ;; is where a description starts, and `*tab-width*` is the unit
+    ;; `describe-map--fill-columns` pads in.
+    (only (schemacs editor intervals) get)
+    (only (schemacs editor keymap) accessible-keymaps))
 
   (export substitute-quotes substitute-command-keys key-valid-p
-          help--key-description-fontified)
+          help--key-description-fontified
+          help-buffer help-setup-xref help--window-setup with-help-window
+          help-fns-function-name help--describe-command
+          help--describe-map-compare help--shadow-lookup
+          describe-map describe-map--align-section
+          describe-map--fill-columns help--describe-map-tree
+          describe-buffer-bindings describe-bindings
+          help-map *help-mode-function* *help-xref-following*
+          *help-xref-stack-item* *describe-bindings-show-prefix-commands*)
 
   (begin
 
@@ -286,4 +330,583 @@
                        ;; 3. Nothing to do - next character.
                        (else (forward-char 1))))
                     (loop)))
-                (buffer-string))))))))
+                (buffer-string))))))
+    ;;----------------------------------------------------------------
+    ;; The help buffer - `help-buffer', `help-setup-xref',
+    ;; `help--window-setup' (help-mode.el and help.el)
+    ;;----------------------------------------------------------------
+
+    (define *help-mode-function* (make-parameter #f))
+    ;; ^ `help-mode' is `help-mode.el`'s, and help-mode.el requires
+    ;; help.el - so the mode is *above* this library and arrives through
+    ;; a seam, exactly as Emacs reaches it through an autoload.
+    ;; `help-mode.scm' installs it as it loads.
+
+    (define *help-xref-stack-item* #f)
+    ;; ^ `help-xref-stack-item' (`help-mode.el:496`). The xref stacks
+    ;; themselves are not carried - there are no buttons and no
+    ;; `help-follow' - so what `help-setup-xref' can do here is the part
+    ;; that re-enables the major mode and records the item.
+
+    (define *help-xref-following* #f)
+    ;; ^ `help-xref-following': whether the *Help* buffer is being
+    ;; reused by a following command. Nothing here sets it (that is the
+    ;; xref machinery's), but `help-buffer' reads it, as the Lisp does.
+
+    (define (%help-arg args n)
+      ;; The Nth optional argument of an Emacs DEFUN spelled as a rest
+      ;; list, or #f. Every reader below takes its optional arguments
+      ;; explicitly, which is this tree's convention.
+      ;;--------------------------------------------------------------
+      (let loop ((rest args) (i 0))
+        (cond ((null? rest) #f)
+              ((= i n) (car rest))
+              (else (loop (cdr rest) (+ i 1))))))
+
+    (define (help-buffer)
+      ;; GNU Emacs's `help-buffer' (`help-mode.el:527`): "Return the
+      ;; name of a buffer for inserting help. If `help-xref-following'
+      ;; is non-nil and the current buffer is derived from `help-mode',
+      ;; this is the name of the current buffer. Otherwise, return
+      ;; \"*Help*\", creating a buffer with that name if it does not
+      ;; already exist."
+      ;;--------------------------------------------------------------
+      (buffer-name
+       ;; `help-xref-following` is a plain variable here - Emacs
+       ;; `setq`s it, nothing `let`-binds it - so it is read, not called.
+       (if (and *help-xref-following* (derived-mode-p 'help-mode))
+           (current-buffer)
+           (get-buffer-create "*Help*"))))
+
+    (define (help-setup-xref item interactive-p)
+      ;; GNU Emacs's `help-setup-xref' (`help-mode.el:496`): "Invoked
+      ;; from commands using the \"*Help*\" buffer to install some xref
+      ;; info. ... This function also re-enables the major mode of the
+      ;; buffer, thus resetting local variables to the values set by the
+      ;; mode and running the mode hooks."
+      ;;
+      ;; The stack half is the xref machinery's and is not carried.
+      ;;--------------------------------------------------------------
+      (with-current-buffer (help-buffer)
+        (when (*help-mode-function*)
+          ((*help-mode-function*)))
+        (set! *help-xref-stack-item* item))
+      #f)
+
+    (define (help--window-setup buffer-or-name callback)
+      ;; GNU Emacs's `help--window-setup' (`help.el:2254`), which
+      ;; `with-help-window` expands to: make the help buffer, put it in
+      ;; help mode, empty it, run the body with it current, and show it
+      ;; in a window.
+      ;;
+      ;; **Not carried**: `help-window-point-marker`,
+      ;; `temp-buffer-window-setup-hook`, `help-make-xrefs` (no buttons
+      ;; here), `buffer-disable-undo` (undo is not on in a fresh buffer
+      ;; here) and `help-window-setup`'s reselection rules. The display
+      ;; is `display-buffer`, which is where `temp-buffer-window-show`
+      ;; ends, and it does not select the window.
+      ;;--------------------------------------------------------------
+      (let ((buffer (get-buffer-create buffer-or-name)))
+        (with-current-buffer buffer
+          (unless (derived-mode-p 'help-mode)
+            (when (*help-mode-function*)
+              ((*help-mode-function*))))
+          (set!buffer-read-only buffer #t)
+          ;; "`(let ((inhibit-read-only t)) (erase-buffer) ...)`: the
+          ;; binding wraps the *body* too - Emacs's own nesting - so a
+          ;; help command inserts into a read-only help buffer.
+          (parameterize ((*inhibit-read-only* #t))
+            (erase-buffer)
+            (delete-all-overlays buffer)
+            (callback)))
+        ;; `temp-buffer-window-show`'s tail (`window.el:113`), which is
+        ;; what `help-window-setup` ends at: the buffer unmodified and
+        ;; read-only, point at the top *before* the display (so the new
+        ;; window's own point is the top), then the display and the
+        ;; window's hscroll reset.
+        (with-current-buffer buffer
+          (set-buffer-modified-p #f)
+          (goto-char (point-min)))
+        (let ((window (display-buffer buffer)))
+          (when window
+            (set-window-hscroll! window 0)))
+        #f))
+
+    (define-syntax with-help-window
+      ;; GNU Emacs's `with-help-window' (`help.el:2230`).
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ buffer-or-name body ...)
+         (help--window-setup buffer-or-name
+                             (lambda () body ...)))))
+
+    ;;----------------------------------------------------------------
+    ;; Describing keymaps - `describe-map' and the tree above it
+    ;;----------------------------------------------------------------
+
+    (define *help--keymaps-seen* '())
+    ;; ^ `help--keymaps-seen' (`help.el:1632`): the maps the tree walk
+    ;; has already listed, so a map reached twice is described once.
+
+    (define-custom *describe-bindings-show-prefix-commands* #f
+      "Non-nil means show prefix commands in the output of `describe-bindings'."
+      :type 'boolean
+      :group 'help)
+
+    (define (help-fns-function-name function)
+      ;; GNU Emacs's `help-fns-function-name' (`help-fns.el:2553`):
+      ;; "Return a short buttonized string representing FUNCTION."
+      ;;
+      ;; **The button is not carried** - there is no xref machinery - so
+      ;; the answer is the plain name. The arms are this tree's shapes: a
+      ;; keymap's binding is a procedure or a command record, never a
+      ;; subr, so the name comes from the command's record and otherwise
+      ;; from Guile's `procedure-name'.
+      ;;--------------------------------------------------------------
+      (cond
+       ((symbol? function) (symbol->string function))
+       ((command-type? function) (command-name function))
+       ((procedure? function)
+        (let ((record (command-record-of function)))
+          (if record
+              (command-name record)
+              (let ((name (procedure-name function)))
+                (if name
+                    (string-append "#<procedure " (symbol->string name) ">")
+                    "#<procedure>")))))
+       (else (format #f "~a" function))))
+
+    (define (help--describe-command definition transl)
+      ;; GNU Emacs's `help--describe-command' (`help.el:1742`).
+      ;;
+      ;; `char-to-name` - `mule-cmds.el`'s, which needs the Unicode name
+      ;; table - is not carried, so the translation branch prints the
+      ;; key description alone where Emacs adds a tab and the name.
+      ;;--------------------------------------------------------------
+      (cond ((or (string? definition) (vector? definition))
+             (if transl
+                 (begin
+                   (insert (key-description definition '()))
+                   (insert "\n"))
+                 ;; "These should be rare nowadays, replaced by
+                 ;; `kmacro's."
+                 (insert "Keyboard Macro\n")))
+            ((keymapp definition)
+             (insert "Prefix Command\n"))
+            (else
+             (insert (help-fns-function-name definition))
+             (insert "\n"))))
+
+    (define (help--describe-map-compare a b)
+      ;; GNU Emacs's `help--describe-map-compare' (`help.el:1758`):
+      ;; "Sort the keystroke names in the \"natural\" way, with (for
+      ;; instance) \"<f2>\" coming between \"<f1>\" and \"<f11>\"."
+      ;;--------------------------------------------------------------
+      (let ((a (car a))
+            (b (car b)))
+        (cond ((and (integer? a) (integer? b)) (< a b))
+              ((and (integer? a) (not (integer? b))) #t)
+              ((and (symbol? a) (symbol? b))
+               (string-version-lessp (symbol->string a) (symbol->string b)))
+              (else #f))))
+
+    (define (help--shadow-lookup keymap key accept-default remap)
+      ;; GNU Emacs's `help--shadow-lookup' (`help.el:1725`): "Like
+      ;; `lookup-key', but with command remapping."
+      ;;
+      ;; The remap arm is Emacs's for a *symbol* definition; this
+      ;; tree's definitions are procedures and command records, so the
+      ;; arm is as dead here as it is for a lambda in Emacs. It is
+      ;; carried because `where-is' and `describe-key' are the callers
+      ;; that set REMAP.
+      ;;--------------------------------------------------------------
+      (let ((value (lookup-key keymap key accept-default)))
+        (cond ((and (integer? value) (>= value 0)) value)
+              ((and value remap (symbol? value))
+               (or (command-remapping value) value))
+              (else value))))
+
+    (define (describe-map map . rest)
+      ;; GNU Emacs's `describe-map' (`help.el:1770`): "Describe the
+      ;; contents of keymap MAP. Assume that this keymap itself is
+      ;; reached by the sequence of prefix keys PREFIX (a string or
+      ;; vector). TRANSL, PARTIAL, SHADOW, NOMENU, MENTION-SHADOW and
+      ;; BUFFER are as in `help--describe-map-tree'."
+      ;;
+      ;; **The C's vector half has no counterpart here**: Emacs keeps
+      ;; ordinary characters in a map's char-table or vector and walks
+      ;; them with `help--describe-vector' (`keymap.c:3074'); every
+      ;; binding, characters included, is a sparse entry in this tree's
+      ;; keymap record, so the sparse walk below covers all of them. The
+      ;; vector half's shadow and `entire-map` tests are the same two
+      ;; rules this walk applies.
+      ;;--------------------------------------------------------------
+      (let* ((prefix (%help-arg rest 0))
+             (transl (%help-arg rest 1))
+             (partial (%help-arg rest 2))
+             (shadow (%help-arg rest 3))
+             (nomenu (%help-arg rest 4))
+             (mention-shadow (%help-arg rest 5))
+             (buffer (%help-arg rest 6))
+             (map (keymap-canonicalize map))
+             (vect '())
+             (columns '()))
+        ;; "Ignore bindings whose \"prefix\" are not really valid events.
+        ;; (We get these in the frames and buffers menu.)"
+        (let walk ((events (keymap-order map)))
+          (unless (null? events)
+            (let* ((event (car events))
+                   (definition (get-keyelt
+                                (hashv-ref (keymap-bindings map) event #f) #f))
+                   (this-shadowed #f))
+              (when (or (symbol? event) (integer? event))
+                (unless (and nomenu (eq? event 'menu-bar))
+                  (when (or (not (symbol? definition))
+                            (not (get definition 'suppress-keymap)))
+                    (when (or (not shadow) (null? shadow)
+                              (let ((tem (help--shadow-lookup
+                                          shadow (vector event) #t #f)))
+                                (cond ((not tem) #t)
+                                      ((and (keymapp definition) (keymapp tem)) #t)
+                                      ((and mention-shadow
+                                            (not (eq? tem definition)))
+                                       (set! this-shadowed #t)
+                                       #t)
+                                      (else #f))))
+                      (when (eq? definition
+                                 (lookup-key map (vector event) #t))
+                        (set! vect (cons (list event definition this-shadowed)
+                                         vect))))))))
+            (walk (cdr events))))
+        ;; "If we found some sparse map events, sort them."
+        (let ((vect (sort vect help--describe-map-compare))
+              (line-start #f)
+              (key-end #f)
+              (column #f))
+          (let loop ((vect vect) (first #t))
+            (unless (null? vect)
+              (let* ((elem (car vect))
+                     (start (list-ref elem 0))
+                     (definition (list-ref elem 1))
+                     (shadowed (list-ref elem 2))
+                     (end start)
+                     (remapped #f))
+                ;; "Find consecutive chars that are identically defined."
+                (when (integer? start)
+                  (let merge ()
+                    (when (and (pair? (cdr vect))
+                               (let ((this (car vect))
+                                     (next (cadr vect)))
+                                 (and (eqv? (car next) (+ (car this) 1))
+                                      (equal? (cadr next) (cadr this))
+                                      (eq? (caddr next) (caddr this)))))
+                      (set! vect (cdr vect))
+                      (set! end (car (car vect)))
+                      (merge))))
+                (when (or (not (eqv? start end))
+                          (*describe-bindings-show-prefix-commands*)
+                          ;; "Don't output keymap prefixes."
+                          (not (keymapp definition)))
+                  (when first
+                    (insert "\n")
+                    (set! first #f))
+                  (set! line-start (point))
+                  ;; "If we're in a <remap> section of the output, then
+                  ;; also display the bindings of the keys that we've
+                  ;; remapped from."
+                  (set! remapped
+                        (and (equal? prefix (vector 'remap))
+                             (not (eq? definition self-insert-command))
+                             (let ((keys (where-is-internal definition #f #f #f #f)))
+                               (and (pair? keys) (car keys)))))
+                  (if remapped
+                      (insert (help--key-description-fontified
+                               (vector (list-ref remapped
+                                                 (- (length remapped) 1)))
+                               (list->vector
+                                (reverse (cdr (reverse
+                                               (if (vector? remapped)
+                                                   (vector->list remapped)
+                                                   remapped)))))))
+                      (insert (help--key-description-fontified
+                               (vector start) prefix)))
+                  (when (not (eqv? start end))
+                    (insert " .. ")
+                    (insert (help--key-description-fontified (vector end)
+                                                             prefix)))
+                  (set! key-end (point))
+                  (set! column (current-column))
+                  ;; "Print a description of the definition of this
+                  ;; character."
+                  (help--describe-command definition transl)
+                  (set! columns
+                        (cons (list column line-start key-end (- (point) 1))
+                              columns))
+                  (when (or shadowed remapped)
+                    (goto-char (max (- (point) 1) (point-min)))
+                    (when shadowed
+                      (insert "\n  (this binding is currently shadowed)"))
+                    (when remapped
+                      (insert "\n  (Remapped via ")
+                      (insert (help--key-description-fontified
+                               (vector start) prefix))
+                      (insert ")"))
+                    (goto-char (min (+ (point) 1) (point-max)))))
+                (loop (cdr vect) first))))
+          (when (pair? columns)
+            (describe-map--align-section columns)))))
+
+    (define (describe-map--fill-columns columns width)
+      ;; GNU Emacs's `describe-map--fill-columns' (`help.el:1948`): pad
+      ;; each key column out to WIDTH with tabs and spaces, in tab-width
+      ;; units.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (elem)
+         (goto-char (list-ref elem 2))
+         (let ((tabs (- (/ width (*tab-width*))
+                        (/ (car elem) (*tab-width*)))))
+           (insert-char #\tab tabs)
+           (insert-char #\space
+                        (if (zero? tabs)
+                            (- width (car elem))
+                            (modulo width (*tab-width*))))))
+       columns))
+
+    (define (describe-map--align-section columns)
+      ;; GNU Emacs's `describe-map--align-section' (`help.el:1919`):
+      ;; pick the column block width for this section, or fall back to
+      ;; continuation lines when a definition is too wide for the window.
+      ;;
+      ;; `(window-width)` in the Lisp is the *body* width in columns;
+      ;; this tree's `window-width` is the window record's slot
+      ;; accessor, so the call is `window-body-width` here.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (let ((max-key (apply max (map car columns))))
+          (cond
+           ((< max-key 16) (describe-map--fill-columns columns 16))
+           ((< max-key 24) (describe-map--fill-columns columns 24))
+           ((< max-key 32) (describe-map--fill-columns columns 32))
+           (else
+            ;; "We have some really wide ones in this block."
+            (let ((window-width (window-body-width (selected-window)))
+                  (max-def (apply max
+                                  (map (lambda (elem)
+                                         (- (list-ref elem 3)
+                                            (list-ref elem 2)))
+                                       columns))))
+              (if (< (+ max-def (max 16 max-key)) window-width)
+                  ;; "Can we do the block without continuation lines?
+                  ;; Then do that."
+                  (describe-map--fill-columns columns (+ 1 (max 16 max-key)))
+                  ;; "No, do continuation lines for some definitions."
+                  (for-each
+                   (lambda (elem)
+                     (goto-char (list-ref elem 2))
+                     (if (< (+ (car elem)
+                               (- (list-ref elem 3) (list-ref elem 2)))
+                            window-width)
+                         (insert-char #\space (- (+ 1 max-key) (car elem)))
+                         ;; "Continuation."
+                         (begin
+                           (insert "\n")
+                           (insert-char #\tab 2))))
+                   columns))))))))
+
+    (define (%help--menu-bar-prefix? prefix)
+      ;; `help--describe-map-tree`'s "element that is for the menu bar":
+      ;; a prefix whose first event is `menu-bar`.
+      ;;--------------------------------------------------------------
+      (and (vector? prefix)
+           (>= (vector-length prefix) 1)
+           (eq? (vector-ref prefix 0) 'menu-bar)))
+
+    (define (help--describe-map-tree startmap . rest)
+      ;; GNU Emacs's `help--describe-map-tree' (`help.el:1638`):
+      ;; "Insert a description of the key bindings in STARTMAP. ...
+      ;; PARTIAL omits certain uninteresting commands ... SHADOW is a
+      ;; list of maps ... PREFIX ... TITLE ... NO-MENU ... TRANSL ...
+      ;; ALWAYS-TITLE ... MENTION-SHADOW ... BUFFER."
+      ;;--------------------------------------------------------------
+      (let* ((partial (%help-arg rest 0))
+             (shadow (%help-arg rest 1))
+             (prefix (%help-arg rest 2))
+             (title (%help-arg rest 3))
+             (no-menu (%help-arg rest 4))
+             (transl (%help-arg rest 5))
+             (always-title (%help-arg rest 6))
+             (mention-shadow (%help-arg rest 7))
+             (buffer (%help-arg rest 8))
+             (amaps (accessible-keymaps startmap prefix))
+             (orig-maps
+              (if no-menu
+                  ;; "Delete from MAPS each element that is for the menu
+                  ;; bar."
+                  (let collect ((tail amaps) (result '()))
+                    (cond ((null? tail) (reverse result))
+                          ((%help--menu-bar-prefix? (car (car tail)))
+                           (collect (cdr tail) result))
+                          (else (collect (cdr tail) (cons (car tail) result)))))
+                  amaps))
+             (maps orig-maps)
+             (print-title (or (pair? maps) always-title))
+             (start-point (point)))
+        ;; "Describe key bindings."
+        (set! *help--keymaps-seen* '())
+        (let loop ((maps maps))
+          (unless (null? maps)
+            (let* ((elt (car maps))
+                   (elt-prefix (car elt))
+                   (sub-shadows (lookup-key shadow elt-prefix #t)))
+              (when (if (and (integer? sub-shadows) (>= sub-shadows 0))
+                        (begin (set! sub-shadows #f) #t)
+                        ;; "Describe this map iff ELT_PREFIX is bound to
+                        ;; a keymap, since otherwise it completely
+                        ;; shadows this map."
+                        (or (keymapp sub-shadows)
+                            (null? sub-shadows)
+                            (not sub-shadows)
+                            (and (pair? sub-shadows)
+                                 (keymapp (car sub-shadows)))))
+                ;; "Maps we have already listed in this loop shadow this
+                ;; map."
+                (let scan ((tail orig-maps))
+                  (unless (eq? tail maps)
+                    (when (equal? (car (car tail)) elt-prefix)
+                      (set! sub-shadows
+                            (cons (cdr (car tail)) sub-shadows)))
+                    (scan (cdr tail))))
+                (describe-map (cdr elt) elt-prefix transl partial
+                              sub-shadows no-menu mention-shadow
+                              buffer)))
+            (loop (cdr maps))))
+        ;; "Print title... unless the keymap was empty."
+        (when (and print-title (not (= (point) start-point)))
+          (save-excursion
+            (goto-char start-point)
+            (when (eolp)
+              (delete-region (point) (+ (point) 1)))
+            (insert
+             (string-append
+              (if title
+                  (string-append title
+                                 (if prefix
+                                     (string-append
+                                      " Starting With "
+                                      (help--key-description-fontified prefix))
+                                     "")
+                                 ":\n")
+                  "")
+              "\nKey             Binding\n"
+              (make-separator-line)))))
+        #f))
+
+    (define (describe-buffer-bindings buffer . rest)
+      ;; GNU Emacs's `describe-buffer-bindings' (`keymap.c:2834'):
+      ;; "Insert the list of all defined keys and their definitions. The
+      ;; list is inserted in the current buffer, while the bindings are
+      ;; looked up in BUFFER."
+      ;;
+      ;; **A placement departure**: the C has this in keymap.c, but its
+      ;; whole body is calls to `help--describe-map-tree` plus the buffer
+      ;; state each section shows, so it lives here beside that
+      ;; function.
+      ;;
+      ;; **Not carried**: the keyboard-translate-table report (there is
+      ;; no such table here) and the `key-translation-map` /
+      ;; `input-decode-map` sections - the first is not ported, and the
+      ;; second belongs to the *terminal* library, which no editor
+      ;; library may import. `local-function-key-map` is an alist of
+      ;; translations here (`*function-key-map*`), not a keymap, so it
+      ;; has nothing `help--describe-map-tree` can walk.
+      ;;--------------------------------------------------------------
+      (let* ((prefix (%help-arg rest 0))
+             (menus (%help-arg rest 1))
+             (nomenu (not menus))
+             (shadow '()))
+        (define (section! title map partial transl always-title)
+          (help--describe-map-tree map partial shadow prefix title nomenu
+                                   transl always-title #f buffer)
+          (set! shadow (cons map shadow)))
+        ;; `*overriding-terminal-local-map*` is a plain variable here -
+        ;; its comment says why (a kboard slot with no dynamic binding of
+        ;; its own) - and `*overriding-local-map*` is a parameter.
+        (let ((overriding *overriding-terminal-local-map*))
+          (cond
+           (overriding
+            (section! "\f\nOverriding Bindings" overriding #t #f #f))
+           ((*overriding-local-map*)
+            (section! "\f\nOverriding Bindings" (*overriding-local-map*)
+                      #t #f #f))
+           (else
+            ;; "Print the `keymap' property bindings."
+            (let ((prop (get-local-map (buffer-pt buffer) buffer 'keymap)))
+              (when prop
+                (section! "\f\n`keymap' Property Bindings" prop #t #f #f)))
+            ;; "Print the minor mode maps."
+            (for-each
+             (lambda (entry)
+               (let ((mode (car entry))
+                     (map (cdr entry)))
+                 (when (and map (buffer-local-value buffer mode #f))
+                   (section! (string-append "\f\n`"
+                                            (symbol->string mode)
+                                            "' Minor Mode Bindings")
+                             map #t #f #f))))
+             (*minor-mode-map-alist*))
+            ;; "Print the (major mode) local map."
+            (let ((map (get-local-map (buffer-pt buffer) buffer 'local-map)))
+              (when map
+                (if (eq? map (buffer-local-keymap buffer))
+                    (section! (string-append
+                               "\f\n`"
+                               (symbol->string
+                                (buffer-local-value buffer 'major-mode
+                                                    'fundamental-mode))
+                               "' Major Mode Bindings")
+                              map #t #f #f)
+                    (section! "\f\n`local-map' Property Bindings"
+                              map #t #f #f)))))))
+        (section! "\f\nGlobal Bindings" *default-keymap* #t #f #t)
+        #f))
+
+    (define-command (describe-bindings . rest)
+      ;; GNU Emacs's `describe-bindings' (`help.el:849`): "Display a
+      ;; buffer showing a list of all defined keys, and their
+      ;; definitions. The keys are displayed in order of precedence."
+      ;;--------------------------------------------------------------
+      "Display a buffer showing a list of all defined keys, and their definitions.
+The keys are displayed in order of precedence.
+
+The optional argument PREFIX, if non-nil, should be a key sequence;
+then we display only bindings that start with that prefix.
+The optional argument BUFFER specifies which buffer's bindings
+to display (default, the current buffer).  BUFFER can be a buffer
+or a buffer name."
+      (interactive)
+      (let ((prefix (%help-arg rest 0))
+            (buffer (%help-arg rest 1)))
+        (unless buffer (set! buffer (current-buffer)))
+        (help-setup-xref (list describe-bindings prefix buffer)
+                         (called-interactively? describe-bindings))
+        (with-help-window (help-buffer)
+          (with-current-buffer (help-buffer)
+            (describe-buffer-bindings buffer prefix)
+            ;; `describe-bindings-outline` and its outline-mode setup
+            ;; are not carried - this tree has no outline-mode - and
+            ;; with them the hiding of the ^L section separators.
+            #f))
+        #f))
+
+    ;; `help-map` (`help.el:62`) and the keys this tree can back. Emacs
+    ;; hangs it off `C-h` as a prefix map; this tree's lookup takes the
+    ;; flat spellings, which is the standing departure `narrow-map` and
+    ;; `mule-keymap` record. The rest of `help-map`'s entries name
+    ;; commands this tree does not have yet; each belongs here when it
+    ;; lands.
+    (define help-map (make-sparse-keymap "Help"))
+    (define-key help-map (kbd "b") describe-bindings)
+    (define-key *default-keymap* (kbd "C-h b") describe-bindings)
+
+))
