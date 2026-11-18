@@ -118,7 +118,16 @@ def resize(fd, pid, rows, cols):
 
 # How long the editor must be silent before a check is considered to have
 # seen everything it is going to see, and the longest it will wait in all.
-QUIET = 0.4
+#
+# The three quiet values are tunable for experiments - `PTY_QUIET' (the
+# end-of-drive wait), `PTY_STARTUP_QUIET' (the startup wait) and
+# `PTY_GAP' (the per-key pacing, below) - and the defaults here are what
+# a run uses. Measured full battery on this 16-core machine, 219 drives:
+# gap 0.3 -> 388 s of key pacing, gap 0.05 -> 250 s (the rest is the
+# editor's own response per key); startup and end waits are the other
+# 330 s at 0.4.
+QUIET = float(os.environ.get("PTY_QUIET", "0.2"))
+STARTUP_QUIET = float(os.environ.get("PTY_STARTUP_QUIET", "0.2"))
 SETTLE_MAX = 20.0
 # The longest a single key waits for the editor to finish with it, before
 # the harness gives up and sends the next one anyway.
@@ -129,6 +138,29 @@ KEY_MAX = 10.0
 # (`WAIT_TIMED_OUT`), because a check that waited for the wrong thing
 # otherwise fails somewhere else entirely and reads as an editor bug.
 WAIT_TIMED_OUT = "[[harness: gave up waiting for %r]]"
+
+# **Where the battery's wall time goes**, when SCHEMACS_PTY_PROFILE=1:
+# the startup wait per drive, the per-key pacing, the end quiet wait,
+# and how many drives and key elements there were. Printed at exit by
+# an atexit handler. It exists so that "make the battery faster" is
+# aimed by measurement rather than by guessing which sleep is big.
+PROFILE = os.environ.get("SCHEMACS_PTY_PROFILE") == "1"
+PROFILE_T = {"drives": 0, "keys": 0, "startup": 0.0, "key_settle": 0.0,
+             "end_wait": 0.0, "tail": 0.0}
+
+
+def _profile_report():
+    if PROFILE:
+        t = PROFILE_T
+        print("pty profile: %d drives, %d key elements; startup %.1fs, "
+              "key pacing %.1fs, end waits %.1fs, kill tail %.1fs"
+              % (t["drives"], t["keys"], t["startup"], t["key_settle"],
+                 t["end_wait"], t["tail"]))
+
+
+if PROFILE:
+    import atexit
+    atexit.register(_profile_report)
 
 
 def WAIT(text):
@@ -157,7 +189,14 @@ EXITED = ("exited",)
 
 
 
-def drive(keys, path, settle=0.3, gap=0.3, term=None, background="0000/0000/0000",
+# The pacing default, overridable for experiments: `PTY_GAP=0.05` asks
+# whether keys can be queued on each other safely (a human typing fast is
+# the same situation), which is the difference between 388 s and ~20 s of
+# per-key settling in a full battery.
+DEFAULT_GAP = float(os.environ.get("PTY_GAP", "0.05"))
+
+
+def drive(keys, path, settle=0.3, gap=None, term=None, background="0000/0000/0000",
           report_exit=False, during=None, config=None, colorterm=None):
     """Run the editor on PATH, send KEYS, and return everything it drew.
 
@@ -195,6 +234,8 @@ def drive(keys, path, settle=0.3, gap=0.3, term=None, background="0000/0000/0000
     waits for a quiet terminal can - which is what `save-y-n` did, and
     what `C-x C-f` then `C-a` did for four other checks.
     """
+    if gap is None:
+        gap = DEFAULT_GAP
     pid, fd = pty.fork()
     if pid == 0:
         os.environ["GUILE_WARN_DEPRECATED"] = "no"
@@ -274,12 +315,16 @@ def drive(keys, path, settle=0.3, gap=0.3, term=None, background="0000/0000/0000
     # `5ahello` - the C-u gone without a trace - and 62/62 when the
     # machine was quiet. A fixed 1.5 s was a guess at the library load,
     # and it is a guess that gets worse exactly when the machine is busy.
+    profile_t0 = time.time()
     floor = time.time() + settle
     deadline = time.time() + SETTLE_MAX
     quiet = 0.0
     while time.time() < floor or (time.time() < deadline
-                                  and (not out or quiet < QUIET)):
+                                  and (not out or quiet < STARTUP_QUIET)):
         quiet = 0.0 if drain(0.05) else quiet + 0.05
+    if PROFILE:
+        PROFILE_T["startup"] += time.time() - profile_t0
+        PROFILE_T["drives"] += 1
 
     # **A key is sent only once the editor has finished with the last
     # one.** The gap was a fixed sleep, which is a guess at how long a
@@ -363,7 +408,11 @@ def drive(keys, path, settle=0.3, gap=0.3, term=None, background="0000/0000/0000
             # ("resize" rows cols): make the terminal that size, as a
             # window manager does, and let the editor notice
             resize(fd, pid, k[1], k[2])
+            _t = time.time()
             settle(gap, KEY_MAX)
+            if PROFILE:
+                PROFILE_T["key_settle"] += time.time() - _t
+                PROFILE_T["keys"] += 1
             continue
         try:
             os.write(fd, k)
@@ -373,7 +422,11 @@ def drive(keys, path, settle=0.3, gap=0.3, term=None, background="0000/0000/0000
             # what happened from the screen collected so far.
             break
         if i != last_key:
+            _t = time.time()
             settle(gap, KEY_MAX)
+            if PROFILE:
+                PROFILE_T["key_settle"] += time.time() - _t
+                PROFILE_T["keys"] += 1
     # **Wait for the editor to go quiet, not for a fixed time.** The keys
     # have been sent; what the check is about to assert on is whatever
     # the editor drew in response. Sleeping a fixed 0.6 s and reading
@@ -386,10 +439,13 @@ def drive(keys, path, settle=0.3, gap=0.3, term=None, background="0000/0000/0000
     # is one burst of output, so no output for a while is the end of it -
     # and the deadline is the backstop for a check that expects something
     # to arrive later.
+    _t = time.time()
     quiet = 0.0
     deadline = time.time() + SETTLE_MAX
     while time.time() < deadline and quiet < QUIET:
         quiet = 0.0 if drain(0.05) else quiet + 0.05
+    if PROFILE:
+        PROFILE_T["end_wait"] += time.time() - _t
     if during is not None:
         during()
         # and let whatever it made the editor draw arrive

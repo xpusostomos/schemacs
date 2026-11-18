@@ -11214,3 +11214,51 @@ jobs than this one:
    checks call `drive()` four times and pay four editor starts; each
    call's fresh state is deliberate, so this is a redesign of those
    checks, not a harness tweak.
+
+# The pty battery, second pass: 981 s -> 528 s (2026-11-18)
+
+The first pass (the section above) removed two fixed sleeps and got 981 ->
+770 s. This pass was aimed by **measurement**: `SCHEMACS_PTY_PROFILE=1`
+makes `drive()` count its own phases and print them at exit -
+
+    pty profile: 219 drives, 1066 key elements; startup 222.1s,
+    key pacing 388.0s, end waits 103.5s, kill tail 0.0s
+
+- which said the per-key pacing was half the battery. That value was the
+`gap=0.3` "quiet between keys", and the question it raised - **can a
+key be queued behind the previous one, as a fast typist does?** - was
+answered by experiment rather than by argument: the seven checks this
+file has ever called flaky, five runs each at `PTY_GAP=0.05`, then full
+batteries.
+
+| | settings | time |
+|---|---|---|
+| baseline | gap 0.3, floor 1.5, quiet 0.4 | 981 s |
+| first pass | floor 0.3, no last-key settle | 770 s |
+| + gap 0.05 | | 632 s |
+| + startup/end quiet 0.2 | **528 s** (two runs, 528 and 528) | |
+
+**95/95 on every one of the four full runs after the change** (one at
+`PTY_GAP=0.05`, one with all three knobs explicit, two at the new
+defaults).
+
+## The knobs, and what is left
+
+`PTY_GAP` (default 0.05), `PTY_STARTUP_QUIET` (0.2), `PTY_QUIET` (0.2)
+and `SCHEMACS_PTY_PROFILE=1` are the experiment surface; the profile
+split at the new defaults is **startup 178 s, key pacing 250 s, end
+waits 52 s**, rest ~50 s. So:
+
+- the remaining **250 s is the editor's own response per key**, not
+  harness sleep - `gap` is nearly exhausted;
+- **startup 178 s** is 219 editor starts (0.8 s each: floor + first
+  draw + quiet);
+- **52 s** is the end waits.
+
+Further means the two bigger jobs named above - per-check `WAIT`
+threading (each key waits for the text it provokes, so the pacing
+settle is skipped where an expectation exists) and reusing one editor
+across a check's drives. **Pushing the quiet values below 0.2 was not
+done**: four green runs is not evidence for a fifth of the margin, and
+the battery's own history is that the margin is what a loaded machine
+spends.
