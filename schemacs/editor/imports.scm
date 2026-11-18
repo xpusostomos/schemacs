@@ -79,6 +79,7 @@
     (schemacs editor icons)
     (schemacs editor easy-mmode)
     (except (schemacs editor window)  *cursor-in-echo-area* window-live-p window-normal-size window-size)
+    (schemacs editor help-fns)
     (schemacs editor novice)
     (schemacs editor warnings)
     (schemacs editor doc)
@@ -274,6 +275,7 @@
     *delete-by-moving-to-trash*
     *delete-horizontal-space-function*
     *describe-bindings-show-prefix-commands*
+    *describe-function-1-function*
     *directory-abbrev-alist*
     *directory-files-no-dot-files-regexp*
     *dired-actual-switches*
@@ -1201,9 +1203,13 @@
     derived-mode-syntax-table-name
     describe-bindings
     describe-buffer-bindings
+    describe-function
+    describe-function-1
+    describe-key
     describe-map
     describe-map--align-section
     describe-map--fill-columns
+    describe-variable
     detach-marker
     detect-coding-bytes
     detect-coding-system
@@ -1358,6 +1364,7 @@
     end-of-line
     end-of-paragraph-text
     end-of-visual-line
+    ensure-empty-lines
     ensure-final-newline-on-save!
     ensure-final-newline-on-visit
     ensure-surface!
@@ -1709,14 +1716,22 @@
     gui-set-selection
     handle-delete-frame
     handle-interrupt
+    help--analyze-key
+    help--binding-undefined-p
     help--describe-command
     help--describe-map-compare
     help--describe-map-tree
+    help--filter-info-list
     help--key-description-fontified
     help--shadow-lookup
     help--window-setup
     help-buffer
+    help-fns--ensure-empty-line
+    help-fns--insert-bindings
+    help-fns--key-bindings
+    help-fns--obsolete
     help-fns-function-name
+    help-key-description
     help-map
     help-mode
     help-mode-hook

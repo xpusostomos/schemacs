@@ -2476,6 +2476,44 @@ def check_help_bindings():
     return problems
 
 
+def check_help_describe():
+    """`C-h f`, `C-h v` and `C-h k` - the three describe commands.
+
+    `describe-function` writes "NAME is an interactive command." and
+    "It is bound to C-f." (help-fns.el's shape, less the usage line and
+    the file - see DEPARTURES.md); `describe-variable` writes
+    "NAME's value is V" and the documentation; `describe-key` writes
+    "KEY runs the command NAME, which is ". The phrases asserted are
+    Emacs 31.1's own for the same keys, minus the two documented
+    departures.
+    """
+    path = "/tmp/pty-check-describe.txt"
+    open(path, "w").write("describe me\n")
+    problems = []
+
+    out = drive([C_h + b"f", WAIT(b"Describe function: "),
+                 b"forward-char", RET], path)
+    if "forward-char is an interactive command." not in out:
+        problems.append("C-h f did not describe forward-char: %r" % out[-300:])
+    # "C-f" carries the `help-key-binding` face, so the raw stream has
+    # escape sequences inside the sentence; assert the plain run.
+    if "It is bound to " not in out:
+        problems.append("C-h f did not print its key binding: %r" % out[-300:])
+
+    out = drive([C_h + b"v", WAIT(b"Describe variable: "),
+                 b"*search-ring-max*", RET], path)
+    if "'s value is " not in out:
+        problems.append("C-h v did not print the value: %r" % out[-300:])
+    if "Maximum length of search ring" not in out:
+        problems.append("C-h v did not print the documentation: %r"
+                        % out[-300:])
+
+    out = drive([C_h + b"k", WAIT(b"Describe key: "), b"\x06"], path)
+    if "runs the command " not in out or "forward-char" not in out:
+        problems.append("C-h k did not describe C-f: %r" % out[-300:])
+    return problems
+
+
 def check_indent():
     """`C-M-q' indents the sexp, and `M-)' closes and reindents.
 
@@ -5295,6 +5333,7 @@ CHECKS = {
     "splash": check_splash,
     "switch-buffer": check_switch_buffer,
     "help-bindings": check_help_bindings,
+    "help-describe": check_help_describe,
     "indent": check_indent,
     "abbreviate": check_abbreviate,
     "kill-buffer": check_kill_buffer,

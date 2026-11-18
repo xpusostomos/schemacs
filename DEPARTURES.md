@@ -6773,3 +6773,121 @@ plain variable (calling it applies a list); `(not '())` is false, so
 every Elisp `(null x)` must be `null?` in this tree - a `(not shadow)`
 test silently skipped every section; and `(/=` does not exist in this
 Guile at all.
+
+# `C-h k`, `C-h f`, `C-h v` - describe-key and the describe-fns half (2026-11-18)
+
+## The bug this pass found in `read-key-sequence`
+
+`%read-key-sequence` (`keyboard.scm`, the body behind the `k`/`K`
+interactive codes) **answered `#f` for every call**: the sequence is
+built inside the three callbacks it hands `modal-lookup-state-step!`,
+and their return values are discarded - the step answers only "was the
+chord finished?". `C-h k` is the first caller that used the answer, and
+it described `#f runs the command ...`. The sequence now goes in a
+variable the callbacks set and the procedure answers. Anything else
+using the `k` code was silently getting `#f` too.
+
+## `describe-key` (help.el:1197)
+
+Ported: `help--binding-undefined-p`, `help-key-description`,
+`help--analyze-key`, `help--filter-info-list` and the command, with the
+C's "several key-sequences" header and the per-key description.
+
+**Not carried**:
+
+- `help--read-key-sequence`'s menu/mouse reading with disabled items
+  enabled; the interactive spec reads one sequence with
+  `read-key-sequence`, which is this tree's whole input pipeline.
+- the `(found in global-map)` locus (`help--binding-locus`), and the
+  `mouse-on-link-p`/`mouse-1-click-follows-link` note - there are no
+  link properties here.
+- `char-to-name`'s "(translated from ...)" character-name branch.
+- the C's surgery on a string *event* (`(any string)`) - this tree's
+  menus have no such entries.
+- `describe-key-briefly` (`C-h c`) and `help--describe-command`'s
+  command branch for keyboard macros' key descriptions: `c` is not
+  bound and not ported.
+
+`describe-function-1` is reached through `*describe-function-1-function*`
+- help-fns.el is above help.el, exactly as in Emacs, where the call is
+an autoload.
+
+## `describe-function` (help-fns.el:298, :1228)
+
+**The data model blocks three of Emacs's sections**, and each is named
+in the library header:
+
+1. **the usage line** `(forward-char &optional N)` - from
+   `help-function-arglist`. A Scheme procedure has no arglist to read:
+   its name is all Guile keeps. `help-split-fundoc`,
+   `help--make-usage-docstring` and `help-highlight-arguments` are not
+   carried. This is the largest visible difference: Emacs's
+   describe-function output has the usage line between the binding and
+   the docstring.
+2. **the file/line xref** - `find-lisp-object-file-name` has no
+   counterpart, so the header says "is an interactive command" where
+   Emacs says "is an interactive primitive-function in ‘C source
+   code’".
+3. **aliases, autoloads, macros, advised functions, subrs** - none of
+   these shapes exist here, so `help-fns--analyze-function` answers the
+   definition alone where Emacs answers
+   `(REAL-FUNCTION DEF ALIASED REAL-DEF)`, and the header's arms are
+   keymap / keyboard macro / interactive command / function.
+
+Carried whole: `help-fns--key-bindings` (all-keys through
+`where-is-internal`, the menu split, the ten-non-modified-keys rule,
+the `self-insert-command` special case, filling), `help-fns--obsolete`
+(reading `byte-obsolete-info`, which nothing sets yet),
+`help-fns--ensure-empty-line`, `help-fns--insert-bindings`, and
+`ensure-empty-lines` (`subr.el:7914`, placed in help-fns.scm because
+its `re-search-backward` is above subr.scm).
+
+**Not carried**: `help-fns--insert-menu-bindings` (the menu walk; the
+sentence "It can also be invoked from the menu." stands in),
+`help-fns-describe-function-functions` hooks and the
+parent-mode/compiler-macro/generalized-variable entries, the
+`help-enable-autoload` docstring scan, the type inference, and
+`help-fns--setup-xref-backend`.
+
+`key-binding` grew its ACCEPT-DEFAULT argument (and so now answers the
+"too long" number, as the C's `Flookup_key` does) so
+`help--analyze-key`'s `(key-binding key t)` is the C's call.
+
+## `describe-variable` (help-fns.el:1356)
+
+**Only custom variables can be described.** A variable here is a Scheme
+binding; a symbol reaches only the ones `custom-declare-variable`
+recorded, and they carry their docstring, standard value and reader on
+the symbol. What is printed is Emacs's shape - "NAME's value is VALUE",
+"Documentation:", "You can customize this variable." - with
+`(format "%S" value)` as the prin1.
+
+Note that the *symbol* carries the asterisks this tree's convention puts
+on parameters (`*search-ring-max*`), so the prompt and the printed name
+differ from Emacs's for every custom option - a departure of the custom
+machinery, not of describe-variable.
+
+**Not carried**: buffer-local and frame-local values (no such bindings
+here), `variable-binding-locus`/`find-lisp-object-file-name`, the
+`:risky`/`:safe` confirmation, the "saved value" section (nothing
+writes `saved-value` yet), customize buttons, `describe-symbol`,
+`describe-command`, `variable-at-point` and the default at the prompt
+(they need elisp-mode's `function-called-at-point`, which needs the
+reader).
+
+## Keys
+
+`C-h k`, `C-h f`, `C-h v` are flat bindings on `*default-keymap*` and
+entries in `help-map`, as `C-h b` is. Both front ends import
+`(schemacs editor help-fns)` - the library binds the keys and installs
+the `describe-key` seam.
+
+## Verification
+
+`help-tests.scm` 29 (the describe-function phrases, describe-variable's
+value/doc/customize lines, describe-key's "runs the command", the
+undefined-key analysis, the filter, and the five key bindings). The pty
+battery gained **`help-describe`**, which drives all three keys through
+the real command loop. One trap in writing it: `C-f` in the output is
+fontified with `help-key-binding`, so the raw byte stream has escape
+sequences *inside* "It is bound to C-f." - assert on the plain runs.

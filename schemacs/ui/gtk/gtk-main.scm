@@ -42,6 +42,9 @@
     ;; Help mode installs `*help-mode-function*`, which is what puts
     ;; `*Help*` in `help-mode`; `C-h b` is bound by `help.scm`.
     (only (schemacs editor help-mode))
+    ;; `describe-function`/`-variable`, whose commands `C-h f`/`-v` are
+    ;; bound by that library, and the seam `describe-key` calls.
+    (only (schemacs editor help-fns))
     ;; `novice.el`'s disabled-command prompt; loading it installs
     ;; `disabled-command-function` and the `query` form's asker, which
     ;; `command.scm`'s `run-command` reads.

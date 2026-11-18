@@ -35,11 +35,17 @@
         describe-map describe-buffer-bindings describe-bindings
         help--describe-map-compare help-fns-function-name help-buffer)
   (only (schemacs editor command) define-command)
+  ;; C-h f/v/k and the analysis under describe-key
+  (only (schemacs editor help)
+        describe-key help--analyze-key help--filter-info-list
+        help--binding-undefined-p help-map)
+  (only (schemacs editor help-fns) describe-function describe-variable)
+  (only (schemacs editor custom) define-custom)
   (only (schemacs editor keymap) keymap define-key *default-keymap*
         lookup-key keymapp)
   (only (schemacs editor buffer) get-buffer-create buffer-local-keymap
         buffer-read-only? buffer-local-value buffer-name erase-buffer
-        set-buffer set!buffer-local-keymap)
+        set-buffer set!buffer-local-keymap with-current-buffer)
   (only (schemacs editor editfns) buffer-string)
   (only (schemacs editor frame) window-list window-buffer *current-frame*)
   (only (ice-9 exceptions) exception-message))
@@ -244,5 +250,77 @@
 ;; looks it up.
 (test-equal #t
   (eq? (lookup-key *default-keymap* (kbd "C-h b")) describe-bindings))
+
+;; ------------------------------------------------------------------
+;; `C-h f`, `C-h v` and `C-h k`.
+;;
+;; The expectation strings are the phrases Emacs 31.1 prints for the
+;; same keys, minus the two documented departures: the usage line
+;; ("(forward-char &optional N)") and the "in ‘C source code’" clause,
+;; neither of which a Scheme procedure can supply.
+
+(define (help-tests-yield f)
+  (parameterize ((*current-frame* (new-frame (allocate-buffer) 24 80))
+                 (*current-buffer* #f))
+    (set-buffer (get-buffer-create "*help-tests*"))
+    (erase-buffer)
+    (f)))
+
+(test-assert "describe-function's keys and name"
+  (let ((s (help-tests-yield
+            (lambda ()
+              (describe-function 'forward-char)
+              (with-current-buffer (get-buffer-create "*Help*")
+                (buffer-string))))))
+    (and (string-contains s "forward-char is an interactive command.")
+         (string-contains s "It is bound to C-f.")
+         (string-contains s "Move point N characters forward"))))
+
+(define-custom *help-test-option* 42
+  "A test option for `describe-variable'."
+  :type 'integer
+  :group 'help)
+
+(test-assert "describe-variable's value and documentation"
+  (let ((s (help-tests-yield
+            (lambda ()
+              (describe-variable '*help-test-option*)
+              (with-current-buffer (get-buffer-create "*Help*")
+                (buffer-string))))))
+    (and (string-contains s "*help-test-option*'s value is 42")
+         (string-contains s "A test option for ‘describe-variable’.")
+         (string-contains s "You can customize this variable."))))
+
+(test-assert "describe-key names the command the key runs"
+  (let ((s (help-tests-yield
+            (lambda ()
+              (describe-key (list (cons (kbd "C-f") #f)))
+              (with-current-buffer (get-buffer-create "*Help*")
+                (buffer-string))))))
+    (string-contains s
+                     "C-f runs the command forward-char, which is an interactive command.")))
+
+;; An unbound key's analysis: the brief says so, and the definition is
+;; nil - which `help--binding-undefined-p` recognizes.
+(test-equal '(#t "C-x q q is undefined")
+  (let* ((a (help--analyze-key (kbd "C-x q q") #f #f))
+         (defn (list-ref a 1)))
+    (list (help--binding-undefined-p defn) (list-ref a 0))))
+
+;; `help--filter-info-list` drops the undefined entries, and keeps the
+;; last one when they are all undefined.
+(test-equal '(1 #t)
+  (list (let ((l (help--filter-info-list (list (list 'a #f #f) (list 'b #f #t)) 2)))
+          (length l))
+        (let ((l (help--filter-info-list (list (list 'a #f #f)) 2)))
+          (and (= (length l) 1) (eq? (car (car l)) 'a)))))
+
+;; The three keys are bound where the command loop looks.
+(test-equal '(#t #t #t #t #t)
+  (list (eq? (lookup-key *default-keymap* (kbd "C-h f")) describe-function)
+        (eq? (lookup-key *default-keymap* (kbd "C-h v")) describe-variable)
+        (eq? (lookup-key *default-keymap* (kbd "C-h k")) describe-key)
+        (eq? (lookup-key help-map (kbd "f")) describe-function)
+        (eq? (lookup-key help-map (kbd "k")) describe-key)))
 
 (test-end "schemacs_editor_help")

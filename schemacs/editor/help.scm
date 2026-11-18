@@ -36,7 +36,7 @@
     ;; `sort` for `describe-map`'s sorted sparse entries; `format` is
     ;; Guile's (`~a`, destination first); `procedure-name` is how a
     ;; definition that is not a command is still named.
-    (only (guile) sort format procedure-name hashv-ref caddr)
+    (only (guile) sort procedure-name hashv-ref caddr)
     (only (schemacs editor subr) split-string keymap-canonicalize
           *minor-mode-map-alist*)
     ;; the temporary buffer the walk edits in place
@@ -60,11 +60,13 @@
     (only (schemacs editor search) search-forward)
     ;; `where-is-internal` is `keymap.c`'s, and `key-description` with it.
     (only (schemacs editor keyboard)
-          where-is-internal command-remapping
+          where-is-internal command-remapping key-binding read-key-sequence
+          undefined
           *overriding-terminal-local-map* *overriding-local-map*)
     (only (schemacs editor keymap)
           key-description keymapp lookup-key keymap-order keymap-bindings
-          get-keyelt make-sparse-keymap define-key *default-keymap*)
+          keymap-index get-keyelt make-sparse-keymap define-key
+          *default-keymap*)
     ;; a command's name for `help-fns-function-name`, and the
     ;; "was this called from a key?" test `describe-bindings` records.
     (only (schemacs editor command)
@@ -77,8 +79,13 @@
     (only (schemacs editor frame) selected-window window-body-width)
     (only (schemacs editor window) display-buffer set-window-hscroll!)
     (only (schemacs editor simple) make-separator-line)
-    (only (schemacs editor character) kbd *tab-width*)
+    (only (schemacs editor character) kbd *tab-width* event-modifiers)
     (only (schemacs editor indentc) current-column)
+    ;; `describe-key`'s mouse coordinates and the key it runs.
+    (only (schemacs editor subr) event-start event-end)
+    (only (schemacs editor mouse) posn-set-point)
+    ;; `format` is `editfns.scm`'s Emacs `format`, not Guile's.
+    (only (schemacs editor editfns) message format)
     ;; the face and the property store
     (only (schemacs editor textprop) add-text-properties)
     ;; `get` is the `suppress-keymap` property test, `accessible-keymaps`
@@ -96,7 +103,10 @@
           describe-map--fill-columns help--describe-map-tree
           describe-buffer-bindings describe-bindings
           help-map *help-mode-function* *help-xref-following*
-          *help-xref-stack-item* *describe-bindings-show-prefix-commands*)
+          *help-xref-stack-item* *describe-bindings-show-prefix-commands*
+          *describe-function-1-function*
+          describe-key help--analyze-key help--filter-info-list
+          help--binding-undefined-p help-key-description)
 
   (begin
 
@@ -474,7 +484,7 @@
                 (if name
                     (string-append "#<procedure " (symbol->string name) ">")
                     "#<procedure>")))))
-       (else (format #f "~a" function))))
+       (else (format "%s" function))))
 
     (define (help--describe-command definition transl)
       ;; GNU Emacs's `help--describe-command' (`help.el:1742`).
@@ -908,5 +918,156 @@ or a buffer name."
     (define help-map (make-sparse-keymap "Help"))
     (define-key help-map (kbd "b") describe-bindings)
     (define-key *default-keymap* (kbd "C-h b") describe-bindings)
+
+    ;;----------------------------------------------------------------
+    ;; `describe-key' and the analysis under it (`help.el:952-1188')
+    ;;----------------------------------------------------------------
+
+    (define *describe-function-1-function* (make-parameter #f))
+    ;; ^ `describe-function-1' is `help-fns.el`'s and that library is
+    ;; *above* this one, so `describe-key` reaches it through a seam -
+    ;; Emacs reaches it the same way, through help-fns's autoload.
+    ;; `help-fns.scm` installs it as it loads.
+
+    (define (help--binding-undefined-p defn)
+      ;; GNU Emacs's `help--binding-undefined-p' (`help.el:963`):
+      ;; "A key's definition is undefined when it is nil, a number (the
+      ;; `lookup-key' 'too long' answer) or `undefined' itself."
+      ;;--------------------------------------------------------------
+      (or (not defn) (integer? defn) (eq? defn undefined)))
+
+    (define (help-key-description key untranslated)
+      ;; GNU Emacs's `help-key-description' (`help.el:952`): the key's
+      ;; description, and "(translated from ...)" when the untranslated
+      ;; sequence differs.
+      ;;
+      ;; `char-to-name` - the branch that names a single translated
+      ;; character - is not carried: it needs the Unicode name table
+      ;; (`mule-cmds.el`).
+      ;;--------------------------------------------------------------
+      (let ((string (help--key-description-fontified key)))
+        (if (or (not untranslated)
+                (let ((u (keymap-index untranslated))
+                      (k (keymap-index key)))
+                  (and u k
+                       (eqv? (car u) #\escape)
+                       (not (eqv? (car k) #\escape)))))
+            string
+            (let ((otherstring (help--key-description-fontified untranslated)))
+              (if (equal? string otherstring)
+                  string
+                  (format "%s (translated from %s)" string otherstring))))))
+
+    (define (help--analyze-key key untranslated buffer)
+      ;; GNU Emacs's `help--analyze-key' (`help.el:966`): "Get
+      ;; information about KEY its corresponding UNTRANSLATED events.
+      ;; Returns a list of the form (BRIEF-DESC DEFN EVENT MOUSE-MSG)."
+      ;;
+      ;; The C's surgery on the last event - a string event replaced by
+      ;; "(any string)" so the user is not shown a pasted menu entry's
+      ;; text - is not carried: this tree's menus have no such entries.
+      ;;--------------------------------------------------------------
+      (let* ((events (keymap-index key))
+             (event (and (pair? events)
+                         (if (and (symbol? (car events))
+                                  (pair? (cdr events))
+                                  (pair? (cadr events)))
+                             ;; "Look at the second event when the first
+                             ;; is a pseudo-event like `mode-line' or
+                             ;; `left-fringe'."
+                             (cadr events)
+                             (car events))))
+             (modifiers (if event (event-modifiers event) '()))
+             (mouse-msg (if (or (memq 'click modifiers) (memq 'down modifiers)
+                                (memq 'drag modifiers))
+                            " at that spot"
+                            ""))
+             (click-pos (and event (event-end event)))
+             (defn (if (or buffer (not (pair? click-pos)))
+                       (key-binding key #t)
+                       (save-excursion
+                         (posn-set-point click-pos)
+                         (key-binding key #t))))
+             (key-desc (help-key-description key untranslated)))
+        (list
+         (if (help--binding-undefined-p defn)
+             (format "%s%s is undefined" key-desc mouse-msg)
+             (format "%s%s runs the command %s" key-desc mouse-msg
+                     (help-fns-function-name defn)))
+         defn event mouse-msg)))
+
+    (define (help--filter-info-list info-list i)
+      ;; GNU Emacs's `help--filter-info-list' (`help.el:1015`): "Drop
+      ;; the undefined keys." Answers the last one when that leaves
+      ;; nothing, so the caller still has something to report.
+      ;;--------------------------------------------------------------
+      (let ((kept (let loop ((rest info-list) (acc '()))
+                    (cond ((null? rest) (reverse acc))
+                          ((help--binding-undefined-p (list-ref (car rest) i))
+                           (loop (cdr rest) acc))
+                          (else (loop (cdr rest) (cons (car rest) acc)))))))
+        (if (pair? kept) kept (list (car (reverse info-list))))))
+
+    (define-command (describe-key key-list . rest)
+      ;; GNU Emacs's `describe-key' (`help.el:1197`): "Display
+      ;; documentation of the function invoked by KEY-LIST."
+      ;;
+      ;; KEY-LIST is a list of `(SEQ . RAW-SEQ)'. The interactive spec
+      ;; reads one sequence with `read-key-sequence` - Emacs's
+      ;; `help--read-key-sequence` also reads menus and mouse events
+      ;; with the disabled ones enabled; that half is not carried.
+      ;;--------------------------------------------------------------
+      "Display documentation of the function invoked by KEY-LIST.
+KEY-LIST can be any kind of a key sequence; it can include keyboard events,
+mouse events, and/or menu events.  When calling from a program,
+pass KEY-LIST as a list of elements (SEQ . RAW-SEQ) where SEQ is
+a key-sequence and RAW-SEQ is its untranslated form.
+
+BUFFER is the buffer in which to lookup those keys; it defaults to
+the current buffer."
+      (interactive (list (list (cons (read-key-sequence "Describe key: ")
+                                     #f))))
+      (let* ((buffer (or (%help-arg rest 0) (current-buffer)))
+             (info-list
+              (help--filter-info-list
+               (map (lambda (x)
+                      (let* ((seq (if (pair? x) (car x) x))
+                             (raw (if (pair? x) (cdr x) #f))
+                             (analysis (help--analyze-key seq raw buffer)))
+                        (list seq (list-ref analysis 0) (list-ref analysis 1) #f)))
+                    key-list)
+               2)))
+        (help-setup-xref (list describe-key key-list buffer)
+                         (called-interactively? describe-key))
+        (if (and (<= (length info-list) 1)
+                 (help--binding-undefined-p (list-ref (car info-list) 2)))
+            (message "%s" (list-ref (car info-list) 1))
+            (with-help-window (help-buffer)
+              (when (> (length info-list) 1)
+                (insert "There were several key-sequences:\n\n")
+                (let loop ((rest info-list))
+                  (unless (null? rest)
+                    (insert "  ")
+                    (insert (list-ref (car rest) 1))
+                    (insert "\n")
+                    (loop (cdr rest))))
+                (insert "\n\nThey're all described below.\n"))
+              (for-each
+               (lambda (info)
+                 (let ((brief-desc (list-ref info 1))
+                       (defn (list-ref info 2)))
+                   (when defn
+                     (when (> (length info-list) 1)
+                       (with-current-buffer (help-buffer)
+                         (insert (make-separator-line))))
+                     (insert brief-desc)
+                     (insert ", which is ")
+                     ((*describe-function-1-function*) defn))))
+               info-list)
+              #f))
+        #f))
+
+    (define-key help-map (kbd "k") describe-key)
+    (define-key *default-keymap* (kbd "C-h k") describe-key)
 
 ))

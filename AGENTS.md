@@ -11013,3 +11013,52 @@ into the file.
 - The `\{MAPVAR}` form of `substitute-command-keys` now has its
   machinery (`help--describe-map-tree`); wiring it is the next piece of
   help.scm's header's first gap.
+
+# `C-h f`, `C-h v`, `C-h k` (2026-11-18, same day as `C-h b`)
+
+## The bug under `C-h k`: `read-key-sequence` always answered `#f`
+
+The three callbacks `%read-key-sequence` hands `modal-lookup-state-step!`
+were treated as if their values came back, but the step answers only
+"was the chord finished?" - so the function returned `#f` for every
+call. The sequence now goes in a variable the callbacks set. Anything
+using the `k`/`K` interactive codes was getting `#f` silently; `C-h k`
+was the first real caller and showed it as "#f runs the command ...".
+**When a primitive's answer travels through callbacks, it needs a
+variable, not the call's return value.**
+
+## What landed
+
+- `help-fns.scm` (NEW): `describe-function`, `describe-function-1`,
+  `help-fns--key-bindings`/`--insert-bindings`/`--obsolete`/
+  `--ensure-empty-line`, `ensure-empty-lines`, `describe-variable`;
+  installs `*describe-function-1-function*` and binds `C-h f`/`v`.
+- `help.scm`: `describe-key`, `help--analyze-key`,
+  `help--filter-info-list`, `help--binding-undefined-p`,
+  `help-key-description`, and the seam; binds `C-h k`.
+- `keyboard.scm`: `key-binding` takes ACCEPT-DEFAULT and now answers
+  the "too long" number like `Flookup_key`; `read-key-sequence` fixed.
+- Tests: help-tests 29, pty `help-describe`.
+
+## The three data-model walls in `C-h f`/`C-h v` (read the headers)
+
+1. **No usage line** - a Scheme procedure has no arglist. This is the
+   biggest visible difference from Emacs's describe-function.
+2. **No file/line** - `find-lisp-object-file-name` has no counterpart.
+3. **Variables are Scheme bindings** - only `define-custom` variables
+   have a symbol, a docstring and a reader, so `C-h v` completes over
+   `custom-variable-names` and a non-custom name says "Not documented
+   as a variable." And the custom *symbols carry the asterisks* the
+   parameter convention gives them.
+
+## What is left of the help pass
+
+- `C-h c` `describe-key-briefly`, `describe-symbol` (`C-h o`),
+  `describe-command`, `where-is` (`C-h w`), `describe-mode` (`C-h m`),
+  `describe-syntax` and `describe-categories` (need `describe-vector`
+  over a char-table - a chartab walk).
+- `help-fns--signature` and `help-function-arglist`, if the tree ever
+  gives a procedure its argument names (a docstring convention would
+  do it).
+- `\{MAPVAR}`'s wiring now that `help--describe-map-tree` exists.
+- The menu walk in `help-fns--insert-menu-bindings`.

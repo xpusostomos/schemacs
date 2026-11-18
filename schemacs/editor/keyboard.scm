@@ -90,7 +90,7 @@
           *current-keymap*
           *default-keymap*
           *special-event-map* define-key keymap-parent keymap-type?
-          keymap-lookup
+          keymap-lookup lookup-key
           ;; Emacs's `key-description', which the undefined-key message is
           ;; built out of (`subr.el:1297') - and `single-key-description',
           ;; which the prefix-argument echo uses.
@@ -840,7 +840,7 @@
           (let ((got (km:keymap-lookup (car maps) (list event))))
             (or got (loop (cdr maps))))))))
 
-    (define (key-binding key)
+    (define (key-binding key . rest)
       ;; GNU Emacs's `key-binding' (`keymap.c`): "Return the binding for
       ;; command KEY in the current keymaps. KEY is a string or vector,
       ;; that gives the key sequence."
@@ -861,11 +861,16 @@
          ((and (pair? def) (eq? (car def) 'menu-item))
           (and (>= (length def) 3) (list-ref def 2)))
          (else def)))
-      (let loop ((maps (lookup-keymaps)))
-        (if (null? maps)
-            #f
-            (let ((def (coerce (km:keymap-lookup (car maps) key))))
-              (if def def (loop (cdr maps)))))))
+      ;; KEY may be looked up with ACCEPT-DEFAULT - Emacs's
+      ;; `(key-binding KEY ACCEPT-DEFAULT)` - which is the third argument
+      ;; of `lookup-key`'s DEFUN, applied to the whole list of active
+      ;; maps. `lookup-key` reads a *list* of keymaps with that rule
+      ;; already, so the walk is one call - and its "too long" answer
+      ;; (a number) passes through, as `help--binding-undefined-p`
+      ;; expects.
+      (let ((def (lookup-key (lookup-keymaps) key
+                             (and (pair? rest) (car rest)))))
+        def))
 
     (define (modal-lookup-state-step! state event do-action do-wait-next do-fail-lookup)
       ;; One event of `read_key_sequence''s walk.
@@ -1369,7 +1374,12 @@
       ;;--------------------------------------------------------------
       (when prompt (message "%s" prompt))
       (let ((state (new-modal-lookup-state (lookup-keymaps)))
-            (events '()))
+            (events '())
+            ;; The step's own answer is "was the chord finished?" - a
+            ;; boolean - so the sequence the callbacks build goes in a
+            ;; variable. **Without it this function answered #f for
+            ;; every call**, which made `C-h k` describe "#f".
+            (answer #f))
         (let loop ()
           (let ((event (function-key-translate (read-key-event -1))))
             (set! events (append events (list event)))
@@ -1377,13 +1387,14 @@
              state event
              ;; a binding that is not a prefix: the sequence is complete
              (lambda (full-path action)
-               (%read-key-sequence-answer events vector?))
+               (set! answer (%read-key-sequence-answer events vector?)))
              ;; a prefix keymap: keep reading
              (lambda (full-path action) (loop))
              ;; nothing bound: Emacs still answers the sequence it read,
              ;; and the *caller* reports it - `k`'s command does
              (lambda (full-path)
-               (%read-key-sequence-answer events vector?)))))))
+               (set! answer (%read-key-sequence-answer events vector?))))))
+        answer))
 
     (define (read-key-sequence prompt)
       ;; GNU Emacs's `read-key-sequence` (`keyboard.c:12501`): "Read a
