@@ -107,7 +107,7 @@
     ;; `concat' is `fns.c`'s and is what joins a mode line's runs - and
     ;; unlike `string-append' it copies the pieces' text properties, as
     ;; the C's does; `pad-line`'s padding goes on through it.
-    (only (schemacs editor fns) concat)
+    (only (schemacs editor fns) concat equal-including-properties %substring)
     ;; `string-width` is `character.c`'s, and `string-pixel-width` below
     ;; is the cell-model measurement over it.
     (only (schemacs editor character) string-width)
@@ -232,7 +232,8 @@
     ;; them down, and the display realizes what that means on itself
     ;; (`realize-face').
     (only (schemacs editor textprop)
-          get-text-property next-single-property-change)
+          get-text-property next-single-property-change
+          previous-single-property-change)
     (only (schemacs editor buffer)
           *transient-mark-mode*
           ;; `mark_window_display_accurate_1` records what the rows were
@@ -243,7 +244,7 @@
           text-editor-cache-long-scans set!text-editor-cache-long-scans
           buffer-auto-hscroll-mode buffer-cursor-in-non-selected-windows
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
-          buffer-local-value buffer-truncate-lines
+          buffer-local-value set-buffer-local-value! buffer-truncate-lines
           buffer-word-wrap
           ;; the buffer's own bounds and text, which the `%l' cache's
           ;; `BEG_UNCHANGED' accessors below read - `BEG' and `Z' are
@@ -326,7 +327,10 @@
     ;; 2026-10-14: two `(make-parameter ...)' forms of the same name meant
     ;; the mode line read one and `add-minor-mode' wrote the other, so a
     ;; minor mode registered the Emacs way never reached the mode line.
-    (only (schemacs editor subr) *minor-mode-alist* run-hooks)
+    (only (schemacs editor subr) *minor-mode-alist* run-hooks
+          ;; The seam `event-start`/`event-end` take their point-position
+          ;; fallback through; installed at the end of this file.
+          *event--posn-at-point-function*)
     ;; `find_newline' (`search.c:675'), which is what the C's
     ;; `scan_newline' is - the line arithmetic `message-dolog' walks the
     ;; log with.
@@ -396,12 +400,17 @@
    string-pixel-width
    mode-line-string
    render! redisplay-frames! *redisplay-in-progress* *after-redisplay-hook*
+   fontification-functions set!fontification-functions!
    force-mode-line-update
    scroll-to-cursor!
    window-scroll window-move-screen-lines
    status-string
    window-end
    pos-visible-in-window-p
+   ;; `keyboard.c`'s `posn-at-point` and `subr.el`'s
+   ;; `event--posn-at-point`, which is what `event-start` answers for a
+   ;; keyboard key.
+   posn-at-point event--posn-at-point
    window-line-rows
    window-line-slices
    posn-at-x-y buffer-posn-from-coords
@@ -626,10 +635,24 @@
       ;; the buffer's. Measured on Emacs 31.1 with point at 300 in a
       ;; 24-row frame: the selected frame's start is 232 and the other
       ;; frame's is still 1.
+      ;; **The window's point and start are clipped to the accessible
+      ;; range, as the C clips both.** `window_point` does
+      ;; `pt = clip_to_bounds (BEGV, marker_position (w->pointm), ZV)`
+      ;; (`xdisp.c:16812`); `redisplay_window` clamps its `startp` the
+      ;; same way before anything is laid out (`:20781`: "if (CHARPOS
+      ;; (startp) < BEGV) SET_TEXT_POS (startp, BEGV, BEGV_BYTE); else if
+      ;; (CHARPOS (startp) > ZV) ..."). **A narrowing moves BEGV/ZV and
+      ;; leaves both markers where they were** - markers are not clipped
+      ;; by narrowing, measured on Emacs 31.1: `window-start` is still 1
+      ;; after narrowing to 9..15 - so both clamps are the ordinary case
+      ;; after `C-x n n`, not a corner. Without them the row walk below
+      ;; read positions before BEGV, where `fetch-char` answers #f, and
+      ;; that #f reached `char-display-width`: the Gtk redisplay died
+      ;; with "Wrong type argument" after `C-x n n` and a keystroke.
       (let* ((ed (window-buffer window))
              (vheight (window-body-height window))
-             (pt (window-point window))
-             (start (window-start window)))
+             (pt (max (buffer-beg ed) (min (window-point window) (buffer-z ed))))
+             (start (max (buffer-beg ed) (min (window-start window) (buffer-z ed)))))
         ;; **The matrix drawn last time already answers it, when it is
         ;; still valid.** GNU Emacs's `try_cursor_movement`
         ;; (`xdisp.c:20700`) is this check: while point stays inside the
@@ -2443,6 +2466,96 @@
              (end (window-end window)))
         (and (>= pos start) (<= pos end) #t)))
 
+    (define (posn-at-point position window)
+      ;; GNU Emacs's `posn-at-point` (`keyboard.c:13594`): "Return
+      ;; position information for buffer position POS in WINDOW. POS
+      ;; defaults to point in WINDOW; WINDOW defaults to the selected
+      ;; window. ... Return nil if POS is not visible in WINDOW."
+      ;;
+      ;; The C asks `pos_visible_in_window_p` for the glyph's pixel
+      ;; coordinates and hands them to `posn_at_x_y`; this asks the row
+      ;; walk the cursor is placed with for the position's *cell*
+      ;; (screen row and column), and hands that to `posn-at-x-y` in
+      ;; pixels - the same two steps, over the geometry this tree's
+      ;; renderer actually laid out.
+      ;;
+      ;; **What is not carried, and what each would take.** Emacs's posn
+      ;; has the OBJECT, POS, (COL . ROW), IMAGE and size fields; this
+      ;; answers the four fields `posn-at-x-y` builds, whose AREA-OR-POS
+      ;; is the buffer position, which is all any caller here reads. A
+      ;; position inside a `display` string or an invisible run is
+      ;; answered as the cell it is drawn on, not the string, because
+      ;; the posn is rebuilt from the coordinates.
+      ;;--------------------------------------------------------------
+      (let* ((window (or window
+                         (and (*current-frame*) (selected-window))))
+             (ed (and window (window-buffer window)))
+             (pos (or position (and window (window-point window)))))
+        (and window
+             ed
+             ;; **No display, no cells to measure.** A headless test
+             ;; (the help suites) has no display object and asks this
+             ;; through `event-start`; there is no screen for the
+             ;; position to be on, which is the nil answer.
+             (current-display)
+             (>= pos (buffer-beg ed))
+             (<= pos (buffer-z ed))
+             (let* ((line-start (text-editor-get-start-of-line ed pos))
+                    (column (- pos line-start))
+                    (rows (window-line-slices-at window line-start))
+                    (k (rows-row-of-column rows column))
+                    (texts (line-display-texts ed line-start))
+                    (row-start (car (list-ref rows k)))
+                    (width (window-body-width window))
+                    (screen-row (+ (or (rows-above-in-window window line-start)
+                                       (rows-above window line-start))
+                                   k))
+                    (vheight (window-body-height window)))
+               (and (>= screen-row 0) (< screen-row vheight)
+                    (let* ((display-col (current-line-display-column ed column))
+                           (col (+ (window-left window)
+                                   (if (window-wraps? window)
+                                       (min (- display-col
+                                               (line-texts-column texts
+                                                                  (or row-start 0)))
+                                            (- width 1))
+                                       (max 0
+                                            (min (- display-col
+                                                    (%window-hscroll window))
+                                                 (- width 1))))))
+                           (row (+ screen-row (window-body-top window)))
+                           (d (current-display)))
+                      (posn-at-x-y (* col (column-width d))
+                                   (* row (line-height d))
+                                   (window-frame window))))))))
+
+    (define (event--posn-at-point)
+      ;; GNU Emacs's `event--posn-at-point` (`subr.el:1894`): the posn
+      ;; `event-start` and `event-end` answer for anything that is not a
+      ;; mouse event - a keyboard key, whose event is an integer or a
+      ;; symbol, and nil. "Use `window-point` for the case when the
+      ;; current buffer is temporarily switched to some other buffer",
+      ;; and fall back to a short position list when point is off
+      ;; screen.
+      ;;
+      ;; **`subr.el`'s function, placed here** (a named departure):
+      ;; `event-start` is `subr.scm`'s and this needs a window and
+      ;; `posn-at-point`, both above that library, so the fallback
+      ;; arrives through `*event--posn-at-point-function*`.
+      ;;
+      ;; Not carried: the minibuffer-window arm - this tree's echo area
+      ;; is an ordinary window and `(selected-window)` is it while a
+      ;; prompt is up - and the `(setf (nth 5 posn) pos)` correction for
+      ;; a posn whose OBJECT is a display string, because the posn
+      ;; built here has no OBJECT field.
+      ;;--------------------------------------------------------------
+      (let ((window (and (*current-frame*) (selected-window))))
+        (if (not window)
+            #f
+            (let ((pos (window-point window)))
+              (or (posn-at-point pos window)
+                  (list window pos (cons 0 0) 0))))))
+
     ;;----------------------------------------------------------------
     ;; Building rows - the C's `display_line`
     ;;----------------------------------------------------------------
@@ -2753,6 +2866,51 @@
             (set-glyph-row-glyphs! row vec)
             (set-glyph-row-used! row need)))))
 
+    ;;----------------------------------------------------------------
+    ;; `fontification-functions` (`xdisp.c:39022'), and the redisplay
+    ;; hook that runs them (`handle_fontified_prop`, `xdisp.c:4667')
+    ;;----------------------------------------------------------------
+    ;;
+    ;; "List of functions to call to fontify regions of text. Each
+    ;; function is called with one argument POS. Functions must fontify a
+    ;; region starting at POS in the current buffer, and give fontified
+    ;; regions the property `fontified' with a non-nil value."
+    ;;
+    ;; Buffer-local, and set by `jit-lock-mode` (which lives in
+    ;; `(schemacs editor jit-lock)`, above this library), so it is the
+    ;; tree's per-buffer store rather than one of its hook parameters -
+    ;; the same shape as `buffer-truncate-lines` above.
+    ;;
+    ;; **Not carried**: the `long-line-optimizations` narrowing, the
+    ;; `memory-full` and `run-hooks` guards, and
+    ;; `redisplay-skip-fontification-on-input` (nothing here reads
+    ;; pending input from the renderer).
+    (define (fontification-functions)
+      (buffer-local-value (current-buffer) 'fontification-functions '()))
+    (define (set!fontification-functions! value)
+      (set-buffer-local-value! (current-buffer) 'fontification-functions value))
+
+    (define *in-fontification-functions* (make-parameter #f))
+    ;; ^ The C's `specbind (Qfontification_functions, Qnil)` (`:4702'):
+    ;; while the functions run the variable is empty, so a fontifier that
+    ;; causes a redisplay cannot recurse. A separate flag rather than a
+    ;; rebound list, because the buffer's own list would win over a
+    ;; parameter.
+
+    (define (run-fontification-functions pos)
+      ;; `handle_fontified_prop`: text whose `fontified` property is nil,
+      ;; and whose position is before `Z`, is fontified before it is laid
+      ;; out - each function is called with POS and fontifies a region
+      ;; starting there.
+      ;;--------------------------------------------------------------
+      (when (and (not (*in-fontification-functions*))
+                 (< pos (point-max))
+                 (not (get-text-property pos 'fontified)))
+        (let ((fns (fontification-functions)))
+          (when (pair? fns)
+            (parameterize ((*in-fontification-functions* #t))
+              (for-each (lambda (f) (f pos)) fns))))))
+
     (define (build-row! ed row texts from to x0 y width
                         line-start more? truncated? row-width metrics)
       ;; Fill ROW from one screen row of a line: `display_line`.
@@ -2771,6 +2929,12 @@
       ;; after a prompt - so a row that has any is built by
       ;; `line-slice-glyphs-with-strings`.
       ;;--------------------------------------------------------------
+      ;; `handle_fontified_prop`: a row whose first position is not yet
+      ;; fontified is fontified *before* it is built, so the glyphs see
+      ;; the faces the fontifier put down. Emacs checks the property as
+      ;; its iterator reaches each position; checking each row's start is
+      ;; the same rule at the same granularity the row builder has.
+      (run-fontification-functions (+ line-start from))
       (let* ((ovs (row-overlay-strings ed (+ line-start from) (- to from)))
              (any-strings?
               (let loop ((i 0))
@@ -3525,6 +3689,16 @@
         ;; on it before.
         (unless accurate-p
           (set!window-last-mode-line window #f))
+        ;; ...and so does the tab line's. **A cache is only good while the
+        ;; screen still holds what it records**, and a window that has been
+        ;; switched to another buffer - so that `window-wants-tab-line` is
+        ;; false for a while and nothing redraws the row - comes back with
+        ;; its old record intact. Without this the tab line row stayed
+        ;; blank after `C-x <right>' `C-x <left>' when the formatted line
+        ;; happened to be the same string it had been, which is the common
+        ;; case for a window cycling between two buffers.
+        (unless accurate-p
+          (set!window-last-tab-line window #f))
         (when accurate-p
           (let ((start (%window-start window)))
             (set!window-last-buffer window buffer)
@@ -3603,7 +3777,11 @@
              (record (list line face y x0)))
         (unless (and (not (windows-or-buffers-changed?))
                      (not (frame-garbaged-p (window-frame window)))
-                     (equal? (window-last-mode-line window) record))
+                     ;; **Properties count**, which `equal?` does not see:
+                     ;; the same characters with another face is another
+                     ;; row.
+                     (equal-including-properties (window-last-mode-line window)
+                                                 record))
           (draw-mode-line! line face y x0)
           (set!window-last-mode-line window record))
         (when border
@@ -3656,7 +3834,11 @@
              (record (list line face y x0)))
         (unless (and (not (windows-or-buffers-changed?))
                      (not (frame-garbaged-p (window-frame window)))
-                     (equal? (window-last-tab-line window) record))
+                     ;; the mode line's rule, and the reason it matters
+                     ;; more here: a tab line's characters stay the same
+                     ;; while its faces follow the current tab.
+                     (equal-including-properties (window-last-tab-line window)
+                                                 record))
           (draw-mode-line! line face y x0)
           (set!window-last-tab-line window record)))))
 
@@ -4414,6 +4596,58 @@
                       (line-next-start ed line-start)
                       (text-editor-get-end-of-line ed line-start))))))))))
 
+    (define (%tab-line-string-at line pos)
+      ;; The tab line's string that POS was drawn from, and POS's index in
+      ;; it: the `(STRING . POS)` OBJECT field of a position list.
+      ;;
+      ;; **GNU Emacs's redisplay stores one of these per string** that
+      ;; `format-mode-line` lays out (`store_mode_line_string`,
+      ;; `xdisp.c:27444`), so `posn-string` on a tab-line hit gives *that
+      ;; tab's own string* - which is what `tab-line--get-tab-property`
+      ;; reads its `tab` property at position 1 of (`tab-line.el:854`).
+      ;; This renderer formats the whole row into one string, so the
+      ;; segment is rebuilt from the `tab` property's run: a tab's string
+      ;; is `(concat SEPARATOR TAB-STRING)` (`tab-line.el:718`), so it
+      ;; begins one character before the run - and a click on the
+      ;; separator belongs to the string that follows it. Without this,
+      ;; position 1 of the *whole row* is always the first tab, so every
+      ;; click selected the first tab (and a click on a close button
+      ;; closed it).
+      ;;
+      ;; A position outside any `tab` run - the scroll arrows, the `+`
+      ;; button, the empty separator at the end - answers the whole row,
+      ;; which is what it answered before and all those commands read.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length line))
+             (pos (max 0 (min pos (max 0 (- len 1)))))
+             (here (get-text-property pos 'tab line))
+             (next (and (< (+ pos 1) len)
+                        (get-text-property (+ pos 1) 'tab line))))
+        (if (not (or here next))
+            (cons line pos)
+            ;; The run of one `tab` value, walked rather than asked of
+            ;; `previous-single-property-change`: that answers nil at the
+            ;; *first* character of a run, and 4 (not 5) at the start of
+            ;; the next one - Emacs's own answers, measured - which is not
+            ;; a boundary this can use directly.
+            (let* ((start (if here pos (+ pos 1)))
+                   (value (get-text-property start 'tab line))
+                   (start (let loop ((i start))
+                            (if (and (> i 0)
+                                     (equal? (get-text-property (- i 1) 'tab line)
+                                             value))
+                                (loop (- i 1))
+                                i)))
+                   (end (let loop ((i start))
+                          (if (and (< i len)
+                                   (equal? (get-text-property i 'tab line)
+                                           value))
+                              (loop (+ i 1))
+                              i)))
+                   (seg-start (max 0 (- start 1))))
+              (cons (%substring line seg-start end)
+                    (- pos seg-start))))))
+
     (define (posn-at-x-y x y frame)
       ;; GNU Emacs's `posn-at-x-y' (`keyboard.c:13009'), which is
       ;; `make_lispy_position' with a timestamp of 0 and the frame's
@@ -4489,7 +4723,8 @@
                            (pos (- column left)))
                       (if (and line (string? line)
                                (>= pos 0) (< pos (string-length line)))
-                          (list w 'tab-line (cons x y) 0 (cons line pos))
+                          (list w 'tab-line (cons x y) 0
+                                (%tab-line-string-at line pos))
                           (list w 'tab-line (cons x y) 0))))
                    ((and (= row (+ top height -1))
                            ;; **A minibuffer window has no mode line**, so
@@ -4622,11 +4857,13 @@
       ;; other binding. A named departure, and the observable result is
       ;; the C's.
       ;;--------------------------------------------------------------
-      ;; **Drawn on a toolkit frame too.** Emacs's Gtk build gives the
-      ;; tab bar a widget of its own; this tree draws it as the first row
-      ;; of the text area on both kinds of display (see
-      ;; `frame-top-margin`), so there is no window-system guard here -
-      ;; unlike `update-menu-bar`, whose bar *is* a widget there.
+      ;; **Drawn on a toolkit frame too, as Emacs draws it.** GNU
+      ;; Emacs's Gtk build has no tab-bar widget; its redisplay draws
+      ;; the bar into `f->tab_bar_window` below the menu bar, and this
+      ;; tree draws it as the first row of the text area on both kinds
+      ;; of display (see `frame-top-margin`). So there is no
+      ;; window-system guard here - unlike `update-menu-bar`, whose bar
+      ;; *is* a toolkit widget.
       (when (and (> (%frame-tab-bar-lines frame) 0)
                  (*tab-bar-items-function*)
                  (or (windows-or-buffers-changed?)
@@ -5042,5 +5279,12 @@
     ;; `scroll-up-command` is `simple.el`'s and a screen line is this
     ;; library's, so the command calls through here. Installed at load.
     (*window-scroll-function* window-scroll)
+
+    ;; **The point-position seam** (`subr.scm`'s
+    ;; `*event--posn-at-point-function*`): `event-start` and `event-end`
+    ;; answer the posn at point for anything that is not a mouse event,
+    ;; as `subr.el` does, and the window it needs is here. Installed at
+    ;; load; a caller outside a running display keeps the old #f.
+    (*event--posn-at-point-function* event--posn-at-point)
 
     ))

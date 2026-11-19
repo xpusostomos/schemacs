@@ -152,6 +152,9 @@
    ;; `nth' and the `posn-' cluster - see the note on them below.
    nth event-start event-end
    posn-window posn-area posn-point posn-x-y posn-string
+   ;; The seam `event-start`/`event-end` reach the point-position
+   ;; fallback through (`xdisp.scm` installs it).
+   *event--posn-at-point-function*
    )
 
   (begin
@@ -1516,15 +1519,38 @@
     ;; them. It lives in `mouse.sld', with the commands that call it.
     ;;------------------------------------------------------------------
 
+    (define *event--posn-at-point-function* (make-parameter #f))
+    ;; ^ The seam `event--posn-at-point' (`subr.el:1894') is reached
+    ;; through. It needs a window and `posn-at-point', and both live
+    ;; above this library - `posn-at-point' is `xdisp.scm`'s, with the
+    ;; other geometry - so `xdisp.scm` installs it at load time, the
+    ;; same edge `*get-text-property-function*` and `*message-function*`
+    ;; take. `#f` until then, which is the answer this library gave
+    ;; before the fallback existed.
+    ;;
+    ;; **The fallback is not optional: a keyboard key takes it too.**
+    ;; `last_nonmenu_event = key' (`keyboard.c:12216') is the *key
+    ;; event* - an integer or a symbol, not a cons - so every command
+    ;; that asks an event for its position while running from a key
+    ;; reads this arm. `tab-line-switch-to-next-tab' is one, bound to
+    ;; `C-x <right>`, and without the arm it died with "Wrong type
+    ;; argument in position 1 (expecting struct): #f" the moment the
+    ;; tab line was on.
+
     (define (event-start event)
-      ;; GNU Emacs's `event-start': where EVENT begins.
+      ;; GNU Emacs's `event-start' (`subr.el:1911'): "Return the
+      ;; starting position of EVENT. ... If EVENT is nil, the value of
+      ;; `posn-at-point' is used instead."
       ;;
-      ;; Emacs's differs from `event-end' only after a drag, and asks
-      ;; `posn-at-point' when handed nil; this asks nothing and answers
-      ;; #f for something that is not an event at all, which is the
-      ;; shape every caller in this tree wants.
+      ;; The touch-screen arms (`touchscreen-begin`/`-end`/`-update`)
+      ;; are not carried - no touch event exists in either front end -
+      ;; so what is left is the C's two: `(nth 1 event)` for a cons,
+      ;; and the position of point for anything else.
       ;;--------------------------------------------------------------
-      (and (pair? event) (nth 1 event)))
+      (or (and (pair? event) (nth 1 event))
+          (let ((fallback (*event--posn-at-point-function*)))
+            (and fallback (fallback)))
+          #f))
 
     (define (event-end event)
       ;; GNU Emacs's `event-end' (`subr.el:1952'): "Return the ending
@@ -1544,11 +1570,15 @@
       ;; click count there instead - `(drag-mouse-1 POSN 2)' - so the
       ;; test is what it is and not "is there a third element".
       ;;
-      ;; The `posn-at-point' fallback for a nil event is not carried:
-      ;; nothing here asks for the end of an event it does not have.
+      ;; The fallback for anything that is not a cons is the same one
+      ;; `event-start' takes (`subr.el:1952`), so a keyboard key answers
+      ;; the position of point rather than #f.
       ;;--------------------------------------------------------------
-      (and (pair? event)
-           (nth (if (pair? (nth 2 event)) 2 1) event)))
+      (or (and (pair? event)
+               (nth (if (pair? (nth 2 event)) 2 1) event))
+          (let ((fallback (*event--posn-at-point-function*)))
+            (and fallback (fallback)))
+          #f))
 
     (define (posn-window position)
       ;; GNU Emacs's `posn-window': the window the event happened in, or

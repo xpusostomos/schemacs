@@ -47,15 +47,20 @@
     ;; it needs, as an Emacs init file requires what it needs - see
     ;; `load-init'
     (only (schemacs editor buffer)
-          *inhibit-read-only* erase-buffer get-buffer-create
+          *inhibit-read-only* *scratch-buffer-name* erase-buffer get-buffer
+          get-buffer-create major-mode
           buffer-default-directory current-buffer set!buffer-default-directory
           set!buffer-read-only set-buffer-modified-p use-local-map
           with-current-buffer)
     (only (schemacs editor command) define-command)
-    (only (schemacs editor editfns) goto-char)
+    ;; `define-custom` is `custom.el`'s, and `initial-scratch-message` is
+    ;; a defcustom - the declaration `startup.el:1841` writes.
+    (only (schemacs editor custom) define-custom)
+    (only (schemacs editor editfns) buffer-size goto-char insert)
     (only (schemacs editor fileio)
           expand-file-name file-exists-p locate-file-internal)
-    (only (schemacs editor files) find-file-noselect insert-file-contents)
+    (only (schemacs editor files)
+          find-file-noselect insert-file-contents set-buffer-major-mode)
     ;; the switch that colours a source buffer as its mode is set
     (only (schemacs editor font-core) global-font-lock-mode)
     ;; an init file that failed is *said* in the echo area as well as on
@@ -80,8 +85,13 @@
     ;; import the whole editor - and a user who replaces that file is
     ;; exactly the one the menus must still be there for.
     (only (schemacs editor menu-bar) menu-bar-file-menu menu-bar-edit-menu)
-    (only (schemacs editor subr) kbd)
+    (only (schemacs editor subr) kbd run-hooks)
+    ;; `substitute-command-keys` is `help.el`'s; the scratch message's
+    ;; `\[find-file]` is written for it (`startup.el:1843`), and Emacs
+    ;; preloads help.el (`loadup.el`), so startup may import it.
+    (only (schemacs editor help) substitute-command-keys)
     (only (schemacs editor window)
+          *get-scratch-buffer-create-function*
           display-buffer other-window quit-window switch-to-buffer
           switch-to-buffer-other-window))
 
@@ -98,6 +108,10 @@
    normal-splash-screen
    exit-splash-screen
    splash-screen-keymap
+   ;; the startup hooks and the `*scratch*` buffer - `startup.el`'s
+   *before-init-hook* *after-init-hook* *emacs-startup-hook*
+   *window-setup-hook* *inhibit-startup-hooks*
+   *initial-scratch-message* get-scratch-buffer-create
    ;; whether the init file is loaded at all - the command line's
    ;; `--no-init-file' (`-q'), which an entry point binds
    *init-file-user* *user-init-file*
@@ -345,6 +359,10 @@
       ;; `define-module' with Guile's own bindings, and this library is
       ;; an R7RS one, so `getenv' comes from `(guile)'.
       ;;--------------------------------------------------------------
+      ;; "The hook run before loading the init file": Emacs runs
+      ;; `before-init-hook` at `startup.el:1612`, after the urgent options
+      ;; and before any init file is looked at.
+      (run-hooks (*before-init-hook*))
       (let ((path (and (*init-file-user*) (init-path))))
         (when path
           (*user-init-file* path)
@@ -404,7 +422,22 @@
                   (display text)
                   (newline)
                   (when (*current-frame*)
-                    (set!frame-message (*current-frame*) text)))))))))
+                    (set!frame-message (*current-frame*) text))))))))
+      ;; `after-init-hook` (`startup.el:1721`): "run after Emacs loads the
+      ;; init file ...". It is outside the `catch` above because it runs
+      ;; whether or not there was a file and whether or not it failed -
+      ;; Emacs's `startup--load-user-init-file` catches the file's errors
+      ;; itself, so the hook is past that catch.
+      (run-hooks (*after-init-hook*))
+      ;; "If *scratch* exists and init file didn't change its mode,
+      ;; initialize it" (`startup.el:1723-1727`). The front ends make the
+      ;; buffer before this runs, so it arrives here bare - the branch
+      ;; Emacs takes for the *scratch* its C makes at dump time.
+      (let ((scratch (get-buffer *scratch-buffer-name*)))
+        (when scratch
+          (with-current-buffer scratch
+            (when (eq? (major-mode) 'fundamental-mode)
+              (set-buffer-major-mode scratch))))))
 
     ;;----------------------------------------------------------------
     ;; The startup screen
@@ -581,6 +614,73 @@
         (when (> count 2)
           (list-buffers))))
 
+    ;;----------------------------------------------------------------
+    ;; The startup hooks - `startup.el:283-334', and where they run
+    ;;----------------------------------------------------------------
+    ;;
+    ;; Emacs declares five. `term-setup-hook' is obsolete in Emacs 31
+    ;; ("In new code, there is no reason to use this instead of
+    ;; `emacs-startup-hook'") and is not carried - so `emacs-startup-hook`
+    ;; is run on its own wherever the C runs the pair.
+    ;;
+    ;; **The hooks are parameters**, as every hook is in this tree (see
+    ;; `add-hook`): Emacs code `let`-binds a hook when it wants a run to
+    ;; see a different one, so the hook's name is the parameter's.
+    (define *before-init-hook* (make-parameter '()))
+    (define *after-init-hook* (make-parameter '()))
+    (define *emacs-startup-hook* (make-parameter '()))
+    (define *window-setup-hook* (make-parameter '()))
+    (define *inhibit-startup-hooks* #f)
+    ;; ^ "Non-nil means don't run some startup hooks, because we already
+    ;; did" (`startup.el:310'). A plain variable: Emacs `setq`s it
+    ;; (`command-line-1`, `:3117`) and nothing `let`-binds it.
+
+    ;;----------------------------------------------------------------
+    ;; `get-scratch-buffer-create' (`simple.el:11553') and
+    ;; `initial-scratch-message' (`startup.el:1841')
+    ;;----------------------------------------------------------------
+    ;;
+    ;; **A placement departure**: `simple.el` is this tree's `simple.scm`,
+    ;; which is *below* `files.scm` (`initial-major-mode`) and this
+    ;; library - so the function lives here, where both are reachable, as
+    ;; `locate-file-internal` lives in `fileio.scm`. `window.scm` asks for
+    ;; it through `*get-scratch-buffer-create-function*`, which this
+    ;; library installs at load, the way `files.scm` installs its seam.
+    (define-custom *initial-scratch-message*
+      ";; This buffer is for text that is not saved, and for Lisp evaluation.
+;; To create a file, visit it with `\\[find-file]' and enter text in its buffer.
+
+"
+      "Initial documentation displayed in *scratch* buffer at startup.
+If this is nil, no message will be displayed."
+      :type '(choice (text :tag "Message") (const :tag "none" nil))
+      :group 'startup)
+
+    (define (get-scratch-buffer-create)
+      ;; "Return the *scratch* buffer, creating a new one if needed."
+      ;;--------------------------------------------------------------
+      (or (get-buffer *scratch-buffer-name*)
+          (let ((scratch (get-buffer-create *scratch-buffer-name*)))
+            ;; "Don't touch the buffer contents or mode unless we know
+            ;; that we just created it."
+            (with-current-buffer scratch
+              (when (*initial-scratch-message*)
+                (insert (substitute-command-keys (*initial-scratch-message*)))
+                (set-buffer-modified-p #f))
+              ;; `(funcall initial-major-mode)' in the C; through
+              ;; `set-buffer-major-mode`, this tree's spelling of it,
+              ;; whose `*scratch*` arm takes `(*initial-major-mode*)` and
+              ;; resolves the command by name.
+              (set-buffer-major-mode scratch)
+              ;; Emacs 31 also sets the buffer's `trusted-content` to
+              ;; `:all` when the mode is `lisp-interaction-mode`; the
+              ;; content-trust machinery is not ported here and nothing
+              ;; reads the slot.
+              #t)
+            scratch)))
+
+    (*get-scratch-buffer-create-function* get-scratch-buffer-create)
+
     (define (command-line-1 args)
       ;; GNU Emacs's `command-line-1', for a command line of file names:
       ;; visit each one into its own buffer - Emacs's `process-file-arg',
@@ -634,11 +734,41 @@
            (set! displayable-buffers
                  (cons (find-file-noselect name) displayable-buffers)))
          args)
+        ;; "If *scratch* exists and is empty, insert
+        ;; initial-scratch-message. Do this before switching to *scratch*
+        ;; below to handle bug#9605" (`startup.el:3015-3021`). The front
+        ;; ends make the buffer before this runs, so this is the arm that
+        ;; fills it - `get-scratch-buffer-create` is for the lazy case.
+        (let ((scratch (get-buffer *scratch-buffer-name*)))
+          (when (and (*initial-scratch-message*) scratch)
+            (with-current-buffer scratch
+              (when (= (buffer-size) 0)
+                (insert (substitute-command-keys (*initial-scratch-message*)))
+                (set-buffer-modified-p #f)))))
         (command-line-1--display displayable-buffers)
-        ;; The startup screen comes *after* the files, which is Emacs's
-        ;; order (`startup.el:3125') and what puts the splash in the
-        ;; window below them rather than over them. CONCISE is Emacs's
-        ;; argument: #t when the command line named something to show.
-        (display-startup-screen (> (length displayable-buffers) 0))))
+        ;; `emacs-startup-hook` and `window-setup-hook` - `startup.el`'s
+        ;; DEFVARs above - at the two sites Emacs runs them. With a
+        ;; startup screen about to be displayed they run here, before it
+        ;; is drawn (`:3094`, `:3115`), and `inhibit-startup-hooks` is
+        ;; set (`:3117`) so they do not run again. **With
+        ;; `inhibit-startup-screen` non-nil Emacs still runs them**, in
+        ;; `normal-top-level`'s tail (`:807`, `:848`) - measured on Emacs
+        ;; 31.1, both ways - and that tail is the `else` here, this tree
+        ;; having no `normal-top-level`.
+        (if (and (not inhibit-startup-screen) (splash-file))
+            (begin
+              (unless *inhibit-startup-hooks*
+                (run-hooks (*emacs-startup-hook*))
+                (run-hooks (*window-setup-hook*))
+                (set! *inhibit-startup-hooks* #t))
+              ;; The startup screen comes *after* the files, which is
+              ;; Emacs's order (`startup.el:3125') and what puts the
+              ;; splash in the window below them rather than over them.
+              ;; CONCISE is Emacs's argument: #t when the command line
+              ;; named something to show.
+              (display-startup-screen (> (length displayable-buffers) 0)))
+            (unless *inhibit-startup-hooks*
+              (run-hooks (*emacs-startup-hook*))
+              (run-hooks (*window-setup-hook*))))))
 
     ))

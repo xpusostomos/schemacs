@@ -10,6 +10,7 @@
  (only (ice-9 exceptions) exception-message)
  (prefix (schemacs editor keymap) km:)
  (only (srfi 64) test-assert test-equal test-begin test-end)
+ (only (srfi srfi-13) string-contains)
  
  ;; The literal search is `search.c`'s and lives in `search.scm`.
  (only (schemacs editor search) string-search-forward)
@@ -37,6 +38,9 @@
  (only (schemacs editor keyboard)
        command-remapping dispatch-key-event dispatch-input-event timer-check!
        *unread-command-events*
+       ;; `read-key-sequence`'s answer rule and its ESC prefix - see the
+       ;; group at the end of this file.
+       read-key-sequence read-key-sequence-vector
        ;; The outermost loop, and the quit it has to survive - see
        ;; "an error in the read does not end the loop" below.
        event-loop signal-quit)
@@ -56,7 +60,7 @@
        ;; the display's own and not to a fresh generic of that name.
        read-input-event)
  (only (schemacs editor test-display) <test-display> test-display-script
-       set!test-display-script
+       set!test-display-script test-display-glyphs
        test-display-frames-deleted test-display-cursor)
  (only (schemacs editor keymap) *current-keymap* *default-keymap*)
  ;; `kbd' - the tree's spelling of a key, and the event a test presses.
@@ -165,6 +169,8 @@
        *interactive-read-function-name-function*)
  (only (schemacs editor editfns)
        buffer-substring-no-properties delete-region goto-char point point-max point-min
+       char-after
+       narrow-to-region widen
        message
        region-beginning region-end
        text-editor-cursor-column insert buffer-string
@@ -761,6 +767,24 @@
                get-bytevector-all))))
        (list (list "/tmp/fe-latin1.txt" #vu8(99 97 102 233 32 110 97 239 118 101 10))
              (list "/tmp/fe-c1.txt" #vu8(97 133 98 10)))))
+
+;; **A file whose *first* character decodes to a byte character must still
+;; open.** `set-auto-mode` walks the first line with `skip-chars-forward`,
+;; which reads through `fetch-char`, and that read called `integer->char`
+;; on the byte character and raised "Value out of range -1 to <1114111>:
+;; 4194178". Found by the coding corpus's `shift-jis` case once its
+;; schemacs probe was repaired (the tool had been unable to run at all).
+;; Emacs 31.1 reads these bytes as `utf-8-unix` - its streaming detector
+;; treats a run of continuation bytes cut off by end of file as
+;; inconclusive - and the buffer holds byte characters, which
+;; `fetch-char` answers as U+FFFD (`code-point->char`).
+(test-equal '(utf-8-unix #\xfffd)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f))
+    (call-with-port (open-output-file "/tmp/fe-byte-first.txt" #:encoding #f)
+      (lambda (port) (put-bytevector port #vu8(130 160 130 162))))
+    (let ((ed (find-file-noselect "/tmp/fe-byte-first.txt")))
+      (list (coding-system-name (buffer-file-coding-system ed))
+            (with-current-buffer ed (char-after 1))))))
 
 ;; ... and a file that arrives with a **byte order mark** leaves with the
 ;; same one, in the same byte order. This is the third route: the mark is
@@ -4665,6 +4689,84 @@
 
 (test-end "schemacs_ncurses_editor_line_movement")
 
+(test-begin "schemacs_ncurses_editor_narrow_start")
+
+;; **A narrowing leaves the window's start marker outside the accessible
+;; range, and the redisplay clips it, as the C does.** Markers are not
+;; clipped by narrowing - measured on Emacs 31.1: `window-start` is still
+;; 1 after narrowing to 9..15 - and `redisplay_window` clamps its
+;; `startp` before any layout (`xdisp.c:20781`). Without the clamp
+;; `scroll-to-cursor!` walked lines from position 1 while BEGV was 5,
+;; `fetch-char` answered #f there, and that #f reached
+;; `char-display-width`: `C-x n n` followed by a keystroke killed the Gtk
+;; redisplay with "Wrong type argument". A fresh frame has no matrix, so
+;; this takes the row walk - the path that read the unclipped start.
+(test-equal "a narrowed window draws from the restriction's beginning"
+  '(5 "bbb\nccc")
+  (with-narrow-frame 40 "aaa\nbbb\nccc\n"
+    (lambda (ed frame)
+      (set-point ed 8)
+      (narrow-to-region 5 12)
+      (render! frame)
+      (list (window-start (window-of frame))
+            (with-current-buffer ed
+              (buffer-substring-no-properties (point-min) (point-max)))))))
+
+;; And the cursor is still where point is, drawn inside the restriction:
+;; the row the narrowed window shows the cursor on is the first one.
+(test-equal 0
+  (with-narrow-frame 40 "aaa\nbbb\nccc\n"
+    (lambda (ed frame)
+      (set-point ed 8)
+      (narrow-to-region 5 12)
+      (render! frame)
+      (car (cursor-screen-position (window-of frame))))))
+
+(test-end "schemacs_ncurses_editor_narrow_start")
+
+;;------------------------------------------------------------------
+;; The line-break cache across a narrowing
+;;
+;; `find_newline` records "no line break here" runs in
+;; `buf->newline_cache`, and those are facts about the *text*: Emacs's
+;; `region_cache_forward` reads `BUF_BEG`/`BUF_Z` (`region-cache.c`), not
+;; `BEGV`/`ZV`. Told the accessible range instead, an insertion while
+;; narrowed shifted the cache's basis, and after `C-x n w` the rest of
+;; the file was drawn as one line with `^J` where its newlines were - the
+;; user's "if I then do C-x n w to widen, it's a hell of a mess".
+;;
+;; The redisplay is part of the reproduction: it is what records the
+;; narrowed scan's knowledge, so the sequence is show, narrow, edit,
+;; redraw, widen, redraw.
+;;------------------------------------------------------------------
+
+(test-begin "schemacs_ncurses_editor_narrow_cache")
+
+(define (drawn-row-text row)
+  (let loop ((runs (test-display-glyphs (current-display))) (out '()))
+    (cond ((null? runs) (apply string-append (reverse out)))
+          ((= (cadr (car runs)) row)
+           (loop (cdr runs) (cons (car (car runs)) out)))
+          (else (loop (cdr runs) out)))))
+
+(test-equal "a widened buffer is drawn line by line, not as one ^J line"
+  '(#t #t #f)
+  (with-narrow-frame 80 "line-01\nline-02\nline-03\nline-04\nline-05\nline-06\n"
+    (lambda (ed frame)
+      (render! frame)                 ; the file is shown: the cache is primed
+      (narrow-to-region 1 16)         ; "line-01\nline-02\n"
+      (goto-char (point-max))
+      (insert "x")
+      (render! frame)                 ; and a redisplay while it is narrowed
+      (widen)
+      (render! frame)
+      (list (not (string-contains (drawn-row-text 1) "^J"))
+            (and (string-contains (drawn-row-text 2) "line-03") #t)
+            (and (string-contains (drawn-row-text 1) "line-03") #t)))))
+
+(test-end "schemacs_ncurses_editor_narrow_cache")
+
+
 ;;------------------------------------------------------------------
 ;; `*Messages*' keeps its point - `message_dolog`'s own rule
 ;;
@@ -4996,3 +5098,53 @@
                   (procedure? (*interactive-read-buffer-function*))))
 
 (test-end "schemacs_tty_editor_interactive_readers")
+
+;;--------------------------------------------------------------------
+;; `read-key-sequence`'s answer, and the ESC prefix
+;;
+;; GNU Emacs's `Fread_key_sequence` answers a string only for events that
+;; `make_event_array` (`alloc.c:3691`) can put in one - "characters that
+;; are in 0...127", the meta bit discarded. This tree cannot carry the
+;; meta bit in a string (a Guile string is Unicode, and Emacs's byte
+;; 0xBA for `M-:` would read back as a different character), so a meta
+;; event answers a vector. The "all integers" test this replaces called
+;; `integer->char` on 134217786 and raised "Value out of range -1 to
+;; <1114111>: 134217786" - the reported `C-h k M-:`.
+;;
+;; A terminal sends `M-:` as ESC then `:`, so the read must fold the ESC
+;; prefix into the meta event (`read_key_sequence`'s `meta_prefix_char`
+;; step); without it `C-h k` read a lone ESC and described "ESC".
+;;--------------------------------------------------------------------
+
+(define (read-keys-answer script vector?)
+  ;; A fresh buffer and frame per read: `read-key-event` wants a display,
+  ;; and `read-input-event` answers whatever the script holds.
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*unread-command-events* '()))
+      (set! (test-display-script *test-display*) script)
+      (if vector?
+          (read-key-sequence-vector #f)
+          (read-key-sequence #f)))))
+
+(test-begin "schemacs_tty_editor_read_key_sequence")
+
+(test-equal "ESC then : is the meta event, and answers a vector"
+  (vector (+ #x8000000 58))
+  (read-keys-answer (list #\x1b #\:) #f))
+
+(test-equal "a plain character answers a string"
+  "a"
+  (read-keys-answer (list #\a) #f))
+
+(test-equal "control characters fit a string, as in make_event_array"
+  (string (integer->char 24) (integer->char 6))
+  (read-keys-answer (list #\x18 #\x06) #f))
+
+(test-equal "the -vector form always answers a vector"
+  (vector 97)
+  (read-keys-answer (list #\a) #t))
+
+(test-end "schemacs_tty_editor_read_key_sequence")

@@ -3,11 +3,17 @@
  (scheme char)
  (scheme file)
  (only (guile) delete-file mkdir rmdir setenv unsetenv %load-path)
- (only (srfi srfi-13) string-suffix?)
+ (only (srfi srfi-13) string-contains string-suffix?)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (schemacs editor buffer) get-buffer)
- (only (schemacs editor startup) init-path load-init splash-file
-       display-startup-screen inhibit-startup-screen))
+ (only (schemacs editor buffer) allocate-buffer buffer-modified-p buffer-name
+       get-buffer major-mode with-current-buffer)
+ (only (schemacs editor editfns)
+       buffer-substring goto-char insert point-max point-min)
+ (only (schemacs editor frame) *current-buffer* *current-frame* new-frame)
+ (only (schemacs editor startup) *after-init-hook* *before-init-hook*
+       *initial-scratch-message* get-scratch-buffer-create init-path
+       load-init splash-file display-startup-screen
+       inhibit-startup-screen))
 
 ;; `startup.el`'s init file, as loaded here: where it is looked for, and
 ;; that loading one works. The loader is taken from
@@ -127,3 +133,96 @@
          (get-buffer "*Schemacs*")))
 
 (test-end "schemacs_editor_startup")
+
+;;--------------------------------------------------------------------
+;; `*scratch*' - `get-scratch-buffer-create' and its message
+;;--------------------------------------------------------------------
+;; `initial-scratch-message' and `initial-major-mode' are what the
+;; buffer holds when the editor starts; `get-scratch-buffer-create'
+;; (`simple.el:11553') is the lazy path, and is what
+;; `switch-to-buffer "*scratch*"' reaches through `window.scm''s seam.
+(test-begin "schemacs_editor_startup_scratch")
+
+(define ed (allocate-buffer))
+
+(parameterize ((*current-frame* (new-frame ed 24 80))
+               (*current-buffer* #f))
+  (define scratch (get-scratch-buffer-create))
+  (define (scratch-text)
+    (with-current-buffer scratch
+      (buffer-substring (point-min) (point-max))))
+
+  (test-equal "get-scratch-buffer-create makes *scratch*"
+    "*scratch*" (and scratch (buffer-name scratch)))
+
+  (test-assert "and puts the message in it"
+    (string-contains (scratch-text)
+                     "This buffer is for text that is not saved"))
+
+  (test-equal "unmodified, as startup.el:3021 leaves it" #f
+    (buffer-modified-p scratch))
+
+  (test-equal "and in `initial-major-mode'" 'lisp-interaction-mode
+    (with-current-buffer scratch (major-mode)))
+
+  ;; "Don't touch the buffer contents or mode unless we know that we
+  ;; just created it" - a second call answers the same buffer untouched.
+  (with-current-buffer scratch (goto-char (point-max)) (insert "typed"))
+  (let ((before (scratch-text)))
+    (get-scratch-buffer-create)
+    (test-equal "a second call leaves the contents alone" before
+      (scratch-text))))
+
+(test-end "schemacs_editor_startup_scratch")
+
+;;--------------------------------------------------------------------
+;; The startup hooks, around the init file
+;;--------------------------------------------------------------------
+;; `before-init-hook` runs before the init file and `after-init-hook`
+;; after it - whether or not there was a file and whether or not it
+;; failed, because Emacs runs the second in `command-line` outside
+;; `startup--load-user-init-file`'s catch (`startup.el:1721`).
+(test-begin "schemacs_editor_startup_hooks")
+
+(define hook-marker (string-append root "/hook-marker.txt"))
+(define hook-log '())
+
+(define (hook-before)
+  (set! hook-log (cons 'before hook-log)))
+
+(define (hook-after)
+  (set! hook-log
+        (cons (if (file-exists? hook-marker) 'after-with-init 'after-no-init)
+              hook-log)))
+
+(parameterize ((*current-frame* (new-frame ed 24 80))
+               (*current-buffer* #f)
+               (*before-init-hook* (list hook-before))
+               (*after-init-hook* (list hook-after)))
+  (guard (e (#t #f)) (mkdir root))
+  (guard (e (#t #f)) (mkdir (string-append root "/.config")))
+  (guard (e (#t #f)) (mkdir (string-append root "/.config/schemacs")))
+  (setenv "HOME" root)
+  (setenv "XDG_CONFIG_HOME" (string-append root "/.config"))
+  (guard (e (#t #f)) (delete-file hook-marker))
+
+  ;; The init file leaves a marker the after hook can see: `before` first,
+  ;; then the file, then `after` with the marker in place.
+  (write-file (string-append root "/.config/schemacs/init.scm")
+              (string-append "(call-with-output-file \"" hook-marker "\"\n"
+                             "  (lambda (out) (display \"init\" out)))\n"))
+  (load-init)
+  (test-equal "before, then the init file, then after" '(after-with-init before)
+    hook-log)
+
+  ;; An init file that raises still gets `after-init-hook`, and the marker
+  ;; is not there because the file never got that far.
+  (guard (e (#t #f)) (delete-file hook-marker))
+  (write-file (string-append root "/.config/schemacs/init.scm")
+              "(this-is-not-bound)\n")
+  (set! hook-log '())
+  (load-init)
+  (test-equal "and an init file that failed does not skip it"
+    '(after-no-init before) hook-log))
+
+(test-end "schemacs_editor_startup_hooks")

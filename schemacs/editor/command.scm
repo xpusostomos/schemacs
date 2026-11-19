@@ -49,7 +49,8 @@
    *interactive-read-directory-name-function*
    called-interactively? funcall-interactively
    uarg->integer
-   run-command apply-command show-command
+   prefix-numeric-value
+   run-command call-interactively apply-command show-command
    define-command define-alias *command-table* command? command-record-of
    command-value-of
    command-record-named
@@ -290,6 +291,26 @@
        ((number? uarg) (round uarg))
        (else (error "U-argument cannot be cast to integer" uarg))
        ))
+
+    (define (prefix-numeric-value raw)
+      ;; GNU Emacs's `prefix-numeric-value' (`callint.c:805'): "Return
+      ;; numeric meaning of raw prefix argument RAW. A raw prefix argument
+      ;; is what you get from an `(interactive \"P\")'. Its numeric meaning
+      ;; is what you would get from `(interactive \"p\")'."
+      ;;
+      ;; The C's five cases, in its order: nil is 1, the symbol `-' is -1,
+      ;; a cons whose car is a fixnum is that fixnum (the `(4)' a bare
+      ;; `C-u' leaves), a fixnum is itself, and anything else is 1. It is
+      ;; `uarg->integer' below with the default fixed at 1 - kept separate
+      ;; because that one takes the default as an argument and this one
+      ;; must answer as Emacs's does for every caller that quotes a
+      ;; `prefix-numeric-value' call from the C.
+      ;;--------------------------------------------------------------
+      (cond ((not raw) 1)
+            ((eq? raw '-) -1)
+            ((and (pair? raw) (integer? (car raw))) (car raw))
+            ((integer? raw) raw)
+            (else 1)))
 
     (define (new-count-command name impl docstr)
       ;; A command whose interactive form takes the universal argument
@@ -1211,6 +1232,35 @@
       ;; just asked about. `novice.scm` is the caller.
       ;;--------------------------------------------------------------
       (apply (command-procedure cmd) args))
+
+    (define (call-interactively command . rest)
+      ;; GNU Emacs's `call-interactively` (`callint.c:253`): "Call
+      ;; COMMAND, reading arguments according to its interactive calling
+      ;; requirements. Return whatever COMMAND returns."
+      ;;
+      ;; COMMAND is a command: this tree's keymaps hold the *procedure*,
+      ;; while a `menu-item`'s command slot - which is how the tab bar's
+      ;; buttons are written, as Emacs writes them - holds the *symbol*.
+      ;; Both are accepted here, which is what `command-execute` does
+      ;; with Emacs's one obarray.
+      ;;
+      ;; Not carried: RECORD-FLAG (which records a command's arguments
+      ;; for `repeat-complex-command') and KEYS - nothing here records
+      ;; them.
+      ;;
+      ;; The prefix is `current-prefix-arg`'s. Emacs binds the calling
+      ;; command's prefix for the whole command; here the parameter is
+      ;; bound only while an interactive specification is evaluated, so
+      ;; a call from inside a command body reads its default, nil - the
+      ;; right answer for the caller this exists for, a mouse click.
+      ;;--------------------------------------------------------------
+      (let ((record (cond ((command-type? command) command)
+                          ((symbol? command) (command-record-named command))
+                          (else (command-record-of command)))))
+        (cond ((not record) (error "Not a command" command))
+              ((command-interactive-spec record)
+               (run-command record (current-prefix-arg)))
+              (else (run-command record)))))
 
     (define (apply-command cmd . args)
       ;; Some commands have an "API" (application programming interface)

@@ -1923,11 +1923,12 @@ for SWITCHES."
         ;; which the symlink keywords cannot survive, because they ask
         ;; `dired-file-name-at-point' and that asks
         ;; `dired-current-directory', whose answer for an empty alist is
-        ;; "No subdir-alist in %s". Emacs never meets it, because with
-        ;; jit-lock `font-lock-after-change-function' only *records* the
-        ;; region, and the fontification happens after the buffer is
-        ;; consistent. This port fontifies on the change, so it is turned
-        ;; on where the alist is ready instead - see `dired-readin'.
+        ;; "No subdir-alist in %s". **That reason is gone now that
+        ;; jit-lock is ported** (`jit-lock.scm`): a change only marks the
+        ;; region and the fontification happens at display time, when the
+        ;; alist is built. The late turn-on in `dired-readin` is kept
+        ;; for now, and can move here the next time this function is
+        ;; touched.
         (run-mode-hooks *dired-mode-hook*)))
 
     ;;----------------------------------------------------------------

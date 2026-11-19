@@ -23,7 +23,7 @@
 ;; A buffer of LENGTH characters whose first position is 1, as every
 ;; buffer in this tree is - so the positions asked about run from 1 to
 ;; LENGTH + 1, that last being `point-max'.
-(define (cache-for length) (new-region-cache 1))
+(define (cache-for length) (new-region-cache 1 11))
 
 (define (beg c) 1)
 
@@ -165,7 +165,7 @@
   ;; host's random source.
   (let* ((n 40)
          (model (make-vector (+ n 2) #f))
-         (c (new-region-cache 1))
+         (c (new-region-cache 1 (+ n 2)))
          (seed 12345)
          (next-int (lambda (m)
                      (set! seed (modulo (+ (* seed 1103515245) 12345)

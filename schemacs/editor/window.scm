@@ -211,6 +211,8 @@
    *switch-to-visible-buffer* *switch-to-prev-buffer-skip*
    *switch-to-prev-buffer-skip-regexp*
    *read-buffer-to-switch*
+   *set-buffer-major-mode-function*
+   *get-scratch-buffer-create-function*
    window-min-height
    *cursor-in-echo-area*
    window-min-width
@@ -276,6 +278,36 @@
     ;; works here: `(schemacs editor minibuffer)' sets it as it loads.
     ;; The prompt it is given is Emacs's own, "Switch to buffer: ".
 
+    (define *set-buffer-major-mode-function* (make-parameter #f))
+    ;; ^ How a buffer created by `window-normalize-buffer-to-switch-to'
+    ;; gets its major mode. `set-buffer-major-mode' is `buffer.c''s
+    ;; function (`:2283') and its port lives in `(schemacs editor files)',
+    ;; which is built on this library - a mode *command* is found through
+    ;; the command table - so this library holds the seam and `files.scm'
+    ;; installs it as it loads, as it does for the `f' interactive
+    ;; code's reader. Emacs calls it from the create branch below and
+    ;; from `other_buffer_safely' and `shell-command'; the first of those
+    ;; is this one.
+    ;;
+    ;; It matters beyond tidiness: a new buffer that never runs a major
+    ;; mode never runs `after-change-major-mode-hook', so no
+    ;; `define-globalized-minor-mode' reaches it - `C-x b NAME' made a
+    ;; buffer with no font-lock and no `tab-line-mode' where Emacs's has
+    ;; both.
+
+    (define *get-scratch-buffer-create-function* (make-parameter #f))
+    ;; ^ How the `"*scratch*"' arm below makes its buffer.
+    ;; `get-scratch-buffer-create' is `simple.el`'s and its port lives in
+    ;; `(schemacs editor startup)` - `simple.scm` is below `files.scm`,
+    ;; where `initial-major-mode` lives, and startup is where both are
+    ;; reachable - so this library holds the seam and `startup.scm`
+    ;; installs it as it loads, as `files.scm` installs the mode seam
+    ;; above. Emacs's arm is `(get-scratch-buffer-create)`, which is
+    ;; `(or (get-buffer X) (let ((b (get-buffer-create X))) ...))`; the
+    ;; fallback here is the bare buffer, for an editor started without
+    ;; the boot - a test or a probe - so it gets a `*scratch*` rather
+    ;; than an error.
+
     ;; `*cursor-in-echo-area*` is `dispnew.c`'s (`DEFVAR_BOOL` at
     ;; `:7538`) and lives in `(schemacs editor dispnew)` now: the
     ;; redisplay reads it in `get_window_cursor_type` (`xdisp.c:34825`),
@@ -336,7 +368,7 @@
        ((eq? (car lst) item) (append replacement (cdr lst)))
        (else (cons (car lst) (list-substitute item replacement (cdr lst))))))
 
-    (define (make-window-parent window new top height left width)
+    (define (make-window-parent window new before? top height left width)
       ;; The internal window a split inserts in WINDOW's place: it holds
       ;; WINDOW and NEW, and occupies what WINDOW occupied before the split.
       ;;
@@ -352,7 +384,8 @@
       ;; (w->pointm))', `window.c:219').
       (make<window> (window-frame window) #f #f #f #f 0 0 #f 0 0
                             top height left width
-                            (window-parent window) (list window new)
+                            (window-parent window)
+                            (if before? (list new window) (list window new))
                             0 0 #f 0 '() '()
                             #f 0 0 0 0 0 0 0 -1 #f '() #f
                           0 #f 0 0 0 0))
@@ -507,7 +540,17 @@
             ((eq? (car lst) item) (cons item (cons new (cdr lst))))
             (else (cons (car lst) (list-insert-after item new (cdr lst))))))
 
-    (define (%split-window-install! frame window new horizontal top height left width)
+    (define (list-insert-before item new lst)
+      ;; LST with NEW inserted directly before ITEM: SIDE `above`/`left`
+      ;; puts the new window *before* the one it split, the other half
+      ;; of the C's `wset_prev`/`wset_next` pair (`window.c:5586`).
+      ;;--------------------------------------------------------------
+      (cond ((null? lst) (list new))
+            ((eq? (car lst) item) (cons new lst))
+            (else (cons (car lst) (list-insert-before item new (cdr lst))))))
+
+    (define (%split-window-install! frame window new horizontal before?
+                                    top height left width)
       ;; Where `split-window` puts the new window, which is the C's
       ;; `combination_limit` decision (`window.c:5427`): "Set
       ;; combination_limit if we have to make a new parent window. We do
@@ -536,7 +579,8 @@
         (if combination-limit
             (let ((p (install-window-parent!
                       frame window
-                      (make-window-parent window new top height left width))))
+                      (make-window-parent window new before?
+                                          top height left width))))
               (when (window-internal? window)
                 ;; **"Get entire space from WINDOW"** (`window.el:5945`):
                 ;; an internal window's children give up the new window's
@@ -556,10 +600,12 @@
               (set!window-parent new parent)
               (set!window-children
                parent
-               (list-insert-after window new (window-children parent)))
+               (if before?
+                   (list-insert-before window new (window-children parent))
+                   (list-insert-after window new (window-children parent))))
               new))))
 
-    (define (split-window window size horizontal)
+    (define (split-window window size . args)
       ;; `FRAME_WINDOW_CHANGE` (`window.c:5681`). **At the top rather
       ;; than at the C's end**, where this function has two return points
       ;; and the C one; a split that raises leaves the flag set where the
@@ -572,16 +618,37 @@
       ;; two, the first part SIZE rows (or columns, for a horizontal
       ;; split) and the rest going to the new one - a positive SIZE on
       ;; the first part, a negative one -SIZE on the second, and half
-      ;; and half (or close to it) when there is no SIZE. HORIZONTAL
-      ;; splits side by side; otherwise the new window is below.
+      ;; and half (or close to it) when there is no SIZE.
       ;;
-      ;; `split-window-below' and `split-window-right' - window.el's
-      ;; commands - read the argument from the keyfinger and call this;
-      ;; a bare `C-x 2' gives both halves the same height
-      ;; `window-min-height' or more, exactly as Emacs's plain
-      ;; `(split-window)' does.
+      ;; **SIDE and PIXELWISE are Emacs's** (`window.el:2833`): SIDE nil
+      ;; (or `below`) puts the new window below, `above` above,
+      ;; `left`/`right` beside it; `up` and `down` are `above` and
+      ;; `below`, and any other non-nil value - `t` included - is
+      ;; `right`, which is why the tree's old boolean HORIZONTAL callers
+      ;; still mean what they meant. PIXELWISE means SIZE is pixels.
+      ;;
+      ;; **The tree's rectangles are cells**, so a pixel SIZE is turned
+      ;; into cells here, at the edge; `window--state-put-1` splits with
+      ;; pixel sizes and applies the exact sizes itself afterwards.
       ;;--------------------------------------------------------------
-      (if horizontal
+      (let* ((side (window--opt args 0))
+             (pixelwise (window--opt args 1))
+             (side (cond ((not side) 'below)
+                         ((eq? side 'up) 'above)
+                         ((eq? side 'down) 'below)
+                         ((memq side '(below above right left)) side)
+                         (else 'right)))
+             (horizontal (memq side '(left right)))
+             (before? (memq side '(above left)))
+             (frame (window-frame window))
+             (size (if (and pixelwise (number? size))
+                       (let* ((step (if horizontal
+                                        (frame-char-width frame)
+                                        (frame-char-height frame)))
+                              (cells (round (/ (abs size) step))))
+                         (if (< size 0) (- cells) cells))
+                       size)))
+        (if horizontal
           (let* ((frame (window-frame window))
                  ;; The C's reference window (`window.c:5443`): "if
                  ;; OLD is live, use it as reference window. Use the
@@ -604,6 +671,10 @@
             (let ((top (window-top window))
                   (start (window-left window))
                   (height (window-height window)))
+              ;; SIDE `left`: the new window takes the first part, and
+              ;; OLD keeps its SIZE but moves after it.
+              (when before?
+                (set!window-left window (+ start right)))
               (set!window-width window left)
               (let ((new (make<window>
                           ;; the new window is on the frame of the one
@@ -635,13 +706,13 @@
                           0 0 #f 0 0
                           top
                           height
-                          (+ start left)
+                          (if before? start (+ start left))
                           right
                           #f '()
                           0 0 #f 0 '() '()
                           #f 0 0 0 0 0 0 0 -1 #f '() #f
                           0 #f 0 0 0 0)))
-                (%split-window-install! frame window new #t
+                (%split-window-install! frame window new horizontal before?
                                         top height start width)
                 new)))
           (let* ((frame (window-frame window))
@@ -661,6 +732,10 @@
             (let ((top (window-top window))
                   (left (window-left window))
                   (width (window-width window)))
+              ;; SIDE `above`: the new window takes the first part, and
+              ;; OLD keeps its SIZE but moves below it.
+              (when before?
+                (set!window-top window (+ top lower)))
               (set!window-height window upper)
               (let ((new (make<window>
                           ;; the new window is on the frame of the one
@@ -675,7 +750,7 @@
                                        (marker-position (%window-start refer)))
                           (%window-start-at-line-beg refer)
                           0 0 #f 0 0
-                          (+ top upper)
+                          (if before? top (+ top upper))
                           lower
                           left
                           width
@@ -683,9 +758,9 @@
                           0 0 #f 0 '() '()
                           #f 0 0 0 0 0 0 0 -1 #f '() #f
                           0 #f 0 0 0 0)))
-                (%split-window-install! frame window new #f
+                (%split-window-install! frame window new horizontal before?
                                         top height left width)
-                new)))))
+                new))))))
     (define (split-main-window-below buffer size)
       ;; Show BUFFER in a new window at the bottom of the frame, SIZE rows
       ;; tall and spanning the frame's whole width: GNU Emacs's
@@ -878,20 +953,32 @@
       ;; `get-buffer-create' - `initial-major-mode' and
       ;; `initial-scratch-message' - are `startup.el''s variables, which
       ;; this tree does not have (its `*scratch*' is made bare by the front
-      ;; ends). Its `set-buffer-major-mode' is `buffer.c''s and not ported
-      ;; either, so a buffer created *by name* here takes the default mode,
-      ;; which is Fundamental - what Emacs's own default gives it too.
+      ;; ends).
+      ;;
+      ;; The `_` arm is `(or (get-buffer X) (let ((b (get-buffer-create X)))
+      ;; (set-buffer-major-mode b) b))', and the mode call reaches this
+      ;; library through `*set-buffer-major-mode-function*' - see its
+      ;; comment above.
       ;;--------------------------------------------------------------
       (cond ((not buffer-or-name) (other-buffer))
             ((and (string? buffer-or-name)
                   (string=? buffer-or-name *scratch-buffer-name*))
-             (get-buffer-create *scratch-buffer-name*))
+             ;; `(get-scratch-buffer-create)' in the C - through the
+             ;; seam, see its comment above.
+             (if (*get-scratch-buffer-create-function*)
+                 ((*get-scratch-buffer-create-function*))
+                 (get-buffer-create *scratch-buffer-name*)))
             ;; Emacs's own `_` arm is `(or (get-buffer X) (get-buffer-create
             ;; X))', and its `get-buffer' answers a *buffer* argument too.
             ;; This tree's does not - `buffer.sld''s takes a name - so the
             ;; buffer case is spelled out.
             ((bufferp buffer-or-name) buffer-or-name)
-            ((string? buffer-or-name) (get-buffer-create buffer-or-name))
+            ((string? buffer-or-name)
+             (or (get-buffer buffer-or-name)
+                 (let ((buffer (get-buffer-create buffer-or-name)))
+                   (let ((set-mode (*set-buffer-major-mode-function*)))
+                     (when set-mode (set-mode buffer)))
+                   buffer)))
             (else (error "not a buffer or a buffer name" buffer-or-name))))
 
     (define (pop-to-buffer buffer-or-name . args)
@@ -3716,9 +3803,9 @@ by this function.  This happens in an interactive call."
       ;; WINDOW cannot be split." SIDE is Emacs's `below`/`right`; the
       ;; tree's `split-window` takes the boolean HORIZONTAL instead.
       ;;--------------------------------------------------------------
-      (let ((horizontal (if (memq side '(right left)) #t (and side #t))))
-        (guard (e (#t #f))
-          (split-window (window-normalize-window window) size horizontal))))
+      (guard (e (#t #f))
+        (split-window (window-normalize-window window) size
+                      side (window--opt args 0))))
 
     (define (window-deletable-p . args)
       ;; GNU Emacs's `window-deletable-p` (`window.el:4199`): "Return t if

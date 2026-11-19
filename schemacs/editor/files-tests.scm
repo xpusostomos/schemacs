@@ -19,7 +19,9 @@
  (only (guile) getenv)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  
- (only (schemacs editor buffer) buffer-local-value default-directory current-buffer allocate-buffer)
+ (only (schemacs editor buffer) buffer-local-value default-directory current-buffer allocate-buffer
+       get-buffer-create set-buffer set-buffer-local-value!)
+ (only (schemacs editor window) window-normalize-buffer-to-switch-to)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor fileio)
        directory-file-name file-directory-p file-name-case-insensitive-p
@@ -29,7 +31,7 @@
        *abbreviated-home-dir* *directory-abbrev-alist*
        abbreviate-file-name cd cd-absolute cd-path set!cd-path
        directory-abbrev-apply file-name-completion-table
-       parse-colon-path locate-file))
+       parse-colon-path locate-file set-buffer-major-mode))
 
 (setvbuf (current-output-port) 'none)
 
@@ -239,3 +241,30 @@
           (buffer-local-value (current-buffer) 'list-buffers-directory #f))))
 
 (test-end "schemacs_editor_files")
+
+;;------------------------------------------------------------------
+;; `set-buffer-major-mode' takes the *default* mode, not the current one
+;;------------------------------------------------------------------
+;;
+;; Measured on Emacs 31.1: `(window-normalize-buffer-to-switch-to "fresh")'
+;; run from a `text-mode' buffer answers a buffer in `fundamental-mode',
+;; and a `*scratch*' buffer takes `initial-major-mode', which is
+;; `lisp-interaction-mode'. Reading the *target* buffer's own mode - what
+;; this did - left `C-x b fresh' in a Scheme buffer a Scheme buffer.
+
+(test-begin "schemacs_editor_files_major_mode")
+
+(test-equal 'fundamental-mode
+  (let ((source (get-buffer-create "sbmm-source")))
+    (set-buffer source)
+    (set-buffer-local-value! source 'major-mode 'scheme-mode)
+    (let ((fresh (window-normalize-buffer-to-switch-to "sbmm-fresh")))
+      (buffer-local-value fresh 'major-mode 'fundamental-mode))))
+
+(test-equal 'lisp-interaction-mode
+  (let ((scratch (get-buffer-create "*scratch*")))
+    (set-buffer-local-value! scratch 'major-mode 'fundamental-mode)
+    (set-buffer-major-mode scratch)
+    (buffer-local-value scratch 'major-mode 'fundamental-mode)))
+
+(test-end "schemacs_editor_files_major_mode")

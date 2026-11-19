@@ -10,7 +10,7 @@
  (only (schemacs editor keymap)
        keymap-index keymap-index->events
        make-sparse-keymap define-key set-keymap-parent keymap-parent
-       keymap-type? keymap-lookup map-keymap)
+       keymap-type? keymap-lookup lookup-key keymapp map-keymap)
  ;; `function-key-map''s translation of a named key into the character it
  ;; means, which is `read_key_sequence''s step.
  (only (schemacs editor keyboard) function-key-translate)
@@ -319,6 +319,44 @@
       (and (keymap-type? merged)
            (equal? '((120 cx) (121 py)) (subr-keymap-pairs merged))
            (keymap-type? (keymap-parent merged))))))
+
+;;----------------------------------------------------------------
+;; `lookup-key' follows a keymap's parent - `access_keymap''s
+;; NOINHERIT rule (`keymap.c:491'). Every answer here is Emacs 31.1's
+;; for the same maps, measured with `emacs -Q --batch'.
+;;----------------------------------------------------------------
+(test-assert "lookup-key finds a binding in the parent"
+  (let ((parent (make-sparse-keymap)) (child (make-sparse-keymap)))
+    (define-key parent (kbd "b") 'pb)
+    (set-keymap-parent child parent)
+    (eq? 'pb (lookup-key child (kbd "b")))))
+
+(test-equal "lookup-key reaches the parent's keys under a child's own prefix"
+  '(px py)
+  (let ((parent (make-sparse-keymap)) (child (make-sparse-keymap)))
+    (define-key parent (kbd "C-c y") 'py)
+    (set-keymap-parent child parent)
+    (define-key child (kbd "C-c x") 'px)
+    (list (lookup-key child (kbd "C-c x"))
+          (lookup-key child (kbd "C-c y")))))
+
+(test-assert "and the prefix both define is a keymap list"
+  (let ((parent (make-sparse-keymap)) (child (make-sparse-keymap)))
+    (define-key parent (kbd "C-c y") 'py)
+    (set-keymap-parent child parent)
+    (define-key child (kbd "C-c x") 'px)
+    (let ((prefix (lookup-key child (kbd "C-c"))))
+      (and (keymapp prefix)
+           (not (keymap-type? prefix))
+           (eq? 'py (lookup-key prefix (kbd "y")))))))
+
+(test-assert "define-key does not inherit: a parent's command is not a prefix"
+  (let ((parent (make-sparse-keymap)) (child (make-sparse-keymap)))
+    (define-key parent (kbd "C-c") 'parent-command)
+    (set-keymap-parent child parent)
+    (define-key child (kbd "C-c x") 'cx)
+    (and (eq? 'cx (lookup-key child (kbd "C-c x")))
+         (keymap-type? (lookup-key child (kbd "C-c"))))))
 
 ;; **`assoc-delete-all` walks an alist whose elements are not all
 ;; conses.** Emacs's guard is `(consp (car alist))`, and its `assq` is

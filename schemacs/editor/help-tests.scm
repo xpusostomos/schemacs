@@ -39,7 +39,9 @@
   (only (schemacs editor help)
         describe-key describe-key-briefly where-is
         help--analyze-key help--filter-info-list
-        help--binding-undefined-p help-map)
+        help--binding-undefined-p help-map
+        help-for-help help-quit
+        help--for-help-make-commands help--for-help-make-sections)
   (only (schemacs editor help-fns) describe-function describe-variable
         describe-mode *describe-mode-outline* describe-syntax
         internal-describe-syntax-value describe-symbol)
@@ -507,5 +509,45 @@
 (test-equal '(#t #t)
   (list (eq? (lookup-key *default-keymap* (kbd "C-h o")) describe-symbol)
         (eq? (lookup-key help-map (kbd "o")) describe-symbol)))
+
+;;----------------------------------------------------------------
+;; `help--for-help-make-commands' / `help--for-help-make-sections'
+;; (`help.el:365', `:384') - the screen's option table. Every expected
+;; string is Emacs 31.1's own `substring-no-properties` answer for the
+;; same input.
+;;----------------------------------------------------------------
+(test-equal "a command entry is written in bracket form and becomes its key"
+  (string-append "   C-h b \tShow all key bindings\n\n"
+                 "   C-h w \tShow which key runs a specific command")
+  (substitute-command-keys
+   (help--for-help-make-commands
+    '(("describe-bindings" "Show all key bindings") ""
+      ("where-is" "Show which key runs a specific command")))))
+
+(test-equal "a name that is already a C- key is propertized, not wrapped"
+  "   C-x \tcompletion list"
+  (substitute-command-keys
+   (help--for-help-make-commands '(("C-x" "completion list")))))
+
+(test-equal "a section is its title, then its commands"
+  "\n\nCommands, Keys and Functions\n\n   C-h b \tShow all key bindings"
+  (substitute-command-keys
+   (help--for-help-make-sections
+    '(("Commands, Keys and Functions"
+       ("describe-bindings" "Show all key bindings"))))))
+
+;; The page keys are the C's spelling (`help-macro.el:190').
+;; `(kbd "next")' - the four characters - is what this port first used,
+;; and Emacs answers `(key-description (kbd "next"))' = "n e x t".
+(test-equal '("<PageDown>" "<PageUp>")
+  (list (help--key-description-fontified (kbd "<PageDown>"))
+        (help--key-description-fontified (kbd "<PageUp>"))))
+
+(test-equal "help-map's own options, and the two ways in"
+  '(#t #t #t #t)
+  (list (eq? (lookup-key help-map (kbd "?")) help-for-help)
+        (eq? (lookup-key help-map (kbd "q")) help-quit)
+        (eq? (lookup-key *default-keymap* (kbd "C-h ?")) help-for-help)
+        (eq? (lookup-key *default-keymap* (kbd "C-h C-h")) help-for-help)))
 
 (test-end "schemacs_editor_help")

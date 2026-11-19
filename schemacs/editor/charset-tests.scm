@@ -6,7 +6,8 @@
        charset-iso-final-char charset-iso-chars-96
        charset-code-space charset-code-offset charset-max-code
        *charset-table* charset-from-id iso-charset-table
-       *iso-2022-charset-list*))
+       *iso-2022-charset-list*
+       decode-char encode-char))
 
 ;; Regression tests for `(schemacs editor charset)', which mirrors GNU
 ;; Emacs's `src/charset.c' - the registry the ISO-2022 machinery is built
@@ -217,5 +218,66 @@
        (cond ((null? l) ok)
              ((memv (car l) (*iso-2022-charset-list*)) (check (cdr l) ok))
              (else #f))))))
+
+(test-begin "schemacs_editor_charset_conversion")
+
+;; The map tables and the conversions. Every answer is Emacs 31.1's own
+;; `(decode-char ...)' / `(encode-char ...)' for the same arguments; the
+;; whole corpus behind them - every charset, ten sampled code points each,
+;; 2148 decodes and 1812 encodings - was compared against Emacs with
+;; zero differences before these lines were written.
+
+;; A *unified* charset: `mule-conf.el''s `unify-charset' loaded
+;; `JISX0208.map', and the answer is Unicode, not the internal `0x140000'
+;; range the offset arithmetic alone produces.
+(test-equal '(#t #t #t)
+  (list (= (decode-char 'japanese-jisx0208 #x2121) 12288)   ; U+3000
+        (= (decode-char 'japanese-jisx0208 #x2122) 12289)   ; U+3001
+        (= (encode-char 12288 'japanese-jisx0208) #x2121)))
+
+(test-equal '(#t #t)
+  (list (= (decode-char 'chinese-gb2312 #x3021) 21834)      ; U+554A
+        (= (encode-char 21834 'chinese-gb2312) #x3021)))
+
+;; An ASCII-compatible charset answers ASCII through the C's
+;; `DECODE_CHAR'/`ENCODE_CHAR' shortcut, before its map is consulted
+;; (`charset.h:427', `:443'): MIK's map starts at 0x20.
+(test-equal '(#t #t #t)
+  (list (= (decode-char 'mik 0) 0)
+        (= (decode-char 'mik 21) 21)
+        (= (encode-char 0 'mik) 0)))
+
+;; A *subset* (`latin-iso8859-2' of `iso-8859-2', offset -128) and a
+;; *superset* (`tis620-2533' of `thai-tis620' plus ASCII, offset 128;
+;; `gb18030' of six parents with their own offsets).
+(test-equal '(#t #t #t #t)
+  (list (= (decode-char 'latin-iso8859-2 32) 160)
+        (= (encode-char 160 'latin-iso8859-2) 32)
+        (= (decode-char 'tis620-2533 160) 3584)
+        (= (decode-char 'gb18030 #x81308130) 128)))
+
+;; A plain offset charset: `latin-iso8859-1' is codes 32..127 at
+;; code-offset 160, so code 32 is character 160, code 233 is outside it,
+;; and characters 160 and 192 are codes 32 and 64.
+(test-equal '(#f #t #t #t)
+  (list (decode-char 'latin-iso8859-1 233)
+        (= (decode-char 'latin-iso8859-1 32) 160)
+        (= (encode-char 160 'latin-iso8859-1) 32)
+        (= (encode-char 192 'latin-iso8859-1) 64)))
+
+;; The C's `emacs' charset is 0..`MAX_5_BYTE_CHAR' - narrower than its
+;; code space, an attribute only the C definition carries.
+(test-equal '(#t #f #f #f)
+  (list (= (decode-char 'emacs 4194175) 4194175)
+        (decode-char 'emacs 4194176)
+        (decode-char 'emacs 4194303)
+        (encode-char #x10FFFF 'japanese-jisx0208)))
+
+(test-equal "an unmapped code point and no encoding of an unmapped character"
+  (list #f #f)
+  (list (decode-char 'japanese-jisx0208 #x7F7F)
+        (encode-char #x10FFFF 'japanese-jisx0208)))
+
+(test-end "schemacs_editor_charset_conversion")
 
 (test-end "schemacs_editor_charset")

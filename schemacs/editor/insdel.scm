@@ -153,6 +153,7 @@
     ;; `BEG_UNCHANGED`/`END_UNCHANGED` are fields of `struct buffer_text`,
     ;; so they are read and written where the text is.
     (only (schemacs editor buffer-text)
+          buffer-text-base buffer-text-z
           buffer-text-beg-unchanged set!buffer-text-beg-unchanged
           buffer-text-modiff set!buffer-text-chars-modiff
           buffer-text-substring buffer-text-delete!
@@ -330,8 +331,14 @@
       ;; `find_newline_no_quit`. What is left is the `BEG_UNCHANGED`
       ;; update and the newline cache.
       ;;--------------------------------------------------------------
-      (let ((beg (buffer-beg buffer))
-            (text (text-editor-text buffer)))
+      ;; **Text coordinates, not the accessible range.** `BUF_BEG_UNCHANGED`
+      ;; and `BUF_Z_UNCHANGED` count from the *text*'s `BEG` and `Z`
+      ;; (`buffer.h:149`), and `invalidate_region_cache` is passed those
+      ;; same ends - a narrowing changes neither, and using `BEGV`/`ZV`
+      ;; here shifted the cache's basis every time a buffer was narrowed.
+      (let ((text (text-editor-text buffer))
+            (beg (buffer-text-base (text-editor-text buffer)))
+            (z (buffer-text-z (text-editor-text buffer))))
         ;; Nothing before the change is known to be unchanged any more -
         ;; the C's `if (GPT - BEG < BEG_UNCHANGED) BEG_UNCHANGED = GPT -
         ;; BEG` (`insdel.c:1608'). The `%l` cache reads this to decide
@@ -341,9 +348,9 @@
             (set!buffer-text-beg-unchanged text prefix)))
         (let ((cache (%text-editor-newline-cache buffer)))
           (when cache
-            (invalidate-region-cache cache beg (buffer-z buffer)
+            (invalidate-region-cache cache beg z
                                      (- start beg)
-                                     (- (buffer-z buffer) end))))))
+                                     (- z end))))))
 
     ;;----------------------------------------------------------------
     ;; Preparing a change

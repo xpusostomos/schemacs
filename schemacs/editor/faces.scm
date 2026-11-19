@@ -1019,6 +1019,13 @@ This inherits from the `mode-line` face.")
 
 This face is added by `substitute-command-keys', which see.")
 
+    ;; `help.el:364`'s `help-for-help-header` - "Face used for headers
+    ;; in the `help-for-help' buffer" - placed here because this is where
+    ;; the deffaces live; `help.scm` names it in the section titles.
+    (defface 'help-for-help-header
+          '((t :height 1.26))
+          "Face used for headers in the `help-for-help' buffer.")
+
     ;; simple.el's `separator-line` (`simple.el:747`) - the line
     ;; `make-separator-line' draws and `describe-bindings` puts under
     ;; its column headings.

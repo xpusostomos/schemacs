@@ -9,17 +9,10 @@
   ;; which finds comments and strings from the *syntax table* and gives
   ;; them `font-lock-comment-face' and `font-lock-string-face', and
   ;; `font-lock-fontify-keywords-region', which runs the regexps the mode
-  ;; supplies. The second is ported here; the first is six lines in Emacs
-  ;; standing on `parse-partial-sexp', which is `syntax.c''s and is *not*
-  ;; ported - `syntax.sld' has `skip-chars-forward' and
-  ;; `skip-chars-backward' and nothing else. So a mode's own patterns
-  ;; fontify and its comments do not. Named rather than faked, and with
-  ;; it: `font-lock-fontify-syntactically-region',
-  ;; `font-lock-keywords-only', `font-lock-syntactic-keywords',
-  ;; `font-lock-syntactic-face-function', `font-lock-syntax-table',
-  ;; `font-lock-comment-start-skip'/`-end-skip', `syntax-propertize' (so
-  ;; `font-lock-extend-region-wholelines' with it), and the
-  ;; `font-lock-keywords-alist'/`-removed-keywords-alist' walk in
+  ;; supplies. Both are here: the syntactic half stands on
+  ;; `parse-partial-sexp` (syntax.c), which the syntax engine pass ported.
+  ;; **The one piece not carried is the
+  ;; `font-lock-keywords-alist'/`-removed-keywords-alist' walk** in
   ;; `font-lock-set-defaults'.
   ;;
   ;; **The channel is the `face' text property**, as it is in Emacs -
@@ -57,6 +50,12 @@
 
   (import
  (only (schemacs editor insdel) *after-change-functions*)
+    ;; the just-in-time fontification `font-lock-mode` uses by default -
+    ;; `jit-lock.el`, which is below this library.
+    (only (schemacs editor jit-lock)
+          jit-lock-register jit-lock-unregister jit-lock-refontify
+          jit-lock-fontify-now jit-lock-mode-on? *jit-lock-start* *jit-lock-end*
+          *jit-lock-after-change-extend-region-functions*)
     (scheme base)
     (scheme char)
     ;; `cdddr' is `(scheme cxr)''s, not `(scheme base)''s - the
@@ -76,7 +75,7 @@
     ;; the region: its ends, and the search that walks it
     (only (schemacs editor editfns)
           forward-line goto-char line-beginning-position
-          line-end-position point point-marker point-max point-min
+          line-end-position point point-marker point-max point-min bolp
           save-excursion)
     (only (schemacs editor search)
           match-beginning match-end re-search-forward save-match-data
@@ -103,6 +102,7 @@
     ;; `syntax.c' and `syntax.el' and live in `(schemacs editor syntax)'
     (only (schemacs editor syntax)
           parse-partial-sexp syntax-ppss syntax-table syntax-propertize
+          syntax-propertize-wholelines
           with-syntax-table copy-syntax-table modify-syntax-entry)
     ;; the faces above are `defface''d here, as font-lock.el deffaces them
     (only (schemacs editor faces) defface))
@@ -144,6 +144,12 @@
    font-lock-eval-keywords
    font-lock-extend-region-multiline
    font-lock-fillin-text-property
+   font-lock-turn-on-thing-lock
+   font-lock-turn-off-thing-lock
+   font-lock-extend-jit-lock-region-after-change
+   font-lock-flush-function font-lock-ensure-function
+   font-lock-fontify-buffer-function
+   font-lock-extend-after-change-region-function
    font-lock-flush
    font-lock-fontify-anchored-keywords
    font-lock-fontify-buffer
@@ -469,11 +475,11 @@
     ;; functions. They start false and `font-lock-set-defaults' fills
     ;; them, because the functions they name are defined below.
 
-    (define *font-lock-support-mode* (make-parameter #f))
-    ;; ^ GNU Emacs's `font-lock-support-mode', whose default is
-    ;; `jit-lock-mode'. jit-lock is not ported, so the default here is
-    ;; false and `font-lock-after-change-function' fontifies the change
-    ;; itself. This is the one place "no jit-lock" shows.
+    (define *font-lock-support-mode* (make-parameter 'jit-lock-mode))
+    ;; ^ GNU Emacs's `font-lock-support-mode`, default `jit-lock-mode`.
+    ;; `font-lock-turn-on-thing-lock` registers with jit-lock when this
+    ;; says so - which is what makes a change *mark* text for
+    ;; fontification instead of fontifying it in `after-change`.
 
     (define *font-lock-beg* (make-parameter 0))
     (define *font-lock-end* (make-parameter 0))
@@ -558,6 +564,23 @@
       (font-lock-buffer-local *font-lock-fontified*))
     (define (set!font-lock-fontified! value)
       (set!font-lock-buffer-local! *font-lock-fontified* value))
+
+    ;; The four function variables of `font-lock.el:1033-1095` and
+    ;; `:1000`. Each is a `defvar-local`, so each is a parameter whose
+    ;; *buffer-local* entry wins (`font-lock-buffer-local`), as the four
+    ;; above are.
+    (define *font-lock-flush-function* (make-parameter #f))
+    (define *font-lock-ensure-function* (make-parameter #f))
+    (define *font-lock-fontify-buffer-function* (make-parameter #f))
+    (define *font-lock-extend-after-change-region-function* (make-parameter #f))
+    (define (font-lock-flush-function)
+      (font-lock-buffer-local *font-lock-flush-function*))
+    (define (font-lock-ensure-function)
+      (font-lock-buffer-local *font-lock-ensure-function*))
+    (define (font-lock-fontify-buffer-function)
+      (font-lock-buffer-local *font-lock-fontify-buffer-function*))
+    (define (font-lock-extend-after-change-region-function)
+      (font-lock-buffer-local *font-lock-extend-after-change-region-function*))
 
     (define (font-lock-major-mode)
       (font-lock-buffer-local *font-lock-major-mode*))
@@ -966,6 +989,21 @@
       (with-silent-modifications
        ((*font-lock-unfontify-region-function*) beg end)))
 
+    (define (font-lock-extend-region-wholelines)
+      ;; GNU Emacs's `font-lock-extend-region-wholelines'
+      ;; (font-lock.el:1186): "Move fontification boundaries to beginning
+      ;; of lines."
+      ;;
+      ;; The answer is `syntax-propertize-wholelines`' (syntax.el:152),
+      ;; which this tree has had since the syntax engine pass; the note
+      ;; that said it was missing was stale.
+      ;;--------------------------------------------------------------
+      (let ((new (syntax-propertize-wholelines (*font-lock-beg*) (*font-lock-end*))))
+        (when new
+          (*font-lock-beg* (car new))
+          (*font-lock-end* (cdr new))
+          #t)))
+
     (define (font-lock-extend-region-multiline)
       ;; GNU Emacs's `font-lock-extend-region-multiline'
       ;; (font-lock.el:1160): "Move fontification boundaries away from any
@@ -1107,11 +1145,22 @@
               ;; "If there's been a change, we should go through the list
               ;; again since this new position may warrant a different
               ;; answer from one of the fun we've already seen."
-              (let loop ((funs (*font-lock-extend-region-functions*)))
-                (when (pair? funs)
-                  (if ((car funs))
-                      (loop (*font-lock-extend-region-functions*))
-                      (loop (cdr funs)))))
+              ;;
+              ;; **The `(eq funs font-lock-extend-region-functions)'
+              ;; guard is load-bearing**: `font-lock-extend-region-wholelines`
+              ;; answers non-nil on every call (its
+              ;; `syntax-propertize-wholelines` always conses), so without
+              ;; the guard - which stops the restart when a function
+              ;; returned true at the *start* of a pass - the loop never
+              ;; ends. Measured: the dired suite hung on it.
+              (let ((whole (*font-lock-extend-region-functions*)))
+                (let loop ((funs whole))
+                  (when (pair? funs)
+                    (let ((next (if (or (not ((car funs)))
+                                        (eq? funs whole))
+                                    (cdr funs)
+                                    whole)))
+                      (loop next)))))
               (let ((beg (*font-lock-beg*))
                     (end (*font-lock-end*)))
                 (font-lock-unfontify-region beg end)
@@ -1148,34 +1197,31 @@
 
     (define (font-lock-fontify-buffer . args)
       ;; GNU Emacs's `font-lock-fontify-buffer' (font-lock.el:1010):
-      ;; "Fontify the whole buffer."
+      ;; "Fontify the current buffer the way the function `font-lock-mode'
+      ;; would" - through `font-lock-fontify-buffer-function', which is
+      ;; `jit-lock-refontify` in a jit-locked buffer (`:930-934`).
       ;;--------------------------------------------------------------
-      (font-lock-fontify-region (point-min) (point-max))
-      (set!font-lock-fontified! #t))
+      (font-lock-set-defaults)
+      ((font-lock-fontify-buffer-function)))
 
     (define (font-lock-ensure . args)
       ;; GNU Emacs's `font-lock-ensure' (font-lock.el:1082): "Make sure
-      ;; the region is fontified."
+      ;; the region BEG...END has been fontified."
       ;;--------------------------------------------------------------
-      (font-lock-fontify-region (if (pair? args) (car args) (point-min))
-                                (if (and (pair? args) (pair? (cdr args)))
-                                    (cadr args)
-                                    (point-max))))
+      (when (font-lock-specified-p #t)
+        (font-lock-set-defaults)
+        ((font-lock-ensure-function)
+         (if (pair? args) (car args) (point-min))
+         (if (and (pair? args) (pair? (cdr args))) (cadr args) (point-max)))))
 
     (define (font-lock-flush . args)
       ;; GNU Emacs's `font-lock-flush' (font-lock.el:1051): "Declare the
-      ;; region between BEG and END as not being fontified. ... This
-      ;; causes the region to be fontified next time it is displayed."
-      ;;
-      ;; There is no deferred fontification here (jit-lock is not
-      ;; ported), so the region is unfontified now and fontified again at
-      ;; the next `font-lock-ensure' - which is what "declare" comes to in
-      ;; an editor with no idle pass.
+      ;; region BEG...END's fontification as out-of-date."
       ;;--------------------------------------------------------------
-      (font-lock-unfontify-region (if (pair? args) (car args) (point-min))
-                                  (if (and (pair? args) (pair? (cdr args)))
-                                      (cadr args)
-                                      (point-max))))
+      (when (and (font-lock-mode-on?) (font-lock-fontified))
+        ((font-lock-flush-function)
+         (if (pair? args) (car args) (point-min))
+         (if (and (pair? args) (pair? (cdr args))) (cadr args) (point-max)))))
 
     ;;----------------------------------------------------------------
     ;; The change hook
@@ -1190,9 +1236,12 @@
       ;; - "typical case: the first char of the line was deleted. Or a \n
       ;; was inserted in the middle of a line."
       ;;
-      ;; The C's `font-lock-extend-after-change-region-function' is not
-      ;; ported (nothing sets it), and neither is the jit-lock branch it
-      ;; ends with: the region is fontified here and now.
+      ;; **This is the eager path, and with the default
+      ;; `*font-lock-support-mode*` it is not on any hook**: jit-lock's
+      ;; `jit-lock-after-change` marks the change instead, and the
+      ;; fontification happens at display time. This function is what
+      ;; `font-lock-flush-function` defaults to, and what a support mode
+      ;; of nil would use.
       ;;--------------------------------------------------------------
       (when (font-lock-mode-on?)
         (save-excursion
@@ -1464,7 +1513,8 @@
         (*font-lock-fontify-region-function* font-lock-default-fontify-region)
         (*font-lock-unfontify-region-function* font-lock-default-unfontify-region)
         (*font-lock-extend-region-functions*
-         (list font-lock-extend-region-multiline))
+         (list font-lock-extend-region-wholelines
+               font-lock-extend-region-multiline))
         #t)))
 
     ;;----------------------------------------------------------------
@@ -1475,22 +1525,124 @@
       ;; GNU Emacs's `font-lock-mode-internal' (font-lock.el:703): what
       ;; turning the mode on and off consists of.
       ;;
-      ;; The C's `(add-hook 'after-change-functions #'f t t)' and its
-      ;; removal are here a `cons' and a filter over the engine's hook
-      ;; list, which this tree keeps as a list of procedures in a
-      ;; parameter - the shape isearch.sld uses for the same hook.
+      ;; **The jit-lock branch is the whole of it now.** Emacs's body adds
+      ;; `font-lock-after-change-function` to `after-change-functions` and
+      ;; then calls `font-lock-turn-on-thing-lock`, whose first act (with
+      ;; the default `font-lock-support-mode`) is to *remove* it again and
+      ;; register with jit-lock - so a normal buffer ends with jit-lock
+      ;; and no eager fontification. This tree's `after-change-functions`
+      ;; is one global list, so that removal is a `delq` from it.
       ;;--------------------------------------------------------------
       (if arg
           (begin
             (*after-change-functions*
-             (cons font-lock-after-change-function
-                   (delq font-lock-after-change-function
-                         (*after-change-functions*))))
-            (font-lock-set-defaults))
-          (begin
-            (*after-change-functions*
              (delq font-lock-after-change-function (*after-change-functions*)))
-            (font-lock-unfontify-buffer))))
+            (font-lock-set-defaults)
+            (font-lock-turn-on-thing-lock))
+          (begin
+            (font-lock-unfontify-buffer)
+            (font-lock-turn-off-thing-lock)))
+      #t)
+
+    ;;----------------------------------------------------------------
+    ;; The support mode (`font-lock.el:915-947')
+    ;;----------------------------------------------------------------
+    (define (font-lock-turn-on-thing-lock)
+      ;; GNU Emacs's `font-lock-turn-on-thing-lock' (`font-lock.el:924'),
+      ;; the `jit-lock-mode` arm - the only support mode this tree has,
+      ;; and the one `*font-lock-support-mode*` names by default.
+      ;;
+      ;; The four `setq-local`s are the same buffer-local entries with
+      ;; this library's accessor names, and the `add-hook ... nil t` for
+      ;; `jit-lock-after-change-extend-region-functions` is one global
+      ;; parameter with the function gated on `font-lock-mode` inside it
+      ;; (see `font-lock-extend-jit-lock-region-after-change`).
+      ;;--------------------------------------------------------------
+      (when (eq? (font-lock-value-in-major-mode (*font-lock-support-mode*))
+                 'jit-lock-mode)
+      ;; "Prepare for jit-lock"
+      (*after-change-functions*
+       (delq font-lock-after-change-function (*after-change-functions*)))
+      (set!font-lock-buffer-local! *font-lock-flush-function* jit-lock-refontify)
+      (set!font-lock-buffer-local! *font-lock-ensure-function*
+                                   jit-lock-fontify-now)
+      (set!font-lock-buffer-local! *font-lock-fontify-buffer-function*
+                                   jit-lock-refontify)
+      ;; "Don't fontify eagerly (and don't abort if the buffer is large)."
+      (set!font-lock-fontified! #t)
+      ;; "Use jit-lock."
+      (jit-lock-register font-lock-fontify-region
+                         (not (font-lock-keywords-only)))
+      ;; "Tell jit-lock how we extend the region to refontify."
+      (unless (memq font-lock-extend-jit-lock-region-after-change
+                    (*jit-lock-after-change-extend-region-functions*))
+        (*jit-lock-after-change-extend-region-functions*
+         (cons font-lock-extend-jit-lock-region-after-change
+               (*jit-lock-after-change-extend-region-functions*)))))
+      #t)
+
+    (define (font-lock-extend-jit-lock-region-after-change beg end old-len)
+      ;; GNU Emacs's `font-lock-extend-jit-lock-region-after-change'
+      ;; (`font-lock.el:1282'), the member
+      ;; `font-lock-turn-on-thing-lock` hangs on
+      ;; `jit-lock-after-change-extend-region-functions`.
+      ;;
+      ;; **Gated on the buffer's `font-lock-mode` here**: Emacs adds it to
+      ;; a buffer-local hook list, and this tree's hook is one global
+      ;; parameter.
+      ;;
+      ;; **Not carried**: the pre-enlarge to whole lines (`:1326-1339'),
+      ;; which tests for `font-lock-extend-region-wholelines` - a function
+      ;; this tree's `font-lock-extend-region-functions` does not have.
+      ;;--------------------------------------------------------------
+      (when (font-lock-mode-on?)
+        (save-excursion
+          (let ((region (let ((f (font-lock-extend-after-change-region-function)))
+                          (and f (f beg end old-len)))))
+            (when region
+              (set! beg (min (*jit-lock-start*) (car region)))
+              (set! end (max (*jit-lock-end*) (cdr region)))))
+          ;; "Then extend the region obeying `font-lock-multiline`
+          ;; properties."
+          (when (and (> beg (point-min))
+                     (get-text-property (- beg 1) 'font-lock-multiline))
+            (set! beg (or (previous-single-property-change
+                           beg 'font-lock-multiline)
+                          (point-min))))
+          (when (< end (point-max))
+            (set! end
+                  (cond
+                   ((get-text-property end 'font-lock-multiline)
+                    (or (text-property-any end (point-max)
+                                           'font-lock-multiline #f)
+                        (point-max)))
+                   ;; "If `end' has been set by the function above, don't
+                   ;; corrupt it." - the C's test is a *call* of the
+                   ;; variable (`(font-lock-extend-after-change-region-function
+                   ;; end)`), kept as it stands.
+                   ((font-lock-extend-after-change-region-function) (+ end 1))
+                   (else (+ end 1)))))
+          ;; "Finally, pre-enlarge the region to a whole number of
+          ;; lines, to try and anticipate what
+          ;; `font-lock-default-fontify-region` will do, so as to avoid
+          ;; double-redisplay."
+          (when (memq font-lock-extend-region-wholelines
+                      (*font-lock-extend-region-functions*))
+            (goto-char beg)
+            (set! beg (min (*jit-lock-start*) (line-beginning-position)))
+            (goto-char end)
+            (set! end (max (*jit-lock-end*)
+                           (if (bolp) (point) (line-beginning-position 2)))))
+          (*jit-lock-start* beg)
+          (*jit-lock-end* end)
+          #t)))
+
+    (define (font-lock-turn-off-thing-lock)
+      ;; GNU Emacs's `font-lock-turn-off-thing-lock' (`font-lock.el:947').
+      ;;--------------------------------------------------------------
+      (when (jit-lock-mode-on?)
+        (jit-lock-unregister font-lock-fontify-region))
+      #t)
 
     (define (font-lock-initial-fontify)
       ;; GNU Emacs's `font-lock-initial-fontify' (font-lock.el:695): "The
@@ -1509,5 +1661,18 @@
       (or (font-lock-defaults)
           (and (font-lock-keywords) #t)
           (and mode (font-lock-set-defaults-done?) #t)))
+
+    ;; The four function variables' *defaults* (`font-lock.el:1033-1095`),
+    ;; set here because the functions they name are defined above - a
+    ;; parameter has to be made with a value, so the variable starts #f
+    ;; and is given its value where the value exists.
+    (*font-lock-flush-function* font-lock-after-change-function)
+    (*font-lock-ensure-function*
+     (lambda (beg end)
+       ;; `(unless font-lock-fontified (save-excursion
+       ;; (font-lock-fontify-region beg end)))'
+       (unless (font-lock-fontified)
+         (save-excursion (font-lock-fontify-region beg end)))))
+    (*font-lock-fontify-buffer-function* font-lock-default-fontify-buffer)
 
     ))

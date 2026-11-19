@@ -51,6 +51,7 @@ SUITES = [
     'schemacs/editor/dired-tests.scm',
     'schemacs/editor/dired-mode-tests.scm',
     'schemacs/editor/font-lock-tests.scm',
+    'schemacs/editor/jit-lock-tests.scm',
     'schemacs/editor/lisp-mode-tests.scm',
     'schemacs/editor/prog-mode-tests.scm',
     'schemacs/editor/lisp-tests.scm',
@@ -67,6 +68,7 @@ SUITES = [
     # `fill.el` - the paragraph filler, its justification half and
     # `fill-individual-paragraphs`, each expectation Emacs 31.1's own.
     'schemacs/editor/fill-tests.scm',
+    'schemacs/editor/newcomment-tests.scm',
     'schemacs/editor/coding-tests.scm',
     'schemacs/editor/charset-tests.scm',
     'schemacs/editor/mule-cmds-tests.scm',

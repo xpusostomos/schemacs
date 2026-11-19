@@ -61,6 +61,9 @@
     ;; `find-file-other-window' shows one in the OTHER window.
     (only (schemacs editor window)
           pop-to-buffer-same-window
+          ;; `set-buffer-major-mode`'s one caller in this tree, installed
+          ;; at the bottom of this file.
+          *set-buffer-major-mode-function*
           switch-to-buffer switch-to-buffer-other-window)
     ;; The file-name table is a *function* table, so it answers
     ;; `try-completion' and `all-completions' itself - `minibuf.c''s.
@@ -3774,7 +3777,7 @@ The path separator is colon in GNU and GNU-like systems."
         #t))
 
     (define *initial-major-mode*
-      (make-parameter 'fundamental-mode))
+      (make-parameter 'lisp-interaction-mode))
     ;; ^ GNU Emacs's `initial-major-mode' (`startup.el'): "Major mode
     ;; command to use for the `*scratch*' buffer."
 
@@ -3793,13 +3796,43 @@ The path separator is colon in GNU and GNU-like systems."
              (cond ((string=? (buffer-name buffer) "*scratch*")
                     (*initial-major-mode*))
                    (else
-                    (let ((default (buffer-local-value buffer 'major-mode #f)))
-                      (if default default (major-mode)))))))
+                    ;; "function = BVAR (&buffer_defaults, major_mode)"
+                    ;; - the *default* value of `major-mode', which is
+                    ;; `fundamental-mode' unless something has changed it.
+                    ;; **The buffer-defaults table is not carried**; every
+                    ;; reader in this tree spells that default out, and so
+                    ;; does this. The C's two lines under it - "if nil,
+                    ;; and the *current* buffer's mode has no `mode-class'
+                    ;; property, use that mode" - are carried for shape,
+                    ;; though nothing here can make the default nil.
+                    ;;
+                    ;; Reading the target buffer's own mode instead, which
+                    ;; is what this did, made `C-x b fresh' in a Scheme
+                    ;; buffer a Scheme buffer: measured on Emacs 31.1,
+                    ;; `(window-normalize-buffer-to-switch-to "fresh")'
+                    ;; from a `text-mode' buffer gives `fundamental-mode'.
+                    (let ((default 'fundamental-mode))
+                      (if default
+                          default
+                          (let ((current (buffer-local-value
+                                          (current-buffer) 'major-mode
+                                          'fundamental-mode)))
+                            (and (not (get current 'mode-class)) current))))))))
         (if (not function)
             #f
             (with-current-buffer buffer
               ((%mode-function function))
               #t))))
+
+    (*set-buffer-major-mode-function* set-buffer-major-mode)
+    ;; ^ The caller `buffer.c' has and this tree did not:
+    ;; `window-normalize-buffer-to-switch-to' creates a buffer for a name
+    ;; it has not seen and then runs the mode on it (`window.el:9519'), so
+    ;; that a buffer made by `C-x b NAME' has a major mode - and therefore
+    ;; gets everything that hangs off `after-change-major-mode-hook',
+    ;; `global-tab-line-mode' and `global-font-lock-mode' among them. The
+    ;; seam is `window.scm''s, because a mode command is found through the
+    ;; command table and that library is below this one.
 
     (*interactive-read-file-name-function*
      (lambda (prompt must-match initial)

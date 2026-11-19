@@ -106,6 +106,10 @@
           ;; first click raised inside the signal handler, where
           ;; Gtk swallows it: a click that did nothing at all.
           event:get-coords
+          ;; *which* button - `pgtk-event-button'. Without it every
+          ;; press was `down-mouse-1', so a right-click on the tab
+          ;; bar could not reach its context menu.
+          event:get-button
           ;;----------------------------------------------------------------
           ;; The menu bar's widgets - gtkutil.c's `create_menus',
           ;; `make_menu_item` and `make_widget_for_menu_item`.
@@ -1000,6 +1004,11 @@
       ;; the right shape: Emacs's equivalent is the frame's X window,
       ;; which is *resized* and never recreated.
       (surface-size #:init-value #f #:accessor pgtk-surface-size)
+      ;; The integer scale factor the surface is drawn at - 2 on a HiDPI
+      ;; output. The surface is `size x scale' *device* pixels, and every
+      ;; coordinate the renderer hands its context is divided by this to
+      ;; reach them; see `pgtk-ensure-surface!`.
+      (scale   #:init-value 1  #:accessor pgtk-scale)
       (cr      #:init-value #f #:accessor pgtk-cr)
       (layout  #:init-value #f #:accessor pgtk-layout)
       ;; ^ The Pango layout the text is drawn through. It belongs to a
@@ -1450,6 +1459,31 @@
       (let*-values (((_ keysym) (event:get-keyval e)))
         keysym))
 
+    (define (pgtk-event-button e)
+      ;; Which button a Gdk button event is: 1 left, 2 middle, 3
+      ;; right. `gdk_event_get_button' answers TWO values - whether it
+      ;; worked, then the number - the same out-parameter shape
+      ;; `event:get-coords' has.
+      ;;--------------------------------------------------------------
+      (let*-values (((_ok button) (event:get-button e)))
+        button))
+
+    (define (pgtk-mouse-button-symbol kind button)
+      ;; The event symbol a button N makes: GNU Emacs's
+      ;; `make_lispy_event` calls `modify_event_symbol` with the
+      ;; `down_modifier`/`drag_modifier` fold and builds
+      ;; `down-mouse-N`, `mouse-N` or `drag-mouse-N` from the number
+      ;; (`keyboard.c:6760`). A front end that spelled every press
+      ;; `down-mouse-1` turned a right-click into a left one, which is
+      ;; why the tab bar's `[tab-bar down-mouse-3]` could never fire
+      ;; on this display.
+      ;;--------------------------------------------------------------
+      (string->symbol
+       (string-append (cond ((eq? kind 'down) "down-")
+                            ((eq? kind 'drag) "drag-")
+                            (else ""))
+                      "mouse-" (number->string button))))
+
     (define (pgtk-event-cell e)
       ;; Where a Gtk button event happened, as the CELL the frame's
       ;; windows are measured in. A Gdk event carries pixels and every
@@ -1577,6 +1611,28 @@
     ;; character - so, like a terminal's own `KEY_RESIZE', it is a code of
     ;; this display's that the key decoder turns into `(resize)'.
 
+    (define %gtk-widget-get-scale-factor
+      ;; `gtk_widget_get_scale_factor' (`gtkwidget.c'): the integer factor
+      ;; the widget is drawn at - 2 on a HiDPI output, which is what
+      ;; Emacs reads as `FRAME_SCALE_FACTOR` (`pgtkterm.c`).
+      (let ((lib (dynamic-link "libgtk-3.so.0")))
+        (pointer->procedure int
+                            (dynamic-func "gtk_widget_get_scale_factor" lib)
+                            (list '*))))
+
+    (define (pgtk-display-scale d)
+      ;; The scale factor this display draws at. A display with no widget
+      ;; (one a test made) is 1.
+      ;;
+      ;; **Asked every redisplay**, like the font's own check: moving the
+      ;; window between outputs of different scales changes it, and the
+      ;; surface then has to be remade at the new size.
+      ;;--------------------------------------------------------------
+      (let ((area (pgtk-area d)))
+        (if area
+            (max 1 (%gtk-widget-get-scale-factor (pgtk-widget-pointer area)))
+            1)))
+
     (define (pgtk-ensure-surface! d)
       ;; Make the drawing surface the size the WIDGET is, in pixels - not
       ;; the size of the grid. The grid is the allocation divided by a
@@ -1608,14 +1664,26 @@
         ;; was drawn: a file's text flashed and then vanished, and a
         ;; resize did the same again. Emacs's frame has one X window for
         ;; its whole life and *resizes* it; this is that.
-        (if (and (pgtk-surface d) (equal? (pgtk-surface-size d) size))
+        (let ((scale (pgtk-display-scale d)))
+        (if (and (pgtk-surface d) (equal? (pgtk-surface-size d) size)
+                 (= scale (pgtk-scale d)))
             #t
-        (let* ((surface (cairo-image-surface-create 'argb32
-                                                    (car size) (cdr size)))
+        (let* ((surface (cairo-image-surface-create
+                         'argb32
+                         (* scale (car size)) (* scale (cdr size))))
                (cr (cairo-create surface)))
           (set! (pgtk-surface d) surface)
           (set! (pgtk-surface-size d) size)
+          (set! (pgtk-scale d) scale)
           (set! (pgtk-cr d) cr)
+          ;; **Every coordinate the renderer uses is logical; the context
+          ;; scales it to device pixels.** The surface is `size x scale'
+          ;; device pixels, so a glyph drawn at a logical font size of 20
+          ;; is rasterized at 2x on a HiDPI output and comes out sharp -
+          ;; before this the surface was one device pixel per logical
+          ;; pixel and Gtk/Cairo upscaled it, which is why the whole
+          ;; editor looked blurry beside every other application.
+          (cairo-scale cr scale scale)
           ;; **A new surface is filled with the frame's background.**
           ;; `cairo-image-surface-create` makes a *transparent* one, and
           ;; until now `clear-frame-area!` did this fill on every
@@ -1632,7 +1700,7 @@
                  cr
                  (or (colour->rgb (face-attribute 'default ':background))
                      (list 1.0 1.0 1.0)))
-          (cairo-paint cr)))))
+          (cairo-paint cr))))))
 
     (define (pgtk-resize! d width height)
       ;; Take the window's new size in pixels as the grid's new size, and
@@ -1736,9 +1804,13 @@
        ;; a mouse event and not a key, so it must not be asked for a
        ;; keysym.
        ((and (pair? item) (eq? (car item) 'button-press))
-        (pgtk-mouse-event from (cdr item) 'down-mouse-1))
+        (pgtk-mouse-event from (cdr item)
+                          (pgtk-mouse-button-symbol 'down
+                                                    (pgtk-event-button (cdr item)))))
        ((and (pair? item) (eq? (car item) 'button-release))
-        (pgtk-mouse-event from (cdr item) 'mouse-1))
+        (pgtk-mouse-event from (cdr item)
+                          (pgtk-mouse-button-symbol 'click
+                                                    (pgtk-event-button (cdr item)))))
        ;; **A release *after* the pointer moved is a different event** -
        ;; GNU Emacs's `drag-mouse-1', which `mouse.el:3783' binds to
        ;; `mouse-set-region'. It is what re-establishes the region the
@@ -1747,7 +1819,9 @@
        ;; press's position *and* the release's, which is what
        ;; `event-end' reads the second of.
        ((and (pair? item) (eq? (car item) 'drag-release))
-        (list 'drag-mouse-1 (pgtk-press-posn from)
+        (list (pgtk-mouse-button-symbol 'drag
+                                        (pgtk-event-button (cdr item)))
+              (pgtk-press-posn from)
               (pgtk-posn-for from (cdr item))))
        ;; The pointer moved and nobody has been told yet: **this is where
        ;; the `mouse-movement' event is made** - GNU Emacs's
@@ -2629,8 +2703,16 @@
       (let ((surface (pgtk-surface d))
             (cr (cairo-pointer->context (slot-ref gtk-cr 'value))))
         (when surface
+          ;; **Device pixels, one to one.** Gtk's context maps a user unit
+          ;; to `scale' device pixels (that is what a HiDPI output is);
+          ;; the surface is already device-sized, so dividing the context
+          ;; back out blits it without a second scaling - the one that
+          ;; made the text blurry.
+          (cairo-save cr)
+          (cairo-scale cr (/ 1.0 (pgtk-scale d)) (/ 1.0 (pgtk-scale d)))
           (cairo-set-source-surface cr surface 0 0)
-          (cairo-paint cr))))
+          (cairo-paint cr)
+          (cairo-restore cr))))
 
     (define-method (flush-display! (d <pgtk-display>))
       ;; What has been drawn becomes visible when Gtk next asks us to
@@ -3442,8 +3524,17 @@
       ;; `create_and_show_popup_menu` (`pgtkmenu.c:528`): build the menu,
       ;; show it at (X, Y) - or at the pointer when it was a click - and
       ;; "process events that apply to the menu" until it pops down.
+      ;;
+      ;; **The walk starts at the root's *contents*.** `create_and_show_
+      ;; popup_menu` hands the root `widget_value` to `xg_create_widget`,
+      ;; whose menu branch is `create_menus (val->contents, ...)`
+      ;; (`gtkutil.c:3575`): the root is the menu itself - its name is
+      ;; only the widget's name - and its children are the first level of
+      ;; items. Passing the root made it an item, so every popup opened
+      ;; on a single entry named "menu" with the real menu inside it.
       ;;--------------------------------------------------------------
-      (let ((menu (pgtk-create-menus tree d pgtk-popup-selected #f #f)))
+      (let ((menu (pgtk-create-menus (widget-value-contents tree)
+                                     d pgtk-popup-selected #f #f)))
         (widget:show-all menu)
         ;; "The menu is canceled if it is unmapped" - the same
         ;; `popup_deactivate_callback` the C connects through

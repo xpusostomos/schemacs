@@ -61,24 +61,37 @@
     ;; `where-is-internal` is `keymap.c`'s, and `key-description` with it.
     (only (schemacs editor keyboard)
           where-is-internal command-remapping key-binding read-key-sequence
-          lookup-keymaps undefined
+          read-key-sequence-vector lookup-keymaps undefined
+          *unread-command-events* *this-command-keys*
+          help-char help-event-list
           *overriding-terminal-local-map* *overriding-local-map*)
     (only (schemacs editor keymap)
           key-description keymapp lookup-key keymap-order keymap-bindings
           keymap-index get-keyelt make-sparse-keymap define-key
-          keymap-by-name *default-keymap*)
+          set-keymap-parent keymap-by-name *default-keymap*)
     ;; a command's name for `help-fns-function-name`, and the
     ;; "was this called from a key?" test `describe-bindings` records.
     (only (schemacs editor command)
           define-command command-type? command-name command-record-of
-          called-interactively? current-prefix-arg)
+          called-interactively? current-prefix-arg call-interactively)
     (only (schemacs editor custom) define-custom)
     (only (schemacs editor derived) derived-mode-p)
     (only (schemacs editor fns) string-version-lessp)
     ;; the window a description is laid out in, and the separator line
     (only (schemacs editor frame) selected-window window-body-width)
-    (only (schemacs editor window) display-buffer set-window-hscroll!)
-    (only (schemacs editor simple) make-separator-line)
+    (only (schemacs editor window)
+          display-buffer set-window-hscroll! pop-to-buffer
+          current-window-configuration set-window-configuration
+          *cursor-in-echo-area*)
+    (only (schemacs editor simple)
+          make-separator-line scroll-up-command scroll-down-command)
+    ;; `pos-visible-in-window-p` is the renderer's, and
+    ;; `help--help-screen` asks it to pick the prompt's wording.
+    (only (schemacs editor xdisp) pos-visible-in-window-p)
+    ;; `make-help-screen` and its option - `help-macro.el`'s, which
+    ;; reaches the screen above through `*help--help-screen-function*`.
+    (only (schemacs editor help-macro)
+          *three-step-help* *help--help-screen-function* make-help-screen)
     (only (schemacs editor character) kbd *tab-width* event-modifiers
           *max-char* *max-5-byte-char*)
     (only (schemacs editor chartab)
@@ -114,6 +127,9 @@
           *describe-function-1-function*
           describe-vector
           describe-key describe-key-briefly where-is
+          help-for-help help-quit help--help-screen
+          help-for-help-buffer-name
+          help--for-help-make-commands help--for-help-make-sections
           help--analyze-key help--filter-info-list
           help--binding-undefined-p help-key-description)
 
@@ -1256,5 +1272,290 @@ If INSERT (the prefix arg) is non-nil, insert the message in the buffer."
     (define-key *default-keymap* (kbd "C-h c") describe-key-briefly)
     (define-key help-map (kbd "w") where-is)
     (define-key *default-keymap* (kbd "C-h w") where-is)
+
+
+    ;;----------------------------------------------------------------
+    ;; Help for help - `help-macro.el`'s `help--help-screen`, and
+    ;; `help.el`'s `help-for-help` (`:400') with its option table
+    ;;----------------------------------------------------------------
+    ;;
+    ;; **A placement departure**: `make-help-screen` and its two options
+    ;; are `help-macro.scm`'s as in Emacs, but the screen
+    ;; (`help--help-screen`) is here, because it calls this library's
+    ;; `substitute-command-keys` and `help--key-description-fontified`,
+    ;; and a static import graph cannot have `help-macro.scm` below
+    ;; `help.scm` while `help.scm` imports its macro from it. The macro
+    ;; reaches this function through `*help--help-screen-function*`,
+    ;; which this library installs at load - Emacs gets the same
+    ;; indirection from its one obarray at run time.
+    ;;
+    ;; **The help-map entries are split across two libraries** - another
+    ;; consequence of having no obarray: `b`, `c`, `?` and `q` are bound
+    ;; here, where their commands live, and `f`, `v`, `m`, `o`, `s` in
+    ;; `help-fns.scm`, where those commands live. Emacs binds them all in
+    ;; `help.el`'s `help-map` because every name is in one obarray.
+
+    (define help-for-help-buffer-name " *Metahelp*")
+    ;; ^ `help.el:361`.
+
+    (define %help-metahelp-scroll-up-events
+      ;; `(?\C-v ?\s next end)' in `help--help-screen`'s `cond`.
+      (list (vector-ref (kbd "C-v") 0) (vector-ref (kbd "SPC") 0)
+            'next 'end))
+    (define %help-metahelp-scroll-down-events
+      ;; `(?\177 ?\M-v ?\S-\s deletechar backspace prior home)'.
+      (list (vector-ref (kbd "DEL") 0) (vector-ref (kbd "M-v") 0)
+            (vector-ref (kbd "S-SPC") 0)
+            'deletechar 'backspace 'prior 'home))
+
+    (define (help--help-screen help-line help-text helped-map buffer-name)
+      ;; GNU Emacs's `help--help-screen` (`help-macro.el:105').
+      ;;
+      ;; **The departures, each named**: `variable-pitch-mode` is not
+      ;; ported (the option is carried, the branch is skipped);
+      ;; `iconify-frame`, `handle-switch-frame` and
+      ;; `frame-toggle-on-screen-keyboard` are not ported (neither front
+      ;; end has frames that iconify or an on-screen keyboard);
+      ;; `vertical-scroll-bar` is carried in the key list and never
+      ;; arises (no scroll bars); the C's `[t] -> undefined` binding is
+      ;; not needed, because an unbound key is already undefined here -
+      ;; `lookup-key` answers #f and the else branch reports it; the
+      ;; scroll keys call `scroll-up-command`/`scroll-down-command` where
+      ;; the C calls the `scroll-up`/`scroll-down` primitives
+      ;; (`scroll_command`, `window.c:6975`, is not ported); and `ding`
+      ;; is not ported, so an unbound option reports without a bell.
+      ;;--------------------------------------------------------------
+      (let ((line-prompt (substitute-command-keys help-line)))
+        (when (*three-step-help*)
+          (message "%s" line-prompt))
+        (let* ((help-screen help-text)
+               (local-map (make-sparse-keymap))
+               (config #f)
+               (key #f)
+               (char #f))
+          ;; "If HELP-TEXT contains the sequence `%THIS-KEY%', that is
+          ;; replaced with the key sequence that invoked FNAME."
+          (when (string-match "%THIS-KEY%" help-screen)
+            (let* ((keys (*this-command-keys*))
+                   (prefix (if (and (vector? keys)
+                                    (> (vector-length keys) 1))
+                               (vector-copy keys 0 (- (vector-length keys) 1))
+                               keys))
+                   (at (match-beginning 0)))
+              (set! help-screen
+                    (string-append (substring help-screen 0 at)
+                                   (help--key-description-fontified prefix)
+                                   (substring help-screen (match-end 0))))))
+          ;; The C's `unwind-protect` is `dynamic-wind` here - the same
+          ;; shape `save-excursion` and `save-restriction` use. (The
+          ;; `unwind-protect` spelling compiles with only a warning and
+          ;; then is *unbound at run time* in a library: measured.)
+          (dynamic-wind
+              (lambda () #f)
+              (lambda ()
+                (begin
+                ;; "`(setcdr local-map helped-map)'": the option
+                ;; characters resolve through `helped-map` - which this
+                ;; tree's lookup reaches as a keymap *parent*.
+                (set-keymap-parent local-map helped-map)
+                (if (*three-step-help*)
+                    ;; The middle step: read one key through the map.
+                    (begin
+                      (set! key
+                            (parameterize ((*overriding-local-map* local-map))
+                              (read-key-sequence-vector #f)))
+                      (set! char (vector-ref key 0)))
+                    (set! char (char->integer #\?)))
+                (when (or (eqv? char (char->integer #\?))
+                          (eqv? char help-char)
+                          (and (memv char help-event-list) #t))
+                  (set! config (current-window-configuration))
+                  ;; `(pop-to-buffer (or buffer-name " *Metahelp*") nil
+                  ;; t)'.
+                  (pop-to-buffer (or buffer-name help-for-help-buffer-name)
+                                 #f #t)
+                  (parameterize ((*inhibit-read-only* #t))
+                    (erase-buffer)
+                    (insert (substitute-command-keys help-screen)))
+                  (when (*help-mode-function*) ((*help-mode-function*)))
+                  (goto-char (point-min))
+                  (let ((scroll-keys
+                         (append
+                          help-event-list
+                          (cons help-char
+                                (append
+                                 (list (char->integer #\?))
+                                 %help-metahelp-scroll-up-events
+                                 %help-metahelp-scroll-down-events
+                                 '(deletechar backspace vertical-scroll-bar
+                                              home end next prior up down))))))
+                    (let loop ()
+                      (when (and (memv char scroll-keys) #t)
+                        ;; "If this is a scroll bar command, just run
+                        ;; it." - and the rest of the C's `cond': a page
+                        ;; for the page keys, one line for the arrows.
+                        (cond ((memv char %help-metahelp-scroll-up-events)
+                               (scroll-up-command #f))
+                              ((memv char %help-metahelp-scroll-down-events)
+                               (scroll-down-command #f))
+                              ((memv char '(down)) (scroll-up-command 1))
+                              ((memv char '(up)) (scroll-down-command 1)))
+                        ;; `(let ((cursor-in-echo-area t)
+                        ;; (overriding-local-map local-map)) ...)'
+                        (parameterize ((*cursor-in-echo-area* #t)
+                                       (*overriding-local-map* local-map))
+                          (set! key
+                                (read-key-sequence-vector
+                                 (format "Type one of listed options%s: "
+                                         (if (pos-visible-in-window-p
+                                              (point-max))
+                                             ""
+                                             (string-append
+                                              ", or "
+                                              (help--key-description-fontified
+                                               (kbd "<PageDown>"))
+                                              "/"
+                                              (help--key-description-fontified
+                                               (kbd "<PageUp>"))
+                                              "/"
+                                              (help--key-description-fontified
+                                               (kbd "SPC"))
+                                              "/"
+                                              (help--key-description-fontified
+                                               (kbd "DEL"))
+                                              " to scroll")))))
+                        (set! char (vector-ref key 0))
+                        (loop))))))
+                ;; "We don't need the prompt any more."
+                (message "")
+                ;; "Mouse clicks are not part of the help feature, so
+                ;; reexecute them in the standard environment."
+                (if (not (or (integer? char) (symbol? char)))
+                    (begin
+                      (*unread-command-events*
+                       (cons char (*unread-command-events*)))
+                      (set! config #f))
+                    (let ((defn (lookup-key local-map key)))
+                      (if defn
+                          (begin
+                            (when config
+                              (set-window-configuration config)
+                              (set! config #f))
+                            (call-interactively defn))
+                          (unless (equal? (key-description key) "C-g")
+                            (message
+                             (substitute-command-keys
+                              (format "No help command is bound to `%s'"
+                                      (key-description key))))))))))
+              (lambda () (when config (set-window-configuration config)))))))
+
+    (*help--help-screen-function* help--help-screen)
+
+    (define-command (help-quit)
+      "Just exit from the Help command's command loop."
+      (interactive)
+      #f)
+    ;; ^ `help.el:286'.
+
+    (define (help--for-help-make-commands commands)
+      ;; GNU Emacs's `help--for-help-make-commands' (`help.el:365'):
+      ;; "Create commands for `help-for-help' screen from COMMANDS."
+      ;;
+      ;; Each entry is `(NAME DESCRIPTION)' or the empty string for a
+      ;; blank line. NAME is a command - written `\[NAME]', which
+      ;; `substitute-command-keys` turns into its key - or a key itself,
+      ;; which is propertized as one; the table this tree carries has
+      ;; the first kind only.
+      ;;--------------------------------------------------------------
+      (let loop ((rest commands) (acc '()))
+        (cond
+         ((null? rest) (string-join (reverse acc) "\n"))
+         ((pair? (car rest))
+          (let* ((name (car (car rest)))
+                 (desc (cadr (car rest)))
+                 (shown (if (string-match "\\`C-\\w+\\'" name)
+                            (propertize name 'face 'help-key-binding)
+                            (string-append "\\[" name "]"))))
+            (loop (cdr rest)
+                  (cons (string-append
+                         "   " shown " "
+                         (propertize "\t" 'display '(space :align-to 8))
+                         desc)
+                        acc))))
+         (else (loop (cdr rest) (cons "" acc))))))
+
+    (define (help--for-help-make-sections sections)
+      ;; GNU Emacs's `help--for-help-make-sections' (`help.el:384').
+      ;;--------------------------------------------------------------
+      (let loop ((rest sections) (acc '()))
+        (if (null? rest)
+            (string-join (reverse acc) "\n")
+            (let ((section (car rest)))
+              (loop (cdr rest)
+                    (cons (string-append
+                           "\n\n"
+                           (propertize (car section) 'face 'help-for-help-header)
+                           "\n\n"
+                           (help--for-help-make-commands (cdr section)))
+                          acc))))))
+
+    (define %help-for-help-sections
+      ;; `help-for-help`'s table (`help.el:405-472'), **less every entry
+      ;; whose command this tree does not have**, and with the help line
+      ;; trimmed to match. Not carried, with what each waits for:
+      ;; `apropos-command`/`apropos-documentation` (apropos.el),
+      ;; `describe-command`, `help-find-source` (Commands, Keys and
+      ;; Functions); the whole Manuals section - `info`, the
+      ;; `Info-goto-emacs-*` pair, `info-lookup-symbol` (info.el, which
+      ;; is a project of its own); `view-external-packages`,
+      ;; `finder-by-keyword`, `describe-package`, `help-with-tutorial`,
+      ;; `help-quick-toggle`, `view-echo-area-messages`, `view-lossage`,
+      ;; `display-local-help` (Other Help Commands); the whole
+      ;; Miscellaneous section (`about-emacs`, the `view-emacs-*`
+      ;; family); and `describe-input-method`,
+      ;; `describe-language-environment`, `view-hello-file`
+      ;; (Internationalization).
+      '(("Commands, Keys and Functions"
+         ("describe-mode"
+          "Show help for current major and minor modes and their commands")
+         ("describe-bindings" "Show all key bindings")
+         ("describe-key" "Show help for key")
+         ("describe-key-briefly" "Show help for key briefly")
+         ("where-is" "Show which key runs a specific command")
+         ""
+         ("describe-function" "Show help for function")
+         ("describe-variable" "Show help for variable")
+         ("describe-symbol" "Show help for function or variable"))
+        ("Internationalization and Coding Systems"
+         ("describe-syntax" "Show current syntax table"))))
+
+    (make-help-screen help-for-help
+      "Type a help option: [bcfkmoqsvw] or ?"
+      (string-append
+       "(Type "
+       (help--key-description-fontified (kbd "<PageDown>"))
+       " or "
+       (help--key-description-fontified (kbd "<PageUp>"))
+       " to scroll, "
+       (help--key-description-fontified (kbd "C-s"))
+       " to search, or \\[help-quit] to exit.)"
+       (help--for-help-make-sections %help-for-help-sections)
+       "\n")
+      help-map
+      help-for-help-buffer-name)
+
+    ;; "Keymap for characters following the Help key." `help.el:62`.
+    ;; The other option characters are already bound in this map, where
+    ;; their commands were defined (`b`, `c`, `k` and `w` in this file
+    ;; and `f`, `v`, `m`, `o` and `s` in `help-fns.scm`); these two are
+    ;; help-for-help's own.
+    (define-key help-map (kbd "q") help-quit)
+    (define-key help-map (kbd "?") help-for-help)
+
+    ;; `help-map`'s own entries for C-h C-h, `<help>` and `<f1>`
+    ;; (`help.el:62-66') are the flat keys here - the standing departure
+    ;; `narrow-map` and `mule-keymap` record.
+    (define-key *default-keymap* (kbd "C-h ?") help-for-help)
+    (define-key *default-keymap* (kbd "C-h C-h") help-for-help)
 
 ))

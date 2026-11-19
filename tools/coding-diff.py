@@ -26,6 +26,14 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# **The shared site directory is on the load path or nothing loads.**
+# `(schemacs editor keyboard)` imports `(scheme-utils repl server)` from
+# there, and without `-L` the editor libraries fail to resolve and every
+# schemacs answer is `None` (measured - that is what made this tool
+# report 19 "NEW" cases against a tree that was fine).
+SITE = os.path.join(os.environ.get("XDG_DATA_HOME",
+                                   os.path.expanduser("~/.local/share")),
+                    "guile", "site", "3.0")
 TMP = "/tmp/schemacs-coding-diff"
 FIXTURES = "/home/chris/GITE/encoding-test-files"
 
@@ -75,21 +83,18 @@ KNOWN_DIFFERENCES = {
         "`detect_coding_iso_2022` is not ported (259 lines, a state "
         "machine).  The bytes are safe - they are 7-bit and round-trip - "
         "but the text shows as mojibake."),
-    "shift-jis": (
-        "The *read-path* detector, `detect_coding` (`coding.c:6501'), is "
-        "not ported - what is ported is `detect_coding_system` (`:8686'), "
-        "which is the one `detect-coding-region` uses.  Emacs's two "
-        "detectors disagree on these bytes: `find-file` names them "
-        "`utf-8-unix` while Emacs's own `detect-coding-region` names them "
-        "`japanese-shift-jis-unix`, which is what schemacs answers.  Emacs "
-        "then cannot save the buffer at all (its byte characters have no "
-        "UTF-8 encoding), so this case has no Emacs round trip to compare "
-        "against - see `ask_emacs`."),
 }
 
 
 def run(cmd, timeout=180):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # **`stdin=DEVNULL` is load-bearing for the Emacs side.** When Emacs
+    # cannot encode a buffer it prompts "Select coding system", and in
+    # `--batch` that prompt reads stdin: with an inherited stdin it can
+    # wait for ever (measured here - a 180 s timeout), where EOF is what
+    # makes it error out and leave the file unsaved, which is the answer
+    # `ask_emacs`'s third value reports.
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          timeout=timeout, stdin=subprocess.DEVNULL)
 
 
 def write_case(name, data):
@@ -140,20 +145,20 @@ def ask_schemacs(path):
     """schemacs's coding system for PATH, and the bytes it writes back."""
     elisp = """
 (import (scheme base) (scheme write) (schemacs editor files)
-        (schemacs editor frame) (schemacs editor buffer) (schemacs editor coding)
-        (schemacs editor engine))
+        (schemacs editor frame) (schemacs editor buffer) (schemacs editor coding))
 (parameterize ((*buffer-list* (list)) (*current-buffer* #f))
   (let* ((ed (find-file-noselect "%s"))
          (frame (new-frame ed 24 80)))
-    (display "CODING=") (write (coding-system-name (buffer-file-coding-system ed))) (newline)
-    (parameterize ((*current-frame* frame))
-      (text-editor-set-modified! ed #t)
+    (display "CODING=") (write (buffer-file-coding-system ed)) (newline)
+    (parameterize ((*current-frame* frame) (*current-buffer* ed))
+      (set-buffer-modified-p #t)
       (save-buffer))))
 """ % path
     script = os.path.join(TMP, "schemacs-side.scm")
     with open(script, "w") as port:
         port.write(elisp)
-    out = run(["guile", "--no-auto-compile", "-L", REPO, "-s", script])
+    out = run(["guile", "--no-auto-compile", "-L", REPO, "-L", SITE,
+               "-s", script])
     coding = None
     for line in out.stdout.split("\n"):
         if line.startswith("CODING="):

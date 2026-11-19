@@ -3745,7 +3745,9 @@ Just \\[universal-argument] as argument means to use the current column."
       (interactive
        (list (or (current-prefix-arg)
                  (read-number
-                  (format #f "Change fill-column from %s to: "
+                  ;; Guile's `format' takes `~a', not Emacs's `%s' - a
+                  ;; literal `%s' printed itself in the prompt.
+                  (format #f "Change fill-column from ~a to: "
                           (buffer-fill-column (current-buffer)))
                   (current-column)))))
       (let ((n (cond

@@ -63,7 +63,7 @@
        set-window-start!
        window-body-height window-buffer window-edges window-height)
  (only (schemacs editor xdisp)
-       posn-at-x-y render! track-mouse vertical-motion
+       posn-at-x-y posn-at-point render! track-mouse vertical-motion
        window-end window-start)
  (only (schemacs editor keyboard)
        *last-read-event* *overriding-terminal-local-map*
@@ -586,5 +586,27 @@
         (let ((p (posn-at-x-y 0 2 f)))
           (posn-set-point p)
           (eq? (posn-window p) (selected-window)))))))
+
+;; **`event-start` for a keyboard key** - `subr.el`'s
+;; `event--posn-at-point`: a key event is an integer or a symbol, not a
+;; mouse position, and Emacs answers the position of point in the
+;; selected window rather than nil. `tab-line-switch-to-next-tab` is
+;; bound to `C-x <right>` and reads
+;; `(posn-window (tab-line-event-start event))`, so nil here was
+;; "Wrong type argument in position 1 (expecting struct): #f" the moment
+;; the tab line was on.
+(test-equal #t
+  (let ((f (numbered-frame 3 24 80)))
+    (parameterize ((*current-frame* f))
+      (eq? (posn-window (event-start 32)) (selected-window)))))
+
+;; And `posn-at-point` answers the window for a position that is on
+;; screen, and nil for one that is not.
+(test-equal '(#t #f)
+  (let ((f (numbered-frame 3 24 80)))
+    (parameterize ((*current-frame* f))
+      (let ((w (selected-window)))
+        (list (eq? (posn-window (posn-at-point 1 w)) w)
+              (posn-at-point 10000 w))))))
 
 (test-end "schemacs_editor_mouse")

@@ -86,7 +86,7 @@
           ;; The scan's side of `buffer-text-ref' - see the comment in
           ;; `text-editor-search-forward'.
           buffer-text-store buffer-text-base buffer-text-gpt
-          buffer-text-gap-size)
+          buffer-text-gap-size buffer-text-z)
     ;; The store's own type. `u32vector-ref' is what `BUF_BEG_ADDR'
     ;; indexing is in Scheme; it is not in `(scheme base)' nor in
     ;; `(rnrs bytevectors)' on this Guile - `(guile)' is where the
@@ -1938,10 +1938,12 @@
              ;; buffer whose lines are never searched never pays for one.
              (cache (and (text-editor-cache-long-scans ed)
                          (or (%text-editor-newline-cache ed)
-                             (let ((c (new-region-cache
-                                       (buffer-beg ed))))
-                               (set!%text-editor-newline-cache ed c)
-                               c)))))
+                             (let ((text (text-editor-text ed)))
+                               (let ((c (new-region-cache
+                                         (buffer-text-base text)
+                                         (buffer-text-z text))))
+                                 (set!%text-editor-newline-cache ed c)
+                                 c))))))
         (if (< 0 count)
             (find-newline-forward ed start count end cache)
             (find-newline-backward ed start count end cache))))
@@ -1980,8 +1982,13 @@
       ;; A stretch the cache calls known holds no line break, so it is
       ;; stepped over rather than looked at. That is the whole saving.
       ;;--------------------------------------------------------------
-      (let ((beg (buffer-beg ed))
-            (z (buffer-z ed)))
+      ;; **The cache's endpoints are the *text*'s; the scan's is the
+      ;; restriction's.** `region_cache_forward` reads `BUF_BEG`/`BUF_Z`
+      ;; (`region-cache.c`), while the scan still stops at the caller's
+      ;; END (ZV forward, BEGV back).
+      (let* ((text (text-editor-text ed))
+             (beg (buffer-text-base text))
+             (z (buffer-text-z text)))
         (let outer ((pos start) (left count) (found 0))
           (if (>= pos end)
               (values end found)
@@ -2021,8 +2028,13 @@
       ;; one: consult, scan down to where the knowledge runs out, record
       ;; what was crossed, repeat.
       ;;--------------------------------------------------------------
-      (let ((beg (buffer-beg ed))
-            (z (buffer-z ed)))
+      ;; **The cache's endpoints are the *text*'s; the scan's is the
+      ;; restriction's.** `region_cache_forward` reads `BUF_BEG`/`BUF_Z`
+      ;; (`region-cache.c`), while the scan still stops at the caller's
+      ;; END (ZV forward, BEGV back).
+      (let* ((text (text-editor-text ed))
+             (beg (buffer-text-base text))
+             (z (buffer-text-z text)))
         (let outer ((pos start) (left count) (found 0))
           (if (<= pos end)
               (values end found)

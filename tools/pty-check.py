@@ -67,7 +67,17 @@ NO_SPLASH_INIT = (
     ';; has its own check, `tty-menu`, which passes a config without this\n'
     ';; line. The default alist is set as well as the frame, because the\n'
     ';; checks that make extra frames would otherwise get a bar back.\n'
-    "(*default-frame-alist* (cons '(menu-bar-lines . 0) (*default-frame-alist*)))\n")
+    "(*default-frame-alist* (cons '(menu-bar-lines . 0) (*default-frame-alist*)))\n"
+    # **The cursor blink is off.** `blink-cursor-mode` is Emacs's default
+    # and this tree blinks on a timer (`*blink-cursor-delay*` 0.5 s), so
+    # a repaint of the cursor cell can land in any settle window and
+    # restart it. No check is about blinking (the timer machinery has its
+    # own unit tests), and turning it off makes "the editor went quiet"
+    # mean the editor, not the clock. Measured: it did **not** explain the
+    # 400 ms settle outliers - those were checks passing a large `gap`,
+    # which is a pacing value and is not used any more - so this is a
+    # de-jitter measure, not a fix.
+    '(blink-cursor-mode -1)\n')
 _CFG = os.path.join(TEST_CONFIG_HOME, 'schemacs')
 os.makedirs(_CFG, exist_ok=True)
 open(os.path.join(_CFG, 'init.scm'), 'w').write(NO_SPLASH_INIT)
@@ -146,7 +156,8 @@ WAIT_TIMED_OUT = "[[harness: gave up waiting for %r]]"
 # aimed by measurement rather than by guessing which sleep is big.
 PROFILE = os.environ.get("SCHEMACS_PTY_PROFILE") == "1"
 PROFILE_T = {"drives": 0, "keys": 0, "startup": 0.0, "key_settle": 0.0,
-             "end_wait": 0.0, "tail": 0.0}
+             "end_wait": 0.0, "tail": 0.0, "first_key": 0.0, "rest_key": 0.0,
+             "first_n": 0, "rest_n": 0}
 
 
 def _profile_report():
@@ -156,6 +167,38 @@ def _profile_report():
               "key pacing %.1fs, end waits %.1fs, kill tail %.1fs"
               % (t["drives"], t["keys"], t["startup"], t["key_settle"],
                  t["end_wait"], t["tail"]))
+        # The per-key average hides its shape: the first element of a
+        # drive waits behind the editor's own start, and the rest behind
+        # the editor's response only. Two averages, so "slow keys" is a
+        # measured statement rather than an average's guess.
+        for cc, kk, dd, st in t.get("slow", [])[:12]:
+            print("  slow key %s %r: %.0f ms  (first/last/reads: %s %s %.2f)"
+                  % (cc, kk, 1000 * dd,
+                     "%.0f" % (1000 * st[0]) if st and st[0] is not None
+                     else "-",
+                     "%.0f" % (1000 * st[1]) if st else "-",
+                     st[2] if st else -1))
+        if t.get("durs"):
+            ds = sorted(t["durs"])
+            n = len(ds)
+            print("  per-key settle: min %.0f ms, median %.0f ms, p90 %.0f ms,"
+                  " max %.0f ms over %d"
+                  % (1000*ds[0], 1000*ds[n//2], 1000*ds[min(n-1, 9*n//10)],
+                     1000*ds[-1], n))
+        if t.get("resp_n"):
+            print("  response to first byte: %.1fs over %d settled elements "
+                  "(%.0f ms each); last byte at %.0f ms each over %.1f reads"
+                  % (t["resp"], t["resp_n"],
+                     1000 * t["resp"] / t["resp_n"],
+                     1000 * t["last_delay"] / t["resp_n"],
+                     t.get("reads", 0) / t["resp_n"]))
+        if t["first_n"]:
+            print("  first key of a drive: %.1fs over %d (%.0f ms each); "
+                  "rest: %.1fs over %d (%.0f ms each)"
+                  % (t["first_key"], t["first_n"],
+                     1000 * t["first_key"] / t["first_n"],
+                     t["rest_key"], t["rest_n"],
+                     1000 * t["rest_key"] / max(1, t["rest_n"])))
 
 
 if PROFILE:
@@ -280,7 +323,6 @@ def drive(keys, path, settle=0.3, gap=None, term=None, background="0000/0000/000
         # Read whatever is available within TIMEOUT, and answer how many
         # bytes arrived. The count is what lets the settle below wait for
         # the editor to go *quiet* instead of for a fixed time.
-        nonlocal out
         got = 0
         while select.select([fd], [], [], timeout)[0]:
             try:
@@ -289,14 +331,67 @@ def drive(keys, path, settle=0.3, gap=None, term=None, background="0000/0000/000
                 break
             if not d:
                 break
-            out += d
+            out_extend(d)
             got += len(d)
-            for query, reply in answers.items():
-                if query in out and query not in answered:
-                    answered.add(query)
-                    if reply is not None:
-                        os.write(fd, reply)
         return got
+
+    def wait_quiet(quiet_for, longest):
+        # **Silence measured against the last byte, not counted in
+        # windows.** The old loop asked `drain(0.05)` for a whole empty
+        # window *and* the window that collected the response, so one
+        # settled key-print cost ~105 ms whatever the editor did - and
+        # the editor answers a key in 1-5 ms (measured). Here each
+        # select waits only the time still missing before QUIET_FOR is
+        # true, so the same rule - "no byte for QUIET_FOR" - costs
+        # QUIET_FOR.
+        last = time.time()
+        t0 = last
+        first = None
+        seen = 0
+        deadline = last + longest
+        while True:
+            now = time.time()
+            quiet = now - last
+            if quiet >= quiet_for or now >= deadline:
+                if PROFILE:
+                    PROFILE_T["_settle"] = (first - t0 if first is not None
+                                            else None, last - t0, seen)
+                if PROFILE and first is not None:
+                    PROFILE_T["resp"] = PROFILE_T.get("resp", 0.0) + first - t0
+                    PROFILE_T["resp_n"] = PROFILE_T.get("resp_n", 0) + 1
+                    # time from the first byte to the last one, and how
+                    # many reads carried them
+                    PROFILE_T["last_delay"] = (PROFILE_T.get("last_delay", 0.0)
+                                               + last - t0)
+                    PROFILE_T["reads"] = PROFILE_T.get("reads", 0) + seen
+                return
+            slice_ = min(quiet_for - quiet, 0.02, deadline - now)
+            if slice_ <= 0:
+                return
+            if select.select([fd], [], [], slice_)[0]:
+                try:
+                    d = os.read(fd, 65536)
+                except OSError:
+                    return
+                if not d:
+                    return
+                if first is None:
+                    first = time.time()
+                out_extend(d)
+                last = time.time()
+                seen += 1
+
+    def out_extend(d):
+        # One place that appends to the transcript and answers the
+        # terminal's queries, so `wait_quiet` and `drain` cannot drift.
+        nonlocal out
+        out += d
+        for query, reply in answers.items():
+            if query in out and query not in answered:
+                answered.add(query)
+                if reply is not None:
+                    os.write(fd, reply)
+
 
     # **The editor is ready when it has drawn and gone quiet, not when a
     # fixed time has run out.** SETTLE stays as a *floor* - 0.3 s, not
@@ -318,13 +413,15 @@ def drive(keys, path, settle=0.3, gap=None, term=None, background="0000/0000/000
     profile_t0 = time.time()
     floor = time.time() + settle
     deadline = time.time() + SETTLE_MAX
-    quiet = 0.0
-    while time.time() < floor or (time.time() < deadline
-                                  and (not out or quiet < STARTUP_QUIET)):
-        quiet = 0.0 if drain(0.05) else quiet + 0.05
+    while time.time() < floor and time.time() < deadline:
+        drain(0.02)
+    while not out and time.time() < deadline:
+        drain(0.02)
+    wait_quiet(STARTUP_QUIET, max(0.0, deadline - time.time()))
     if PROFILE:
         PROFILE_T["startup"] += time.time() - profile_t0
         PROFILE_T["drives"] += 1
+        PROFILE_T["_sent"] = False
 
     # **A key is sent only once the editor has finished with the last
     # one.** The gap was a fixed sleep, which is a guess at how long a
@@ -337,10 +434,7 @@ def drive(keys, path, settle=0.3, gap=None, term=None, background="0000/0000/000
     # produced. GAP is still the floor, so a key the editor answers with
     # nothing still gets the pause it always had.
     def settle(quiet_for, longest):
-        quiet = 0.0
-        end = time.time() + longest
-        while time.time() < end and quiet < quiet_for:
-            quiet = 0.0 if drain(0.05) else quiet + 0.05
+        wait_quiet(quiet_for, longest)
 
     def wait_until(criterion, longest):
         # Drain (which also answers the terminal's questions) until the
@@ -425,8 +519,21 @@ def drive(keys, path, settle=0.3, gap=None, term=None, background="0000/0000/000
             _t = time.time()
             settle(gap, KEY_MAX)
             if PROFILE:
-                PROFILE_T["key_settle"] += time.time() - _t
+                dt = time.time() - _t
+                PROFILE_T["key_settle"] += dt
                 PROFILE_T["keys"] += 1
+                PROFILE_T.setdefault("durs", []).append(dt)
+                if dt > 0.2:
+                    PROFILE_T.setdefault("slow", []).append(
+                        (PROFILE_T.get("check", "?"), k[:10], dt,
+                         PROFILE_T.get("_settle")))
+                if not PROFILE_T.get("_sent"):
+                    PROFILE_T["first_key"] += dt
+                    PROFILE_T["first_n"] += 1
+                else:
+                    PROFILE_T["rest_key"] += dt
+                    PROFILE_T["rest_n"] += 1
+        PROFILE_T["_sent"] = True
     # **Wait for the editor to go quiet, not for a fixed time.** The keys
     # have been sent; what the check is about to assert on is whatever
     # the editor drew in response. Sleeping a fixed 0.6 s and reading
@@ -440,19 +547,13 @@ def drive(keys, path, settle=0.3, gap=None, term=None, background="0000/0000/000
     # and the deadline is the backstop for a check that expects something
     # to arrive later.
     _t = time.time()
-    quiet = 0.0
-    deadline = time.time() + SETTLE_MAX
-    while time.time() < deadline and quiet < QUIET:
-        quiet = 0.0 if drain(0.05) else quiet + 0.05
+    wait_quiet(QUIET, SETTLE_MAX)
     if PROFILE:
         PROFILE_T["end_wait"] += time.time() - _t
     if during is not None:
         during()
         # and let whatever it made the editor draw arrive
-        quiet = 0.0
-        deadline = time.time() + SETTLE_MAX
-        while time.time() < deadline and quiet < QUIET:
-            quiet = 0.0 if drain(0.05) else quiet + 0.05
+        wait_quiet(QUIET, SETTLE_MAX)
     # If the editor quit on its own - a command like C-x C-c, or a file
     # it could not open - the wait below reaps it; otherwise it is still
     # running and gets killed. The distinction is what REPORT-EXIT asks
@@ -644,14 +745,19 @@ def check_save_y_n():
     # question is on the screen, and the exit is *waited for* rather than
     # inferred from silence.
     screen, exited = drive([b"X", C_x + C_c, WAIT(b"Save file"), b"y", EXITED],
-                           path, report_exit=True, gap=0.4)
+                           path, report_exit=True)
     if not exited or open(path).read() != "Xhello\n":
         problems.append("a bare `y' did not save the buffer and quit "
                         "(exited=%s file=%r)" % (exited, open(path).read()))
 
     open(path, "w").write("hello\n")
-    screen, exited = drive([b"X", C_x + C_c, b"n", b"no" + b"\r"], path,
-                           report_exit=True, gap=0.4)
+    # **Each answer waits for the question it answers.** That is what the
+    # check is about - "the prompt answers on the key" - and it is what
+    # makes the check independent of how fast the machine is: `n` typed
+    # before "Save file? " is up would go to the buffer.
+    screen, exited = drive([b"X", C_x + C_c, WAIT(b"Save file"), b"n",
+                            WAIT(b"exit anyway"), b"no" + b"\r"], path,
+                           report_exit=True)
     if exited:
         problems.append("a bare `n' should decline the save and ask "
                         "whether to exit anyway, not quit")
@@ -853,11 +959,11 @@ def check_m_x():
     open(path, "w").write("hello\n")
     problems = []
     out = drive([b"\x1b", b"x", b"read-only-mode", b"\r"], path,
-                settle=2.5, gap=0.35)
+                settle=2.5)
     if "Read-Only mode enabled in current buffer" not in out:
         problems.append("M-x read-only-mode did not run the command "
                         "(no enabled message)")
-    out = drive([b"\x1b", b"x", b"read-on", b"\t"], path, settle=2.5, gap=0.35)
+    out = drive([b"\x1b", b"x", b"read-on", b"\t"], path, settle=2.5)
     # The escapes are stripped before looking for the completed name: the
     # prompt is drawn in GNU Emacs's `minibuffer-prompt' face, so the
     # terminal stream carries attribute sequences between `M-x ' and the
@@ -898,7 +1004,7 @@ def check_text_scale_command():
     problems = []
 
     out = drive([b"\x1b", b"x", b"global-text-s", b"\t"], path,
-                settle=2.5, gap=0.35)
+                settle=2.5)
     plain = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", out)
     if "global-text-scale-adjust" not in plain:
         problems.append("M-x did not complete `global-text-s' to "
@@ -906,7 +1012,7 @@ def check_text_scale_command():
                         "defines it is not loaded by the front end")
 
     out = drive([b"\x1b", b"x", b"global-text-scale-adjust", b"\r"], path,
-                settle=2.5, gap=0.35)
+                settle=2.5)
     for bad in ("No match", "Undefined", "error:"):
         if bad in out:
             problems.append("running global-text-scale-adjust said %r: %r"
@@ -914,7 +1020,7 @@ def check_text_scale_command():
 
     # The buffer-local scaling, whose lighter the mode line shows.
     out = drive([b"\x1b", b"x", b"text-scale-increase", b"\r"], path,
-                settle=2.5, gap=0.35)
+                settle=2.5)
     mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
     if not mode or "+1" not in mode[-1]:
         problems.append("M-x text-scale-increase did not put `+1` in the "
@@ -1121,7 +1227,7 @@ def check_isearch_multiline():
     open(path, "w").write("alpha\nbeta\ngamma\n")
     # row 0 is the "alpha" half of the match; row 1 is "beta". Both must
     # carry a face the plain screen does not.
-    searched = drive([C_s, b"alpha", b"\n", b"beta"], path, settle=2.0, gap=0.35)
+    searched = drive([C_s, b"alpha", b"\n", b"beta"], path, settle=2.0)
     plain = drive([], path)
     if not ((row_attrs(searched, 0) - row_attrs(plain, 0))
             and (row_attrs(searched, 1) - row_attrs(plain, 1))):
@@ -1153,7 +1259,7 @@ def check_isearch_scroll():
     # file and be reading keys: the C-s goes to a program that is not
     # listening yet, no search starts at all, and the check then reports
     # the match as unhighlighted when nothing ever searched for it.
-    out = drive([C_s, b"alpha"] + [C_s] * 39, path, settle=2.0, gap=0.25)
+    out = drive([C_s, b"alpha"] + [C_s] * 39, path, settle=2.0)
     tail = out.rsplit("\x1b[2J", 1)[-1]
     # the face attributes active when the search string's text came out:
     # the echo-area prompt "ISearch: alpha" is drawn with no attribute,
@@ -2438,6 +2544,169 @@ def check_splash():
     return problems
 
 
+# `*scratch*' at startup - `initial-scratch-message', `initial-major-mode'
+# and the two startup hooks. The init file inhibits the startup screen so
+# the buffer itself is what the frame shows, adds the two hooks, and each
+# appends a letter to a file: `ew` is `emacs-startup-hook` then
+# `window-setup-hook`, which is `startup.el`'s order at both of its sites.
+SCRATCH_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-scratch-config-')
+os.makedirs(os.path.join(SCRATCH_CONFIG_HOME, 'schemacs'), exist_ok=True)
+SCRATCH_HOOK_LOG = os.path.join(SCRATCH_CONFIG_HOME, 'hooks.txt')
+open(os.path.join(SCRATCH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
+    '(import (schemacs editor startup))\n'
+    '(set! inhibit-startup-screen #t)\n'
+    '(define (log-hook! s)\n'
+    '  (let ((out (open-file "%s" "a")))\n'
+    '    (display s out)\n'
+    '    (close-port out)))\n'
+    '(add-hook *emacs-startup-hook* (lambda () (log-hook! "e")))\n'
+    '(add-hook *window-setup-hook* (lambda () (log-hook! "w")))\n'
+    % SCRATCH_HOOK_LOG)
+
+
+def check_scratch():
+    """`*scratch*' at startup: its message, its mode, and the hooks.
+
+    The front ends make the buffer before `command-line-1' runs, so the
+    message comes from `startup.el:3015-3021`'s "if *scratch* exists and
+    is empty, insert initial-scratch-message" and the mode from
+    `:1723-1727`'s "if *scratch* exists and init file didn't change its
+    mode, initialize it". `C-x C-f` in the message is
+    `substitute-command-keys` on Emacs's own `\\[find-file]`.
+
+    And with `inhibit-startup-screen' set - which this init does - Emacs
+    still runs `emacs-startup-hook' and `window-setup-hook', in
+    `normal-top-level`'s tail (`startup.el:807`, `:848`); measured on
+    Emacs 31.1 both ways. So the log's `ew` is the proof they ran at all,
+    and in their order.
+    """
+    problems = []
+    try:
+        os.unlink(SCRATCH_HOOK_LOG)
+    except OSError:
+        pass
+    screen = screen_of(drive([], None, config=SCRATCH_CONFIG_HOME))
+    rows = screen.split("\n")
+    if "This buffer is for text that is not saved" not in screen:
+        problems.append("with no file argument *scratch* does not show "
+                        "initial-scratch-message: %r" % "\n".join(rows[:3]))
+    if "C-x C-f" not in screen:
+        problems.append("the message's `\\[find-file]` was not substituted: "
+                        "%r" % "\n".join(rows[:3]))
+    if not any("(Lisp Interaction)" in r for r in rows):
+        problems.append("the mode line does not say (Lisp Interaction), so "
+                        "*scratch* did not get `initial-major-mode`: %r"
+                        % [r for r in rows if "--" in r][:2])
+    try:
+        log = open(SCRATCH_HOOK_LOG).read()
+    except OSError:
+        log = ""
+    if log != "ew":
+        problems.append("`emacs-startup-hook` and `window-setup-hook` did not "
+                        "both run, in that order, with the startup screen "
+                        "inhibited (log %r)" % log)
+    return problems
+
+
+def check_metahelp():
+    """`C-h ?` - `help-for-help` and the `make-help-screen` machinery.
+
+    GNU Emacs's `C-h ?` prints `"(Type <next> or <prior> to scroll, C-s to
+    search, or C-q to exit.)"` and the option sections, with each command
+    written as its *key* (`\\[describe-bindings]` -> "C-h b").
+    `help--help-screen` (`help-macro.el:105`) shows that text in
+    ` *Metahelp*` and reads options through `help-map` until one runs.
+
+    Three things are driven: the screen, an option (`b` runs
+    `describe-bindings` and gives the window back), and the way out
+    (`C-g` leaves it) - plus `C-h C-h`, which is the same command by
+    Emacs's own binding (`help.el:62`).
+    """
+    path = "/tmp/pty-check-metahelp.txt"
+    open(path, "w").write("help me\n")
+    problems = []
+
+    out = drive([C_h + b"?", WAIT(b"Commands, Keys and Functions")], path)
+    if "gave up waiting" in out:
+        problems.append("C-h ? never drew the option screen: %r" % out[-300:])
+    screen = screen_of(out)
+    if "Commands, Keys and Functions" not in screen:
+        problems.append("C-h ? did not show the section heading: %r"
+                        % screen[-300:])
+    # A row's description, and its command shown as the key that runs it -
+    # `substitute-command-keys` on `\[describe-bindings]`.
+    if "Show all key bindings" not in screen:
+        problems.append("C-h ? did not show describe-bindings' row: %r"
+                        % screen[-300:])
+    if "C-h b" not in screen:
+        problems.append("C-h ? did not substitute describe-bindings' key: "
+                        "%r" % screen[-300:])
+    if "*Metahelp*" not in screen:
+        problems.append("the screen is not much emacs's *Metahelp*: %r"
+                        % screen[-300:])
+
+    # An option runs its command from the metahelp and takes no window
+    # with it: `(when config (set-window-configuration config))' before
+    # `call-interactively`.
+    out = drive([C_h + b"?", WAIT(b"Commands, Keys and Functions"),
+                 b"b", WAIT(b"Global Bindings")], path)
+    screen = screen_of(out)
+    if "gave up waiting" in out:
+        problems.append("typing `b' in the option screen did not run "
+                        "describe-bindings: %r" % out[-300:])
+    elif "Global Bindings" not in screen or "*Metahelp*" in screen:
+        problems.append("`b' ran but left the metahelp on screen: %r"
+                        % screen[-300:])
+
+    # C-g leaves the screen and the file comes back, through the
+    # `dynamic-wind` the C spells `unwind-protect`.
+    out = drive([C_h + b"?", WAIT(b"Commands, Keys and Functions"),
+                 b"\x07"], path)
+    screen = screen_of(out)
+    if "*Metahelp*" in screen:
+        problems.append("C-g left the metahelp on screen: %r" % screen[-300:])
+
+    # Emacs binds `C-h C-h` to the same command (`help.el:62`).
+    out = drive([C_h + C_h, WAIT(b"Commands, Keys and Functions")], path)
+    if "gave up waiting" in out:
+        problems.append("C-h C-h did not open the option screen: %r"
+                        % out[-300:])
+    return problems
+
+
+def check_describe_key_meta():
+    """`C-h k M-:` - the read's answer rule and the ESC meta prefix.
+
+    A terminal sends `M-:` as ESC then `:`, so this drives both halves of
+    the fix at once: `read-key-sequence` folds the two into the meta
+    event (Emacs's `meta_prefix_char` step, `keyboard.c:11829`), and
+    `%read-key-sequence-answer` must answer a *vector* for it
+    (`make_event_array`, `alloc.c:3691`: only events below 0200 after
+    discarding the meta bit fit a string) instead of calling
+    `integer->char` on 134217786 - which raised "Value out of range -1
+    to <1114111>: 134217786" in the reported bug.
+
+    The waits are the prompt and "It is bound to"; the assertions are on
+    text neither marker contains (the WAIT-marker trap).
+    """
+    path = "/tmp/pty-check-dkm.txt"
+    open(path, "w").write("hello\n")
+    problems = []
+    out = drive([C_h + b"k", WAIT(b"Describe the following key"),
+                 b"\x1b:", WAIT(b"It is bound to")], path)
+    screen = screen_of(out)
+    if "gave up waiting" in out:
+        problems.append("C-h k M-: never described the key: %r"
+                        % out[-400:])
+    if "runs the command eval-expression" not in screen:
+        problems.append("C-h k M-: did not name eval-expression: %r"
+                        % screen[-400:])
+    if "out of range" in out:
+        problems.append("the read raised integer->char on the meta event: "
+                        "%r" % out[-400:])
+    return problems
+
+
 def check_switch_buffer():
     """`C-x b': the prompt, a name that exists, and a name that does not.
 
@@ -2516,7 +2785,16 @@ def check_help_bindings():
     open(path, "w").write("help me\n")
     problems = []
 
-    out = drive([C_h + b"b"], path)
+    # **`WAIT`, because the editor is silent while it fills *Help***:
+    # `describe-bindings` inserts the whole listing and fontifies it, and
+    # that takes longer than the quiet window once any lisp-family mode
+    # has run in the session (measured: ~510 ms against ~13 ms before;
+    # see AGENTS.md, "Starting lisp-interaction-mode makes every later
+    # fontification 40x slower"). A quiet-window check would kill the
+    # editor mid-command.
+    out = drive([C_h + b"b", WAIT(b"Global Bindings")], path)
+    if "gave up waiting" in out:
+        problems.append("C-h b never drew the bindings: %r" % out[-300:])
     if "Global Bindings" not in out:
         problems.append("C-h b did not show Global Bindings: %r" % out[-300:])
     if "Key             Binding" not in out:
@@ -2611,8 +2889,12 @@ def check_help_describe():
         problems.append("C-h m did not describe the major mode: %r"
                         % out[-300:])
 
-    # C-h s: the syntax table's rows, with the describer's text.
-    out = drive([C_h + b"s"], path)
+    # C-h s: the syntax table's rows, with the describer's text. `WAIT`
+    # for the same reason as `C-h b` above - the syntax description is
+    # long and the editor is silent while it is fontified.
+    out = drive([C_h + b"s", WAIT(b"which means:")], path)
+    if "gave up waiting" in out:
+        problems.append("C-h s never drew the description: %r" % out[-300:])
     if "which means:" not in out or "punctuation" not in out:
         problems.append("C-h s did not describe the syntax table: %r"
                         % out[-300:])
@@ -2979,7 +3261,7 @@ def check_disabled_command():
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  C_SPC, C_N, C_N, C_x + b"nn",
                  WAIT(b"Use this command?"), b"n"],
-                path, gap=0.35)
+                path)
     screen = screen_of(out)
     if "only once" not in out:
         problems.append("the disabled command's prompt never came up "
@@ -2990,7 +3272,7 @@ def check_disabled_command():
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  C_SPC, C_N, C_N, C_x + b"nn",
                  WAIT(b"Use this command?"), b" "],
-                path, gap=0.35)
+                path)
     screen = screen_of(out)
     if "charlie" in screen:
         problems.append("after SPC the command did not run: a line "
@@ -3000,7 +3282,7 @@ def check_disabled_command():
                  C_SPC, C_N, C_N, C_x + b"nn",
                  WAIT(b"Use this command?"), b"!",
                  C_x + b"nn"],
-                path, gap=0.35)
+                path)
     screen = screen_of(out)
     if "charlie" in screen:
         problems.append("after ! the command did not run")
@@ -3048,7 +3330,7 @@ def check_completion_scroll():
 
     import re as _re
 
-    def observe(keys, name, gap=0.25):
+    def observe(keys, name, gap=None):
         os.environ["SCHEMACS_INSTANCE"] = name
         os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(
             prefix="schemacs-scroll-rt-")
@@ -4087,7 +4369,7 @@ def check_quit_during_burst():
                                     ("nowait", second), b"\x07",
                                     b"\x1b", b"x", WAIT(b"M-x")],
                                   d,
-                                  settle=2.5, gap=0.4)))
+                                  settle=2.5)))
     if "[[harness: gave up" in screen:
         problems.append("after a burst of Down keys and C-g the editor did "
                         "not answer M-x - it is gone (that is "
@@ -4303,7 +4585,7 @@ def check_hscroll():
     redraw = ("resize", 24, 80)
     problems = []
     screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
-                              C_e, C_n, redraw], path, settle=2.5, gap=0.35))
+                              C_e, C_n, redraw], path, settle=2.5))
     rows = screen.split("\n")
     if not rows or rows[0][0] != "0":
         problems.append("with hscroll reset by the short line below, "
@@ -4322,7 +4604,7 @@ def check_hscroll():
     # 211..249 fill columns 1..39 and the row is blank past column 40 -
     # no right `$', because the line ends inside the view.
     screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
-                              C_e, redraw], path, settle=2.5, gap=0.35))
+                              C_e, redraw], path, settle=2.5))
     rows = screen.split("\n")
     if not rows or rows[0][0] != "$":
         problems.append("the hscrolled row did not begin with the left "
@@ -4342,7 +4624,7 @@ def check_hscroll():
     # pins that as the minimum; moving down to the short line then leaves
     # the window hscrolled at 78 instead of resetting it.
     screen = screen_of(drive([M_x, b"toggle-truncate-lines", b"\r",
-                              b"\x18<", C_n, redraw], path, settle=2.5, gap=0.35))
+                              b"\x18<", C_n, redraw], path, settle=2.5))
     rows = screen.split("\n")
     if not rows or rows[0][0] != "$":
         problems.append("after C-x < the row did not begin with the left "
@@ -4376,7 +4658,7 @@ def check_query_replace():
     # M-% = ESC %; read FROM and TO, then answer y, n, y
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  ESC, b"%", b"apple", RET, b"pear", RET,
-                 b"y", b"n", b"y"], path, gap=0.35)
+                 b"y", b"n", b"y"], path)
     if "Replaced 2 occurrences" not in out:
         problems.append("y n y did not end with `Replaced 2 occurrences'")
     if "pear" not in out:
@@ -4384,13 +4666,13 @@ def check_query_replace():
     # `!' replaces the rest without asking
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  ESC, b"%", b"apple", RET, b"pear", RET,
-                 b"n", b"!"], path, gap=0.35)
+                 b"n", b"!"], path)
     if "Replaced 2 occurrences" not in out:
         problems.append("`n' then `!' did not end with `Replaced 2 occurrences'")
     # q exits early with the replacements it made
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  ESC, b"%", b"apple", RET, b"pear", RET,
-                 b"y", b"q"], path, gap=0.35)
+                 b"y", b"q"], path)
     if "Replaced 1 occurrence" not in out:
         problems.append("`y' then `q' did not end with `Replaced 1 occurrence'")
     return problems
@@ -4410,7 +4692,7 @@ def check_query_replace_quit():
     # appear as a contiguous run of bytes even though it is on the screen.
     out = screen_of(drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                            ESC, b"%", b"apple", RET, b"pear", RET,
-                           C_g], path, gap=0.35))
+                           C_g], path))
     if "Quit" not in out:
         problems.append("C-g during query-replace did not report Quit")
     # no y was pressed, so nothing was replaced: no "Replaced N" message
@@ -4497,7 +4779,7 @@ def check_query_replace_pair_default():
 
     def run(label, keys):
         open(path, "w").write(content)
-        return drive(keys, path, settle=2.0, gap=0.4)
+        return drive(keys, path, settle=2.0)
 
     typed = run("typed", first + [ESC, b"%", b"apple", RET, b"pear", RET, b"!"])
     if "Replaced 3 occurrences" not in typed:
@@ -4521,7 +4803,7 @@ def check_replace_string():
     problems = []
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  ESC, b"x", b"replace-string", RET,
-                 b"apple", RET, b"pear", RET], path, gap=0.35)
+                 b"apple", RET, b"pear", RET], path)
     if "Replaced 3 occurrences" not in out:
         problems.append("M-x replace-string did not say `Replaced 3 occurrences'")
     return problems
@@ -4605,7 +4887,7 @@ def check_insert_file():
     open(path, "w").write("inserted line\n")
     problems = []
     out = drive([b"before ", C_x, b"i", C_a, C_k, path.encode(), RET],
-                "/tmp/pty-check-ins.txt", gap=0.35)
+                "/tmp/pty-check-ins.txt")
     if "before inserted line" not in out:
         problems.append("C-x i did not insert the file after `before '")
     if "Mark set" not in out:
@@ -4619,7 +4901,7 @@ def check_find_file_read_only():
     open(path, "w").write("readonly content\n")
     problems = []
     out = drive([C_x + C_r, WAIT(b"Find file read-only: "), C_a, C_k,
-                 path.encode(), RET, b"X"], path, gap=0.35)
+                 path.encode(), RET, b"X"], path)
     if "Buffer is read-only" not in out:
         problems.append("editing a C-x C-r buffer did not say `Buffer is read-only'")
     return problems
@@ -4634,7 +4916,7 @@ def check_find_alternate_file():
     problems = []
     out = drive([C_x + C_f, WAIT(b"Find file: "), C_a, C_k, a.encode(), RET,
                  C_x, C_v, WAIT(b"Find alternate file: "),
-                 C_a, C_k, b.encode(), RET], a, gap=0.35)
+                 C_a, C_k, b.encode(), RET], a)
     if "file b" not in out:
         problems.append("C-x C-v did not show the new file's text")
     if "pty-check-faf-b.txt" not in out:
@@ -4657,7 +4939,7 @@ def check_revert_buffer():
     # that had not changed.
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  b"EDITED ", ESC, b"x", b"revert-buffer", RET,
-                 b"yes", RET], path, gap=0.35)
+                 b"yes", RET], path)
     if "Discard edits and reread from" not in out:
         problems.append("revert of a modified buffer did not ask "
                         "`Discard edits and reread from ...? '")
@@ -4683,13 +4965,13 @@ def check_not_modified():
     # the same race `save-y-n` had: reading the silence after the last key
     # is not the same as the editor having left.
     screen, exited = drive([b"X", M_TILDE, C_x + C_c, EXITED], path,
-                           report_exit=True, gap=0.4)
+                           report_exit=True)
     if "Modification-flag cleared" not in screen:
         problems.append("M-~ did not say `Modification-flag cleared'")
     if not exited:
         problems.append("M-~ then C-x C-c still asked about modified buffers")
     # with a prefix it sets the flag instead
-    out = drive([C_u, M_TILDE], path, gap=0.35)
+    out = drive([C_u, M_TILDE], path)
     if "Modification-flag set" not in out:
         problems.append("M-~ with a prefix did not say `Modification-flag set'")
     return problems
@@ -4710,11 +4992,11 @@ def check_star_interactive():
     problems = []
     out = drive([b"\x1b", b"x", b"read-only-mode", b"\r",
                  b"\x1b", b"x", b"comment-indent", b"\r"], path,
-                settle=2.0, gap=0.4)
+                settle=2.0)
     if "Buffer is read-only" not in out:
         problems.append("M-x comment-indent on a read-only buffer did not "
                         "signal `Buffer is read-only'")
-    out = drive([b"\x1b", b"x", b"comment-indent", b"\r"], path, gap=0.4)
+    out = drive([b"\x1b", b"x", b"comment-indent", b"\r"], path)
     if "No comment syntax defined" not in out:
         problems.append("M-x comment-indent on a writable buffer did not "
                         "reach its body (no `No comment syntax defined')")
@@ -4745,7 +5027,7 @@ def check_find_file_substitution():
     # `/tmp//tmp/pty-check-slash/x.txt' is `/tmp/pty-check-slash/x.txt'
     typed = "/tmp//" + d.lstrip("/") + "/x.txt"
     out = drive([C_x + C_f, C_a, C_k, typed.encode(), RET], "/tmp/pty-check-mx.txt",
-                settle=2.0, gap=0.35)
+                settle=2.0)
     if "SLASH-CONTENT" not in out:
         problems.append("`C-x C-f %s' did not visit %s - a `//' in a typed "
                         "name must be discarded up to, not doubled"
@@ -4772,7 +5054,7 @@ def check_pwd():
     path = _os.path.join(d, "f.txt")
     open(path, "w").write("hello\n")
     problems = []
-    out = drive([b"\x1b", b"x", b"pwd", b"\r"], path, settle=2.0, gap=0.35)
+    out = drive([b"\x1b", b"x", b"pwd", b"\r"], path, settle=2.0)
     if "Directory " + d + "/" not in out:
         problems.append("M-x pwd did not show the default directory - it "
                         "should say `Directory %s/' for the buffer's" % d)
@@ -4783,7 +5065,7 @@ def check_pwd():
     # and with a prefix the directory goes into the buffer instead - no
     # message, so what is looked for is the text at point, with the
     # file's own first line right after it
-    out = drive([C_u, b"\x1b", b"x", b"pwd", b"\r"], path, settle=2.0, gap=0.35)
+    out = drive([C_u, b"\x1b", b"x", b"pwd", b"\r"], path, settle=2.0)
     if "Wrong type to apply" in out:
         problems.append("C-u M-x pwd applied the prefix as a function - "
                         "the parameter named `insert' shadows the "
@@ -4799,7 +5081,7 @@ def check_set_fill_column():
     path = "/tmp/pty-check-sfc.txt"
     open(path, "w").write("hello\n")
     problems = []
-    out = drive([C_u, b"2", b"0", C_x, b"f"], path, gap=0.35)
+    out = drive([C_u, b"2", b"0", C_x, b"f"], path)
     if "Fill column set to 20 (was 70)" not in out:
         problems.append("C-u 20 C-x f did not say "
                         "`Fill column set to 20 (was 70)'")
@@ -4831,8 +5113,12 @@ def check_dired():
         """
         return _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B|\x1b.", "", text)
 
-    out = plain(drive([C_x + b"d", C_a, C_k, (d + "/").encode(), RET],
-                      _os.path.join(d, "hello.txt"), gap=0.35))
+    # The prompt is waited for rather than typed at: `C-a' sent before
+    # `Dired (directory): ' is up moves point in the file instead of
+    # clearing the prompt's prefill.
+    out = plain(drive([C_x + b"d", WAIT(b"Dired (directory)"), C_a, C_k,
+                       (d + "/").encode(), RET],
+                      _os.path.join(d, "hello.txt")))
     if "Dired" not in out:
         problems.append("C-x d did not enter Dired (the mode line says so)")
     if "hello.txt" not in out:
@@ -4863,7 +5149,7 @@ def check_dired():
     # `find-directory-functions', whose value names `dired-noselect'.
     # Before that branch was ported this said
     # `; find-file: error loading <dir>'.
-    out = plain(drive([], d, gap=0.4))
+    out = plain(drive([], d))
     if "Dired" not in out:
         problems.append("the editor started on a directory did not enter "
                         "Dired")
@@ -4886,7 +5172,7 @@ def check_dired():
     # the two tests, which are about the marks being made, not about how
     # they are drawn - `dired-delete' below is what exercises the drawing
     # and the deletion.
-    out = plain(drive([b"m", b"d"], d, gap=0.35))
+    out = plain(drive([b"m", b"d"], d))
     if "* " not in out:
         problems.append("`m' in Dired did not mark the file at point")
     if "D " not in out:
@@ -4918,7 +5204,7 @@ def check_dired_delete():
     # confirmation is `yes-or-no-p''s - whose answer is the whole word.
     # Point starts on `gone.txt' (the listing is sorted, and `..' comes
     # before it).
-    out = drive([b"d", b"x", b"yes", RET], d, gap=0.4)
+    out = drive([b"d", b"x", b"yes", RET], d)
     if "read-only" in out:
         problems.append("`x' was refused as read-only - it was unbound and "
                         "self-inserted into the read-only listing")
@@ -4951,7 +5237,7 @@ def check_cd():
 
     screen = screen_of(drive([b"\x1b", b"x", b"cd", b"\r",
                               C_a, C_k, b"/tmp", b"\r", C_x + C_f],
-                             path, settle=2.0, gap=0.4))
+                             path, settle=2.0))
     if "Find file: " not in screen:
         problems.append("no `Find file: ' prompt after M-x cd")
     else:
@@ -4965,7 +5251,7 @@ def check_cd():
     # on which Emacs does not say "is not a directory" either: the
     # `dir-ok' predicate rejects it in `locate-file' first.
     out = drive([b"\x1b", b"x", b"cd", b"\r", C_a, C_k,
-                 b"/etc/hostname", b"\r"], path, settle=2.0, gap=0.4)
+                 b"/etc/hostname", b"\r"], path, settle=2.0)
     if "No such directory: /etc/hostname" not in out:
         problems.append("M-x cd to a file did not say "
                         "`No such directory: /etc/hostname'")
@@ -5033,6 +5319,56 @@ def check_isearch_mark():
     return problems
 
 
+def check_comment_commands():
+    """The comment commands - `newcomment.el`'s, on a `.scm' file.
+
+    `M-;` is `comment-dwim` (`bindings.el:1603`), `C-x ;` is
+    `comment-set-column` and `C-x C-;` is `comment-line`; a terminal
+    cannot tell `C-;` from `ESC` (`(event-convert-list '(control ?;))` is
+    27), so `comment-line` is driven through M-x here, which is Emacs's
+    own road to it. `comment-dwim`'s blank-line branch is the one arm a
+    key reaches on a terminal.
+
+    The expectations are Emacs 31.1's on the same `.scm' buffer:
+    `(comment-line 1)` on "hello" gives ";; hello" (scheme-mode's
+    `comment-add` is 1), and a second call on the commented line takes it
+    back.
+    """
+    problems = []
+    C_p = b"\x10"   # C-p, previous-line
+    path = "/tmp/pty-check-comment.scm"
+    open(path, "w").write("hello\nworld\n")
+
+    def rows(screen):
+        return [r.rstrip() for r in screen.split("\n")[:4]]
+
+    # M-x comment-line: line 1 becomes ";; hello".
+    screen = screen_of(drive([b"\x1bx", b"comment-line", b"\r"], path))
+    got = rows(screen)
+    if ";; hello" not in got[0]:
+        problems.append("comment-line did not comment the line: %r" % (got,))
+
+    # ...and again on the same line takes it back: C-p puts point back on
+    # the commented line, and comment-or-uncomment-region sees a comment.
+    screen = screen_of(drive([b"\x1bx", b"comment-line", b"\r",
+                              C_p,
+                              b"\x1bx", b"comment-line", b"\r"], path))
+    got = rows(screen)
+    if "hello" not in got[0] or ";;" in got[0]:
+        problems.append("comment-line did not uncomment the line: %r" % (got,))
+
+    # M-; on a blank line inserts an empty comment (`comment-add` 1 makes
+    # it ";; ").
+    blank = "/tmp/pty-check-comment-blank.scm"
+    open(blank, "w").write("\n")
+    screen = screen_of(drive([b"\x1b;"], blank))
+    got = rows(screen)
+    if ";;" not in got[0]:
+        problems.append("M-; on a blank line inserted no comment: %r" % (got,))
+
+    return problems
+
+
 def check_tab_line():
     """The tab line, on a terminal.
 
@@ -5084,6 +5420,23 @@ def check_tab_line():
                         % (rows[:3],))
     elif "pty-check-tab.txt" not in row:
         problems.append("the old tab went away instead of staying: %r" % (row,))
+
+    # **Away and back must draw the row again.** `C-x <left>`/`C-x <right>`
+    # switch the window's buffer; the tab line's *characters* are the same
+    # before and after (the same tabs in the same order) while the current
+    # tab's *face* moves - so a skip that compares with `equal?` left the
+    # wiped row blank, and the only thing left on screen was the tab bar's
+    # one tab, which looked like a tab line showing one tab.
+    left, right = b"\x18\x1bOD", b"\x18\x1bOC"
+    rows = screen_of(drive([left, right], path,
+                           config=TAB_LINE_CONFIG_HOME)).split("\n")
+    at, row = tab_row(rows)
+    if at is None:
+        problems.append("the tab line disappeared after C-x <left> C-x <right>:"
+                        " %r" % (rows[:3],))
+    elif "pty-check-tab.txt" not in row or "*scratch*" not in row:
+        problems.append("the tab line lost its tabs after a round trip: %r"
+                        % (row,))
     return problems
 
 
@@ -5288,7 +5641,7 @@ def check_fill_paragraph():
               "seventy characters in total.\n")
     problems = []
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
-                 ESC, b"q", C_x + C_s], path, gap=0.35)
+                 ESC, b"q", C_x + C_s], path)
     got = open(path).read()
     if got != expect:
         problems.append("after M-q the file is not Emacs's fill: %r" % (got,))
@@ -5311,7 +5664,7 @@ def check_comment_continuation():
     expect = ";; aaa bbb\n;; \n"
     problems = []
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
-                 C_e, ESC, b"j", C_x + C_s], path, gap=0.35)
+                 C_e, ESC, b"j", C_x + C_s], path)
     got = open(path).read()
     if got != expect:
         problems.append("after M-j the file is not Emacs's continuation: %r"
@@ -5345,7 +5698,7 @@ def check_narrow():
                  # (`bindings.el:1111`), so Emacs asks first; SPC is
                  # "only this once".
                  WAIT(b"Use this command?"), b" "],
-                path, gap=0.35)
+                path)
     # The region is [1, the start of line 3), so after narrowing "alpha"
     # and "bravo" are shown and "charlie" is not.
     screen = screen_of(out)
@@ -5358,14 +5711,28 @@ def check_narrow():
     if "charlie" in screen:
         problems.append("after C-x n n a line outside the region is still "
                         "drawn")
-    # And back out.
+    # And back out - **after typing a character**, which is where the
+    # line-break cache used to come apart. The cache is a fact about the
+    # *text* and must be told the text's `BEG`/`Z`; told `BEGV`/`ZV`
+    # instead, an insertion while narrowed shifted its basis, and after
+    # `C-x n w` the rest of the file was drawn as one line with "^J"
+    # where its newlines were.
     out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
                  C_SPC, C_N, C_N, C_x + b"nn",
                  WAIT(b"Use this command?"), b" ",
+                 b"x",
                  C_x + b"nw"],
-                path, gap=0.35)
-    if "charlie" not in screen_of(out):
+                path)
+    screen = screen_of(out)
+    if "charlie" not in screen:
         problems.append("after C-x n w the hidden line is not back")
+    if "^J" in screen:
+        problems.append("after widening, newlines are drawn as ^J: the "
+                        "line-break cache has a stale basis")
+    rows = [r.rstrip() for r in screen.split("\n")]
+    if not any("delta" in r and "charlie" not in r for r in rows):
+        problems.append("after widening, the last line is not on a row of "
+                        "its own: %r" % (rows[:6],))
     return problems
 
 
@@ -5449,8 +5816,11 @@ CHECKS = {
     "hscroll": check_hscroll,
     "back-door": check_back_door,
     "splash": check_splash,
+    "scratch": check_scratch,
     "switch-buffer": check_switch_buffer,
     "help-bindings": check_help_bindings,
+    "metahelp": check_metahelp,
+    "describe-key-meta": check_describe_key_meta,
     "help-describe": check_help_describe,
     "indent": check_indent,
     "abbreviate": check_abbreviate,
@@ -5463,6 +5833,7 @@ CHECKS = {
     "completion-scroll": check_completion_scroll,
     "tty-menu": check_tty_menu,
     "tab-line": check_tab_line,
+    "comment-commands": check_comment_commands,
     "tab-bar": check_tab_bar,
     "no-display": check_no_display,
 }
@@ -5476,6 +5847,7 @@ def main():
             print("no such check: %s (have: %s)"
                   % (name, ", ".join(CHECKS)))
             return 2
+        PROFILE_T["check"] = name
         problems = CHECKS[name]()
         if problems:
             failed.append(name)

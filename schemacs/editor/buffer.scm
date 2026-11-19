@@ -74,7 +74,7 @@
     (only (schemacs editor buffer-text)
           *gap-bytes-min*
           new-buffer-text  buffer-text-base  buffer-text-z
-          buffer-text-ref
+          buffer-text-ref code-point->char
           buffer-text-modiff  buffer-text-chars-modiff
           buffer-text-overlay-modiff
           buffer-text-beg-unchanged set!buffer-text-beg-unchanged
@@ -2505,10 +2505,18 @@
       ;; `char-after' (`editfns.c:1038') is the Lisp door onto this, for
       ;; the current buffer and with point as the default; this is the
       ;; read below it, and every caller of it names the buffer.
+      ;;
+      ;; **A byte character reads as U+FFFD**, through the same
+      ;; `code-point->char` rule everything above the store uses: a byte
+      ;; character has no Scheme character to be (it is above
+      ;; `#x10FFFF'), and `integer->char` raised on it - "Value out of
+      ;; range -1 to <1114111>: 4194178". Found by opening a file whose
+      ;; bytes decode to byte characters: `set-auto-mode`'s
+      ;; `skip-chars-forward` walked the first line and died there.
       ;;--------------------------------------------------------------
       (and (<= (buffer-beg ed) pos)
            (< pos (buffer-z ed))
-           (integer->char (buffer-text-ref (text-editor-text ed) pos))))
+           (code-point->char (buffer-text-ref (text-editor-text ed) pos))))
 
     (define (set-point ed position)
       ;; GNU Emacs's `SET_PT' (`buffer.h:170'), as `Fgoto_char'

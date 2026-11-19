@@ -148,12 +148,16 @@
       ;;
       ;;     return FIXNUMP (x) && 0 <= XFIXNUM (x) && XFIXNUM (x) <= MAX_CHAR;
       ;;
-      ;; So a *modified* event is a character by this test - `M-x' is
-      ;; 134217752 and `CHARACTERP' says yes - which surprises people who
-      ;; expect it to mean "a printing character". It does not, and the
-      ;; test that keeps `M-x' out of `self-insert-command' is the keymap's:
-      ;; `M-x' is not bound to it, because a char-table cannot even be
-      ;; indexed by an event that carries modifier bits.
+      ;; **A modified event is not a character**, which surprises people
+      ;; in the other direction: measured on Emacs 31.1, `(characterp
+      ;; ?\M-:)' is nil, because `M-:' is 134217786 and `MAX_CHAR' is
+      ;; `#x3FFFFF' - the modifier bits are *above* the character range.
+      ;; (This comment used to say the opposite, which is what made
+      ;; `C-h k M-:' build a string with `integer->char` and raise "Value
+      ;; out of range".) The test that keeps `M-x' out of
+      ;; `self-insert-command' is the keymap's: `M-x' is not bound to it,
+      ;; because a char-table cannot even be indexed by an event that
+      ;; carries modifier bits.
       ;;--------------------------------------------------------------
       (and (integer? x) (<= 0 x *max-char*)))
 

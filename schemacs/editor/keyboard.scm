@@ -213,7 +213,7 @@
    quoted-insert
    read-quoted-char
    *overriding-terminal-local-map* *overriding-local-map*
-   *this-command-keys*
+   *this-command-keys* help-char help-event-list
    ;; `keyboard.c`'s menu-bar half. `menu_bar_items` and `parse_menu_item`
    ;; are C-internal in Emacs (the front end calls them); here the front
    ;; end is Scheme and must import them, so the property slots are
@@ -424,6 +424,20 @@
     ;; does in `isearch.el'. It is keyboard.c's variable - the read's
     ;; first step is `read_char''s - which is why it is here and not on
     ;; the display.
+
+    (define help-char 8)
+    ;; ^ GNU Emacs's `help-char` (`keyboard.c:14491`): "Character to
+    ;; recognize as meaning Help." The C sets `Ctl ('H')`, which is 8. A
+    ;; plain variable - a DEFVAR that nothing `let`-binds - and the
+    ;; self-assignment marks it mutable against the compiler's constant
+    ;; folding, because an init file may `set!` it.
+    (set! help-char help-char)
+
+    (define help-event-list '())
+    ;; ^ GNU Emacs's `help-event-list` (`keyboard.c:14497`): "List of
+    ;; input events to recognize as meaning Help. These work just like
+    ;; the value of `help-char`." Nil in a plain Emacs.
+    (set! help-event-list help-event-list)
 
     (define (this-command-name)
       ;; The command's name, as `Vthis_command' is in the C: the symbol
@@ -1335,19 +1349,32 @@
       (message "%s is undefined"
                (km:key-description (*this-command-keys*))))
 
-    (define (%all-integers? events)
-      ;; `every` is SRFI 1's and this library does not import it.
-      ;;--------------------------------------------------------------
-      (let loop ((rest events))
-        (or (null? rest)
-            (and (integer? (car rest)) (loop (cdr rest))))))
-
     (define (%read-key-sequence-answer events vector?)
       ;; GNU Emacs's `Fread_key_sequence` -> `read-key-sequence`: "Return
       ;; the sequence as a string if all events are characters, else a
-      ;; vector" - and `Fread_key_sequence_vector` always a vector.
+      ;; vector" - and `Fread_key_sequence_vector` always a vector. The
+      ;; test is `make_event_array` (`alloc.c:3691`): an event fits a
+      ;; string when, "after discarding the meta bit and all the bits
+      ;; above it", it is below 0200.
+      ;;
+      ;; **The meta bit is the one part that cannot be carried.** Emacs
+      ;; moves it into the string byte's high bit there (`SSET ...
+      ;; | 0x80`), so `M-:' becomes the unibyte string byte 0xBA; a
+      ;; Guile string is Unicode, and that byte would read back as `º'.
+      ;; So a modified event answers a vector here, and every consumer
+      ;; takes either form through `keymap-index`.
+      ;;
+      ;; The "all integers" test this replaced was also a *crash*:
+      ;; `C-h k M-:' raised "Value out of range -1 to <1114111>:
+      ;; 134217786" from `integer->char` - the read had answered the
+      ;; meta event and this asked Guile to make a character of it.
       ;;--------------------------------------------------------------
-      (if (or vector? (not (%all-integers? events)))
+      (if (or vector?
+              (not (let loop ((rest events))
+                     (or (null? rest)
+                         (and (integer? (car rest))
+                              (<= 0 (car rest) 127)
+                              (loop (cdr rest)))))))
           (list->vector events)
           (list->string (map integer->char events))))
 
@@ -1380,20 +1407,38 @@
             ;; variable. **Without it this function answered #f for
             ;; every call**, which made `C-h k` describe "#f".
             (answer #f))
-        (let loop ()
-          (let ((event (function-key-translate (read-key-event -1))))
-            (set! events (append events (list event)))
-            (modal-lookup-state-step!
-             state event
-             ;; a binding that is not a prefix: the sequence is complete
-             (lambda (full-path action)
-               (set! answer (%read-key-sequence-answer events vector?)))
-             ;; a prefix keymap: keep reading
-             (lambda (full-path action) (loop))
-             ;; nothing bound: Emacs still answers the sequence it read,
-             ;; and the *caller* reports it - `k`'s command does
-             (lambda (full-path)
-               (set! answer (%read-key-sequence-answer events vector?))))))
+        (let loop ((meta-prefix #f))
+          (let* ((raw (function-key-translate (read-key-event -1)))
+                 (event (cond ((not raw) raw)
+                              ((not meta-prefix) raw)
+                              ((integer? raw) (logior raw char-meta))
+                              (else (event-convert-list (list 'meta raw))))))
+            (cond
+             ;; **ESC prefixes the next key with the meta modifier** -
+             ;; `read_key_sequence`'s `meta_prefix_char` step
+             ;; (`keyboard.c:11829`), and the state the command loop
+             ;; already keeps in `*esc-pending*` (`dispatch-key-event`).
+             ;; Without it `C-h k` read a lone ESC on a terminal and
+             ;; answered "ESC is undefined" where Emacs describes `M-:'.
+             ;; Like the command loop, the fold is unconditional: a
+             ;; two-event `ESC KEY` binding is not a spelling this tree
+             ;; uses - meta is one event here, as it is in Emacs.
+             ((and (not meta-prefix)
+                   (eqv? raw (event-convert-list '(control #\[))))
+              (loop #t))
+             (else
+              (set! events (append events (list event)))
+              (modal-lookup-state-step!
+               state event
+               ;; a binding that is not a prefix: the sequence is complete
+               (lambda (full-path action)
+                 (set! answer (%read-key-sequence-answer events vector?)))
+               ;; a prefix keymap: keep reading
+               (lambda (full-path action) (loop #f))
+               ;; nothing bound: Emacs still answers the sequence it read,
+               ;; and the *caller* reports it - `k`'s command does
+               (lambda (full-path)
+                 (set! answer (%read-key-sequence-answer events vector?))))))))
         answer))
 
     (define (read-key-sequence prompt)
@@ -1519,13 +1564,28 @@
           (maybe-quit)
           (let* ((unread (*unread-command-events*))
                    (ev (if (null? unread)
-                           (let ((raw (read-input-event
-                                       (current-display)
-                                       (if deadline
-                                           (max 0 (- deadline (%now-ms)))
-                                           timeout))))
-                             (*last-read-event* raw)
-                             (and raw (key-event->key (current-display) raw)))
+                           (begin
+                             ;; **`read_char` redisplays before it
+                             ;; waits** (`keyboard.c:2718-2723`: "Redisplay
+                             ;; if no pending input", inside the loop that
+                             ;; retries when input preempts the draw).
+                             ;; That is what lets a command that is
+                             ;; *waiting* for a key show what it changed:
+                             ;; `help--help-screen` switches to *Metahelp*
+                             ;; and then reads options, and without this
+                             ;; the switch was the editor's state and never
+                             ;; reached the terminal (measured - the
+                             ;; window and buffer were right and the screen
+                             ;; still showed the file).
+                             (redisplay-frames!)
+                             (let ((raw (read-input-event
+                                         (current-display)
+                                         (if deadline
+                                             (max 0 (- deadline (%now-ms)))
+                                             timeout))))
+                               (*last-read-event* raw)
+                               (and raw (key-event->key (current-display)
+                                                        raw))))
                            (begin
                              (*unread-command-events* (cdr unread))
                              (car unread)))))
@@ -2014,7 +2074,15 @@
              ;; (measured: SIGINT, then the process gone with a
              ;; `%quit-condition' throw). The handler reports it and the
              ;; loop goes on reading, which is what `cmd_error` does.
-             (guard (ex (else (report-command-error! frame ex)))
+             ;; **The redisplay after an error is the loop's, as it is
+             ;; Emacs's**: `cmd_error` reports and returns to
+             ;; `command_loop_1`, which redisplays before it reads again.
+             ;; Without it a command that raised part-way - a C-g over
+             ;; the *Completions* window is the one measured - left the
+             ;; screen showing what the aborted command had drawn, and
+             ;; the window it had made stayed there until the next key.
+             (guard (ex (else (report-command-error! frame ex)
+                              (redisplay-frames!)))
              (let ((want (read-timeout-or
                           ;; **Nothing to wait for but a key.** The
                           ;; echo area's two clock-driven habits - a
@@ -2480,6 +2548,21 @@ With argument, insert ARG copies of the character."
       '(menu-bar tab-bar tool-bar tab-line header-line mode-line
                  mouse-1 mouse-2 mouse-3 mouse-4 mouse-5))
 
+    (define (%where-is-value x)
+      ;; **A symbol on one side, a value on the other.** Elisp's keymaps
+      ;; hold the command *symbol*, so the C's `EQ (binding, definition)'
+      ;; compares like with like. This tree's keymaps hold the value
+      ;; `define-command` made, while a menu item may still name its
+      ;; command as the symbol the C would - `(menu-item "Save"
+      ;; save-buffer)'. Resolving the symbol through the command table
+      ;; makes both sides values; anything that names no command is left
+      ;; as it is, so two identical symbols still compare equal.
+      ;;--------------------------------------------------------------
+      (if (symbol? x)
+          (let ((record (command-record-named x)))
+            (if record (command-value-of record) x))
+          x))
+
     (define (where-is-internal-1 definition key binding this last last-is-meta
                                  noindirect)
       ;; GNU Emacs's `where_is_internal_1` (`keymap.c:2787`): the sequence
@@ -2487,7 +2570,8 @@ With argument, insert ARG copies of the character."
       ;; BINDING is not DEFINITION. The C pushes onto a list; this
       ;; answers, and the caller conses.
       ;;--------------------------------------------------------------
-      (let ((binding (if noindirect binding (km:get-keyelt binding #f))))
+      (let ((binding (%where-is-value
+                      (if noindirect binding (km:get-keyelt binding #f)))))
         ;; `and`, not `when`: a `when` whose test fails answers the
         ;; unspecified value, which is *true* in Scheme - and the caller
         ;; reads the answer as "found". It was cosmetic here for one
@@ -2606,7 +2690,9 @@ With argument, insert ARG copies of the character."
               (cond
                ;; "Verify that this key binding is not shadowed by another
                ;; binding for the same key, before we say it exists."
-               ((not (equal? (%shadow-lookup keymaps sequence) definition))
+               ((not (equal? (%where-is-value
+                              (%shadow-lookup keymaps sequence))
+                             definition))
                 (loop (cdr rest) found))
                (else
                 ;; "Don't annoy user with strings from a menu such as the

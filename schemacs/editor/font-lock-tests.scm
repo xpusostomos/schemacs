@@ -88,7 +88,7 @@
   'bold
   (let ((ed (fresh "aaa foo bbb\n")))
     (set!font-lock-defaults! (list (list (list "foo" (list 0 'bold)))))
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (face-at ed 5)))
 
 ;; measured: `override prepend => (bold)' and `append => (bold)' - with
@@ -100,7 +100,7 @@
   (let ((ed (fresh "aaa foo bbb\n")))
     (set!font-lock-defaults!
      (list (list (list "foo" (list 0 'bold 'prepend)))))
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (face-at ed 5)))
 
 (test-equal "an overriding keyword appends into a face list"
@@ -108,7 +108,7 @@
   (let ((ed (fresh "aaa foo bbb\n")))
     (set!font-lock-defaults!
      (list (list (list "foo" (list 0 'bold 'append)))))
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (face-at ed 5)))
 
 ;; ------------------------------------------------------------------
@@ -158,7 +158,7 @@
                                      #f
                                      (list 0 'bold))))))
     (set!font-lock-defaults! (list keywords))
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     ;; the D line starts at Emacs position 34, its name at 44
     (list (face-at ed 34) (face-at ed 45))))
 
@@ -175,7 +175,7 @@
     (set!font-lock-defaults! #f)
     (font-lock-add-keywords #f (list (list "bar" (list 0 'underline))) 'set)
     (font-lock-add-keywords #f (list (list "foo" (list 0 'bold))) 'set)
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (list (face-at ed 5))))
 
 (test-equal "font-lock-remove-keywords takes a keyword off again"
@@ -184,7 +184,7 @@
     (set!font-lock-defaults! #f)
     (font-lock-add-keywords #f (list (list "foo" (list 0 'bold))
                                      (list "bbb" (list 0 'underline))) 'set)
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (let ((before (face-at ed 5)))
       (font-lock-remove-keywords #f (list (list "bbb" (list 0 'underline))))
       (font-lock-fontify-buffer)
@@ -196,7 +196,7 @@
 (test-assert "font-lock-flush takes the face off, font-lock-ensure puts it back"
   (let ((ed (fresh "aaa foo bbb\n")))
     (set!font-lock-defaults! (list (list (list "foo" (list 0 'bold)))))
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (let ((on (face-at ed 5)))
       (font-lock-flush)
       (let ((off (face-at ed 5)))
@@ -209,7 +209,7 @@
   ;; what "text is fontified as you type it" means, without jit-lock.
   (let ((ed (fresh "aaa bbb\n")))
     (set!font-lock-defaults! (list (list (list "foo" (list 0 'bold)))))
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (let ((hook-installed (memq font-lock-after-change-function
                                 (*after-change-functions*))))
       (goto-char (point-max))
@@ -219,7 +219,7 @@
 (test-assert "turning the mode off takes the hook and the faces off"
   (let ((ed (fresh "aaa foo bbb\n")))
     (set!font-lock-defaults! (list (list (list "foo" (list 0 'bold)))))
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (let ((on (face-at ed 5)))
       (font-lock-mode -1)
       (list on

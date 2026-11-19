@@ -101,8 +101,8 @@
     ;; item becomes a command.
     (only (schemacs editor menu-bar) popup-menu)
     (only (schemacs editor subr)
-          assq-delete-all delq kbd nth posn-window posn-string event-start
-          event-end string-replace)
+          assq-delete-all delq kbd nth nthcdr posn-window posn-string
+          event-start event-end string-replace)
     (only (schemacs editor search) string-match-p)
     ;; The `kill-buffer` *command*, which is `files.scm`'s: the
     ;; mechanism that leaves the buffer list is `buffer.scm`'s
@@ -351,7 +351,7 @@ When a function, it is called with the tab as its argument."
       ;; GNU Emacs's `tab-line-tab-modified-p` (`:440`): "Return t if
       ;; TAB's buffer is modified."
       ;;--------------------------------------------------------------
-      (let ((buffer (if buffer-p tab (cdr (assq 'buffer tab)))))
+      (let ((buffer (if buffer-p tab (alist-get 'buffer tab))))
         (and buffer
              (buffer-file-name buffer)
              (buffer-modified-p buffer)
@@ -368,6 +368,26 @@ When a function, it is called with the tab as its argument."
     ;; a parameter, and the asterisks are what tell it from the *function*
     ;; of the same name - the collision that a Lisp-2 has and a Lisp-1
     ;; does not.
+    (define *tab-line-tabs-buffer-groups*
+      ;; The default is the group *table*: `*mouse-buffer-menu-mode-groups*`
+      ;; is a plain variable in `mouse.scm` (Emacs `defvar`s it), so it is
+      ;; read by name here, not called - `(*mouse-buffer-menu-mode-groups*)`
+      ;; applied the alist and died with "Wrong type to apply".
+      (make-parameter *mouse-buffer-menu-mode-groups*))
+    ;; ^ GNU Emacs's `(defvar tab-line-tabs-buffer-groups
+    ;; mouse-buffer-menu-mode-groups ...)' (`tab-line.el:499`): "How to
+    ;; group various major modes together in the tab line. Each element
+    ;; has the form (REGEXP . GROUPNAME). If the major mode's name
+    ;; matches REGEXP, it belongs to GROUPNAME. ..." Its default is the
+    ;; *value* of `mouse-buffer-menu-mode-groups` at load time, which is
+    ;; what the call here gives it.
+    ;;
+    ;; **It was exported and never defined**, so turning the tab line on
+    ;; and letting `tab-line-tabs-buffer-groups` group the buffers died
+    ;; with `unbound variable: *tab-line-tabs-buffer-groups*` the first
+    ;; time a group was asked for. Every other name in this section had
+    ;; its definition; this one only had its uses, and nothing exercised
+    ;; them until a user enabled the mode.
 
     (define (tab-line-tabs-buffer-group-by-mode . args)
       ;; GNU Emacs's `tab-line-tabs-buffer-group-by-mode` (`:487`):
@@ -378,11 +398,15 @@ When a function, it is called with the tab as its argument."
       ;; `mode-name` groups under that.
       ;;--------------------------------------------------------------
       (let ((buffer (if (pair? args) (car args) #f)))
+        ;; **`mode-name` is read, not passed**: it is a *procedure* in
+        ;; this tree (Emacs's is a variable), so `(format-mode-line
+        ;; mode-name)` handed the accessor to the formatter and every
+        ;; mode grouped under the empty string.
         (let ((mode (if buffer
                         (with-current-buffer
                             buffer
-                          (format-mode-line mode-name))
-                        (format-mode-line mode-name))))
+                          (format-mode-line (mode-name)))
+                        (format-mode-line (mode-name)))))
           ;; `(cdr nil)` is nil in Elisp, so a group table with no match
           ;; answers MODE; here `seq-find` answers #f and `cdr` would
           ;; raise.
@@ -586,10 +610,10 @@ When a function, it is called with the tab as its argument."
       (let* ((buffer-p (bufferp tab))
              (selected-p (if buffer-p
                              (eq? tab (window-buffer (selected-window)))
-                             (cdr (assq 'selected tab))))
+                             (alist-get 'selected tab)))
              (name (if buffer-p
                        ((*tab-line-tab-name-function*) tab tabs)
-                       (cdr (assq 'name tab))))
+                       (alist-get 'name tab)))
              (face (if selected-p
                        (if (mode-line-window-selected-p)
                            'tab-line-tab-current
@@ -662,7 +686,7 @@ When a function, it is called with the tab as its argument."
       ;; specifies a non-file-visiting buffer, make FACE inherit from
       ;; `tab-line-tab-special'."
       ;;--------------------------------------------------------------
-      (let ((buffer (if buffer-p tab (cdr (assq 'buffer tab)))))
+      (let ((buffer (if buffer-p tab (alist-get 'buffer tab))))
         (when (and buffer (not (buffer-file-name buffer)))
           (set! face (list ':inherit (list 'tab-line-tab-special face)))))
       face)
@@ -729,7 +753,13 @@ When a function, it is called with the tab as its argument."
                       (> (length strings) 1))
                   (list tab-line-right-button)
                   '())))
-         (if hscroll (list-tail strings (truncate hscroll)) strings)
+         ;; **`nthcdr`, not `list-tail`.** Elisp's `nthcdr` answers nil
+         ;; when the list is shorter than N; Scheme's `list-tail` is an
+         ;; error there, and `tab-line-hscroll` can name a column the
+         ;; *new* tab list no longer reaches - which is what selecting a
+         ;; buffer from the buffer menu did while the tab line was being
+         ;; reformatted (`list-tail` died and took the redisplay with it).
+         (if hscroll (nthcdr (truncate hscroll) strings) strings)
          (list separator)
          ;; Emacs's `(when ... (list tab-line-new-button))', whose nil
          ;; `append` drops - here a `when` that fails answers the
@@ -1028,10 +1058,10 @@ using the `previous-buffer' command."
         (let* ((posnp (tab-line-event-start event))
                (string (car (posn-string posnp)))
                (tab (and string (tab-line--get-tab-property 'tab string)))
-               (buffer (if (bufferp tab) tab (cdr (assq 'buffer tab)))))
+               (buffer (if (bufferp tab) tab (alist-get 'buffer tab))))
           (if buffer
               (tab-line-select-tab-buffer buffer (posn-window posnp))
-              (let ((select (cdr (assq 'select tab))))
+              (let ((select (alist-get 'select tab)))
                 (when (procedure? select)
                   (with-selected-window
                       (posn-window posnp)
@@ -1203,8 +1233,8 @@ sight of the tab line."
                         (and string
                              (tab-line--get-tab-property 'tab string))
                         (tab-line--current-tab)))
-               (buffer (if (bufferp tab) tab (cdr (assq 'buffer tab))))
-               (close-function (if (bufferp tab) #f (cdr (assq 'close tab)))))
+               (buffer (if (bufferp tab) tab (alist-get 'buffer tab)))
+               (close-function (if (bufferp tab) #f (alist-get 'close tab))))
           (with-selected-window
               (posn-window posnp)
             (cond
@@ -1242,9 +1272,9 @@ sight of the tab line."
               (posn-window posnp)
             (for-each
              (lambda (tab)
-               (let ((buffer (if (bufferp tab) tab (cdr (assq 'buffer tab))))
+               (let ((buffer (if (bufferp tab) tab (alist-get 'buffer tab)))
                      (close-function
-                      (if (bufferp tab) #f (cdr (assq 'close tab)))))
+                      (if (bufferp tab) #f (alist-get 'close tab))))
                  (cond
                   ((procedure? close-function)
                    (close-function))

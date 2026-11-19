@@ -53,7 +53,7 @@
     ;; `substitute-key-definition` builds `tty-menu-navigation-map`, and
     ;; `event-end` is `popup-menu-normalize-position`'s.
     (only (schemacs editor subr)
-          substitute-key-definition event-end posn-x-y)
+          substitute-key-definition event-end posn-x-y posn-window)
     ;; `menu-bar-open` asks which kind of display the frame is on, which
     ;; is what decides whether the toolkit opens the bar.
     (only (schemacs editor dispnew) window-system-display?)
@@ -105,6 +105,9 @@
     (only (schemacs editor buff-menu) list-buffers)
     (only (schemacs editor fileio) file-name-directory-part)
     (only (schemacs editor frame) make-frame-command delete-frame
+          ;; `posnp`'s windowp test - subr.el's function, placed below
+          ;; because windowp lives in `frame.scm`.
+          window-type?
           *echo-area-buffer*
           ;; `tty-menu-open-use-tmm` is this file's in Emacs; it lives in
           ;; `frame.scm` so that `display-popup-menus-p` can read it, and
@@ -1043,16 +1046,63 @@ created in the future."
                     menu-bar)
           map)))
 
+    (define (posnp obj)
+      ;; GNU Emacs's `posnp` (`subr.el:1981`): "Return non-nil if OBJ
+      ;; appears to be a valid `posn' object specifying a window. ...
+      ;; If OBJ is a valid `posn' object, but specifies a frame rather
+      ;; than a window, return nil."
+      ;;
+      ;; **The frame exclusion is load-bearing here**, and the C's own
+      ;; FIXME admits the function is wrong in general: a tab-bar
+      ;; click's posn names the frame, so `popup-menu-normalize-
+      ;; position` below must leave it alone - `x_popup_menu_1`
+      ;; recognizes that posn's `tab-bar' part (`menu.c:1135') to place
+      ;; the menu at the mouse.
+      ;;
+      ;; **Placement**: `subr.el` is this function's file, but its
+      ;; `windowp` test is `(schemacs editor window)`'s, which is above
+      ;; `subr.scm` - the same named departure `key-valid-p`'s is.
+      ;;--------------------------------------------------------------
+      (and (window-type? (and (pair? obj) (car obj)))
+           (let* ((rest (and (pair? obj) (cdr obj)))
+                  (area (and (pair? rest) (car rest))))
+             (and (not (pair? area))
+                  (let* ((rest2 (and (pair? rest) (cdr rest)))
+                         (xy (and (pair? rest2) (car rest2))))
+                    (and (integer? (and (pair? xy) (car xy)))
+                         (integer? (and (pair? rest2)
+                                        (pair? (cdr rest2))
+                                        (cadr rest2)))))))))
+
     (define (popup-menu-normalize-position position)
-      ;; GNU Emacs's `popup-menu-normalize-position` (`menu-bar.el:2788`).
+      ;; GNU Emacs's `popup-menu-normalize-position` (`menu-bar.el:2788`):
+      ;; "Convert the POSITION to the form which `popup-menu' expects
+      ;; internally. POSITION can be an event, a posn- value, a value
+      ;; having the form ((XOFFSET YOFFSET) WINDOW), or nil."
+      ;;
+      ;; **The posn branch was missing**, and it is the one a tab-line
+      ;; click needs: without it a posn fell through to `x-popup-menu`
+      ;; as if it were an event. A *frame* posn - the tab bar's - is
+      ;; deliberately not normalized (`posnp` answers nil for it); the
+      ;; C's tab-bar arm takes it instead.
       ;;--------------------------------------------------------------
       (cond
+       ;; nil -> mouse cursor position
        ((not position)
         (let ((mp (mouse-position)))
           (list (list (cadr mp) (cddr mp)) (car mp))))
+       ;; Value returned from `event-end` or `posn-at-point`.
+       ((posnp position)
+        (let ((xy (posn-x-y position)))
+          (list (list (car xy) (cdr xy)) (posn-window position))))
+       ;; `touchscreen-begin' or `touchscreen-end' event.
+       ((memq (and (pair? position) (car position))
+              '(touchscreen-begin touchscreen-end))
+        position)
+       ;; Event.
        ((and (pair? position) (symbol? (car position)))
-        ;; An event.
         (popup-menu-normalize-position (event-end position)))
+       ;; Some other value.
        (else position)))
 
     (define (popup-menu menu position prefix from-menu-bar)

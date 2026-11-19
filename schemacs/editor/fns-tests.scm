@@ -16,9 +16,9 @@
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor editfns)
        goto-char insert narrow-to-region point point-min point-max
-       save-restriction)
+       propertize save-restriction)
  (only (schemacs editor marker) copy-marker)
- (only (schemacs editor textprop) put-text-property)
+ (only (schemacs editor textprop) get-text-property put-text-property)
  (only (schemacs editor simple) count-lines)
  (only (ice-9 exceptions) exception-message)
  )
@@ -334,5 +334,49 @@
       (eq? p q))
     (test-equal '(:a 9 :b 2) q)))
 (test-equal 2 (plist-get '("a" 1 "b" 2) "b" equal?))
+
+;;------------------------------------------------------------------
+;; `equal-including-properties' - and the `equal?' that cannot see a face
+;;------------------------------------------------------------------
+;;
+;; Measured on Emacs 31.1 first: `(equal a b)' is t for two strings that
+;; differ only in their `face' property, and `equal-including-properties'
+;; is nil. That difference is what the redisplay's mode-line and tab-line
+;; skips need - a tab line whose characters are unchanged while the
+;; current tab moves has a different *face* at the same characters.
+(test-equal '(#t #f #t #f #t #t)
+  (let ((a (propertize "ab" 'face 'bold))
+        (b (propertize "ab" 'face 'italic))
+        (c (propertize "ab" 'face 'bold)))
+    (list (equal-including-properties a c)
+          (equal-including-properties a b)
+          (equal-including-properties "ab" "ab")
+          (equal-including-properties (list a 'x) (list b 'x))
+          (equal-including-properties (list a 'x) (list c 'x))
+          (equal? a b))))
+
+;;------------------------------------------------------------------
+;; `%substring' - Emacs's `substring', which keeps text properties
+;;------------------------------------------------------------------
+;;
+;; Measured on Emacs 31.1 first: `(substring s 2)' of a wholly bold
+;; "abcdef" is "cdef" with `face' bold at every position, a negative FROM
+;; counts from the end, nil FROM/TO mean the ends - and a range out of
+;; bounds, or FROM past TO, *signals* (`validate_subarray') rather than
+;; clipping. Guile's `substring' is the no-properties variant.
+(test-equal '(#t #t "cdef" "bc" "cdef" "ab")
+  (let ((s (propertize "abcdef" 'face 'bold)))
+    (list (eq? (get-text-property 0 'face (%substring s 2)) 'bold)
+          (eq? (get-text-property 1 'face (%substring s 1 3)) 'bold)
+          (%substring s 2)
+          (%substring s 1 3)
+          (%substring s -4)
+          (%substring s #f 2))))
+
+(test-equal '(#t #t #t)
+  (let ((s (propertize "abcdef" 'face 'bold)))
+    (list (guard (e (#t #t)) (%substring s 5 2) #f)
+          (guard (e (#t #t)) (%substring s 9) #f)
+          (guard (e (#t #t)) (%substring s -9) #f))))
 
 (test-end "schemacs_editor_fns")

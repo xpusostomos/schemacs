@@ -14,6 +14,13 @@
 
 (import (scheme base) (scheme write)
         (only (srfi 64) test-assert test-equal test-begin test-end)
+        (only (guile) string-contains)
+        (only (schemacs editor buffer) allocate-buffer *current-buffer*
+              with-current-buffer get-buffer-create)
+        (only (schemacs editor frame) *current-frame* new-frame)
+        (only (schemacs editor editfns) insert buffer-string)
+        (only (schemacs editor help-fns)
+              describe-function help-fns--insert-menu-bindings)
         (only (schemacs editor keymap) keymap-lookup keymap-order
               keymap-bindings *default-keymap*)
         (only (guile) hashv-ref)
@@ -93,5 +100,29 @@
            ;; `(STRING . DEFN)` binding is unwrapped by `access_keymap` -
            ;; which is what makes a click and a typed chord agree.
            (eq? (keymap-lookup global-buffers-menu-map 0) (cdr raw))))))
+
+(test-equal "a command's menu path is what describe-function prints"
+  "File → Save"
+  (let ((ed (allocate-buffer)))
+    (parameterize ((*current-frame* (new-frame ed 24 80))
+                   (*current-buffer* ed))
+      (help-fns--insert-menu-bindings
+       (list (kbd "<menu-bar> <file> <save-buffer>")) "")
+      (buffer-string))))
+
+;; The sentence, whole - it is `help-fns--key-bindings`' menu arm, which
+;; had been a placeholder until `help-fns--insert-menu-bindings` was
+;; ported. Emacs 31.1 prints exactly this line after "It is bound to C-x
+;; C-s." with no blank line between (measured).
+(test-assert "describe-function lists the menu a command is on"
+  (let ((ed (allocate-buffer)))
+    (parameterize ((*current-frame* (new-frame ed 24 80))
+                   (*current-buffer* ed))
+      (describe-function 'save-buffer)
+      (with-current-buffer (get-buffer-create "*Help*")
+        (and (string-contains
+              (buffer-string)
+              "It can also be invoked from the menu: File → Save.")
+             #t)))))
 
 (test-end "schemacs_editor_menu_bar_menus")

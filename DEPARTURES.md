@@ -7156,3 +7156,1129 @@ seam `*read-string-function*` the `s` interactive code uses.**
 message, the binding); the pty `help-describe` check drives `C-h o`
 too - all nine keys (`b f v k c w m s o`) through the real command
 loop now.
+
+# `posn-at-point`, `event--posn-at-point`, `call-interactively` (2026-11-18)
+
+`event-start`/`event-end` for a non-mouse event now answer the position
+of point, as `subr.el:1907`/`:1946` do (`(event--posn-at-point)`). Three
+representational departures come with it.
+
+1. **`event--posn-at-point` is `subr.el`'s function, placed in
+   `xdisp.scm`.** It reads `window-point` and calls `posn-at-point`, and
+   both live above `subr.scm`; `event-start` reaches it through the seam
+   `*event--posn-at-point-function*`. The body is Emacs's - the
+   `(window-point)` read, the `(list (selected-window) POS '(0 . 0) 0)`
+   fallback for an off-screen position - minus its minibuffer-window arm
+   (the echo area is an ordinary window here) and its
+   `(setf (nth 5 posn) pos)` correction (the posn below has no OBJECT
+   field).
+
+2. **`posn-at-point` (`keyboard.c:13594`) is rebuilt from cells, not
+   from glyphs.** The C asks `pos_visible_in_window_p` for the glyph's
+   pixel position and hands it to `posn_at_x_y`; this asks the same row
+   walk the cursor is placed with (`rows-above-in-window`, the row
+   slices, `current-line-display-column`) for the position's screen row
+   and column, converts those to pixels and calls `posn-at-x-y` - the
+   same two steps. Consequences, all on the returned list's *shape*:
+   the posn has the four fields `posn-at-x-y` builds rather than
+   Emacs's eleven, so there is no OBJECT/POS/(COL . ROW)/IMAGE; a
+   position inside a `display` string or an invisible run is answered as
+   the cell it is drawn on, not as the string; and with **no display
+   object** (the help suites run headless) it answers nil, where Emacs's
+   would still answer from its frame. nil is the "not on screen" answer
+   and is what those callers handle.
+
+3. **`call-interactively` (`callint.c:253`) does not carry
+   RECORD-FLAG or KEYS** - nothing here records a command's arguments
+   for `repeat-complex-command` - and it reads `current-prefix-arg`,
+   which this tree binds only while an interactive specification is
+   evaluated, not for the whole command. A `call-interactively` made
+   from inside a command body therefore passes the prefix nil; the one
+   caller that needs it (`tab-bar-mouse-1`) is a mouse click, for which
+   nil is right.
+
+`*tab-line-tabs-buffer-groups*` is a **parameter** where Emacs has a
+`defvar` (`tab-line.el:499`): `tab-line-new-tab` `let`-binds it, and
+that is the tree's test for which one a variable is. Its default is
+`mouse-buffer-menu-mode-groups`' value, which is a plain variable in
+`mouse.scm` despite its stars.
+
+## `%substring`, because Scheme's `substring` drops text properties (2026-11-18)
+
+GNU Emacs's `substring` is `substring_both` (`fns.c:1579`) followed by
+`copy_text_properties`: the result keeps the source range's faces,
+keymaps and every other property. `(scheme base)`'s `substring` is, in
+Emacs's vocabulary, `substring-no-properties` (`fns.c:1610`) - and with
+this tree's string intervals held in a side table keyed by the string
+object, a new string from `substring` has none.
+
+Measured: `(get-text-property 0 'close-tab (substring s 3))` is `#f` for
+`s` propertized over its whole length.
+
+`%substring` is Emacs's in `fns.scm`, with the whole string's interval
+tree copied through `copy-intervals`. **The `%` is forced**: a library
+cannot shadow a core binding (the `%assq` rule). The rest of the tree
+still calls Guile's `substring`; the ones that matter are those where
+Emacs's source says `substring` on a string that may carry properties.
+
+## `equal-including-properties`, and the redisplay's row caches (2026-11-18)
+
+Ported in `fns.scm` (`fns.c:2823`) over `compare-string-intervals`
+(`intervals.scm`, `intervals.c`). `equal?` is its character-only half;
+the C is `internal_equal` with `EQUAL_INCLUDING_PROPERTIES`, which
+recurses through conses and vectors. The vector arm is carried; the
+hash-table, char-table and record arms answer `equal?`, nothing in this
+tree asking for their properties.
+
+The **mode-line and tab-line row caches are this tree's own** - the C has
+no such fields; `w->last_mode_line` does not exist, because Emacs rebuilds
+the glyph matrix row and skips only on `w->update_mode_line`/garbaged
+frames. Ours compares the formatted string, so the comparison has to see
+everything the row does: characters *and* properties. With `equal?` a
+window cycling between two buffers formatted the same characters with a
+different current-tab face, the skip fired, and the wiped row stayed
+blank. Both skips use `equal-including-properties` now, and
+`mark-window-display-accurate-1` clears `last-tab-line` as it already
+cleared `last-mode-line`.
+
+## `*set-buffer-major-mode-function*` - a seam for `buffer.c`'s caller (2026-11-18)
+
+`set-buffer-major-mode` is `buffer.c:2283`'s and its port is in
+`files.scm` (it calls a mode *command*, which only the command table
+above `window.scm` can resolve). Its caller
+`window-normalize-buffer-to-switch-to` is `window.el:9519`'s and lives in
+`window.scm`, so the call is a seam, as `*read-buffer-to-switch*` is:
+`window.scm` holds the parameter, `files.scm` installs the function as it
+loads. Emacs's other two callers (`other_buffer_safely`, `shell-command`)
+are not wired - nothing here creates the scratch buffer through that path
+yet.
+
+## The Gtk popup's root was passed as an item (2026-11-18) - fixed
+
+`create_menus (val->contents, ...)` (`gtkutil.c:3575`) is how
+`xg_create_widget` opens a popup: the root `widget_value` is the GtkMenu
+and its *children* are the first level. `pgtk-create-and-show-popup-menu`
+passed the root, so every popup began with one item named "menu" - the
+root's own name (`menu.c:619`). Fixed to `(widget-value-contents tree)`
+and verified live (the two-pane probe above). No Emacs-side departure
+remains; this entry is here because the symptom ("a menu containing only
+the word 'menu'") named nothing recognisable in the source.
+
+## `set-buffer-major-mode` reads the default mode (2026-11-18)
+
+The C takes `BVAR (&buffer_defaults, major_mode)` - the *default* value
+of `major-mode`, `fundamental-mode` - and only when that is nil does it
+fall back to the current buffer's mode. The port read the *target*
+buffer's own `major-mode` and then the current buffer's, so `C-x b fresh`
+from a Scheme buffer produced a Scheme buffer where Emacs produces a
+Fundamental one (measured: `(window-normalize-buffer-to-switch-to
+"fresh")` from a `text-mode` buffer answers `fundamental-mode`).
+
+There is no buffer-defaults table in this tree - readers spell the
+default out (`buffer.scm`'s `major-mode` accessor passes
+`'fundamental-mode`) - so this does too. The C's nil-default fallback is
+carried and is unreachable here, as it is in Emacs. Also faithful now:
+`*initial-major-mode*` is `lisp-interaction-mode` (`startup.el`), which
+is what a *created* `*scratch*` buffer takes. Nothing creates one through
+`get-scratch-buffer-create` yet, which is why this changes no behaviour
+today.
+
+## The line-break cache speaks text coordinates, not `BEGV`/`ZV` (2026-11-18)
+
+`find_newline` consults `buf->newline_cache`, and every entry point of
+that cache in the C reads `BUF_BEG`/`BUF_Z` - the *text*'s ends
+(`region-cache.c`'s `region_cache_forward`/`_backward`/`know_region_cache`/
+`revalidate_region_cache`), and `invalidate_region_cache` is given the
+same pair by `invalidate_buffer_caches` (`insdel.c:2206`). That is
+correct by the cache's contract: it stores facts about characters - "this
+stretch holds no line break" - and a narrowing changes no characters.
+
+This tree passed `(buffer-beg ed)`/`(buffer-z ed)`, which are `BEGV`/`ZV`.
+While nothing narrowed the two agreed, so every test passed. With
+`C-x n n` they do not: the cache's stored basis stayed the whole text
+while every query and invalidation spoke of the accessible range, so an
+insertion while narrowed (the user typed one character) shifted the
+basis, and after `C-x n w` a "no line break here" run covered text the
+cache had never scanned. The rest of the file was drawn as one line with
+`^J` where its newlines were.
+
+Three call sites, all now in text coordinates:
+`new-region-cache` takes both ends (`BEG` and `Z` at creation, as the C's
+initialises `buffer_beg`/`buffer_end`); `find-newline-forward`/`-backward`
+pass the text's ends to the cache while their *scan* still stops at the
+caller's END (ZV forward, BEGV back); and `invalidate-buffer-caches`
+computes `beg_unchanged` and the head/tail in text coordinates, which is
+what `buffer-text-beg-unchanged` already counts in.
+
+The regression is at the render level (`tty-editor-tests.scm`'s
+`schemacs_ncurses_editor_narrow_cache`): show, narrow, edit, redraw,
+widen, redraw. The redisplay is part of the reproduction - it is the scan
+that records the narrowed knowledge - which is why a direct
+`find-newline` test did not see it. `tools/pty-check.py`'s `narrow` check
+gained the typed character and asserts no `^J` and no joined lines.
+
+## The comment commands' departures (2026-11-18)
+
+* **`comment-add` the function is `comment-add-count`** (Lisp-2: the
+  variable's accessor keeps the name).
+* **`combine-change-calls` is not called**: `comment-region-default` and
+  `uncomment-region-default` do their work directly, and
+  `comment-combine-change-calls` exists and is read nowhere. Emacs wraps
+  the region pass in `combine-change-calls` (`replace.el`), which is not
+  ported.
+* **`comment-setup-function` is not carried** - it is `ignore` by default
+  and nothing here sets one; `comment-normalize-vars` therefore does not
+  call it.
+* **`comment-use-syntax`'s `undecided` resolves to "not by syntax"** (the
+  C tries `forward-comment` in a temp buffer); a programming mode sets it
+  to t, which is where it matters.
+* **`comment-with-narrowing` is a macro here as there**, but its temporary
+  is a `syntax-case`-built identifier rather than a `make-symbol` gensym.
+* **`comment-line`'s backward marker**: Emacs sets `this-command` to the
+  symbol `comment-line-backward`; here the symbol is stored in
+  `*this-command*` directly (nothing applies it - the loop only rotates it
+  into `last-command`), because the command *is* the procedure
+  `comment-line`.
+* **`(string c)` for a code point** needed `%char-string` at two sites in
+  `comment-padright`; Elisp's `string` accepts integers, Scheme's does not.
+* **`comment-padright`'s duplicate character** is captured before the
+  MULTI test: a failed `string-match` preserves the previous match data in
+  Emacs (measured) and clears it here, and the captured character is the
+  same answer.
+
+## The redisplay after an error is the command loop's (2026-11-18)
+
+`command_loop_1` (`keyboard.c:1637`) runs one command inside
+`internal_condition_case_1 (command_loop_1_body, Qerror, cmd_error)` and
+then falls through to the redisplay at the bottom of the loop - so an
+error a command raises is *reported* and the screen is brought into
+agreement with the editor's state before the next key is read. `cmd_error`
+itself only reports: it prints the message and returns.
+
+This tree's loop reported the error inside its `guard` and returned to
+the read without redisplaying, so a command that raised *part-way* left
+the screen showing what the aborted command had drawn. Measured with
+`C-x 2`, `C-x C-f`, a path, `?` (which pops `*Completions*`) and then
+`C-g`: the aborted completing-read's window stayed on screen until the
+next keypress, three mode lines where the editor's window list had two.
+
+`keyboard.scm`'s guard now calls `redisplay-frames!` after
+`report-command-error!`, which is the C's fall-through. Verified
+load-bearing: with the redisplay reverted, 1 run in 20 of the probe shows
+the stale window (`[2 2 ... 3 ... 2]`); with it, 15/15 clean, and the
+`completion-window` pty check passes repeatedly.
+
+## The startup hooks and the *scratch* buffer (2026-11-18)
+
+**`term-setup-hook` is not carried.** Emacs 31 still declares it and runs
+it beside `emacs-startup-hook` (`startup.el:283-334`, `:807`, `:3094`),
+but marks it obsolete: "In new code, there is no reason to use this
+instead of `emacs-startup-hook'". Every site that runs the pair here runs
+`emacs-startup-hook` alone, and a hook added to `term-setup-hook` in an
+init file is simply absent rather than silently skipped.
+
+**Where the startup hooks run.** In Emacs they run at one of two sites,
+whichever comes first: `command-line-1`'s startup-screen branch
+(`:3094`, `:3115`), which then sets `inhibit-startup-hooks` (`:3117`);
+or, when no screen is displayed, `normal-top-level`'s tail (`:807`,
+`:848`). **Measured on Emacs 31.1** with an init file that adds a logging
+function to each hook: with `inhibit-startup-screen` set, both hooks
+still run (`emacs-startup-hook`, then `window-setup-hook`). This tree has
+no `normal-top-level`, so `command-line-1`'s `else` is that tail: the
+splash branch runs them before the screen is displayed and sets
+`inhibit-startup-hooks`; the else runs them at the end of
+`command-line-1`.
+
+**`get-scratch-buffer-create` is a placement departure.** It is
+`simple.el:11553`'s, and `simple.scm` is below `files.scm` (which holds
+`initial-major-mode`) and below this library. It lives in `startup.scm`,
+where both are reachable, as `locate-file-internal` lives in
+`fileio.scm`; `window.scm` calls it through
+`*get-scratch-buffer-create-function*`, which startup installs at load.
+Its `(funcall initial-major-mode)` is spelled `(set-buffer-major-mode
+scratch)`, this tree's resolution of the mode command by name.
+
+**Emacs 31's `trusted-content` slot is not carried.** `:11564` sets it
+to `:all` for `lisp-interaction-mode`; the content-trust machinery is not
+ported and nothing here reads the slot.
+
+**The two `command-line`/`command-line-1` `*scratch*` blocks are ported
+separately, as Emacs has them**: `:1723-1727` initializes the mode of a
+`*scratch*` that exists after the init file, and `:3015-3021` fills an
+empty one with `initial-scratch-message` before display. The front ends
+make the buffer before `command-line-1`, so the second block is the one
+that fills it in a real run; `get-scratch-buffer-create` is the lazy
+path. `initial-scratch-message` is a `define-custom` because Emacs
+declares it with `defcustom` (`startup.el:1841`).
+
+## Running a lisp-family mode makes every later fontification 40x
+## slower - a bug, named (2026-11-18)
+
+Found when Emacs's `initial-major-mode` was applied to `*scratch*`: the
+`help-bindings` and `help-describe` pty checks went red, and both failed
+identically - `C-h b` did nothing in the screen they captured.
+
+**Measured.** `(describe-bindings)` in a fresh editor takes **12-14 ms**
+until a `lisp-interaction-mode`/`emacs-lisp-mode` has *run* somewhere in
+the session, and **~510 ms** for ever after. The mode need not be in the
+buffer being described, and changing that buffer's mode back does not
+undo it: in one editor, `(f) (run lisp-interaction-mode somewhere) (f)`
+gave `(14 507 514)`.
+
+The time is inside `font-lock-after-change-function` →
+`font-lock-default-fontify-region` → `parse-partial-sexp` →
+`%scan-sexps-forward`, i.e. the *syntactic* pass over the text being
+inserted into `*Help*` (~5 KB of bindings listing). `describe-bindings`
+is silent while it fills and fontifies `*Help*`, which is why the checks
+saw nothing: their settle waits for quiet, and quiet is what a 500 ms
+compute looks like.
+
+**Ruled out, each measured:**
+
+* the global `before-change-functions` flush hook - it is installed
+  globally where Emacs installs it buffer-locally
+  (`syntax-ppss-flush-cache`, `syntax.el:679`'s final `t`), but clearing
+  it changes nothing (`(516 … 514)`);
+* the `%syntax-propertize-done` cache - forcing the Help buffer's
+  `syntax-propertize--done` to the sentinel changes nothing
+  (`(512 513)`);
+* the described buffer's mode, the current buffer, and the content of
+  the listing - identical in both cases;
+* Help's own state (`help-mode`, standard syntax table, no buffer-local
+  `font-lock-mode`) - identical in both cases, and turning Help's
+  font-lock *off* before the call does not help: `(20 #t 518 #t 530)` is
+  fast, Help's font-lock on, then slow, then still slow with it off.
+
+**The mechanism, found by bisecting the mode chain** (`prog-mode` does
+not flip it, `lisp-data-mode` and `emacs-lisp-mode` do, and replaying
+their steps one at a time shows it is none of the buffer-locals):
+
+1. Running a lisp-family mode turns font-lock on in that buffer, and
+   `font-lock-mode-internal` conses `font-lock-after-change-function`
+   onto the **one global `*after-change-functions*` list** (the C adds it
+   buffer-locally, `font-lock.el:703`'s `t t`). Every buffer's edits then
+   go through it, gated per buffer by `font-lock-mode-on?` - which is
+   exactly what the C's buffer-local hook does, so the gate is right and
+   the list is not the problem.
+2. What it costs is **eager fontification**: ours fontifies the changed
+   chunk inside `after-change`, where Emacs only *marks* it and lets
+   `jit-lock` fontify at display time. Measured on a plain buffer with
+   font-lock on and 200 line-inserts: **1 ms** with no fontification
+   running, **95 ms** with it - and the cost is
+   `syntax-ppss(start)` re-parsing from the last cache position, which
+   for a growing buffer is thousands of characters per chunk (a full
+   `parse-partial-sexp` over the 5 KB listing is only 2-3 ms, so the
+   total is the sum of the warm starts). That is the whole 40x.
+3. A normal session always has the hook installed - the `*scratch*`
+   buffer's mode runs at startup - which is why the slowdown looked like
+   a property of the mode rather than of the fill.
+
+**The missing primitive is `jit-lock`** (`lisp/jit-lock.el`, 761 lines;
+the core - `jit-lock-register`, `jit-lock-function`,
+`jit-lock-fontify-now`, `jit-lock-after-change`, `jit-lock-refontify`,
+`jit-lock--run-functions` - is about half of it) **plus the redisplay
+hook it stands on**: `fontification-functions`, which `xdisp.c`'s
+`handle_fontified_prop` runs for text whose `fontified` property is nil.
+Neither is ported. It is pre-existing, and its blast radius is every
+mode that fills a fontified buffer in many chunks: Help (`C-h b`,
+`C-h s`), and Dired/Buffer-Menu refreshes the same way.
+
+**The harness change this forced**: `help-bindings` and `help-describe`
+now say `WAIT` for the text they assert on (`Global Bindings`,
+`which means:`) instead of relying on a quiet window - the rule this file
+already carries - and both assert the absence of the `gave up waiting`
+marker, since the marker's own text contains what they wait for.
+
+## jit-lock ported: the fontification stall closed at its root
+## (2026-11-18/19)
+
+The section above ("Running a lisp-family mode makes every later
+fontification 40x slower") named the missing primitive. This is it:
+`schemacs/editor/jit-lock.scm` (a port of `lisp/jit-lock.el`'s core),
+`fontification-functions` with the redisplay hook it stands on, and
+`font-lock.el`'s `font-lock-support-mode` / `font-lock-turn-on-thing-lock`
+wiring so `font-lock-mode` registers with jit-lock instead of fontifying
+in `after-change`.
+
+**Measured, same harness as the section above:**
+
+| | before | after |
+|---|---|---|
+| 200 line-inserts into a fontified buffer | **95 ms** | **1 ms** |
+| `(describe-bindings)` in a normal session | **~510 ms** | **17 ms** |
+
+**What is ported, and from where:**
+
+* `jit-lock.el`'s core - `jit-lock-mode`, `jit-lock-register`/
+  `-unregister`, `jit-lock-refontify`, `jit-lock-function`,
+  `jit-lock--run-functions`, `jit-lock-fontify-now`,
+  `jit-lock-force-redisplay`, `jit-lock-after-change` - with
+  `jit-lock-start`/`jit-lock-end` as parameters (the C's "dynamically
+  scoped variables", `jit-lock.el:667`) and
+  `jit-lock-after-change-extend-region-functions` as a hook parameter.
+* `fontification-functions` (`xdisp.c:39022`) and the redisplay hook
+  (`handle_fontified_prop`, `xdisp.c:4667`) in `xdisp.scm`'s row
+  builder: a row whose first position is not `fontified` is fontified
+  before it is built.
+* `font-lock-support-mode` - **onto the `*font-lock-support-mode*`
+  parameter this file already had** (it existed as #f "because jit-lock
+  is not ported"; a second plain variable was written first and then
+  consolidated away, because two spellings of one option is the class of
+  bug `loadup-tests`' clash census exists for) - `font-lock-turn-on-thing-lock`,
+  `font-lock-turn-off-thing-lock`, the four function variables
+  (`font-lock-flush-function`, `-ensure-function`,
+  `-fontify-buffer-function`, `-extend-after-change-region-function`),
+  `font-lock-extend-jit-lock-region-after-change`, and
+  `font-lock-extend-region-wholelines` (its `syntax-propertize-wholelines`
+  had been ported all along; the note claiming otherwise was stale).
+
+**The bug this shook out, worth knowing before touching the extend
+loop**: `font-lock-extend-region-wholelines` answers non-nil on *every*
+call (`syntax-propertize-wholelines` always conses), so the
+extend-region loop's `(eq funs font-lock-extend-region-functions)`
+guard is load-bearing - it stops the restart when a function returned
+true at the *start* of a pass. The loop here had been written without
+it (harmless while wholelines did not exist) and the dired suite hung
+on the first run: an infinite restart.
+
+**Not carried, each named in `jit-lock.scm`'s header or the source:**
+
+* stealth fontification (`jit-lock-stealth-*`, idle timers over every
+  buffer);
+* deferred fontification (`jit-lock-defer-time`, nil by default);
+* contextual fontification (`jit-lock-contextually` defaults to
+  `syntax-driven`; the variable is carried so a user setting it sees no
+  error, the pass is not ported);
+* the antiblink `post-command-hook` pair, `jit-lock-debug-mode`,
+  indirect-buffer refusal (`buffer-base-buffer` is not carried), the
+  `memory-full` guard, `run-hook-wrapped` (a plain `for-each` - nothing
+  returns early), and `redisplay-skip-fontification-on-input`.
+
+**Departures in shape, each named in the source:**
+
+* the buffer-local hooks (`jit-lock-functions`,
+  `fontification-functions`) are per-buffer *list entries* read through
+  accessors, because this tree's hook machinery is parameters and a
+  parameter is not per buffer; `jit-lock-after-change` is on the one
+  global `after-change-functions` list, gated on the buffer's
+  `jit-lock-mode` - the compromise `font-lock-after-change-function`
+  already documented;
+* the C's `specbind (Qfontification_functions, Qnil)` is a separate
+  `*in-fontification-functions*` flag, because a buffer's own list would
+  win over a rebound parameter;
+* `font-lock-extend-jit-lock-region-after-change` is gated on
+  `font-lock-mode` because its hook is global here and buffer-local in
+  Emacs.
+
+**Tests**: `jit-lock-tests.scm` (14) - the register/refontify cycle, the
+after-change mark-only rule, `font-lock-ensure` as the demand path, and
+the property at `point-max` staying nil (Emacs's special case).
+`font-lock-tests`, `lisp-mode-tests` and `dired-mode-tests` now call
+`font-lock-ensure` before asserting faces - which is what Emacs's own
+callers do once jit-lock is in play, and is why their expectations did
+not have to change. The pty battery's `font-lock-scheme` check is the
+end-to-end proof that the redisplay hook fontifies what it draws.
+
+**Verified end to end:** all 73 suites pass (jit-lock-tests 14), the tree
+compiles with no new warnings, and `tools/pty-check.py` is **97/97**
+(battery #14). Two earlier runs of the same tree gave 95/97 with
+`query-replace-quit` and, once each, `redisplay` and `completion-ui` -
+the battery's documented load-flake class: each passed 3/3 when run
+alone, and the clean run was taken with the machine quiet.
+## `lookup-key` inherits, and the keymap list `access_keymap` builds
+## (2026-11-19)
+
+`access-keymap` here was the C's `noinherit` half of `access_keymap`
+(`keymap.c:491`) and nothing else: own bindings and char-table, never a
+parent. That is right for `define-key`, whose `Fdefine_key` walk calls
+`access_keymap (map, c, 0, 1)` and documents why - "a *parent's* `C-x`
+does not count - a child is free to make its own" - and wrong for
+`lookup-key`, whose `lookup_key_1` (`keymap.c:1210`) calls
+`access_keymap (map, c, t_ok, 0)` and therefore inherits.
+
+Measured on Emacs 31.1, fresh maps:
+
+| maps | answer |
+|---|---|
+| child has none, parent binds `b` | `(lookup-key child "b")` is the parent's command |
+| child defines `C-c x`, parent `C-c y` | both found through the child |
+| both bind `C-c` to prefixes | the prefix answers `(keymap CHILD-PREFIX PARENT-PREFIX)` |
+| child defines `C-c x`, parent binds `C-c` to a command | the child gets its own prefix; **no error** |
+
+Ported to the C's shape:
+
+* `access-keymap` takes the optional NOINHERIT. With it false, a miss in
+  the map asks the parent; when the event is a keymap both in the map
+  and in the parent the answer is a **keymap list** `(keymap OWN
+  INHERITED)` (`access_keymap_1`, `keymap.c:402-420`), and a KEYMAP that
+  is itself such a list is walked element by element, with an earlier
+  keymap binding beating a later command, as the C's loop does.
+* `keymapp` is `KEYMAPP` = `get_keymap` non-nil, and `get_keymap`
+  answers a keymap list as a keymap (`keymap.c:197`): `(keymapp '(keymap
+  A B))` is t.
+* `lookup-key`'s prefix test is `keymapp` (the C's `get_keymap (cmd, 0,
+  1)`), and `keymap-lookup`'s is too; its old manual parent walk is
+  gone, since the inheritance now happens inside `access-keymap` where
+  the C has it.
+* The `(t . DEF)` default is `%keymap-t-default-chain`: the C records
+  the first default and clears `t_ok` as it walks (`keymap.c:411-414`),
+  so the **nearest** default applies, and only if no specific binding
+  exists anywhere in the chain.
+
+Departures left standing, named in the source:
+
+* **nil versus unbound.** The C tells an explicit nil binding (`Qnil`,
+  which shadows the parent) from no binding (`Qunbound`); this tree's
+  hash answers #f for both, so a nil binding inherits where Emacs
+  shadows. Pre-existing, and now reachable through inheritance - no
+  caller here defines a key to nil deliberately.
+* A list whose leading symbol is not `keymap` is still walked as a list
+  of maps; Emacs's `get_keymap` requires the leading `Qkeymap`.
+* **`keymap-lookup`'s "too long" answer is the command, not a
+  count.** `lookup-key` has the C's (`keymap.c:1289': a number when the
+  sequence runs into a non-prefix before its last event), and
+  `keymap-lookup` - which shares its docstring - answers the command it
+  found. Reachable only for a key sequence *longer* than its binding;
+  its one reader that cares, `%shadow-lookup' in `keyboard.scm', is
+  written around it (its comment says so). Porting it means giving
+  `keymap-lookup' a counter and giving `%shadow-lookup' the C's
+  `FIXNATP' guard (`shadow_lookup', `keymap.c:2464'). Named, not done:
+  nothing here binds a command mid-sequence.
+* A keymap named by a *symbol* (a function definition) is not carried,
+  as `keymapp`'s note says.
+
+Found by `C-h ?`: `help--help-screen` looks its option up with
+`(lookup-key local-map key)`, and the options live in `local-map`'s
+parent `help-map`, so every option answered "No help command is bound to
+`b'". `subr-tests` pins the four measured cases; `tools/pty-check.py`'s
+`metahelp` check is the end-to-end one.
+
+## `C-h ?` — `help-for-help` and `help--help-screen` (2026-11-19)
+
+`help-macro.el`'s macro and `help.el`'s screen and option table are
+ported (described in AGENTS.md); the departures:
+
+* **`unwind-protect` is unbound at runtime in a library.** `(only
+  (guile) unwind-protect)` has no binding, and an unqualified
+  `unwind-protect` in a library body *compiles* with a "possibly
+  unbound" warning and raises when the form runs. The C's frame is
+  `(dynamic-wind (lambda () #f) body cleanup)` here - the same shape
+  `save-excursion` uses.
+* **The option table is trimmed**, not a faithful subset: every entry
+  whose command this tree does not have is gone, and the help line
+  says `[bcfkmoqsvw]` to match. Omitted, with what each waits for:
+  `apropos-command`/`apropos-documentation` (apropos.el),
+  `describe-command`, `help-find-source`, the whole Manuals section
+  (info.el), `view-emacs-*`/`view-hello-file`/`view-lossage`/
+  `view-echo-area-messages`/`describe-package`/`help-with-tutorial`/
+  `display-local-help`/`help-quick-toggle`, and
+  `describe-input-method`/`describe-language-environment`.
+* `variable-pitch-mode` (the `help-for-help-use-variable-pitch` branch;
+  the option is carried so a user setting it sees no error), the frame
+  operations `iconify-frame`/`handle-switch-frame`/
+  `frame-toggle-on-screen-keyboard`, and `ding` are not carried.
+  `vertical-scroll-bar` is in the C's key list and never arises - no
+  front end here has scroll bars.
+* **`[t] -> undefined` is not bound.** The C binds it so every key in
+  the metahelp is "defined"; the else branch's `(lookup-key local-map
+  key)` passes no ACCEPT-DEFAULT, so the C's own `t` entry is invisible
+  to it too - an unbound option answers #f and the "No help command is
+  bound to" branch reports it either way. What the binding changes is
+  `read-key-sequence`'s behaviour over `overriding-local-map`, which
+  this tree's reader does not model.
+* The scroll keys call `scroll-up-command`/`scroll-down-command` where
+  the C calls the `scroll-up`/`scroll-down` primitives
+  (`scroll_command`, `window.c:6975`, is not ported).
+* **The prompt's page keys are `<PageDown>`/`<PageUp>`**, the C's own
+  spelling (`help-macro.el:190`). `(kbd "next")` - which this port first
+  used - reads as the four characters, and Emacs itself answers
+  `(key-description (kbd "next"))` = `"n e x t"`, so the prompt rendered
+  "n e x t".
+* The mouse arm of the C's `(not (or (integerp char) (symbolp char)))`
+  is carried; the `switch-frame` arm is not, since a `switch-frame`
+  event does not exist here.
+* `make-help-screen`'s generated command takes its **`interactive`
+  form** as a syntax object built with the call site's context - see
+  AGENTS.md for why a literal one resolves in `help-macro` and is
+  refused.
+
+**The read-path redisplay is a separate departure, and it was the
+screen being blank**: `read_char` redisplays before it waits
+(`keyboard.c:2718-2723`), and this tree's `read-key-event` did not, so
+every read outside the minibuffer left the screen stale. Ported in
+`keyboard.scm`; see AGENTS.md.
+
+## `C-h k M-:`: the read's answer rule, and the ESC meta prefix
+## (2026-11-19)
+
+Reported from a live editor: `C-h k M-:` answered "Value out of range -1
+to <1114111>: 134217786". Two departures, both in `read-key-sequence`.
+
+**1. String or vector was decided by "are all events integers?".**
+`make_event_array` (`alloc.c:3691`) is the C's rule: a string only when
+every event is "a character in 0...127, after discarding the meta bit
+and all the bits above it"; anything else a vector - and for a *meta*
+character Emacs makes a unibyte string with the meta moved into the
+byte's high bit (`SSET ... | 0x80`), so `M-:` is the byte 0xBA. This
+tree cannot carry that byte in a string (Guile strings are Unicode, and
+0xBA would read back as `º`), so a meta event answers a vector here.
+The port's test called `integer->char` on 134217786, which is above
+Guile's character range - the reported error. `%read-key-sequence-answer`
+is `make_event_array`'s rule now, with `0..127` standing for "fits in a
+string". **A meta event answered as a vector is the named departure**;
+every consumer reads either form through `keymap-index`.
+
+**2. The ESC prefix was not folded in the read.** A terminal sends `M-:`
+as ESC then `:`, and `read_key_sequence` turns that into the meta event
+itself (`meta_prefix_char`, `keyboard.c:11829`). The command loop had
+that state machine already (`*esc-pending*`, `dispatch-key-event`), but
+the read `C-h k` and the `k`/`K` interactive codes use did not: a pty
+run of `C-h k ESC :` answered "ESC is undefined" (measured before the
+fix). The fold is in `%read-key-sequence` now, unconditionally, matching
+the command loop: a two-event `ESC KEY` binding is not a spelling this
+tree uses - meta is one event here, as it is in Emacs.
+
+**Also corrected**: `characterp`'s comment said Emacs answers t for
+`M-x`. Measured, `(characterp ?\M-:)` is nil - the modifier bits are
+above `MAX_CHAR` - and that wrong note is the likely origin of the
+"all integers" test.
+
+**Tests**: `tty-editor-tests`' new `read_key_sequence` group (4):
+ESC+`:` is the meta event and answers a vector, a plain character and
+control characters answer strings (`make_event_array`'s rule), and
+`read-key-sequence-vector` always answers a vector. The pty battery's
+new `describe-key-meta` check drives `C-h k ESC :` end to end and
+asserts the *Help* text.
+
+## `help-fns--insert-menu-bindings`, and the comparison it needed
+## (2026-11-19)
+
+The help pass's last named gap is ported: a command's "It can also be
+invoked from the menu: File → Save" paragraph (`help-fns.el:663`), called
+where Emacs calls it (`:636`), with the heading, the remap suffix, the
+`(= (point) start)` punctuation test and the closing `ensure-empty-lines`
+(`:649`) that our `help-fns--key-bindings` had also been missing.
+
+**Two primitive fixes were underneath, and neither showed until menus
+were finally looked for.**
+
+1. **`where-is-internal` never found a menu sequence.** A keyboard
+   binding in this tree is the command's *value*; a menu item is written
+   `(menu-item "Save" save-buffer)`, and `get_keyelt` answers the
+   *symbol* `save-buffer`. The walk compared symbol against value and
+   the shadow check did the same, so every menu binding was rejected in
+   both passes. `%where-is-value` resolves a symbol naming a command
+   through the command table, and both comparisons go through it.
+   Measured: `(where-is-internal 'save-buffer)` was `([24 19])` and is
+   now `([24 19] [menu-bar file save-buffer])`, Emacs's own answer.
+
+2. **A `string-join` separator.** Emacs's `(string-join SEQ)` uses `""`,
+   measured; Guile's uses `" "`. The push-and-join idiom Emacs uses to
+   build "File → Save" came out "File  →  Save" until `""` was passed
+   explicitly.
+
+**Representation notes, named in the source:**
+
+* Emacs's `(assq entry (cdr map))` is a hash lookup of the *raw* binding
+  here (`keymap-bindings`), because `access-keymap` coerces a
+  `menu-item` to its command and the label lives in the list. The walk
+  reads `(menu-item NAME DEF ...)` from the raw list's cadr/caddr - the
+  C's `(nth 2 elem)`/`(cadddr elem)` over `(entry . raw)`.
+* Emacs's `proper-list-p` guard is replaced by the two shapes' own
+  tests: the old `(STRING . SUBMAP)` spelling is *improper* here (its cdr
+  is a keymap record), where Emacs's cons onto a list is proper.
+* **Not carried**: the `(symbolp map)` arm, which resolves a menu bound
+  by a symbol through `symbol-function` - a menu value here is a keymap
+  record or a command, never a symbol naming a keymap.
+* The remap sentences now name the command ("Its keys are remapped to
+  `X'." and ", but that was remapped to `X' as well."), which the C
+  prints only when its remapping answered a *symbol*; ours answers the
+  binding, so the name comes from `help-fns-function-name`.
+* `char-displayable-p` of `→` is #t here (the terminal coding system is
+  `utf-8-unix`), so the separator is ` → `, not the ` => ` fallback.
+
+**An order difference, not a content one**: `where-is-internal` lists a
+menu sequence *before* a chord where Emacs lists the chord first - for
+`delete-frame`, Emacs gives `([24 53 48] [menu-bar file delete-this-frame])`
+and this tree gives the reverse. Emacs's `menu-bar.el` is loaded before
+the key libraries that bind `C-x`; this tree's `menu-bar.scm` is loaded
+after every one of them, and both keymaps put a new binding at the front
+(measured in Emacs: `a`, `b`, `c` defined in order read `(99 98 97)`).
+Only the order of `where-is`'s output and, for a command on *two*
+menus, the order of the menu clause are affected; `describe-function`
+splits keys from menus, so its sentences are unaffected.
+
+**Tests**: `menu-bar-menus-tests` +2 (9): the walk's "File → Save", and
+`describe-function 'save-buffer`'s whole menu sentence - the line Emacs
+31.1 prints there, measured.
+
+## The read-path detector, and `fetch-char` on a byte character
+## (2026-11-19)
+
+The 2026-10-06 handoff said `detect_coding` (`coding.c:6501`) was not
+ported; it had been ported later, as `detect-coding-bytes`, and the note
+was stale. Verified against Emacs 31.1 with `tools/coding-diff.py` (after
+repairing the tool - see AGENTS.md): **20 of 21 corpus cases identical**,
+the remaining one `iso-2022-jp`.
+
+**The rule it reproduces, and the one departure-shaped thing about it.**
+`detect_coding` does *not* set `CODING_MODE_LAST_BLOCK` (unlike
+`detect_coding_system`, `coding.c:8743`), because `decode_coding_gap` -
+the file-visit path - never sets it before detection. A UTF-8 sequence
+cut off by end of file is therefore *inconclusive* rather than invalid,
+and the bytes are named UTF-8:
+
+| bytes | `find-file` | `detect-coding-region` |
+|---|---|---|
+| `2D 4E 87` | `utf-8-unix` (the `87` becomes a byte character) | `raw-text` |
+| `2D 4E 87 41` | `japanese-shift-jis-unix` | `japanese-shift-jis` |
+
+The port has both doors, with `last-block?` as the argument that tells
+them apart. The *inconsistency* is Emacs's, not a departure here.
+
+**One departure made less bad, not new.** A *byte character*
+(`#x3FFF00 + byte`) has no Scheme character to be. `fetch-char`
+(`buffer.scm:2488`) called `integer->char` on the store's code point and
+raised "Value out of range -1 to <1114111>: 4194178" - so visiting any
+file whose first line began with such a character died in
+`set-auto-mode`'s `skip-chars-forward`. It now answers U+FFFD through
+`code-point->char`, the same rule `buffer-text-substring` and the
+search's folding already use; the departure that a byte character cannot
+be displayed as itself stands, but it no longer crashes a scan.
+
+**Named, not carried**: iconv's `SHIFT-JIS` is not Emacs's charset
+table. `87 41` decodes in Emacs to its internal JIS X 0208 code
+(measured 1311849) and iconv answers U+FFFD, so a buffer read as
+`japanese-shift-jis` can differ in that character while the *coding
+system* agrees. Closing it means the charset registry
+(`charset.scm`, metadata only) and its map files.
+
+## The charset registry's map data and unification (2026-11-19)
+
+`charset.scm` had the registry's *metadata* - ids, dimensions, ISO final
+chars - and no conversion. It now has `charset.c`'s map machinery
+(`load_charset_map_from_file` and its `read_hex` parser, control flags
+0/1/2, the 190-byte fast-map, `CODE_POINT_TO_INDEX`), all four methods
+(MAP, OFFSET, SUBSET, SUPERSET), `decode-char`/`encode-char`, and
+`unify-charset` with the global unify table.
+
+**Departures, named:**
+
+* **The map data ships in the tree** (`schemacs/etc/charsets/`, 3.1 MB,
+  Emacs 31.1's 131 generated files). Emacs generates them at build time
+  from glibc's charmaps (`admin/charsets/Makefile`) and ships them in
+  its install's `etc/charsets`; `*charset-map-path*` here defaults to
+  this tree's copy, located on the load path, where Emacs's default is
+  its installation directory.
+* **The 27 `unify-charset` calls are in `charset.scm`**, at the end of
+  the data. Emacs makes them in `mule-conf.el`, which is not ported, and
+  the `:unify-map` attribute each needs travels with the data.
+* **The data section was re-emitted with every attribute Emacs's
+  registry holds.** The first transcription kept the code space, ISO
+  final char, and *some* offsets and maps; it had no `:subset`,
+  `:superset`, `:min-code`/`:max-code` or `:ascii-compatible-p`, so
+  `gb18030` (a superset, 4 dimensions) was defined as an offset charset
+  and crashed the fast-map, and the `latin-iso8859-*` family got the
+  wrong method. A charset registry without its methods is not a subset
+  of Emacs's - it is a different registry.
+* **`emacs`'s `:max-code` is hand-written**: it is one of the five
+  charsets the C defines in `init_charset_once`, and its bound
+  (`MAX_5_BYTE_CHAR`, 0x3FFF7F) is not in its plist.
+
+**Verified against Emacs** with a differential over every charset and
+ten sampled code points each: **2148 decode answers and 1812 encode
+answers, zero differences**. It found the two data bugs and the ASCII
+shortcut of `DECODE_CHAR`/`ENCODE_CHAR` (`charset.h:427`, `:443`): an
+ASCII code through an ASCII-compatible charset is itself, before the map
+is consulted - MIK's map starts at 0x20, so codes 0 and 21 would
+otherwise have no answer.
+
+**Not done yet (2026-11-19).** The registry is complete; the ISO-2022
+codec and its dependent subsystems are not ported, and the "~1400
+lines" the 2026-10-06 reconnaissance gave was `coding.c` alone. Reading
+the C found three subsystems under it that this tree does not have:
+
+* **`char_charset`** (`charset.c:1961`), with `Vcharset_ordered_list`
+  and `charset_non_preferred_head`. The encoder cannot choose a charset
+  for a character without it. ~60 lines plus an ordered list that has
+  to be measured from a running Emacs the way the registry data was.
+* **Composition** (`CODING_ANNOTATE_COMPOSITION_MASK`, the
+  `DECODE_COMPOSITION_*`/`STORE_COMPOSITION_*` state machine in the
+  decoder, `composition.c`). Four systems declare `composition` in
+  their flags (`iso-2022-7bit`, `-ss2`, `-lock`, `-8bit-ss2`) and so
+  does `compound-text`; `iso-2022-jp` does not. Emacs decodes the
+  escapes to component characters *plus* a composition annotation and
+  composes via `composition.c`, which is not ported. The decoded text
+  is the same either way - the grouping is a property - and that
+  grouping is what is missing.
+* **Charset annotations** (`ADD_CHARSET_DATA` in the decoder, the
+  `charset` text property it sets on decoded text, and
+  `CODING_ANNOTATE_CHARSET_MASK`/`preferred_charset_id` in the
+  encoder). The encoder reads them back to reproduce the input file's
+  designations; without them it picks charsets by priority. This is
+  what keeps a multi-charset ISO-2022 file byte-identical round-trip in
+  Emacs.
+
+Also required and not in that estimate: the coding-system attributes
+(`:coding-type 'iso-2022`, the 15 flag bits, `:designation`,
+`:iso-request`/`:iso-usage`, `setup_iso_safe_charsets` at
+`coding.c:2855`), the detector (`detect_coding_iso_2022`, `:2923`), and
+`iso_code_class`'s 256-byte classification table, which the decoder
+switches on.
+
+**Scope decision (Chris, 2026-11-19): deferred, not half-built;
+`implement the gtk tabs` was taken instead.** Nothing of ISO-2022 is
+written - there is no partial codec in the tree. When it is taken up
+the options are: (a) the codec core with the two departures above
+(composition escapes decode to their component characters, no `charset`
+property), still including `char_charset`; (b) full fidelity, adding
+`composition.c` and the `charset` property - a project of its own;
+(c) detector and naming only, for a correct mode line and priority
+without a codec.
+
+## Contextual fontification: a "not carried" note that had its reason
+## backwards (2026-11-19)
+
+`jit-lock-contextually` was carried as a defcustom whose note read
+"Not carried: fontification is line-by-line here; the variable is so a
+user setting it sees no error." **The reason is backwards.**
+Line-by-line fontification is exactly why the sweep exists:
+`jit-lock-after-change` marks only the changed text `fontified` nil
+(`jit-lock.el:701`), and a line the redisplay has already drawn keeps
+its `fontified` t - so when an edit above it changes its syntactic
+context (a string or comment opened two lines up), it keeps its old
+faces indefinitely. Emacs's context pass marks everything after the
+change unfontified once the editor has been idle for
+`jit-lock-context-time`, and the redisplay refontifies what it draws.
+
+Ported from `jit-lock.el`:
+
+* `jit-lock-context-unfontify-pos` (`:154`): the buffer-local position
+  after which text is contextually unfontified; nil means off.
+* `jit-lock-context-timer` (`:171`): one timer for the editor.
+* `jit-lock-context--update` (`:181`) and `jit-lock-context-fontify`
+  (`:636`): on a repeating idle timer, for every buffer on
+  `(buffer-list)`, mark `pos .. point-max` unfontified and seat the
+  position at `point-max`.
+* `jit-lock-mode`'s on branch (`:258-265`): when the buffer's
+  `jit-lock-contextually` is `t`, arm the timer if it is not already
+  and seat the position at `point-max` (`(or pos (point-max))`).
+* `jit-lock-mode`'s off branch (`:286-302`): cancel the timer, but
+  only if no buffer on `(buffer-list)` still has the mode on - the C's
+  `(catch 'found (dolist ...))` walk.
+* `jit-lock-register` (`:338`): `(when (and CONTEXTUAL
+  jit-lock-contextually) (setq-local jit-lock-contextually t))`. The
+  test is on the *dynamic* value, which this tree's
+  `(jit-lock-contextually)` reproduces (the buffer-local when one has
+  been set, the custom's value otherwise). `font-lock` passes
+  `(not font-lock-keywords-only)`, so registering from a mode with
+  syntactic fontification is what turns the sweep on for that buffer.
+* `jit-lock-after-change` (`:701-708`): the sweep position becomes
+  `(min jit-lock-context-unfontify-pos jit-lock-start)` - the
+  possibly-extended start, not the raw argument - and the update sits
+  *outside* `with-silent-modifications`, as the C has it.
+
+Named departures, all unobservable here:
+
+* The sweep uses `put-text-property ... 'fontified #f` where the C
+  uses `remove-text-properties ... '(fontified nil
+  jit-lock-defer-multiline nil)`; nothing sets `jit-lock-defer-multiline`
+  because deferred fontification is not carried, and `get-text-property`
+  answers nil either way.
+* The `jit-lock-defer-multiline` branch of `jit-lock-context-fontify`
+  that walks the position back with
+  `previous-single-property-change` is therefore not carried.
+* The antiblink grace timer and its `post-command-hook` pair
+  (`jit-lock-antiblink-grace`, `jit-lock--antiblink-*`, `:710-762`)
+  are not carried; they *delay* the sweep while an unterminated string
+  has just been opened. Without them the sweep runs at
+  `jit-lock-context-time` as Emacs's does with `jit-lock-antiblink-grace`
+  nil.
+* `memory-full` (`:640`) has no counterpart; there is no low-memory
+  flag here.
+
+Tests: `jit-lock-tests.scm`'s `schemacs_editor_jit_lock_context` group
+(7), on a `get-buffer-create` buffer because `jit-lock-context-fontify`
+walks `(buffer-list)` and an `allocate-buffer` buffer is not on it. The
+after-change test ("a change moves the sweep position...") and the two
+sweep tests were each seen failing with their mechanism removed.
+
+## Every Gtk click was button 1, so the tab bar had no context menu
+## (2026-11-19)
+
+Chris: *"in real emacs I can right click a tab and a menu pops up, we
+don't have that."* The tab-bar command was there -
+`tab-bar-mouse-context-menu` and its `[tab-bar down-mouse-3]` binding
+(`tab-bar.el:569`) - and it could never run on Gtk.
+
+**The front end decoded every button as button 1.** `pgtk.scm`'s
+`pgtk-item->event` spelled the event symbol literally:
+`'down-mouse-1` for every press, `'mouse-1` for every release,
+`'drag-mouse-1` for every drag. GNU Emacs names the symbol from the
+button number: `make_lispy_event`'s button branch (`keyboard.c:6590`)
+takes `event->code` and calls `modify_event_symbol`, which folds the
+`down_modifier`/`drag_modifier` into `down-mouse-N`, `mouse-N`,
+`drag-mouse-N` (`keyboard.c:6760`). A backend that reports the wrong
+number makes a right-click indistinguishable from a left one.
+
+Fixed where the C has it - the front end's event decode:
+
+* `event:get-button` (`gdk_event_get_button`) imported into
+  `pgtk.scm`, and `pgtk-event-button` reads it (the same two-value
+  out-parameter shape as `event:get-coords`).
+* `pgtk-mouse-button-symbol kind button` builds the three names.
+* the press/release/drag branches use it. `down-mouse-3` now reaches
+  `tab-bar-map`'s `[tab-bar down-mouse-3]` and the menu pops;
+  `mouse-2` reaches `[tab-bar mouse-2]` and closes a tab, which is
+  Emacs's middle-click.
+
+**How the tab is identified from the click** is the existing text-mode
+emulation in `tab-bar--event-to-item`: our `posn-at-x-y` answers the
+tab-bar *area* with a cell position and no drawn string, so the tab is
+found by walking the items' caption lengths against the column. That is
+the terminal's path and it is why the command works here without the
+`tab_bar_window` object.
+
+Not carried, all pre-existing and named:
+
+* **`double-mouse-N`/`triple-mouse-N`** - a click count needs a clock
+  in the event decode (`mouse-start-end` mode 0 only).
+* **Wheel events** (`mouse-4`/`mouse-5`): Gdk sends `scroll-event`, a
+  different event type, and the area asks for no scroll mask.
+* **The tty has no mouse at all** (`term.scm` says so: no GPM, no
+  `xterm-mouse-mode`), so the tab bar's context menu is reachable on a
+  terminal only after mouse reporting is ported.
+
+Tests: `pgtk-tests.scm`'s `schemacs_pgtk_mouse_buttons` group (3) pins
+the naming half for buttons 1, 2 and 3 - the half that was wrong. A
+Gdk button event cannot be synthesized in this environment
+(`gdk_test_simulate_button` is not in the typelib surface), so the
+`event:get-button` half is exercised by a real click; the import is
+proven by the library loading at all.
+
+## Emacs's Gtk build has no tab-bar widget (2026-11-19)
+
+Three files said it had one - `frame.scm`'s `frame-top-margin`,
+`xdisp.scm`'s `update-tab-bar`, and `tab-bar.scm`'s header - and
+AGENTS.md repeated it, calling our first-row-of-the-text-area drawing
+a named departure. **It is wrong.** `gtkutil.c` and `xmenu.c` build the
+*menu* bar's widget and contain no tab-bar code at all; the redisplay
+draws the tab bar into `f->tab_bar_window` (`xdisp.c:14696`,
+`redisplay_tab_bar`), `pgtkterm.c` reads `FRAME_TAB_BAR_LINES` for its
+height and hit-tests clicks against that window, and `FRAME_TOP_MARGIN`
+counts the bar's rows on a window-system frame exactly as on a tty.
+Our in-text-area row is Emacs's architecture, not a departure; what is
+missing is the dedicated window *object*, so a click's `posn-window`
+answers the frame where Emacs answers `tab_bar_window`. All four notes
+are corrected in place, and the correction is the reason the "implement
+the gtk tabs" suggestion existed at all.
+
+### ...and the popup path had two more bugs under it (2026-11-19)
+
+Reporting the button decode as the whole fix was wrong: with
+`down-mouse-3` finally reaching the command, the menu still did not
+pop, and the release still errored. The command itself signalled
+`Wrong type argument: windowp (#f)`.
+
+**`popup-menu-normalize-position` was missing its `posnp` branch**
+(`menu-bar.el:2788`). Emacs turns a posn that names a *window* into
+`((X Y) WINDOW)`; ours had only the nil, event and pass-through
+branches, so a tab-line click's posn reached `x-popup-menu` as if it
+were an event. The C's own `posnp` docstring is the reason a *frame*
+posn - the tab bar's - is deliberately not normalized: `posnp` answers
+nil when the posn's first element is a frame rather than a window.
+
+**`x_popup_menu_1`'s decode was missing its tab-bar arm**
+(`menu.c:1135`). A position whose second element is `tab-bar` means
+"use the current mouse position" - the C's
+`(EQ (XCAR (XCDR (position)), Qtab_bar))`. Ours fell through to the
+event branch, `event-start` answered the posn's `tab-bar` part (the
+C's `EVENT_START` macro is `CAR_SAFE (CDR_SAFE (...))`, which on a
+*posn* is its second element), and `posn-window` of the symbol
+`tab-bar` is nil - hence "windowp (#f)". Ported with the C's other arm
+as well: when `x` and `y` are nil ("a click in an external tool bar"),
+use the current mouse position, which is also what `(menu-bar)`
+positions do.
+
+**The `((X Y) WINDOW)` form is a two-element list.** The C reads
+`y = Fcar (XCDR (tem))`; our decode had read the cdr of a dotted pair.
+`popup-menu-normalize-position` builds the list form, so the old
+reading produced `(+ ypos '(0))` - "Wrong type argument in position 2:
+(0)".
+
+Verified live on Gtk (broadway): both `tab-bar-mouse-context-menu` and
+`tab-line-tab-context-menu` now block in the Gtk menu loop with the
+menu up - Emacs's `popup_widget_loop` - where before they either
+signalled or returned with no menu. `tab-bar-tests`'
+`schemacs_editor_tab_bar_context_menu` (2) and `tab-line-tests`'
+`schemacs_editor_tab_line_context_menu` (2) pin the menu's items, that
+`menu-show` receives them, and the flags (the tab bar's position is
+the "current mouse position", carrying no `MENU_FOR_CLICK`).
+
+Not carried, named: `mouse-position` answers cells here where Emacs's
+`Fmouse_position` answers pixels; a mouseless terminal's
+`(FRAME #f . #f)` uses the C's x=0, y=0 fallback; and the
+`last_nonmenu_event` half of the keyboard-navigation test (the
+part-of-window alone decides it here, as it did before).
+
+One bug in that port itself, found by the battery: the
+keyboard-navigation test. The C's is `CONSP (tem2) && EQ (XCAR (tem2),
+Qmenu_bar)` - the part-of-window of an F10 position is the *list*
+`(menu-bar)`, and it takes its car. Comparing the area itself with the
+symbol `menu-bar` matched nothing, so `tty_menu_activate` was handed a
+menu with no `MENU_KBD_NAVIGATION` and the right arrow no longer moved
+between top-level menus (the `tty-menu` check's last two assertions).
+Fixed, and the check passes.
+
+### The context menus were only half fixed: `split-window` lacked SIDE and PIXELWISE (2026-11-19)
+
+Chris, once the menus popped: the first item is "Context Menu"; Duplicate
+gives "Wrong type argument in position 1 (expecting struct): #f";
+Detach gives "Wrong type argument: frame-live-p". Three departures.
+
+**1. `split-window` was `(window size horizontal)`.** Emacs's is
+`(window size side pixelwise)` (`window.el:2833`): SIDE nil/`below`,
+`above`, `left`, `right`, with `up`/`down` aliases and - the clause that
+kept the tree's callers working - *any other non-nil value, `t`
+included, is `right`*. `split-window-no-error` translated SIDE to the
+old boolean and dropped PIXELWISE, and that translation is why the gap
+survived: every call site inside the tree went through it. Ported
+whole: SIDE with all five values and the fallback, `above`/`left`
+placing the new window *first* (it takes the second share; the old
+window keeps its SIZE and moves after it - the first version of this
+port wrongly swapped the sizes too, which the `window-resize` tests
+caught at 10/10), the children order in the combination
+(`list-insert-before`, and the order `make-window-parent` builds), and
+PIXELWISE - whose SIZE is pixels, converted to the tree's cells at the
+edge by the frame's character size.
+
+The failure it caused is exactly the Duplicate report:
+`window--state-put-1` splits with **pixel** sizes
+(`(split-window-no-error window size horizontal pixelwise)`), every
+such call raised a wrong-number-of-arguments inside the guard and
+answered #f, `window` in `window--state-put-1` became #f for the last
+child, and `window--state-put-2` called `window-parameters` on #f -
+"expecting struct: #f". Duplicate's clone *is* `(window-state-put
+(window-state-get))` (`tab-bar.el:2085`), so it took exactly that path.
+
+**2. Detach's `frame-live-p` did not reproduce once the split was
+fixed** - a clean editor detaches a tab into a new frame correctly
+(2 frames, the source keeps its remaining tabs). The reported error
+came after a failed Duplicate in the same session: the failed put had
+left the window tree half-built (the #f `window` above), and the next
+`select-frame` was handed a frame that was no longer live. Named rather
+than called fixed-by-itself.
+
+**3. The `hide` prompt rule was missing from `x_popup_menu_1`.** On a
+window system "a prompt whose first character has the `hide` text
+property is not a title" (`menu.c:1305`, the USE_GTK/NS arm) - which is
+precisely what `(propertize "Context Menu" 'hide t)` on the tab bar's
+and tab line's context menus is for. The port took the prompt as the
+title unconditionally, and the Gtk popup path draws a non-nil title as
+a disabled item, so the menu's first line read "Context Menu". The
+*pane name* keeps the prompt, as the C's `ASET` does, and on a terminal
+the prompt is still the title.
+
+**Named, not fixed**: the tab commands keep Emacs's optional arities
+inconsistently - `tab-bar-new-tab`, `tab-bar-duplicate-tab`,
+`tab-bar-detach-tab` and `tab-bar-close-tab` are `(&optional ...)` in
+Emacs and take every argument as required here, so only the
+interactive and menu paths (which pass all of them) work. Nothing the
+reported path uses.
+
+Tests: `schemacs_editor_tab_bar_context_menu` grew the two title cases;
+`window-state-tests`, `window-config-tests`, `tab-bar-tests` and
+`tab-line-tests` are green; the live Gtk run clones a tab and detaches
+one into a new frame.
+
+### The tab bar kept its width across a frame resize (2026-11-19)
+
+Chris: *"it starts off with a very wide 1st tab... If I full screen and
+duplicate the 1st tab bar then shrink it again, the tab bar size doesn't
+change. In real emacs it does shrink it. ... if I right click the 2nd tab
+it gives the menu prompt new tab, which is the wrong menu, it's as if it
+thinks it shrunk the tabs, but didn't render it."*
+
+One cause, both halves. `tab-bar-auto-width` distributes the tabs across
+`frame-inner-width`, and Emacs's docstring is explicit that the widths
+"change only when tabs are added or deleted, **or when the frame's
+dimensions change**" (`tab-bar.el:1288`). Our `update-tab-bar` is gated
+on `update-mode-lines?` (as Emacs's `update_tab_bar` is gated on the
+same flags), and **nothing set it on a resize**: the items kept the width
+they were first built at. The drawn bar came from those cached items,
+while `tab-bar--event-to-item` recomputes the layout at click time -
+so the bar drew wide, the hit test was narrow, and a right-click on the
+second tab landed past the last one and answered "New tab".
+
+`resize-frame-windows!` now sets `update-mode-lines?` beside the
+`FRAME_WINDOW_CHANGE` flag it already set by hand (departed from the C,
+which reaches the flag through `window_resize_apply`). That is the
+resize's own meaning: the mode line and the tab bar both depend on the
+frame's dimensions.
+
+Verified live on a Gtk frame under broadway: resizing the real window
+from 80 columns to 26 changed `frame-width` and the cached tab caption
+from 32 to 20 characters; before the fix the caption stayed 32.
+
+Tests: `tab-bar-tests`' `schemacs_editor_tab_bar_resize` (3) - the flag
+a resize sets, and the caption rebuilt at the new width. **The unit test
+calls `update-tab-bar` directly rather than `render!`**, because the
+test display's screen size is a fixed 80x24 and a `render!` re-derives
+the frame's size from it; the real front ends report the window's own
+size.
+
+Also exported on the way: `tab-bar-auto-width-max` (a defcustom) and
+`tab-bar-auto-width-min` (a defvar) were carried but unreachable - not
+in the export list. The `*`-name the first version of this export gave
+the second was wrong twice: Emacs's min is a plain `defvar`.
+
+## The Gtk front end was blurry on a HiDPI display (2026-11-19)
+
+Chris: *"why does schemacs look blurry? Do we somehow render our
+graphics at low resolution?... Other apps, terminals, real emacs look
+sharp, but schemacs looks fuzzy."*
+
+**It rendered a logical-resolution image and let Cairo upscale it.**
+The Gtk front end owns an ARGB32 image surface and paints it into the
+cairo context Gtk hands the draw signal. The surface was created at the
+widget's *allocation*, which Gtk reports in logical pixels, and painted
+1:1 - but on a window whose scale factor is 2 (the measured value on
+this machine: `gtk_widget_get_scale_factor` = 2, with Hyprland outputs
+at 1.25 and 1.6), a user unit maps to two device pixels, so every
+keystroke's pixels were drawn at half the display's resolution and
+upscaled 2x. Emacs's own pgtk backend rasterizes glyphs at the device
+resolution, which is why it looked sharp beside us.
+
+Fixed by making the surface device-resolution:
+
+* the surface is `allocation x scale` device pixels, and the context it
+  is drawn through is scaled by the factor (`cairo-scale cr s s`), so
+  every coordinate the renderer hands it stays logical while glyphs are
+  rasterized at 2x - Pango goes through the same CTM and hints at the
+  device size;
+* `pgtk-present!` divides the Gtk context's own scale back out
+  (`cairo-scale cr 1/s 1/s`) so the device-sized surface is one source
+  pixel per device pixel - without it the corrected surface would be
+  *downscaled* instead;
+* the factor is read from `gtk_widget_get_scale_factor` (via
+  `dynamic-func`, the tree's established FFI) every redisplay, and the
+  surface is remade when it changes, so moving the window between
+  outputs of different scales is handled.
+
+Measured on the real display: the surface went from 1536x837 to
+**3072x1674** device pixels, and a 1:1 crop of the screen shows crisp
+glyphs beside the same crop of an editor running the old code, which is
+visibly soft.
+
+Notes:
+
+* the grid, `*cell-width*`/`*cell-height*`, `screen-size`, the font
+  size and all mouse coordinates stay **logical** - only the surface
+  and the drawing context are device pixels; `gtk_widget_get_scale_factor`
+  is an integer, so a fractional output (1.25/1.6) renders at 2x and
+  the compositor scales down, which is what a GTK3 application can do;
+* `pgtk-write-screenshot!` now writes a device-resolution PNG on such a
+  display (a sharper screenshot; a display a test made has no widget,
+  so its scale is 1 and the pixel tests are unchanged);
+* `<pgtk-display>` gained a `scale` slot - a record change, so the
+  Guile cache must be cleared.

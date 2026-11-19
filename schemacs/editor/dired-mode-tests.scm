@@ -16,6 +16,7 @@
        revert-buffer insert-directory)
  (only (schemacs editor fileio) file-exists-p)
  (only (schemacs editor font-core) font-lock-mode)
+ (only (schemacs editor font-lock) font-lock-ensure)
  (schemacs editor frame)
  (only (schemacs editor search) regexp-quote re-search-forward)
  (only (schemacs editor indent) indent-rigidly)
@@ -480,10 +481,10 @@
 ;; Emacs colours the file name when it is marked or flagged:
 ;; `dired-font-lock-keywords' applies `dired-marked' (which inherits
 ;; `warning') to a marked file's name and `dired-flagged' (inheriting
-;; `error') to a flagged one. The mechanism here is the `face' text
-;; property rather than font-lock - named in dired.sld - so what is on
-;; trial is that the property lands on the name, follows `m' / `d' / `u',
-;; and is taken off again.
+;; `error') to a flagged one. The faces are made by font-lock, so with
+;; jit-lock a change only *marks* the line for refontification - the
+;; faces arrive at display time, or when a caller asks, which is what
+;; `font-lock-ensure` is for and what each step below does.
 (test-equal "marked and flagged names carry their faces, and unmarking clears them"
   '(dired-marked dired-flagged #f)
   (let* ((b (listing))
@@ -498,14 +499,17 @@
     ;; but does not turn the mode on yet - see the measurement in
     ;; dired.sld - so the test turns it on. What is on trial is the
     ;; keyword list, which is the same either way.
-    (font-lock-mode #t)
+    (font-lock-mode #t) (font-lock-ensure)
     (goto-file-line "a.txt")
     (dired-mark #f #t)
+    (font-lock-ensure)
     (let ((marked (name-face)))
       (goto-file-line "a.txt")
       (dired-flag-file-deletion #f #t)
+      (font-lock-ensure)
       (let ((flagged (name-face)))
         (dired-unmark #f #t)
+        (font-lock-ensure)
         (list marked flagged (name-face))))))
 
 (test-end "schemacs_editor_dired_mode")

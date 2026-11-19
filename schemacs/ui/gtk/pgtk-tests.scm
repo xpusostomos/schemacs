@@ -1589,6 +1589,32 @@
 
 (test-end "schemacs_editor_pgtk")
 
+;;----------------------------------------------------------------
+;; Which button, and the symbol it makes
+;;----------------------------------------------------------------
+;; **Every press used to be decoded as `down-mouse-1`.** The Gtk signal
+;; handler tags the event with what kind of event it is, and the decoder
+;; then spelled the symbol without ever asking which button - so a
+;; right-click on the tab bar arrived as a left click, and
+;; `[tab-bar down-mouse-3]` (the context menu, `tab-bar.el:569`) could
+;; never fire on this front end. GNU Emacs spells these in
+;; `modify_event_symbol`'s caller (`keyboard.c:6760`) from the button
+;; number; this is that half of the decode, tested without a Gdk event
+;; because the naming is a pure function of the number.
+(test-begin "schemacs_pgtk_mouse_buttons")
+(define (mouse-sym kind button)
+  ((@@ (schemacs ui gtk pgtk) pgtk-mouse-button-symbol) kind button))
+(test-equal "a left button names the click events"
+  '(down-mouse-1 mouse-1 drag-mouse-1)
+  (list (mouse-sym 'down 1) (mouse-sym 'click 1) (mouse-sym 'drag 1)))
+(test-equal "the right button keeps its number, so the context menu can be bound"
+  '(down-mouse-3 mouse-3 drag-mouse-3)
+  (list (mouse-sym 'down 3) (mouse-sym 'click 3) (mouse-sym 'drag 3)))
+(test-equal "the middle button too"
+  '(down-mouse-2 mouse-2)
+  (list (mouse-sym 'down 2) (mouse-sym 'click 2)))
+(test-end "schemacs_pgtk_mouse_buttons")
+
 (test-begin "schemacs_pgtk_queue")
 
 ;; **A key queued while a command or a redisplay was running was never

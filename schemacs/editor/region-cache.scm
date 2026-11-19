@@ -135,15 +135,24 @@
     ;; Allocating
     ;;----------------------------------------------------------------
 
-    (define (new-region-cache buffer-beg)
-      ;; A new, empty cache for a buffer whose first position is
-      ;; BUFFER-BEG - GNU Emacs's `new_region_cache' (`region-cache.c'),
-      ;; which takes the buffer's `BEG' from the buffer. It holds one
-      ;; boundary, at the buffer's beginning, with value 0: "unknown".
+    (define (new-region-cache buffer-beg buffer-end)
+      ;; A new, empty cache for a buffer whose text runs from BUFFER-BEG
+      ;; to BUFFER-END - GNU Emacs's `new_region_cache' (`region-cache.c'),
+      ;; which reads the buffer's `BEG' and `Z'. **Those are the *text*'s
+      ;; ends, not `BEGV'/`ZV'**: the cache records facts about characters,
+      ;; which a narrowing does not change, and `revalidate_region_cache'
+      ;; reconciles its stored basis against them. Passing the accessible
+      ;; range instead made a narrowed buffer's "no line break here" run
+      ;; cover text it had never scanned once the buffer was widened -
+      ;; the screen showed the rest of the file as one line, with `^J'
+      ;; where its newlines were.
+      ;;
+      ;; It holds one boundary, at the text's beginning, with value 0:
+      ;; "unknown".
       ;;--------------------------------------------------------------
       (let ((c (make<region-cache> (make-vector *new-cache-gap* #f)
                                    0 *new-cache-gap* 0
-                                   0 0 buffer-beg buffer-beg)))
+                                   0 0 buffer-beg buffer-end)))
         ;; Insert the boundary for the buffer start.
         (set!%cache-len c 1)
         (set!%cache-gap-len c (- *new-cache-gap* 1))

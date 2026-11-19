@@ -45,8 +45,8 @@
     ;; the whole of `copy-sequence''s string arm - the C calls
     ;; `copy_intervals' and `set_string_intervals' there
     (only (schemacs editor intervals)
-          copy-intervals set-interval-object! set!string-intervals
-          string-intervals)
+          compare-string-intervals copy-intervals set-interval-object!
+          set!string-intervals string-intervals)
     ;; `line-number-at-pos' is a DEFUN of this file and reads the buffer
     ;; through `point' (`PT') and the bounds, and its POSITION argument
     ;; may be a marker - the C's `MARKERP (position)' branch - so the
@@ -66,6 +66,9 @@
     )
 
   (export compare-strings
+          equal-including-properties
+          mapconcat
+          %substring
           buffer-hash
           concat
           vconcat
@@ -280,6 +283,20 @@
                                (min (max pos (buffer-beg ed))
                                     (buffer-z ed)))))))
 
+    (define (%chars-or-numbers->string elements)
+      ;; A list of characters or character code points, as a string - the
+      ;; C's `Fstring`: "The elements ... should be characters or
+      ;; integers that are valid character codes." A character passes as
+      ;; itself (it is this tree's spelling of one), an integer through
+      ;; `integer->char`.
+      ;;--------------------------------------------------------------
+      (list->string
+       (map (lambda (x)
+              (cond ((char? x) x)
+                    ((integer? x) (integer->char x))
+                    (else (error "Wrong type argument: characterp" x))))
+            elements)))
+
     (define (concat . args)
       ;; GNU Emacs's `concat' (fns.c): "Concatenate all the arguments and
       ;; make the result a string. The arguments may be strings, lists of
@@ -287,9 +304,12 @@
       ;; ... The result is a string with the text properties of the
       ;; arguments, when they have any."
       ;;
-      ;; The string arm is here, with the list-of-characters arm beside
-      ;; it; the vector, record and bool-vector arms are not, nothing
-      ;; asking for them.
+      ;; The string arm is here, with the list/vector-of-characters arms
+      ;; beside it. **Those take `numbers` as well as characters**, as the
+      ;; C's do (`Fstring` accepts either for a character element) - the
+      ;; docstring's "lists of numbers" - which is what `mapconcat`'s
+      ;; pieces arrive as when FUNCTION answers `(list c)`. The record and
+      ;; bool-vector arms are not carried, nothing asking for them.
       ;;
       ;; The properties are what make this `concat' rather than
       ;; `string-append': the C concatenates first and then copies the
@@ -304,8 +324,9 @@
                     (cond ((string? arg) arg)
                           ((not arg) "")
                           ((char? arg) (string arg))
-                          ((list? arg) (list->string arg))
-                          ((vector? arg) (list->string (vector->list arg)))
+                          ((list? arg) (%chars-or-numbers->string arg))
+                          ((vector? arg)
+                           (%chars-or-numbers->string (vector->list arg)))
                           (else (error "Wrong type argument: sequencep" arg))))
                   args)))
         (let ((result (apply string-append pieces)))
@@ -355,6 +376,134 @@
               (begin
                 (vector-set! result i (car rest))
                 (loop (+ i 1) (cdr rest)))))))
+
+    (define (mapconcat function sequence . rest)
+      ;; GNU Emacs's `mapconcat' (`fns.c'): "Apply FUNCTION to each element
+      ;; of SEQUENCE, and concat the results as strings. In between each
+      ;; pair of results, stick in SEPARATOR."
+      ;;
+      ;; SEQUENCE may be a list, a vector or a string; over a string
+      ;; FUNCTION is called with each character as an *integer*, as the
+      ;; C's `mapcar1' does. A nil result is the empty string, and the
+      ;; separator may be a string, a vector or a list of characters -
+      ;; `concat' takes all of those, and copies their properties, as the
+      ;; C's final `Fconcat' does. A bool-vector sequence is not carried;
+      ;; nothing here makes one.
+      ;;--------------------------------------------------------------
+      (let* ((elements
+              (cond ((list? sequence) sequence)
+                    ((vector? sequence) (vector->list sequence))
+                    ((string? sequence)
+                     (let loop ((i 0) (out '()))
+                       (if (>= i (string-length sequence))
+                           (reverse out)
+                           (loop (+ i 1)
+                                 (cons (char->integer
+                                        (string-ref sequence i))
+                                       out)))))
+                    (else
+                     (error "Wrong type argument: sequencep" sequence))))
+             (pieces
+              (let loop ((rest elements) (out '()))
+                (if (null? rest)
+                    (reverse out)
+                    (loop (cdr rest) (cons (function (car rest)) out)))))
+             (sep (if (pair? rest) (or (car rest) "") "")))
+        (if (null? pieces)
+            ""
+            (let loop ((rest (cdr pieces)) (out (concat (car pieces))))
+              (if (null? rest)
+                  out
+                  (loop (cdr rest) (concat out sep (car rest))))))))
+
+    (define (%substring string . args)
+      ;; GNU Emacs's `substring' (`fns.c:1579'): "Return a new string
+      ;; whose contents are a substring of STRING. ... Negative values
+      ;; count from the end of STRING. If TO is nil, it means the length
+      ;; of STRING. If FROM is nil or omitted, it means 0."
+      ;;
+      ;; **Why it exists: Scheme's `substring' drops text properties.**
+      ;; Emacs's is `substring_both', which copies the characters and
+      ;; then `copy_text_properties' from the source range - so a ported
+      ;; Elisp that cuts a propertized string keeps its faces and its
+      ;; `keymap`/`close-tab` properties. Guile's `substring' is, in
+      ;; Emacs's vocabulary, `substring-no-properties' (`fns.c:1610'),
+      ;; and a port that reaches for it loses them silently: the tab
+      ;; bar's padding loop (`tab-bar-auto-width`, `tab-bar.el:1444') is
+      ;; built out of `substring' and `concat', and the close button
+      ;; stopped being a close button because of it.
+      ;;
+      ;; **Named `%substring' because a core binding cannot be shadowed**
+      ;; - the rule `%assq' (`:463') already carries - and `substring' is
+      ;; `(scheme base)''s. Use this one wherever the Emacs original uses
+      ;; `substring', and Guile's only where Emacs would have written
+      ;; `substring-no-properties'.
+      ;;
+      ;; **Not carried: the vector arm.** Emacs's `CHECK_VECTOR_OR_STRING`
+      ;; lets `substring` cut a vector too; nothing here does, and
+      ;; `vector-copy` is the Scheme spelling of the same operation.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length string))
+             (from (if (and (pair? args) (car args)) (car args) 0))
+             (from (if (< from 0) (+ len from) from))
+             (to (if (and (pair? args) (pair? (cdr args)) (cadr args))
+                     (cadr args)
+                     len))
+             (to (if (< to 0) (+ len to) to)))
+        ;; `validate_subarray` (`fns.c:1550`): "Signals an error if the
+        ;; range is not within the array's bounds" - it does not clip, and
+        ;; a FROM past TO is the same error. Measured on Emacs 31.1:
+        ;; `(substring "abcdef" -9)` and `(substring "abcdef" 5 2)` both
+        ;; raise `args-out-of-range`.
+        (unless (and (<= 0 from) (<= from len))
+          (error "Args out of range" string from))
+        (unless (and (<= 0 to) (<= to len))
+          (error "Args out of range" string to))
+        (when (> from to)
+          (error "Args out of range" string from to))
+        (let ((result (substring string from to))
+              (ivs (string-intervals string)))
+          (when ivs
+            (let ((copy (copy-intervals ivs from (- to from))))
+              (when copy
+                (set-interval-object! copy result)
+                (set!string-intervals result copy))))
+          result)))
+
+    (define (equal-including-properties o1 o2)
+      ;; GNU Emacs's `equal-including-properties' (`fns.c:2823'): "Return
+      ;; t if two Lisp objects have similar structure and contents. This
+      ;; is like `equal' except that it compares the text properties of
+      ;; strings. (`equal' ignores text properties.)"
+      ;;
+      ;; Scheme's `equal?' ignores a string's properties too, and that is
+      ;; not a corner case here: the redisplay skips a mode line or tab
+      ;; line whose freshly formatted string `equal?' says it already
+      ;; drew, and two tab lines can have exactly the same characters
+      ;; with different *faces* - which is what a window switching
+      ;; between two buffers produces. The skip then left a wiped row
+      ;; blank (`C-x <right>' `C-x <left>' in a tab-line frame).
+      ;;
+      ;; The C is `internal_equal' with `EQUAL_INCLUDING_PROPERTIES',
+      ;; which recurses through conses and vectors and, for strings,
+      ;; calls `compare_string_intervals'. The vector arm is carried; the
+      ;; hash-table, char-table and record arms answer `equal?' here,
+      ;; nothing in the tree asking for their properties.
+      ;;--------------------------------------------------------------
+      (cond
+       ((and (string? o1) (string? o2))
+        (and (string=? o1 o2) (compare-string-intervals o1 o2)))
+       ((and (pair? o1) (pair? o2))
+        (and (equal-including-properties (car o1) (car o2))
+             (equal-including-properties (cdr o1) (cdr o2))))
+       ((and (vector? o1) (vector? o2))
+        (and (= (vector-length o1) (vector-length o2))
+             (let loop ((i 0))
+               (or (>= i (vector-length o1))
+                   (and (equal-including-properties (vector-ref o1 i)
+                                                    (vector-ref o2 i))
+                        (loop (+ i 1)))))))
+       (else (equal? o1 o2))))
 
     (define (copy-sequence arg)
       ;; GNU Emacs's `copy-sequence' (fns.c:761): "Return a copy of a

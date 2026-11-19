@@ -1,17 +1,22 @@
 (import
  (scheme base)
  (scheme write)
- (only (oop goops) make)
+ (only (oop goops) make define-method)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
  (only (ice-9 exceptions) exception-message)
- (only (schemacs editor dispnew) current-display)
+ (only (schemacs editor dispnew) current-display menu-show
+       update-mode-lines? set-update-mode-lines!)
+ (only (schemacs editor menu) menu-items menu-items-used MENU-FOR-CLICK)
+ ;; The `hide`-prompt rule's display test (`menu.c:1305`).
+ (only (schemacs editor faces) *window-system*)
  (only (schemacs editor test-display) <test-display>)
  (only (schemacs editor frame)
        *current-frame* *current-buffer* *default-frame-alist* *frame-list*
        *frame-creation-function*
        new-frame frame-parameter frame-selected-window window-top
-       window-height window-list frame-inner-width %frame-tab-bar-lines)
+       window-height window-list frame-inner-width %frame-tab-bar-lines
+       frame-tab-bar-items change-frame-size resize-frame-windows!)
  (only (schemacs editor window) switch-to-buffer split-window
       run-window-change-functions)
  (only (schemacs editor command) command-record-named)
@@ -19,7 +24,7 @@
        tab-bar-mode tab-bar-mode-variable tab-bar-tabs tab-bar-new-tab
        tab-bar-select-tab tab-bar-close-tab tab-bar-rename-tab
        tab-bar-format-tabs *tab-bar-format* tab-bar-format-list
-       tab-bar--key-to-number tab-bar-mouse-down-1 tab-bar-tabs-set
+       tab-bar--key-to-number tab-bar-mouse-down-1 tab-bar-mouse-1 tab-bar-tabs-set
        tab-bar-close-other-tabs *tab-bar-close-last-tab-choice*
        tab-bar-history-mode tab-bar-history-mode-variable
        tab-bar-history-back tab-bar-history-forward
@@ -31,7 +36,7 @@
        tab-bar-format-menu-bar tab-bar-menu-bar-button
        tab-switcher tab-switcher-noselect tab-switcher-select tab-switcher-mode
        tab-switcher-mode-map
-       *tab-bar-auto-width* tab-bar-map tab-bar-mouse-move-tab
+       *tab-bar-auto-width* *tab-bar-auto-width-max* tab-bar-map tab-bar-mouse-move-tab
        tab-bar-mouse-context-menu tab-bar-move-tab-to-frame
        tab-bar-detach-tab tab-bar--alist-get
        tab-bar-tab-group-default *tab-bar-show-inactive-group-tabs*
@@ -210,6 +215,30 @@
         (list (= (string-length first) (string-length current))
               (> (string-length first) (string-length "tab-one x")))))))
 
+;; **The close button is the last thing in the caption, and
+;; `tab-bar-auto-width` pads *before* it.** `tab-bar-tab-name-format-
+;; close-button` (`tab-bar.el:897`) is `(concat name tab-bar-close-button)`,
+;; and the button's `close-tab` text property is what tells the padding
+;; loop where to insert (`:1431`) and what tells a click on the X to close
+;; the tab. Written with `string-append` the property was dropped - the
+;; padding went after the X, and a click on it was not a close.
+(test-equal '(#t #t #t)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-new-tab #f #f)
+      (switch-to-buffer (get-buffer-create "two"))
+      (let* ((items (tab-bar-items))
+             (caption
+              (let loop ((rest items))
+                (cond ((null? rest) #f)
+                      ((eq? (car (car rest)) 'current-tab)
+                       (list-ref (car rest) 3))
+                      (else (loop (cdr rest))))))
+             (len (string-length caption)))
+        (list (eq? (get-text-property (- len 1) 'close-tab caption) #t)
+              (char=? (string-ref caption (- len 1)) #\x)
+              (> len (string-length "two x")))))))
+
 ;; ...and the current tab's item is enabled, with the close button inside
 ;; its caption - `tab-bar-name-format-close-button`.
 (test-equal '(current-tab #t)
@@ -282,6 +311,53 @@
         (*last-read-event* event)
         (tab-bar-mouse-down-1 event)
         (buffer-name (current-buffer))))))
+
+;; Clicking the **current** tab is a no-op. Its item's key is
+;; `current-tab`, `tab-bar--key-to-number` answers nil for it, and
+;; `tab-bar-mouse-down-1` runs `tab-bar-select-tab` (`tab-bar.el:402`) -
+;; whose nil translation selects the tab it is already on. Calling the
+;; internal function with nil instead died with "Wrong type argument in
+;; position 1: #f".
+(test-equal "two"
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f)
+                   (*tab-bar-auto-width* #f))
+      (tab-bar-new-tab #f #f)
+      (switch-to-buffer (get-buffer-create "two"))
+      (render! frame)
+      (let* ((x (let loop ((rest (tab-bar-items)) (col 0))
+                  (cond ((null? rest) col)
+                        ((eq? (caar rest) 'current-tab) col)
+                        (else (loop (cdr rest)
+                                    (+ col (string-length
+                                            (list-ref (car rest) 3))))))))
+             (event (list 'down-mouse-1 (posn-at-x-y x 0 frame))))
+        (*last-read-event* event)
+        (tab-bar-mouse-down-1 event)
+        (buffer-name (current-buffer))))))
+
+;; The "+" button adds a tab. The item's command is the *symbol*
+;; `tab-bar-new-tab` in the menu-item form, and the command's two
+;; arguments come from its interactive specification - so the click must
+;; `call-interactively` it, as `tab-bar-mouse-1` does (`tab-bar.el:417`);
+;; a bare call was "Wrong number of arguments".
+(test-equal '(2 3)
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f)
+                   (*tab-bar-auto-width* #f))
+      (tab-bar-new-tab #f #f)
+      (render! frame)
+      (let ((before (length (tab-bar-tabs))))
+        (let* ((x (let loop ((rest (tab-bar-items)) (col 0))
+                    (cond ((null? rest) col)
+                          ((eq? (caar rest) 'add-tab) col)
+                          (else (loop (cdr rest)
+                                      (+ col (string-length
+                                              (list-ref (car rest) 3))))))))
+               (event (list 'mouse-1 (posn-at-x-y x 0 frame))))
+          (*last-read-event* event)
+          (tab-bar-mouse-1 event)
+          (list before (length (tab-bar-tabs))))))))
 
 ;; The window starts below the bar: `FRAME_TOP_MARGIN` is the menu bar's
 ;; row plus the tab bar's.
@@ -632,3 +708,130 @@
             (eq? tab-list tab-switcher)))))
 
 (test-end "schemacs_editor_tab_bar")
+
+;;----------------------------------------------------------------
+;; The tab bar's right-click, end to end (`tab-bar.el:431', `:569')
+;;----------------------------------------------------------------
+;;
+;; `tab-bar-mouse-context-menu` is bound to `[tab-bar down-mouse-3]',
+;; and all it does is build the clicked tab's menu and hand it to
+;; `popup-menu`. Two things had to be true for that to pop at all: the
+;; Gtk front end had to report the right button as `down-mouse-3', and
+;; `x-popup-menu` had to accept a posn whose part-of-window is `tab-bar`
+;; as "the current mouse position" (`menu.c:1135') - before that arm
+;; existed the posn was read as an event and the menu died with
+;; "Wrong type argument: windowp (#f)", so the command could never run.
+(test-begin "schemacs_editor_tab_bar_context_menu")
+
+(define *shown-menu* #f)
+
+(define (menu-strings items used)
+  ;; Every string in the parsed `menu_items`, in order - item names and
+  ;; pane names alike. The structure is a vector of fixed-size groups
+  ;; (`menu-items-item-length'), so a string scan is the shape-agnostic
+  ;; reader; the tests below keep only the names they are about.
+  (let loop ((i 0) (acc '()))
+    (if (>= i used)
+        (reverse acc)
+        (let ((v (vector-ref items i)))
+          (loop (+ i 1) (if (string? v) (cons v acc) acc))))))
+
+(define-method (menu-show (d <test-display>) frame x y flags title)
+  (set! *shown-menu* (list flags title (menu-strings (menu-items)
+                                                     (menu-items-used))))
+  #f)
+
+(define (only-names names wanted)
+  (let loop ((rest names) (acc '()))
+    (if (null? rest)
+        (reverse acc)
+        (loop (cdr rest)
+              (if (member (car rest) wanted)
+                  (cons (car rest) acc)
+                  acc)))))
+
+(let ((frame (fresh-frame)))
+  (parameterize ((*current-frame* frame) (*current-buffer* #f))
+    (render! frame)
+    (set! *shown-menu* #f)
+    (tab-bar-mouse-context-menu (list 'down-mouse-3 (posn-at-x-y 4 0 frame)) #f)
+    (test-equal "right-click on a tab builds that tab's menu and shows it"
+      '("Duplicate" "Detach" "Close" "Close other tabs")
+      (only-names (caddr *shown-menu*)
+                  '("Duplicate" "Detach" "Close" "Close other tabs")))
+    ;; The bar's own contribution is no flag at all; the 1 that
+    ;; `x_popup_menu_1` adds is `MENU_KEYMAPS`, because the menu it was
+    ;; handed is a keymap. What matters is that `MENU_FOR_CLICK` - which
+    ;; the event path sets - is absent.
+    (test-equal "the tab bar's position is the current mouse position, not a click"
+      0 (logand (car *shown-menu*) MENU-FOR-CLICK))))
+
+;; **A prompt whose first character has the `hide` property is not a
+;; title on a window system** (`menu.c:1305`, the USE_GTK/NS arm). That
+;; is what `(propertize "Context Menu" 'hide t)` is for: without it the
+;; menu shows a title item reading "Context Menu".
+(let ((frame (fresh-frame)))
+  (parameterize ((*current-frame* frame) (*current-buffer* #f))
+    (render! frame)
+    (parameterize ((*window-system* 'pgtk))
+      (set! *shown-menu* #f)
+      (tab-bar-mouse-context-menu (list 'down-mouse-3 (posn-at-x-y 4 0 frame)) #f)
+      (test-equal "a hidden prompt is not a menu title on a window system"
+        #f (cadr *shown-menu*)))
+    ;; ...and on a terminal the prompt *is* the title, as the tty menu
+    ;; draws it.
+    (set! *shown-menu* #f)
+    (tab-bar-mouse-context-menu (list 'down-mouse-3 (posn-at-x-y 4 0 frame)) #f)
+    (test-equal "on a terminal the prompt is the title"
+      "Context Menu" (cadr *shown-menu*))))
+
+(test-end "schemacs_editor_tab_bar_context_menu")
+
+;;----------------------------------------------------------------
+;; A frame resize re-fits the tabs (`tab-bar-auto-width')
+;;----------------------------------------------------------------
+;;
+;; `tab-bar-auto-width` distributes the tabs across
+;; `frame-inner-width`, and its docstring says the widths "change only
+;; when tabs are added or deleted, or when the frame's dimensions
+;; change" (`tab-bar.el:1288`). Our `update-tab-bar` is gated on
+;; `update-mode-lines?` (Emacs's `update_tab_bar` is gated the same
+;; way), so a resize that does not set the flag leaves the bar drawn at
+;; its old width while `tab-bar--event-to-item` recomputes the layout at
+;; click time - the bar looks wide, the hit test is narrow, and a click
+;; on the second tab lands past the last one.
+(test-begin "schemacs_editor_tab_bar_resize")
+
+(define (tab-caption frame)
+  (let ((items (frame-tab-bar-items frame)))
+    (let loop ((i 0))
+      (and (< i (vector-length items))
+           (let ((v (vector-ref items i)))
+             (if (and (string? v) (>= (string-length v) 7)
+                      (string=? (substring v 0 7) "tab-one"))
+                 v
+                 (loop (+ i 1))))))))
+
+(parameterize ((*tab-bar-auto-width-max* '((10000) 10000)))
+  (let ((frame (fresh-frame)))
+    (parameterize ((*current-frame* frame) (*current-buffer* #f))
+      (tab-bar-mode 1)
+      (render! frame)
+      (let ((wide (and (tab-caption frame)
+                       (string-length (tab-caption frame)))))
+        (test-equal "the tab has a caption to resize" #t (and wide #t))
+        (set-update-mode-lines! #f)
+        (resize-frame-windows! frame 24 80 24 60)
+        (test-equal "a frame resize marks the mode lines for update"
+          #t (update-mode-lines?))
+        (change-frame-size frame 60 24 #f #f)
+        ;; **`update-tab-bar` directly, not `render!`.** The test
+        ;; display's screen size is a fixed 80x24, and a `render!`
+        ;; re-derives the frame's size from it, undoing the resize. The
+        ;; real front ends report the window's own size, so this is the
+        ;; harness's limit, not the editor's.
+        ((@@ (schemacs editor xdisp) update-tab-bar) frame)
+        (test-equal "the tab is rebuilt at the frame's new width"
+          #t (< (string-length (tab-caption frame)) wide))))))
+
+(test-end "schemacs_editor_tab_bar_resize")

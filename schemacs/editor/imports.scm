@@ -51,6 +51,7 @@
     (schemacs editor keyboard)
     (schemacs editor isearch)
     (schemacs editor disp-table)
+    (schemacs editor help-macro)
     (except (schemacs editor timer)  timer-next-delay)
     (schemacs editor dispnew)
     (schemacs editor matrix)
@@ -93,6 +94,7 @@
     (schemacs editor help-mode)
     (schemacs editor indent)
     (schemacs editor cmds)
+    (schemacs editor jit-lock)
     (schemacs editor keymap)
     (schemacs editor lisp-mode)
     (schemacs editor theme)
@@ -152,6 +154,7 @@
     %setup-syntax-table
     %styleb-bit
     %stylec2
+    %substring
     %text-editor-incr-modiff!
     %text-editor-newline-cache
     %transpose-subr
@@ -190,6 +193,7 @@
     *adjust-suspend-auto-hscroll-function*
     *after-change-functions*
     *after-change-major-mode-hook*
+    *after-init-hook*
     *after-make-frame-functions*
     *after-redisplay-hook*
     *amalgamating-count%
@@ -202,6 +206,7 @@
     *auto-mode-interpreter-regexp*
     *barf-if-buffer-read-only-function*
     *before-change-functions*
+    *before-init-hook*
     *before-make-frame-hook*
     *beginning-of-defun-function*
     *blink-cursor-blinks*
@@ -226,6 +231,8 @@
     *change-major-mode-after-body-hook*
     *change-major-mode-hook*
     *char-property-alias-alist*
+    *char-unify-table*
+    *charset-map-path*
     *charset-table*
     *check-mark-function*
     *clear-message-function*
@@ -240,9 +247,16 @@
     *command-execute--query-function*
     *command-table*
     *comment-auto-fill-only-comments*
+    *comment-combine-change-calls*
+    *comment-empty-lines*
     *comment-end-can-be-escaped*
     *comment-multi-line*
+    *comment-padding*
+    *comment-quote-nested*
+    *comment-quote-nested-function*
+    *comment-region-function*
     *comment-style*
+    *comment-use-global-state*
     *comment-use-syntax-ppss*
     *completion-auto-help*
     *completion-auto-wrap*
@@ -320,6 +334,7 @@
     *down-list-function*
     *echo-area-buffer*
     *echo-buffers*
+    *emacs-startup-hook*
     *enable-disabled-menus-and-buttons*
     *enable-kinsoku*
     *enable-local-variables*
@@ -329,6 +344,7 @@
     *eval-expression-debug-on-error*
     *eval-expression-print-maximum-character*
     *eval-minibuffer-function*
+    *event--posn-at-point-function*
     *exchange-point-and-mark-highlight-region*
     *exec-suffixes*
     *extended-command-history*
@@ -386,6 +402,7 @@
     *frame-list*
     *gap-bytes-dfl*
     *gap-bytes-min*
+    *get-scratch-buffer-create-function*
     *get-text-property-function*
     *global-minor-modes*
     *global-mode-string*
@@ -395,6 +412,8 @@
     *gui--last-selected-text-primary*
     *gui-last-cut-in-clipboard*
     *gui-last-cut-in-primary*
+    *help--help-screen-function*
+    *help-for-help-use-variable-pitch*
     *help-mode-function*
     *help-xref-following*
     *help-xref-stack-item*
@@ -416,9 +435,11 @@
     *inhibit-quit*
     *inhibit-read-only*
     *inhibit-redisplay*
+    *inhibit-startup-hooks*
     *init-file-user*
     *initial-frame-alist*
     *initial-major-mode*
+    *initial-scratch-message*
     *insert-default-directory*
     *insert-directory-program*
     *interactive-read-buffer-function*
@@ -434,6 +455,13 @@
     *isearch-lazy-highlight*
     *iso-2022-charset-list*
     *item-properties*
+    *jit-lock-after-change-extend-region-functions*
+    *jit-lock-chunk-size*
+    *jit-lock-context-time*
+    *jit-lock-contextually*
+    *jit-lock-defer-time*
+    *jit-lock-end*
+    *jit-lock-start*
     *kill-buffer-query-functions*
     *kill-do-not-save-duplicates*
     *kill-read-only-ok*
@@ -608,6 +636,7 @@
     *sentence-end-double-space*
     *sentence-end-without-period*
     *sentence-end-without-space*
+    *set-buffer-major-mode-function*
     *set-marker-function*
     *set-marker-insertion-type-function*
     *set-message-function*
@@ -625,6 +654,7 @@
     *syntax-propertize-extend-region-functions*
     *system-time-locale*
     *tab-bar-auto-width*
+    *tab-bar-auto-width-max*
     *tab-bar-close-button-show*
     *tab-bar-close-last-tab-choice*
     *tab-bar-close-tab-select*
@@ -686,6 +716,7 @@
     *text-quoting-style*
     *this-command*
     *this-command-keys*
+    *three-step-help*
     *timer-idle-list*
     *timer-list*
     *timer-wake*
@@ -700,6 +731,7 @@
     *tty-select-active-regions*
     *tty-slant-table*
     *tty-weight-table*
+    *uncomment-region-function*
     *undefined-face-attribute*
     *undo-limit*
     *unread-command-events*
@@ -716,6 +748,7 @@
     *window-persistent-parameters*
     *window-restore-killed-buffer-windows*
     *window-scroll-function*
+    *window-setup-hook*
     *window-system*
     *words-include-escapes*
     *x-pre-popup-menu-hook*
@@ -910,6 +943,7 @@
     bytes-have-null?
     cache-long-scans
     calculate-lisp-indent
+    call-interactively
     call-process
     called-interactively?
     cancel-timer
@@ -954,15 +988,24 @@
     char-width-default
     char-width-ranges
     characterp
+    charset-ascii-compatible-p
+    charset-by-name
     charset-code-offset
     charset-code-space
+    charset-compact-codes-p
     charset-dimension
     charset-from-id
     charset-id
+    charset-invalid-code
     charset-iso-chars-96
     charset-iso-final-char
+    charset-max-char
     charset-max-code
+    charset-min-char
+    charset-min-code
     charset-name
+    charset-unified?
+    charset-unify-map
     charset?
     check-coding-system
     check-face
@@ -1019,10 +1062,13 @@
     command-value-of
     command?
     comment-add
+    comment-add-count
     comment-beginning
+    comment-box
     comment-choose-indent
     comment-column
     comment-continue
+    comment-dwim
     comment-end
     comment-end-skip
     comment-enter-backward
@@ -1033,22 +1079,40 @@
     comment-indent-new-line
     comment-inline-offset
     comment-insert-comment-function
+    comment-kill
+    comment-line
     comment-line-break-function
+    comment-make-bol-ws
+    comment-make-extra-lines
     comment-normalize-vars
+    comment-only-p
+    comment-or-uncomment-region
+    comment-padleft
+    comment-padright
+    comment-quote-nested
+    comment-quote-nested-default
+    comment-quote-re
+    comment-region
+    comment-region-default
+    comment-region-default-1
+    comment-region-internal
     comment-search-backward
     comment-search-forward
+    comment-set-column
     comment-start
     comment-start-skip
+    comment-string-reverse
     comment-string-strip
     comment-styles
-    comment-use-global-state
     comment-use-syntax
     comment-valid-prefix-p
+    comment-with-narrowing
     common-lisp-indent-call-method
     common-lisp-indent-function
     common-lisp-indent-function-1
     common-lisp-loop-part-indentation
     common-prefix
+    compare-string-intervals
     compare-strings
     compareseq
     complete-with-action
@@ -1154,6 +1218,7 @@
     deactivate-mark
     debugger-mode-map
     debugger-quit
+    decode-char
     decode-coding-string
     decode-eol
     decode-file-bytes
@@ -1374,6 +1439,7 @@
     en/disable-command
     enable-command
     enable-theme
+    encode-char
     encode-coding-string
     encode-eol
     end-of-buffer
@@ -1390,6 +1456,7 @@
     eobp
     eol
     eolp
+    equal-including-properties
     erase-buffer
     erase-window-cursor!
     error-message-string
@@ -1401,6 +1468,7 @@
     eval-minibuffer
     eval-print-last-sexp
     eval-region
+    event--posn-at-point
     event-basic-type
     event-convert-list
     event-end
@@ -1561,13 +1629,18 @@
     font-lock-default-unfontify-region
     font-lock-defaults
     font-lock-ensure
+    font-lock-ensure-function
     font-lock-eval-keywords
+    font-lock-extend-after-change-region-function
+    font-lock-extend-jit-lock-region-after-change
     font-lock-extend-region-multiline
     font-lock-fillin-text-property
     font-lock-flush
+    font-lock-flush-function
     font-lock-fontified
     font-lock-fontify-anchored-keywords
     font-lock-fontify-buffer
+    font-lock-fontify-buffer-function
     font-lock-fontify-keywords-region
     font-lock-fontify-region
     font-lock-fontify-syntactically-region
@@ -1583,9 +1656,12 @@
     font-lock-set-defaults
     font-lock-set-defaults-done?
     font-lock-specified-p
+    font-lock-turn-off-thing-lock
+    font-lock-turn-on-thing-lock
     font-lock-unfontify-buffer
     font-lock-unfontify-region
     font-lock-value-in-major-mode
+    fontification-functions
     force-mode-line-update
     force-window-update
     format
@@ -1664,6 +1740,7 @@
     get-keyelt
     get-local-map
     get-pos-property
+    get-scratch-buffer-create
     get-selection
     get-specified-cursor-type
     get-text-property
@@ -1739,20 +1816,29 @@
     help--describe-map-compare
     help--describe-map-tree
     help--filter-info-list
+    help--for-help-make-commands
+    help--for-help-make-sections
+    help--help-screen
     help--key-description-fontified
     help--shadow-lookup
     help--window-setup
     help-buffer
+    help-char
+    help-event-list
     help-fns--ensure-empty-line
     help-fns--insert-bindings
+    help-fns--insert-menu-bindings
     help-fns--key-bindings
     help-fns--obsolete
     help-fns-function-name
+    help-for-help
+    help-for-help-buffer-name
     help-key-description
     help-map
     help-mode
     help-mode-hook
     help-mode-map
+    help-quit
     help-setup-xref
     history-entries
     history?
@@ -1922,6 +2008,20 @@
     itree-tree-root
     itree-tree-size
     itree-tree?
+    jit-lock-after-change
+    jit-lock-context-fontify
+    jit-lock-context-timer
+    jit-lock-context-unfontify-pos
+    jit-lock-contextually
+    jit-lock-fontify-now
+    jit-lock-force-redisplay
+    jit-lock-function
+    jit-lock-functions
+    jit-lock-mode
+    jit-lock-mode-on?
+    jit-lock-refontify
+    jit-lock-register
+    jit-lock-unregister
     just-one-space
     justify-current-line
     kbd
@@ -2090,6 +2190,7 @@
     make-glyph
     make-glyph-matrix
     make-glyph-row
+    make-help-screen
     make-lisp-time
     make-local-variable
     make-marker
@@ -2113,6 +2214,7 @@
     map-keymap
     map-keymap-internal
     map-tty-color
+    mapconcat
     mark
     mark-active
     mark-defun
@@ -2349,6 +2451,7 @@
     pos-eol
     pos-visible-in-window-p
     posn-area
+    posn-at-point
     posn-at-x-y
     posn-point
     posn-set-point
@@ -2359,6 +2462,7 @@
     preceding-char
     prefix-argument-description
     prefix-echo-pending?
+    prefix-numeric-value
     prepare-to-modify-buffer
     prepare-to-modify-buffer-1
     previous-buffer
@@ -2644,6 +2748,7 @@
     set!font-lock-defaults!
     set!font-lock-keywords!
     set!font-lock-mode!
+    set!fontification-functions!
     set!frame-change-stamp
     set!frame-editor
     set!frame-height
@@ -2955,6 +3060,7 @@
     tab-bar--tab-index-by-name
     tab-bar--tabs-recent
     tab-bar--update-tab-bar-lines
+    tab-bar-auto-width-min
     tab-bar-back-button
     tab-bar-change-tab-group
     tab-bar-close-button
@@ -3252,6 +3358,9 @@
     turn-on-visual-line-mode
     uarg->integer
     unchain-marker
+    uncomment-region
+    uncomment-region-default
+    uncomment-region-default-1
     undefined
     undo
     undo-deletion-entry?
@@ -3260,6 +3369,7 @@
     undo-redo
     unfill-paragraph
     unibyte-to-char
+    unify-charset
     universal-coding-system-argument
     unjustify-current-line
     unjustify-region

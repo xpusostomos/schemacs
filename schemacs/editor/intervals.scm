@@ -139,6 +139,7 @@
    balance-possible-root-interval
    balance-intervals
    intervals-equal?
+   compare-string-intervals
    reproduce-interval
    reproduce-tree
    reproduce-tree-object
@@ -1136,6 +1137,32 @@
       ;; GNU Emacs's `intervals_equal'.
       ;;--------------------------------------------------------------
       (intervals-equal-1 i0 i1 #f))
+
+    (define (compare-string-intervals s1 s2)
+      ;; GNU Emacs's `compare_string_intervals' (`intervals.c`): whether
+      ;; two strings' interval trees are the same - the property half of
+      ;; `equal-including-properties', which `fns.c` adds to the
+      ;; characters' comparison.
+      ;;
+      ;; It walks the two trees in step: at each position the distance to
+      ;; the nearer interval end is how far the two can still be compared
+      ;; as a pair, `intervals_equal_1' with USE-EQUAL? t compares that
+      ;; pair's plists, and whichever interval ran out is advanced.
+      ;;--------------------------------------------------------------
+      (let* ((end (string-length s1))
+             (i1 (find-interval (string-intervals s1) 0))
+             (i2 (find-interval (string-intervals s2) 0)))
+        (let loop ((pos 0) (i1 i1) (i2 i2))
+          (if (>= pos end)
+              #t
+              (let* ((len1 (- (if i1 (interval-last-pos i1) end) pos))
+                     (len2 (- (if i2 (interval-last-pos i2) end) pos))
+                     (distance (min len1 len2)))
+                (if (not (intervals-equal-1 i1 i2 #t))
+                    #f
+                    (loop (+ pos distance)
+                          (if (= len1 distance) (next-interval i1) i1)
+                          (if (= len2 distance) (next-interval i2) i2))))))))
 
     ;;----------------------------------------------------------------
     ;; Inheriting on insertion

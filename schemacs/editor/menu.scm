@@ -42,8 +42,11 @@
                 event-start posn-window posn-area posn-x-y nth)
           (only (schemacs editor frame)
                 display-graphic-p frame? frame-live-p frame-output
-                selected-window window-frame window-left window-top
-                window-type?)
+                mouse-position selected-window window-frame window-left
+                window-top window-type?)
+          ;; The `hide` property of a menu's prompt - see
+          ;; `x-popup-menu-1`.
+          (only (schemacs editor textprop) get-text-property)
           ;; The display method that shows the menu, and the quit that
           ;; cancels it.
           (only (schemacs editor dispnew) menu-show current-display)
@@ -605,48 +608,75 @@
     ;; it with `run_hook (Qx_pre_popup_menu_hook)` after the items are
     ;; parsed and before the display.
 
+    (define (%car-safe x) (and (pair? x) (car x)))
+    (define (%cdr-safe x) (and (pair? x) (cdr x)))
+    ;; ^ lisp.h's `CAR_SAFE`/`CDR_SAFE` macros, which `x_popup_menu_1`
+    ;; is written in. (Lisp's `car-safe`/`cdr-safe` are *data.c*
+    ;; functions and a different thing; Emacs's decode also uses the
+    ;; unsafe `Fcar`, but on `nil` it answers nil, which is this.)
+
     (define (menu-position-decode position)
-      ;; The first half of `x_popup_menu_1`: "Decode the first argument:
-      ;; find the window and the coordinates." Answers
+      ;; The first half of `x_popup_menu_1` (`menu.c:1130'): "Decode the
+      ;; first argument: find the window and the coordinates." Answers
       ;; `(values WINDOW X Y FLAGS)` - WINDOW a window or a frame, X and
       ;; Y the offsets from its own top left.
       ;;
+      ;; **A posn whose part-of-window is `tab-bar` means "the current
+      ;; mouse position"** (`menu.c:1135', `(EQ (XCAR (XCDR position)),
+      ;; Qtab_bar)`). That is the case a tab-bar click takes: its posn
+      ;; names the frame, so `popup-menu-normalize-position` leaves it
+      ;; alone (`posnp` answers nil for a frame) and it arrives here
+      ;; whole. Before this arm existed the posn was read as an event,
+      ;; `event-start` answered its `tab-bar` part, and the menu died
+      ;; with "Wrong type argument: windowp (#f)" - the tab bar's
+      ;; right-click context menu could never open.
+      ;;
       ;; **The keyboard-navigation flag is set for a menu-bar position.**
       ;; The C sets it when the position's part-of-window is `menu-bar`
-      ;; and it was not built from the very event that is being handled -
-      ;; which is its way of saying "this was made by hand, by F10, not
-      ;; by a click". With no mouse at all, every menu-bar position is
-      ;; one made by hand, so the test is the part-of-window alone.
+      ;; and it was not built from the very event being handled - "this
+      ;; was made by hand, by F10". With no mouse at all that is every
+      ;; menu-bar position, so the test is the part-of-window alone.
       ;;--------------------------------------------------------------
       (cond
        ;; "This is an obsolete call, which wants us to precompute the
        ;; keybinding equivalents" - nil position.
        ((not position)
         (values #f 0 0 0))
-       ;; `t`, or a position naming the menu bar or the tool bar: the
-       ;; current mouse position. There is no mouse, so this is the
-       ;; selected window's top left.
-       ((eq? position #t)
-        (values (selected-window) 0 0 0))
-       ((and (pair? position) (memq (car position)
-                                    '(menu-bar tab-bar tool-bar)))
-        (values (selected-window) 0 0 0))
+       ;; `t`, a position naming the menu bar or the tool bar, or a posn
+       ;; whose part-of-window is `tab-bar': the current mouse position.
+       ((or (eq? position #t)
+            (let ((head (%car-safe position)))
+              (or (memq head '(menu-bar tab-bar tool-bar))
+                  (eq? (%car-safe (%cdr-safe position)) 'tab-bar))))
+        ;; "Use the mouse's current position." The C asks the terminal's
+        ;; mouse_position_hook; `mouse-position` is the Lisp-level same
+        ;; call. A mouseless terminal answers `(FRAME #f . #f)` and the
+        ;; C's fallback for that is x=0, y=0.
+        (let ((mp (mouse-position)))
+          (values (car mp) (or (cadr mp) 0) (or (cddr mp) 0) 0)))
        ;; `<(XOFFSET YOFFSET) WINDOW>` - the form
        ;; `popup-menu-normalize-position` produces. The C's test is
        ;; `CONSP (Fcar (position))`: a *list* in the car is the offset
        ;; pair, anything else - a symbol, as a menu's position has - is
        ;; an event.
+       ;; `((X Y) WINDOW)` - the form `popup-menu-normalize-position`
+       ;; produces. The C's test is `CONSP (Fcar (position))` and its
+       ;; reads are `x = XCAR (tem); y = Fcar (XCDR (tem))` - a
+       ;; *two-element list*, not a dotted pair.
        ((pair? (car position))
-        (values (if (pair? (cdr position)) (cadr position) #f)
-                (car (car position))
-                (cdr (car position))
-                0))
+        (let ((xy (car position)))
+          (values (if (pair? (cdr position)) (cadr position) #f)
+                  (car xy)
+                  (car (cdr xy))
+                  0)))
        (else
-        ;; An event: a click, or the position `popup-menu` builds for a
-        ;; menu-bar item - `(MENU-SYMBOL (FRAME (menu-bar) (X . Y) 0))`.
-        (let* ((start (event-start position))
-               (window (posn-window start))
-               (xy (posn-x-y start))
+        ;; An event, or the position `popup-menu` builds for a menu-bar
+        ;; item - `(MENU-SYMBOL (FRAME (menu-bar) (X . Y) 0))` - read
+        ;; through `EVENT_START`/`POSN_*`, as the C's macros do.
+        (let* ((tem (%car-safe (%cdr-safe position)))        ; EVENT_START
+               (window (%car-safe tem))                      ; POSN_WINDOW
+               (area (%car-safe (%cdr-safe tem)))            ; POSN_POSN
+               (xy (%car-safe (%cdr-safe (%cdr-safe tem))))  ; WINDOW_POSN
                ;; "menuflags |= MENU_FOR_CLICK" - the event path is a
                ;; click as far as `tty_menu_activate` is concerned, and
                ;; the flag is what makes *cancelling* such a menu pop it
@@ -654,16 +684,25 @@
                ;; (`term.c:4257`: "Make Cancel equivalent to C-g unless
                ;; FOR_CLICK"). That includes the position `popup-menu`
                ;; constructs for F10.
+               ;; The C tests `CONSP (tem2) && EQ (XCAR (tem2),
+               ;; Qmenu_bar)`: the area of an F10 position is the *list*
+               ;; `(menu-bar)` (the `(MENU-SYMBOL (FRAME (menu-bar)
+               ;; (X . Y) 0))` `popup-menu` builds), and its car is the
+               ;; symbol. Testing the area itself against the symbol was
+               ;; wrong and cost the tty menus their arrow-key
+               ;; navigation.
                (flags (logior MENU-FOR-CLICK
-                              (if (and (eq? (posn-area start) 'menu-bar))
+                              (if (and (pair? area) (eq? (car area) 'menu-bar))
                                   MENU-KBD-NAVIGATION
                                   0))))
-          ;; A `touchscreen-begin` event's position is itself; this
-          ;; tree makes none, and a click's position is the `posn-` list.
-          (values window
-                  (if (pair? xy) (car xy) 0)
-                  (if (pair? xy) (cdr xy) 0)
-                  flags)))))
+          ;; "If a click happens in an external tool bar or a detached
+          ;; tool bar, x and y is NIL. In that case, use the current
+          ;; mouse position." (`menu.c:1150') - which is also the
+          ;; `(menu-bar)` position popup-menu builds for F10.
+          (if (not xy)
+              (let ((mp (mouse-position)))
+                (values (car mp) (or (cadr mp) 0) (or (cddr mp) 0) flags))
+              (values window (%car-safe xy) (%cdr-safe xy) flags))))))
 
     (define (x-popup-menu-1 position menu)
       ;; GNU Emacs's `x_popup_menu_1` (`menu.c:1111`).
@@ -698,7 +737,19 @@
                         ;; the keymap."
                         (keymap-panes (list keymap))
                         (let ((prompt (keymap-prompt keymap)))
-                          (when prompt (set! title prompt))
+                          ;; "A prompt whose first character carries the
+                          ;; `hide` text property is not a title" on a
+                          ;; window system (`menu.c:1305`, USE_GTK/NS) -
+                          ;; which is what `(propertize "Context Menu"
+                          ;; 'hide t)` on the tab bar's and tab line's
+                          ;; context menus is for. The *pane name* keeps
+                          ;; it below, as the C's ASET does.
+                          (when (and prompt
+                                     (not (and (string? prompt)
+                                               (> (string-length prompt) 0)
+                                               (get-text-property 0 'hide prompt)
+                                               (display-graphic-p frame))))
+                            (set! title prompt))
                           ;; "Make that be the pane title of the first
                           ;; pane."
                           (when (and prompt (> (menu-items-n-panes) 0))

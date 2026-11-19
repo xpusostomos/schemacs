@@ -3,17 +3,19 @@
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
- (only (oop goops) make)
+ (only (oop goops) make define-method)
  (only (schemacs editor test-display) <test-display>)
- (only (schemacs editor dispnew) current-display)
- (only (schemacs editor frame) *current-frame* *default-frame-alist*
-       new-frame selected-window set-window-buffer! window-list
-       window-parameter)
+ (only (schemacs editor dispnew) current-display menu-show)
+ (only (schemacs editor menu) menu-items menu-items-used MENU-FOR-CLICK)
+ (only (schemacs editor frame) *current-frame* *current-buffer* *default-frame-alist*
+       new-frame selected-window set-window-buffer! window-list window-buffer
+       window-last-tab-line
+       window-parameter set-window-parameter)
  (only (schemacs editor buffer)
        allocate-buffer buffer-local-value buffer-name current-buffer
        get-buffer get-buffer-create set-buffer set-buffer-local-value!
        with-current-buffer)
- (only (schemacs editor window) switch-to-buffer)
+ (only (schemacs editor window) switch-to-buffer window-prev-buffers)
  (only (schemacs editor editfns) insert)
  (only (schemacs editor textprop) get-text-property)
  (only (schemacs editor subr) *after-change-major-mode-hook* run-hooks
@@ -29,7 +31,9 @@
        tab-line-select-tab tab-line-hscroll tab-line--get-tab-property
        tab-line-tab-map tab-line-tab-close-map tab-line-close-tab
        tab-line-mode--turn-on tab-line-tabs-non-excluded
-       tab-line-force-update))
+       tab-line-force-update
+       *tab-line-tabs-buffer-groups* tab-line-tabs-buffer-group-by-mode
+       *tab-line-auto-hscroll* tab-line-tab-context-menu))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -411,3 +415,139 @@
             (*last-command*))
 
 (test-end "schemacs_editor_tab_line_click")
+
+(test-begin "schemacs_editor_tab_line_groups")
+
+;; **The group table is a parameter** (`tab-line.el:499`): Emacs's
+;; defvar holds `mouse-buffer-menu-mode-groups`' value, and
+;; `tab-line-new-tab` `let`-binds it. It was exported and never defined,
+;; so turning the tab line on and letting `tab-line-tabs-buffer-groups`
+;; group the buffers died with "unbound variable:
+;; *tab-line-tabs-buffer-groups*" the first time a group was asked for.
+(test-equal '(#t "Fundamental")
+  (list (procedure? *tab-line-tabs-buffer-groups*)
+        (with-current-buffer (get-buffer-create "tab-line-group-probe")
+          (tab-line-tabs-buffer-group-by-mode))))
+
+(test-end "schemacs_editor_tab_line_groups")
+
+;;----------------------------------------------------------------
+;; A click resolves against the tab it landed on
+;;----------------------------------------------------------------
+;;
+;; **The position's object is the *tab's own* string**, which is what GNU
+;; Emacs's redisplay stores per string (`store_mode_line_string`) and what
+;; `tab-line--get-tab-property` reads the `tab` property at position 1 of.
+;; While the position carried the whole row, position 1 was always the
+;; first tab: every click selected the first tab, and every close button
+;; closed it. The rows here go through `posn-at-x-y`, so this is the
+;; half the `click` group above builds by hand.
+
+(test-begin "schemacs_editor_tab_line_posn_click")
+
+(define posn-click-frame (new-frame (get-buffer-create "posn-a") 24 80))
+
+(parameterize ((*current-frame* posn-click-frame) (*current-buffer* #f))
+  (switch-to-buffer (get-buffer-create "posn-a"))
+  (tab-line-mode 1)
+  (switch-to-buffer (get-buffer-create "posn-b"))
+  (tab-line-mode 1)
+  (switch-to-buffer (get-buffer-create "posn-a"))
+  (render! posn-click-frame))
+
+;; **The columns are measured off the row that was drawn**, not guessed:
+;; which tab comes first depends on the window's buffer history (the row
+;; here reads "|posn-b x|posn-a x| +", because the window left posn-a for
+;; posn-b and came back). `column-of` finds a tab's name in the record of
+;; the last tab line, and the close button is the "x" after it.
+(define (column-of text)
+  (let loop ((i 0))
+    (cond ((> (+ i (string-length text))
+              (string-length (car (window-last-tab-line (selected-window)))))
+           #f)
+          ((string=? text
+                     (substring (car (window-last-tab-line (selected-window)))
+                                i (+ i (string-length text))))
+           i)
+          (else (loop (+ i 1))))))
+
+;; **The tab clicked is the one that is not the window's buffer** - the
+;; row here is "|posn-b x|posn-a x| +" and the window shows posn-b, so a
+;; click on posn-a's name must leave posn-b. (Clicking the *first* tab
+;; cannot tell the bug from the fix: position 1 of the whole row is the
+;; first tab either way.)
+(test-equal "a click on a tab's name selects that tab's buffer"
+            "posn-a"
+            (parameterize ((*current-frame* posn-click-frame))
+              (tab-line-select-tab
+               (list 'down-mouse-1
+                     (posn-at-x-y (column-of "posn-a") 0 posn-click-frame)))
+              (buffer-name (current-buffer))))
+
+(test-equal '(#t #t)
+  (parameterize ((*current-frame* posn-click-frame))
+    (switch-to-buffer (get-buffer "posn-b"))
+    (render! posn-click-frame)
+    (let ((w (selected-window))
+          (x (+ (column-of "posn-a") 7))) ; "posn-a" then " x"
+      (tab-line-close-tab
+       (list 'mouse-1 (posn-at-x-y x 0 posn-click-frame)))
+      (list (not (memq (get-buffer "posn-a") (map car (window-prev-buffers w))))
+            (eq? (window-buffer w) (get-buffer "posn-b"))))))
+
+;; **A stale `tab-line-hscroll` is the empty tail, not an error.** Elisp's
+;; `nthcdr` answers nil past the end; Scheme's `list-tail` raises, and the
+;; tab count shrinks under a scroll position whenever a buffer leaves the
+;; window - which is what selecting a buffer from the buffer menu did
+;; (`ERROR: In procedure list-tail` out of `tab-line-format-template`,
+;; taking the redisplay with it).
+(test-assert "a tab-line-hscroll past the last tab is the empty tail"
+  (parameterize ((*current-frame* posn-click-frame)
+                 (*tab-line-auto-hscroll* #f))
+    (set-window-parameter (selected-window) 'tab-line-hscroll 9)
+    (let ((formatted (tab-line-format)))
+      (set-window-parameter (selected-window) 'tab-line-hscroll #f)
+      (pair? formatted))))
+
+(test-end "schemacs_editor_tab_line_posn_click")
+
+;;----------------------------------------------------------------
+;; The tab line's right-click (`tab-line.el:1231', `:1442')
+;;----------------------------------------------------------------
+;;
+;; A tab-line click's posn names the *window* and the drawn string, so
+;; `popup-menu-normalize-position`'s `posnp` branch is what turns it into
+;; `((X . Y) WINDOW)` for `x-popup-menu`; without it the posn reached the
+;; C-shaped decode as an event-nil and the menu died. The click is a
+;; click, so the flags carry `MENU-FOR-CLICK`.
+(test-begin "schemacs_editor_tab_line_context_menu")
+
+(define *shown-tab-line-menu* #f)
+
+(define (menu-strings items used)
+  (let loop ((i 0) (acc '()))
+    (if (>= i used)
+        (reverse acc)
+        (let ((v (vector-ref items i)))
+          (loop (+ i 1) (if (string? v) (cons v acc) acc))))))
+
+(define-method (menu-show (d <test-display>) frame x y flags title)
+  (set! *shown-tab-line-menu*
+        (list flags title (menu-strings (menu-items) (menu-items-used))))
+  #f)
+
+(set! *shown-tab-line-menu* #f)
+(tab-line-tab-context-menu (list 'down-mouse-3 (posn-at-x-y 5 0 tab-posn-frame)))
+(test-equal "right-click on the tab line builds its menu"
+  '(#t #t)
+  (list (and (member "Close" (caddr *shown-tab-line-menu*)) #t)
+        (and (member "Close other tabs" (caddr *shown-tab-line-menu*)) #t)))
+;; A posn normalized to `((X Y) WINDOW)` carries no click flag - that
+;; is the C's own `((X Y) WINDOW)` branch, which sets `window`, `x` and
+;; `y` and nothing else (`menu.c:1145`). `MENU_KEYMAPS` (1) is added by
+;; `x_popup_menu_1` for the keymap menu itself; `MENU_FOR_CLICK` (2) is
+;; not, and must not be: it is the *event* path's flag.
+(test-equal "and the click's own flags are clear"
+  0 (logand (car *shown-tab-line-menu*) MENU-FOR-CLICK))
+
+(test-end "schemacs_editor_tab_line_context_menu")

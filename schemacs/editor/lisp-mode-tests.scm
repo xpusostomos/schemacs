@@ -16,7 +16,8 @@
         char-syntax set-syntax-table syntax-table standard-syntax-table
         copy-syntax-table)
   (only (schemacs editor font-lock)
-        font-lock-fontify-buffer font-lock-defaults set!font-lock-defaults!)
+        font-lock-ensure font-lock-fontify-buffer font-lock-defaults
+        set!font-lock-defaults!)
   (only (schemacs editor font-core) font-lock-mode)
   (only (schemacs editor textprop) get-text-property)
   (only (schemacs editor scheme) scheme-mode)
@@ -104,7 +105,7 @@
    (insert "(define (foo x) ; hi\n  \"s\" (+ x 1))\n")
    (set-point b 1)
    (scheme-mode)
-   (font-lock-mode #t)
+   (font-lock-mode #t) (font-lock-ensure)
    (font-lock-fontify-buffer)
    (test-equal "`define' is a keyword"
      'font-lock-keyword-face (face-at b 3))
@@ -133,7 +134,7 @@
    (insert "(defun foo (x) \"doc\" x)\n")
    (set-point b 1)
    (emacs-lisp-mode)
-   (font-lock-mode #t)
+   (font-lock-mode #t) (font-lock-ensure)
    (font-lock-fontify-buffer)
    (test-equal "`defun' is a keyword in Elisp"
      'font-lock-keyword-face (face-at b 3))
@@ -148,7 +149,7 @@
    (insert "(defun foo (x) (format t \"hi\"))\n")
    (set-point b 1)
    (lisp-mode)
-   (font-lock-mode #t)
+   (font-lock-mode #t) (font-lock-ensure)
    (font-lock-fontify-buffer)
    (test-equal "`defun' is a keyword in lisp-mode too"
      'font-lock-keyword-face (face-at b 3))

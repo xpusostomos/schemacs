@@ -81,14 +81,17 @@
   ;;     ported. The map's `:suppress t` is carried (`suppress-keymap`),
   ;;     so a letter typed in the `*Tabs*` list is `undefined` rather
   ;;     than inserting itself.
-  ;;   * **The Gtk tab bar is a row of the drawing area, not a widget.**
-  ;;     GNU Emacs's Gtk build builds one with `xg_create_frame_widgets`;
-  ;;     this tree draws the same `display-tab-bar` row there, so the bar
-  ;;     is one row of the frame's text area and the windows start below
-  ;;     it (`frame-top-margin` counts `tab-bar-lines` on both kinds of
-  ;;     display). It looks like the terminal's bar rather than like a
-  ;;     toolkit's, and a click reaches it through the same
-  ;;     `posn-at-x-y` path.
+  ;;   * **The Gtk tab bar is a row of the drawing area, not a widget -
+  ;;     and neither is Emacs's.** GNU Emacs's Gtk build has no tab-bar
+  ;;     widget (`gtkutil.c` builds the menu bar's, not the tab bar's):
+  ;;     the redisplay draws the bar into `f->tab_bar_window` below the
+  ;;     menu bar, and a click is hit-tested against that window. This
+  ;;     tree draws the same `display-tab-bar` row as the first row of
+  ;;     the text area, with the windows starting below it
+  ;;     (`frame-top-margin` counts `tab-bar-lines` on both kinds of
+  ;;     display). The named departure is the window *object*, not the
+  ;;     row: a click's `posn-window` is the frame here where Emacs
+  ;;     answers `tab_bar_window`.
 
   (import
     (scheme base)
@@ -97,7 +100,7 @@
            get-internal-real-time internal-time-units-per-second
            exact->inexact 1+ 1-)
     (only (schemacs editor command) define-command define-alias uarg->integer
-          current-prefix-arg)
+          current-prefix-arg call-interactively command-record-named)
     (only (schemacs editor subr) kbd)
     (only (schemacs editor custom) define-custom custom-initialize-default)
     (only (schemacs editor easy-mmode) define-minor-mode)
@@ -169,7 +172,7 @@
           text-properties-at)
     ;; `concat` and not `string-append`: the resized name keeps its
     ;; properties, and `concat` is the C's `concat`.
-    (only (schemacs editor fns) concat)
+    (only (schemacs editor fns) concat %substring)
     (only (schemacs editor seq) seq-position seq-filter seq-remove seq-sort-by
           seq-take)
     (only (schemacs editor xdisp) force-mode-line-update format-mode-line
@@ -255,7 +258,8 @@
    *tab-bar-tab-format-functions* *tab-bar-tab-name-format-function*
    *tab-bar-format* *tab-bar-define-keys* *tab-bar-select-tab-modifiers*
    *tab-bar-tab-hints* *tab-bar-close-button-show* *tab-bar-new-button-show*
-   *tab-bar-auto-width* *tab-bar-tab-prevent-close-functions*
+   *tab-bar-auto-width* *tab-bar-auto-width-max* tab-bar-auto-width-min
+   *tab-bar-tab-prevent-close-functions*
    *tab-bar-tab-pre-close-functions*
    *tab-bar-post-undo-close-tab-functions*
    *tab-bar-tabs-function*
@@ -884,6 +888,13 @@ Function gets no arguments."
 
     (define (tab-bar-tab-name-format-close-button name tab i)
       ;; "Show the tab close button."
+      ;;
+      ;; **`concat`, not `string-append`.** The button's `close-tab`
+      ;; property is what tells `tab-bar-auto-width` to put the padding
+      ;; *before* the button (`tab-bar.el:1431`) and what tells a click
+      ;; on it to close the tab (`tab-bar-mouse-1`); a fresh string from
+      ;; `string-append` carries none of it, so the X sat at the left of
+      ;; a run of spaces and was not a close button at all.
       ;;--------------------------------------------------------------
       (if (and (*tab-bar-close-button-show*)
                (not (eq? (*tab-bar-close-button-show*)
@@ -891,7 +902,7 @@ Function gets no arguments."
                              'non-selected
                              'selected)))
                tab-bar-close-button)
-          (string-append name tab-bar-close-button)
+          (concat name tab-bar-close-button)
           name))
 
     (define (tab-bar-tab-face-default tab)
@@ -1263,9 +1274,9 @@ non-nil."
           (let* ((space (apply propertize " " (text-properties-at 0 name)))
                  (ins-pos (- len (if close-p (string-length tab-bar-close-button) 0))))
             (let loop ((name name))
-              (let* ((next (string-append (substring name 0 ins-pos)
-                                          space
-                                          (substring name ins-pos)))
+              (let* ((next (concat (%substring name 0 ins-pos)
+                                   space
+                                   (%substring name ins-pos)))
                      (curr-width (string-pixel-width next)))
                 (if (< curr-width width)
                     (loop next)
@@ -1275,9 +1286,9 @@ non-nil."
                  (let loop ((name name))
                    (let* ((len (string-length name))
                           (next (if close-p
-                                    (string-append (substring name 0 (- len 2))
-                                                   (substring name (- len 1) len))
-                                    (substring name 0 (- len 1)))))
+                                    (concat (%substring name 0 (- len 2))
+                                            (%substring name (- len 1) len))
+                                    (%substring name 0 (- len 1)))))
                      (if (> (string-pixel-width next) width)
                          (loop next)
                          next)))))
@@ -1892,8 +1903,15 @@ FROM-NUMBER defaults to the current tab (which happens interactively)."
                     (and item (list-ref-or-false item 2)))
           (if (and item (procedure? (list-ref-or-false item 1)))
               ((list-ref-or-false item 1))
+              ;; **`tab-bar-select-tab`, not the internal function**
+              ;; (`tab-bar.el:402`). Clicking the *current* tab hands a
+              ;; nil TAB-NUMBER - `tab-bar--key-to-number` answers nil for
+              ;; `current-tab` - and the command translates nil through
+              ;; `last-command-event` to 0, "the tab I am on"; the
+              ;; internal function starts with `(< tab-number 0)` and died
+              ;; with "Wrong type argument in position 1: #f".
               (unless (eq? tab-number #t)
-                (tab-bar-select-tab-internal tab-number))))))
+                (tab-bar-select-tab tab-number))))))
 
     (define (list-ref-or-false list i)
       (if (< i (length list)) (list-ref list i) #f))
@@ -1907,8 +1925,21 @@ FROM-NUMBER defaults to the current tab (which happens interactively)."
          ((and item
                (memq (car item) '(add-tab history-back history-forward global))
                (not (eq? (list-ref-or-false item 1) 'tab-bar-mouse-1))
-               (procedure? (list-ref-or-false item 1)))
-          ((list-ref-or-false item 1)))
+               ;; **Emacs's `functionp`** (`tab-bar.el:416`): there a
+               ;; symbol with a function definition is a function; here
+               ;; a command's definition is its record in the command
+               ;; table, and a menu item holds either the procedure or
+               ;; the symbol naming it.
+               (let ((cmd (list-ref-or-false item 1)))
+                 (or (procedure? cmd)
+                     (and (symbol? cmd) (command-record-named cmd)))))
+          ;; **`call-interactively`, as Emacs calls it** (`tab-bar.el:417`):
+          ;; the item's command is a *symbol* in the menu-item form, and
+          ;; the command has an interactive spec which a plain call does
+          ;; not run - `tab-bar-new-tab` takes two arguments that the
+          ;; specification supplies, so calling it bare was "Wrong number
+          ;; of arguments".
+          (call-interactively (list-ref-or-false item 1)))
          ((and item (list-ref-or-false item 2) (not (eq? tab-number #t)))
           (tab-bar-close-tab tab-number #f)))))
 

@@ -627,59 +627,114 @@
         (hashv-set! (keymap-bindings keymap) event def)
         def))
 
-    (define (access-keymap keymap event)
+    (define (%keymap-own-binding keymap event)
+      ;; `access_keymap_1''s own-map half (`keymap.c:377-474'): one event
+      ;; in one map's own bindings, its char-table and nothing else -
+      ;; what is found before any inheritance is consulted.
+      ;;--------------------------------------------------------------
+      (let ((own (hashv-ref (keymap-bindings keymap) event #f)))
+        (cond
+         ;; **"If the keymap contents looks like (STRING . DEFN), use
+         ;; DEFN."** - the C's own words (`keymap.c:719`). It is how a
+         ;; menu bar item is stored: `menu-bar.el' binds
+         ;; `[menu-bar file]' to `(cons "File" menu-bar-file-menu)',
+         ;; the string being the name the bar shows and the cdr the
+         ;; keymap the next event of the sequence is looked up in.
+         ;; Without this `[menu-bar file save-buffer]' has no binding
+         ;; at all, and `parse_menu_item' - which *wants* that cons -
+         ;; is the one reader that never goes through here.
+         ((and (pair? own) (string? (car own))) (cdr own))
+         ;; **"If the keymap contents looks like (menu-item name .
+         ;; DEFN) or (menu-item name DEFN ...) then use DEFN."** The
+         ;; other half of `get_keyelt` (`keymap.c:685`). A menu item
+         ;; is a *binding*, and the thing it runs is inside it - so a
+         ;; menu clicked with the mouse and the same item typed as
+         ;; `[menu-bar file save-buffer]` both have to reach the
+         ;; command itself, not the list describing it.
+         ((and (pair? own) (eq? (car own) 'menu-item) (pair? (cdr own)))
+          (let ((rest (cddr own)))
+            (if (pair? rest) (car rest) rest)))
+         (own own)
+         (else
+          (let ((ct (keymap-char-table keymap)))
+            (and ct (ct event)))))))
+
+    (define (access-keymap keymap event . rest)
       ;; GNU Emacs's `access_keymap' (`keymap.c:491'): the binding of one
       ;; EVENT in KEYMAP, or #f. A *keymap* answer means the event is a
       ;; prefix; the caller reads the next event and calls this again on
       ;; it, which is `Flookup_key''s walk (`keymap.c:1264').
       ;;
-      ;; This is the C's `noinherit' half: it asks KEYMAP's own bindings
-      ;; and its char-table and stops - it does *not* walk the parent,
-      ;; which `access_keymap_1' does only when it is asked to. That is
-      ;; what `define-key' needs when it walks a sequence looking for the
-      ;; prefix to descend through (`Fdefine_key' calls it with
-      ;; `noinherit' set).
+      ;; **NOINHERIT is the C's fourth argument**, and it is what tells
+      ;; the two callers apart: `lookup-key' passes nothing and so
+      ;; follows the map's parent, while `define-key' passes #t because
+      ;; a *parent's* `C-x' does not count there - a child is free to
+      ;; make its own (`Fdefine_key' walks with `access_keymap (..., 0,
+      ;; 1)').
+      ;;
+      ;; **And the answer can be a *keymap list*.** When the event is a
+      ;; prefix both in a map and in its parent, `access_keymap_1'
+      ;; answers `(keymap CHILD-PREFIX PARENT-PREFIX)' rather than one
+      ;; of them (`keymap.c:416-420'), so a key only the parent's
+      ;; prefix goes on to define is still reachable. Measured on Emacs
+      ;; 31.1: a child defining `C-c x' and a parent `C-c y' answers
+      ;; `C-c y' as the parent's command through `lookup-key'.
+      ;;
+      ;; A KEYMAP that is itself such a list - `(keymap MAP...)' - is
+      ;; walked element by element, each map's answer combined the same
+      ;; way (`access_keymap_1`'s loop over its tail).
       ;;--------------------------------------------------------------
-      (let ((event (if (char? event) (char->integer event) event)))
+      (let ((noinherit (and (pair? rest) (car rest)))
+            (event (if (char? event) (char->integer event) event)))
         (unless (or (integer? event) (symbol? event))
           (error "access-keymap: not an event" event))
-        (let ((own (hashv-ref (keymap-bindings keymap) event #f)))
-          (cond
-           ;; **"If the keymap contents looks like (STRING . DEFN), use
-           ;; DEFN."** - the C's own words (`keymap.c:719`). It is how a
-           ;; menu bar item is stored: `menu-bar.el' binds
-           ;; `[menu-bar file]' to `(cons "File" menu-bar-file-menu)',
-           ;; the string being the name the bar shows and the cdr the
-           ;; keymap the next event of the sequence is looked up in.
-           ;; Without this `[menu-bar file save-buffer]' has no binding
-           ;; at all, and `parse_menu_item' - which *wants* that cons -
-           ;; is the one reader that never goes through here.
-           ((and (pair? own) (string? (car own))) (cdr own))
-           ;; **"If the keymap contents looks like (menu-item name .
-           ;; DEFN) or (menu-item name DEFN ...) then use DEFN."** The
-           ;; other half of `get_keyelt` (`keymap.c:685`). A menu item
-           ;; is a *binding*, and the thing it runs is inside it - so a
-           ;; menu clicked with the mouse and the same item typed as
-           ;; `[menu-bar file save-buffer]` both have to reach the
-           ;; command itself, not the list describing it.
-           ((and (pair? own) (eq? (car own) 'menu-item) (pair? (cdr own)))
-            (let ((rest (cddr own)))
-              (if (pair? rest) (car rest) rest)))
-           (own own)
-           (else
-            (let ((ct (keymap-char-table keymap)))
-              (and ct (ct event))))))))
+        (cond
+         ((not keymap) #f)
+         ((pair? keymap)
+          (let loop ((maps keymap) (retval #f))
+            (cond
+             ((null? maps) retval)
+             ((not (keymap-type? (car maps))) (loop (cdr maps) retval))
+             (else
+              (let ((val (access-keymap (car maps) event noinherit)))
+                (cond
+                 ((not val) (loop (cdr maps) retval))
+                 ((keymap-type? val)
+                  (loop (cdr maps)
+                        (cond ((not retval) val)
+                              ((keymap-type? retval)
+                               (list 'keymap retval val))
+                              (else retval))))
+                 ;; "Shadows everything that follows" - a command here
+                 ;; is the answer unless an earlier element already
+                 ;; answered a keymap, which wins.
+                 (else (if retval retval val))))))))
+         (else
+          (let* ((own (%keymap-own-binding keymap event))
+                 (parent (and (not noinherit)
+                              (keymap-type? keymap)
+                              (keymap-parent keymap)))
+                 (inherited (and parent (access-keymap parent event #f))))
+            (cond
+             ((not own) inherited)
+             ((and (keymap-type? own) (keymap-type? inherited))
+              (list 'keymap own inherited))
+             (else own)))))))
 
     (define (keymapp object)
       ;; GNU Emacs's `keymapp' (`keymap.c:3012'): "Return t if OBJECT is
       ;; a keymap."
       ;;
-      ;; The C also answers t for a symbol whose function definition is a
+      ;; `KEYMAPP' is `(!NILP (get_keymap (m, false, false)))'
+      ;; (`keymap.h:34'), and `get_keymap' answers a *keymap list*
+      ;; `(keymap MAP...)' as one (`keymap.c:197') - which is what
+      ;; `access-keymap' builds when a key is a prefix in two maps. The
+      ;; C also answers t for a symbol whose function definition is a
       ;; keymap; this tree's keymaps are values and a symbol has no
-      ;; function here (`access-keymap`'s note says the same), so the
-      ;; answer is the record test alone.
+      ;; function here, so that arm is not carried.
       ;;--------------------------------------------------------------
-      (keymap-type? object))
+      (or (keymap-type? object)
+          (and (pair? object) (eq? (car object) 'keymap))))
 
     (define (%keymap-t-default keymap)
       ;; The `(t . DEF)' default binding of one keymap - what the C's
@@ -689,6 +744,19 @@
       ;; calls with ACCEPT-DEFAULT set.
       ;;--------------------------------------------------------------
       (hashv-ref (keymap-bindings keymap) 't #f))
+
+    (define (%keymap-t-default-chain keymap)
+      ;; The nearest `(t . DEF)' in KEYMAP or one of its parents. The C
+      ;; records the first default and clears `t_ok' as it walks
+      ;; (`keymap.c:411-414'), so a nearer map's default beats a
+      ;; farther one's, and any specific binding anywhere in the chain
+      ;; beats them all - which the caller has already tested.
+      ;;--------------------------------------------------------------
+      (let loop ((map keymap))
+        (cond ((not (keymap-type? map)) #f)
+              ((%keymap-t-default map))
+              (else (let ((parent (keymap-parent map)))
+                      (and parent (loop parent)))))))
 
     (define (%keymap-event-binding keymap event accept-default)
       ;; One event's binding in KEYMAP with the C's ACCEPT-DEFAULT rule.
@@ -701,7 +769,7 @@
       (cond
        ((not (keymap-type? keymap)) #f)
        ((access-keymap keymap event))
-       (accept-default (%keymap-t-default keymap))
+       (accept-default (%keymap-t-default-chain keymap))
        (else #f)))
 
     (define (%maps-event-binding maps event accept-default)
@@ -718,7 +786,7 @@
                     (let default ((rest maps))
                       (cond ((null? rest) #f)
                             ((not (keymap-type? (car rest))) (default (cdr rest)))
-                            ((%keymap-t-default (car rest)))
+                            ((%keymap-t-default-chain (car rest)))
                             (else (default (cdr rest)))))))
               ((not (keymap-type? (car rest))) (specific (cdr rest)))
               ((access-keymap (car rest) event))
@@ -760,8 +828,10 @@
                  ;; `if (idx == length) return cmd;'
                  ((null? (cdr rest)) cmd)
                  ;; `keymap = get_keymap (cmd, 0, 1); if (!CONSP (keymap))
-                 ;; return make_fixnum (idx);'
-                 ((not (keymap-type? cmd)) (+ n 1))
+                 ;; return make_fixnum (idx);' - and `get_keymap' takes a
+                 ;; keymap *list* too, which is what `access-keymap' can
+                 ;; answer when the key is a prefix in two maps.
+                 ((not (keymapp cmd)) (+ n 1))
                  (else (loop (cdr rest) cmd (+ n 1)))))))))))
 
     (define (keymap-lookup keymap key)
@@ -770,9 +840,11 @@
       ;; keymap it leads to." KEY may be written in any spelling
       ;; `keymap-index' reads, which here includes a whole sequence.
       ;;
-      ;; The walk is `access_keymap_1''s: KEYMAP's own bindings, then its
-      ;; char-table, then its *parent*, and the keymap a step answers with
-      ;; is where the next event is looked up.
+      ;; The walk is `access_keymap_1''s: KEYMAP's own bindings, its
+      ;; char-table, then its *parent* - which `access-keymap' asks when
+      ;; NOINHERIT is not set, the way `Flookup_key' calls it - and the
+      ;; keymap (or keymap list) a step answers with is where the next
+      ;; event is looked up.
       ;;--------------------------------------------------------------
       (let ((events (keymap-index key)))
         (cond
@@ -786,18 +858,17 @@
              (else
               (let ((cmd (access-keymap map (car rest))))
                 (cond
-                 ((keymap-type? cmd) (loop (cdr rest) cmd))
-                 ;; a command before the end of the sequence: the C
-                 ;; answers it and stops (`Flookup_key', the `!CONSP
-                 ;; (keymap)' arm), which is what makes a bound prefix of
-                 ;; a longer sequence reachable.
+                 ((keymapp cmd) (loop (cdr rest) cmd))
+                 ;; **A command before the end of the sequence.** The C
+                 ;; answers `idx' - "key is too long" (`Flookup_key',
+                 ;; `keymap.c:1289') - and this answers the command
+                 ;; instead. It is reachable only for a key sequence
+                 ;; longer than its binding, and the one caller that
+                 ;; cares, `%shadow-lookup' in keyboard.scm, is written
+                 ;; around it; `lookup-key' has the C's answer. Named as
+                 ;; a departure in DEPARTURES.md.
                  (cmd cmd)
-                 ;; nothing here: the C asks the parent before it gives
-                 ;; up (`access_keymap_1', the `Qkeymap' arm), and answers
-                 ;; nil if there is none.
-                 (else
-                  (let ((parent (keymap-parent map)))
-                    (if parent (loop rest parent) #f))))))))))))
+                 (else #f))))))))))
 
     (define (define-as-prefix keymap event)
       ;; GNU Emacs's `define_as_prefix' (`keymap.c:1445'): "Make KEYMAP
@@ -850,7 +921,7 @@
            ((null? (cdr rest))
             (store-in-keymap map (car rest) command))
            (else
-            (let ((cmd (access-keymap map (car rest))))
+            (let ((cmd (access-keymap map (car rest) #t)))
               (cond
                ((not cmd) (loop (cdr rest) (define-as-prefix map (car rest))
                                 (cons (car rest) seen)))

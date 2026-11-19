@@ -34,6 +34,10 @@ Here's what works already:
 * Mouse support
 * Emacs theming as well as Omarchy theming
 * Menus
+* Tab bar and tab line modes
+* Narrowing
+* Language coloring, formatting
+* visual line mode, fill mode
 * And many more...
 
 How does it feel? Zippy! 

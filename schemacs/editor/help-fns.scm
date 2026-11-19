@@ -41,11 +41,12 @@
 
   (import
     (scheme base)
-    (only (guile) caddr sort string<? logand most-positive-fixnum)
+    (only (guile) caddr sort string<? logand most-positive-fixnum
+          string-join hashv-ref)
     (only (schemacs editor editfns)
           insert point point-min eolp bolp delete-region save-excursion goto-char
           char-before line-beginning-position buffer-string format forward-line
-          point-max)
+          point-max propertize)
     (only (schemacs editor search) re-search-backward re-search-forward)
     (only (schemacs editor fill) fill-region-as-paragraph fill-paragraph)
     (only (schemacs editor paragraphs) forward-paragraph)
@@ -67,11 +68,13 @@
           completing-read)
     (only (schemacs editor help)
           with-help-window help-buffer help-setup-xref
-          help--key-description-fontified *describe-function-1-function*
+          help--key-description-fontified help-fns-function-name
+          *describe-function-1-function*
           help-map %help-arg *help-xref-stack-item*)
     (only (schemacs editor keyboard)
           where-is-internal command-remapping *overriding-local-map* undefined)
-    (only (schemacs editor keymap) keymapp define-key *default-keymap*)
+    (only (schemacs editor keymap) keymapp keymap-type? keymap-index
+          keymap-bindings lookup-key define-key *default-keymap*)
     (only (schemacs editor character) kbd)
     (only (schemacs editor character) event-modifiers)
     (only (schemacs editor intervals) get)
@@ -89,6 +92,8 @@
           %comstart-first? %comstart-second? %comend-first? %comend-second?
           %prefix-flag? %styleb-bit %stylec2 %nested?)
     (only (schemacs editor chartab) char-table? char-table-parent)
+    ;; the arrow a menu separator uses when the display can draw it
+    (only (schemacs editor mule) char-displayable-p)
     (only (schemacs editor help) substitute-command-keys describe-vector)
     (only (schemacs editor cmds) self-insert-command beginning-of-line)
     (only (schemacs editor simple) make-separator-line))
@@ -97,7 +102,8 @@
           describe-mode describe-mode--minor-modes
           describe-syntax internal-describe-syntax-value describe-symbol
           describe-function describe-function-1 help-fns--key-bindings
-          help-fns--insert-bindings help-fns--obsolete
+          help-fns--insert-bindings help-fns--insert-menu-bindings
+          help-fns--obsolete
           help-fns--ensure-empty-line ensure-empty-lines
           describe-variable)
 
@@ -169,6 +175,91 @@
                       '())))
         (not (or (null? mods) (equal? mods '(shift))))))
 
+    (define (%help-fns-menu-binding map entry)
+      ;; The raw binding of one menu ENTRY in MAP, or #f - Emacs's
+      ;; `(assq entry (cdr map))'. A keymap here is a record whose
+      ;; bindings are in a hash, so the *raw* value is read directly:
+      ;; `access-keymap' would coerce a `menu-item' to the command it
+      ;; runs, and the label this walk prints lives in the list.
+      ;;--------------------------------------------------------------
+      (let ((events (and (keymap-type? map) (keymap-index entry))))
+        (and events
+             (hashv-ref (keymap-bindings map) (car events) #f))))
+
+    (define (help-fns--insert-menu-bindings menus heading)
+      ;; GNU Emacs's `help-fns--insert-menu-bindings'
+      ;; (`help-fns.el:663'): "It can also be invoked from the menu:
+      ;; File → Save", one clause per menu, joined by " and ".
+      ;;
+      ;; **The walk is Emacs's, over this tree's keymap**: `(assq entry
+      ;; (cdr map))' is `%help-fns-menu-binding', because the bindings
+      ;; are a hash and the label is in the raw binding. An entry is
+      ;; either a new-format `(menu-item NAME DEF ...)' list or the old
+      ;; `(STRING . SUBMAP)' cons, which is how `menu-bar.scm' binds
+      ;; `[menu-bar file]'; Emacs's `proper-list-p' guard is replaced by
+      ;; the two shapes' own tests, since the old spelling is improper
+      ;; here (its cdr is a keymap record).
+      ;;
+      ;; **Not carried**: Emacs's `(symbolp map)' arm, which resolves a
+      ;; menu bound by a *symbol* through `symbol-function' - a menu
+      ;; value here is a keymap record or a command, never a symbol
+      ;; naming a keymap.
+      ;;--------------------------------------------------------------
+      (let ((strings '()))
+        ;; "First collect all the printed representations of menus."
+        (for-each
+         (lambda (menu)
+           (let ((map (lookup-key *default-keymap* (vector-ref menu 0)))
+                 (string '())
+                 (sep (if (char-displayable-p #\→) " → " " => ")))
+             (let loop ((entries (cdr (vector->list menu))) (level 0)
+                        (map map))
+               (unless (null? entries)
+                 (let* ((entry (car entries))
+                        (raw (%help-fns-menu-binding map entry)))
+                   (when (pair? raw)
+                     (when (> level 0)
+                       (set! string (cons sep string)))
+                     (cond
+                      ;; `(menu-item NAME DEF ...)' - NAME is RAW's
+                      ;; cadr and DEF its caddr (Emacs reads them as
+                      ;; `(nth 2 elem)' and `(cadddr elem)', where ELEM is
+                      ;; `(entry . raw)').
+                      ((and (eq? (car raw) 'menu-item)
+                            (pair? (cddr raw)))
+                       (set! string
+                             (cons (propertize (cadr raw) 'face
+                                               'help-key-binding)
+                                   string))
+                       (set! map (caddr raw)))
+                      ;; `("Name" . SUBMAP)' - the old spelling.
+                      ((string? (car raw))
+                       (set! string
+                             (cons (propertize (car raw) 'face
+                                               'help-key-binding)
+                                   string))
+                       (set! map (cdr raw)))
+                      (else (set! map #f)))))
+                 (loop (cdr entries) (+ level 1) map)))
+             (when (pair? string)
+               (set! strings (cons string strings)))))
+         menus)
+        ;; "Then output them." - `strings' is a stack, so the menus come
+        ;; out in reverse, which is Emacs's own order (measured: file
+        ;; then edit prints "Edit and File → Save").
+        (when (pair? strings)
+          (when heading
+            (insert heading))
+          (let ((n (length menus)))
+            (let loop ((rest strings) (i 0))
+              (unless (null? rest)
+                (insert (cond ((zero? i) "")
+                              ((= i (- n 1)) " and ")
+                              (else ", ")))
+                (insert (string-join (reverse (car rest)) ""))
+                (loop (cdr rest) (+ i 1))))))
+        #f))
+
     (define (help-fns--key-bindings function)
       ;; GNU Emacs's `help-fns--key-bindings' (`help-fns.el:577`):
       ;; "It is bound to ...", plus the remapping sentence when a
@@ -213,8 +304,13 @@
                    (pair? (vector-ref (car keys) 0)))
               (insert "It is bound to many ordinary text characters.\n")
               (begin
+                ;; **The C prints the *symbol*; ours is the binding
+                ;; `command-remapping' answered**, so the name comes from
+                ;; `help-fns-function-name' - Emacs's "an anonymous
+                ;; command" arm is a lambda no keymap here holds.
                 (when remapped
-                  (insert "Its keys are remapped.\n"))
+                  (insert "Its keys are remapped to `"
+                          (help-fns-function-name remapped) "'.\n"))
                 (when (pair? keys)
                   (insert (if remapped
                               "Without this remapping, it would be bound to "
@@ -239,9 +335,24 @@
           (unless (bolp)
             (insert "\n"))
           (when (pair? menus)
-            ;; `help-fns--insert-menu-bindings` is not carried; this is
-            ;; the sentence its C counterpart heads for.
-            (insert "It can also be invoked from the menu.\n")))
+            (let ((start (point)))
+              (help-fns--insert-menu-bindings
+               menus
+               (string-append "It " (if remapped "could " "can ")
+                              (if (pair? keys) "also " "")
+                              "be invoked from the menu: "))
+              (when remapped
+                (insert ", but that was remapped to `"
+                        (help-fns-function-name remapped)
+                        "' as well.\n"))
+              ;; "The (= (point) start) condition tests whether
+              ;; 'help-fns--insert-menu-bindings' inserted anything; if it
+              ;; didn't, we already have a period from the previous
+              ;; 'princ' call."
+              (unless (or remapped (= (point) start))
+                (insert "."))
+              (fill-region-as-paragraph start (point))))
+          (ensure-empty-lines))
         #f))
 
     (define (help-fns--obsolete function)

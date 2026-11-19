@@ -1436,13 +1436,17 @@
       ;; the text area, which is why this is the one place the two
       ;; differ.
       ;;
-      ;; **The tab bar has no widget here, so it is a row on both.** GNU
-      ;; Emacs's Gtk build gives the tab bar its own widget above the
-      ;; drawing area (`xg_create_frame_widgets`); this tree draws it as
-      ;; the first row of the text area, the way the terminal does, and
-      ;; that is a named departure - `tab-bar.scm`'s header says so. It
-      ;; is why the window-system branch counts `tab-bar-lines` and not
-      ;; `menu-bar-lines`.
+      ;; **The tab bar is a row on both, and that is Emacs's design.**
+      ;; GNU Emacs's Gtk build has no tab-bar widget: `gtkutil.c` and
+      ;; `xmenu.c` contain no tab-bar code, and the bar is drawn by the
+      ;; redisplay into `f->tab_bar_window` below the menu bar
+      ;; (`pgtkterm.c` reads `FRAME_TAB_BAR_LINES` and hit-tests that
+      ;; window) - only the *menu* bar is a toolkit widget. So the
+      ;; window-system branch counts `tab-bar-lines` (the menu bar is
+      ;; the toolkit's zero rows) and the terminal counts both. What is
+      ;; not carried is the dedicated window object: a click's
+      ;; `posn-window` here is the frame, where Emacs answers
+      ;; `tab_bar_window`.
       ;;--------------------------------------------------------------
       (let ((display (frame-output frame)))
         (if (and display (window-system-display? display))
@@ -3052,6 +3056,17 @@
       ;; so the flag is set here - a terminal resize runs
       ;; `window-configuration-change-hook` in Emacs and must here.
       (set!frame-window-change frame #t)
+      ;; **The mode lines are out of date too.** `tab-bar-auto-width`
+      ;; distributes the tabs across `frame-inner-width`, and Emacs's
+      ;; docstring says the widths "change only when tabs are added or
+      ;; deleted, or when the frame's dimensions change" - so a resize
+      ;; is exactly the case that must rebuild the tab bar (and the mode
+      ;; line). Without this the items kept the width they were first
+      ;; built at, while `tab-bar--event-to-item` recomputed them at the
+      ;; click's width: the bar drew wide and the hit test was narrow,
+      ;; so a click on the second tab landed past the last one and
+      ;; answered "New tab".
+      (set-update-mode-lines! #t)
       (let ((margin (frame-top-margin frame)))
         (scale-window! (car (frame-windows frame))
                        0 0 old-width (max 1 (- old-height 1))
