@@ -58,6 +58,7 @@
     ;; The multilingual commands (`C-x RET ...`), which install their own
     ;; keys - `mule-cmds.el`. Not for a name: for the load.
     (only (schemacs editor mule-cmds))
+    (only (schemacs editor mule-diag))
     ;; `dired.el': C-x d binds at load, the same reason again.
     (only (schemacs editor dired))
     ;; `tool-bar.el`: `tool-bar-mode`, the `[tool-bar]` binding and the
@@ -66,6 +67,10 @@
     ;; keymap's expressions ask the frame's display which image files it
     ;; can use.
     (only (schemacs editor tool-bar) tool-bar-setup)
+    ;; `tooltip.el` is preloaded in Emacs and turning it on is its load:
+    ;; the mode installs `show-help-function`, which is what turns a
+    ;; `help-echo` under the pointer into a tooltip on this front end.
+    (only (schemacs editor tooltip))
     ;; `scroll-bar.el`: the `[vertical-scroll-bar mouse-1]` binding and
     ;; `scroll-bar-mode`, made when the library loads. Both front ends
     ;; load it, as Emacs preloads `scroll-bar.el` in every build - a

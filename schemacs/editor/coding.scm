@@ -83,6 +83,7 @@
    coding-system-iconv-name coding-system-raw?
    coding-system-mnemonic coding-system-bom
    coding-system-doc-string coding-system-aliases coding-system-list
+   define-coding-system-alias
    check-coding-system
    coding-system-p
    ;; The registry lookup, Emacs's `CODING_SYSTEM_SPEC'. It is here for
@@ -90,6 +91,7 @@
    ;; accessors take a name and do it themselves.
    find-coding-system
    coding-system-base-name coding-system-change-eol-conversion
+   coding-system-change-text-conversion
    *coding-system-table*
    ;; The end-of-line half
    *max-eol-check-count* detect-eol bytes-have-null? adjust-coding-eol-type
@@ -322,18 +324,74 @@
       ;;--------------------------------------------------------------
       (coding-system-docstring-of (%coding-of cs)))
 
+    (define *coding-system-aliases* (make-hash-table))
+    ;; ^ The alias list of each coding system, keyed by its canonical
+    ;; name. Emacs keeps it in the spec (`AREF (spec, 1)`) with the
+    ;; canonical name first and every alias appended; the record here is
+    ;; shared by an alias and its target - as it is in Emacs, where both
+    ;; names map to the *same* spec object - so the canonical name is a
+    ;; key and this is the table.
+
     (define (coding-system-aliases cs)
       ;; GNU Emacs's `coding-system-aliases': "Return the list of aliases
       ;; of CODING-SYSTEM. The first element is CODING-SYSTEM itself."
       ;;
-      ;; **Ours has no aliases at all** - `define-coding-system-alias' is
-      ;; not ported, so Emacs's `binary', `mule-utf-8', `latin-1' and the
-      ;; rest do not exist here - so the answer is the name alone. That is
-      ;; the shape its one caller wants: `print-coding-system-briefly'
-      ;; reads `(car aliases)' as the base and reports an `(alias: ...)'
-      ;; tail only when `(cdr aliases)' is non-empty.
+      ;; Measured on Emacs 31.1: `(coding-system-aliases 'utf-8)` is
+      ;; `(utf-8 mule-utf-8 cp65001)` and `(coding-system-aliases 'dos)`
+      ;; is `(undecided-dos dos)` - so an alias answers its *target's*
+      ;; canonical name first, which is what `(car ...)` gives its one
+      ;; caller (`print-coding-system-briefly`).
       ;;--------------------------------------------------------------
-      (list (coding-system-name cs)))
+      (let* ((record (%coding-of cs))
+             (name (coding-system-name-of record))
+             (extra (hashq-ref *coding-system-aliases* name)))
+        (cons name (if extra (list-copy extra) '()))))
+
+    (define (define-coding-system-alias alias coding-system)
+      ;; GNU Emacs's `define-coding-system-alias` (`coding.c:11612`):
+      ;; "Define ALIAS as an alias for CODING-SYSTEM."
+      ;;
+      ;; The alias shares the target's *spec* - `Fputhash (alias, spec,
+      ;; Vcoding_system_hash_table)` - so every accessor answers for it
+      ;; exactly what it answers for the target, and the name the caller
+      ;; used is not something the spec remembers. That is why the alias
+      ;; list is a side table here (above) and why `coding-system-name`
+      ;; still answers the name that was asked for.
+      ;;
+      ;; **A target whose eol is a vector gets subsidiaries**: the C's
+      ;; `make_subsidiaries (alias)` makes `ALIAS-unix`, `ALIAS-dos` and
+      ;; `ALIAS-mac` and defines each as an alias of the corresponding
+      ;; variant - so `(define-coding-system-alias 'foo 'utf-8)` makes
+      ;; `foo-unix` work. A coding system with a *fixed* eol (this tree's
+      ;; `no-conversion`, whose eol-type is the symbol rather than `#f`)
+      ;; has no variants and so gets none.
+      ;;--------------------------------------------------------------
+      (%define-coding-system-alias-1 alias (%coding-of coding-system))
+      #f)
+
+    (define (%define-coding-system-alias-1 alias record)
+      (unless (symbol? alias)
+        (error "Wrong type argument: symbolp" alias))
+      (let ((canonical (coding-system-name-of record)))
+        (hashq-set! *coding-system-aliases* canonical
+                    (append (or (hashq-ref *coding-system-aliases* canonical) '())
+                            (list alias)))
+        (hashq-set! (*coding-system-table*) alias record)
+        ;; The C recurses only for a vector eol type - our `#f`, the
+        ;; marker a base carries - and `make_subsidiaries` builds each
+        ;; name from the alias's own spelling.
+        (unless (coding-system-eol-type-of record)
+          (for-each
+           (lambda (eol)
+             (%define-coding-system-alias-1
+              (string->symbol
+               (string-append (symbol->string alias) "-" (symbol->string eol)))
+              (%coding-of
+               (string->symbol
+                (string-append (symbol->string canonical) "-"
+                               (symbol->string eol))))))
+           '(unix dos mac))))
+      alias)
 
     (define (coding-system-list . args)
       ;; GNU Emacs's `coding-system-list': every coding system name in the
@@ -524,6 +582,35 @@
     (define utf-16 (%define-coding-system 'utf-16 #f "UTF-16" #f #\U))
     (define utf-16le (%define-coding-system 'utf-16le #f "UTF-16LE" #f #\U))
     (define utf-16be (%define-coding-system 'utf-16be #f "UTF-16BE" #f #\U))
+
+    ;; `mule-conf.el`'s four aliases (`:1324-1327`), which are what
+    ;; `mode-line-change-eol` names when it asks for a bare `dos` or
+    ;; `mac`. Emacs defines them where the coding systems are defined
+    ;; and this table is that place. `binary` is included because it is
+    ;; one of the four and costs nothing: `(coding-system-p 'binary)` is
+    ;; t in Emacs.
+    ;;
+    ;; `iso-8859-1` is *not* an alias here: it is a coding system of its
+    ;; own in this table, a departure named beside its definition above.
+    (define-coding-system-alias 'binary 'no-conversion)
+    (define-coding-system-alias 'unix 'undecided-unix)
+    (define-coding-system-alias 'dos 'undecided-dos)
+    (define-coding-system-alias 'mac 'undecided-mac)
+
+    ;; The rest of `mule-conf.el`'s aliases whose targets this tree
+    ;; carries (`:1370-1598`), so that `coding-system-aliases` and the
+    ;; help text `print-coding-system-briefly` prints are Emacs's.
+    ;; `iso-8859-1` is left out because it is a coding system of its own
+    ;; here (the departure named beside its definition), and the ISO-2022,
+    ;; CCL, `utf-8-emacs` and compound-text aliases because their targets
+    ;; are not carried.
+    (define-coding-system-alias 'latin-1 'iso-latin-1)
+    (define-coding-system-alias 'mule-utf-8 'utf-8)
+    (define-coding-system-alias 'cp65001 'utf-8)
+    (define-coding-system-alias 'utf-16-le 'utf-16le-with-signature)
+    (define-coding-system-alias 'utf-16-be 'utf-16be-with-signature)
+    (define-coding-system-alias 'ascii 'us-ascii)
+    (define-coding-system-alias 'iso-safe 'us-ascii)
 
     ;;------------------------------------------------------------------
     ;; Converting
@@ -835,17 +922,63 @@
     ;; was written - Emacs's `CODING_ATTR_BASE_NAME''s spelling. Kept so
     ;; that the eol helper below and the tests read as they did.
 
-    (define (coding-system-change-eol-conversion coding eol-type)
-      ;; GNU Emacs's `coding-system-change-eol-conversion': "Return a
-      ;; coding system based on CODING-SYSTEM but with a new EOL
-      ;; type" - the name rebuilt, and the coding system looked up again.
+    (define (%eol-variant name eol-type)
+      ;; `NAME-EOLTYPE`, if the table has it. Emacs's `(aref orig-eol-type
+      ;; i)` reaches the variant through the base's vector; ours are names
+      ;; in the table, as everywhere else.
       ;;--------------------------------------------------------------
-      (let* ((base (and coding (coding-system-base-name coding)))
-             (name (and base
-                        (string->symbol
-                         (string-append (symbol->string base) "-"
-                                        (symbol->string eol-type))))))
-        (and name (coding-system-p name) name)))
+      (let ((n (string->symbol
+                (string-append (symbol->string name) "-"
+                               (symbol->string eol-type)))))
+        (and (coding-system-p n) n)))
+
+    (define (coding-system-change-eol-conversion coding-system eol-type)
+      ;; GNU Emacs's `coding-system-change-eol-conversion'
+      ;; (`mule-cmds.el:182`): "Return a coding system which differs from
+      ;; CODING-SYSTEM in EOL conversion." EOL-TYPE is `unix`, `dos`,
+      ;; `mac`, or nil for "detect it".
+      ;;
+      ;; Emacs's three `cond` branches are its `(vectorp orig-eol-type)`
+      ;; test - here "the eol is not settled", which is the `#f` a base
+      ;; carries - and the two number cases. **The vector case answers
+      ;; the *variant* of the coding system asked for**, so `(utf-8 dos)`
+      ;; is `utf-8-dos`; the number case strips back to the base when no
+      ;; eol is given.
+      ;;
+      ;; A variant's record points at its base's record, while a base's
+      ;; (and a fixed-eol coding system's, like `no-conversion`) points at
+      ;; its own *name* - and that is the distinction the last branch
+      ;; needs: only a variant has variants to switch between.
+      ;;--------------------------------------------------------------
+      (let* ((record (%coding-of coding-system))
+             (base (coding-system-base coding-system))
+             (orig-eol (coding-system-eol-type-of record))
+             (variant? (coding-system? (coding-system-base-of record))))
+        (cond
+         ((not orig-eol)
+          (if (not eol-type)
+              coding-system
+              (%eol-variant (coding-system-name-of record) eol-type)))
+         ((not eol-type) base)
+         ((eq? eol-type orig-eol) coding-system)
+         (variant? (%eol-variant base eol-type))
+         (else #f))))
+
+    (define (coding-system-change-text-conversion coding-system coding)
+      ;; GNU Emacs's `coding-system-change-text-conversion'
+      ;; (`mule-cmds.el:213`): "Return a coding system which differs from
+      ;; CODING-SYSTEM in text conversion."
+      ;;
+      ;; It is `coding-system-change-eol-conversion` with CODING as the
+      ;; base and the *old* eol carried over - which is how `dos` (an
+      ;; alias of `undecided-dos`) becomes `utf-8-dos` when merged with a
+      ;; UTF-8 buffer. The C spells the eol as a number and looks it up in
+      ;; `[unix dos mac]`; ours is already the symbol.
+      ;;--------------------------------------------------------------
+      (let ((eol-type (coding-system-eol-type coding-system)))
+        (coding-system-change-eol-conversion
+         (if coding coding 'undecided)
+         (if (symbol? eol-type) eol-type #f))))
 
     ;;------------------------------------------------------------------
     ;; Which end of line a file uses

@@ -34,7 +34,7 @@
     ;; coordinates arrive as inexact numbers and every cell here
     ;; is an exact one - `pgtk.sld''s `pgtk-ensure-surface!' makes
     ;; the same conversion for the same reason.
-    (only (guile) delq filter sort inexact->exact
+    (only (guile) delq filter sort string<? inexact->exact format
           ;; `string-pixel-width` measures the widest line of a string
           ;; that holds newlines, as the C's `buffer-text-pixel-size`
           ;; does over the work buffer.
@@ -83,9 +83,9 @@
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
-    (only (schemacs editor intervals) make-buffer-string)
+    (only (schemacs editor intervals) make-buffer-string get)
     ;; `symbol-value`'s fallback for a minor mode's variable.
-    (only (schemacs editor data) default-value)
+    (only (schemacs editor data) default-value default-boundp)
     
     ;; The line arithmetic is `editfns.c`'s, and it lives there now.
     (only (schemacs editor editfns)
@@ -97,6 +97,8 @@
          ;; `reset_outermost_restrictions` and its unwind, as one
          ;; bracket around every redisplay (`xdisp.c:17440`).
          %with-outermost-restrictions
+         ;; `mode-line-widen`
+         widen
          ;; `:propertize' in the mode line is Emacs's `propertize',
          ;; `editfns.c:3296'.
          propertize
@@ -107,6 +109,10 @@
          ;; that it follows the text it was on when the oldest lines are
          ;; trimmed off the front.
          point-marker)
+    ;; The mode-line mouse commands are `bindings.el`'s, and a command is
+    ;; what `define-command` makes. `command.scm` is a leaf - it imports
+    ;; nothing of this tree but `intervals` - so the renderer can have it.
+    (only (schemacs editor command) define-command call-interactively)
     ;; The mode line's *text properties*: `format-mode-line' returns a
     ;; propertized string in Emacs, and `render-window!' draws its runs by
     ;; the faces those properties name. `text-property-list' and
@@ -158,6 +164,10 @@
          echo-area-message-buffer *resize-mini-windows* *max-mini-window-height*
          grow-mini-window shrink-mini-window
          window-minibuffer-p
+         ;; `mode-line-default-help-echo` (`bindings.el:128`) asks whether
+         ;; this window is the whole frame, and whether the minibuffer
+         ;; window under it can be resized.
+         frame-root-window minibuffer-window-active-p
          frame-message frame-selected-window
          ;; `render!' binds the display from the frame it was handed: the
          ;; frame's `output' is Emacs's `output_data', and this is what
@@ -273,7 +283,7 @@
           buffer-auto-hscroll-mode buffer-cursor-in-non-selected-windows
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
           buffer-local-value set-buffer-local-value! buffer-truncate-lines
-          buffer-word-wrap
+          buffer-word-wrap local-variable-p
           ;; the buffer's own bounds and text, which the `%l' cache's
           ;; `BEG_UNCHANGED' accessors below read - `BEG' and `Z' are
           ;; `buffer.h:992''s macros and come from their own library, not
@@ -295,7 +305,9 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char set-point text-editor-buffer-name text-editor-text-props text-editor-file-name buffer-pt buffer-modified-p buffer-read-only?)
+          fetch-char set-point text-editor-buffer-name text-editor-text-props text-editor-file-name buffer-pt buffer-modified-p buffer-read-only?
+          ;; `mode-line-toggle-modified`
+          set-buffer-modified-p)
     ;; `BEG_UNCHANGED' (`buffer.h:156') is a field of the buffer's *text* -
     ;; `buffer-text' is this tree's `struct buffer_text' - and the two
     ;; accessors below are the only readers and writers of it here.
@@ -349,6 +361,8 @@
     ;; below is what names them.
     (only (schemacs editor simple)
           *overwrite-mode-textual* *overwrite-mode-binary*
+          ;; `mode-line-toggle-read-only` is `(read-only-mode 'toggle)`.
+          read-only-mode
           ;; the `*Messages*' buffer's own mode, which `message-dolog'
           ;; switches a newly made buffer into
           messages-buffer-mode)
@@ -360,12 +374,24 @@
     ;; `window-at-side-p` is the question the pointer's shape asks
     ;; ("can this window's mode line be dragged?"), and `window.scm`
     ;; holds it for the same reason the mouse commands reach it there.
-    (only (schemacs editor window) run-window-change-functions window-at-side-p)
+    (only (schemacs editor window) run-window-change-functions window-at-side-p
+          ;; every mode-line command acts on the window that was clicked:
+          ;; `(with-selected-window (posn-window (event-start event)) ...)`
+          with-selected-window
+          ;; the buffer-name item's two commands
+          next-buffer previous-buffer)
     ;; `keymapp` decides whether a mode-line string under the pointer is
     ;; a clickable item - if it is, the pointer stays an arrow and the
     ;; mode line is not a resize handle at that glyph
     ;; (`xdisp.c:36805`).
-    (only (schemacs editor keymap) keymapp)
+    ;; `mode-line-default-help-echo` is a `bindings.el` defcustom.
+    (only (schemacs editor custom) define-custom)
+    (only (schemacs editor keymap) keymapp
+          ;; `make-mode-line-mouse-map` is a sparse keymap with one entry
+          make-sparse-keymap define-key
+          ;; `bindings--sort-menu-keymap` walks the toggles map and
+          ;; keeps its prompt.
+          map-keymap keymap-prompt)
     ;; `minor-mode-alist' is `bindings.el`'s and lives in `subr.scm`,
     ;; beside `add-minor-mode' - **the one function that writes it**. It
     ;; is imported here rather than declared here, which it was until
@@ -377,10 +403,13 @@
           ;; mouse commands do - including the string a click landed on,
           ;; which is where a mode-line item's `keymap` and `pointer`
           ;; properties live.
-          posn-window posn-point posn-area posn-string
+          event-start posn-window posn-point posn-area posn-string
           ;; The seam `event-start`/`event-end` take their point-position
           ;; fallback through; installed at the end of this file.
-          *event--posn-at-point-function*)
+          *event--posn-at-point-function*
+          ;; `mode-line-position`'s `%C` arm rewrites the format string,
+          ;; as `mode-line-position`'s `:eval` does in `bindings.el`.
+          string-replace)
     ;; `find_newline' (`search.c:675'), which is what the C's
     ;; `scan_newline' is - the line arithmetic `message-dolog' walks the
     ;; log with.
@@ -459,6 +488,42 @@
    ;; `subr-x.el`'s, for want of a `subr-x` library above `frame.scm`
    string-pixel-width
    mode-line-string
+   ;; `bindings.el`'s mode-line items and the commands they name
+   make-mode-line-mouse-map
+   mode-line-modified mode-line-remote mode-line-narrowed
+   propertized-buffer-identification mode-line-buffer-identification
+   mode-line-read-only-map mode-line-modified-map mode-line-widen-map
+   mode-line-change-eol-map mode-line-buffer-identification-map
+   mode-line-toggle-read-only mode-line-toggle-modified mode-line-widen
+   mode-line-change-eol mode-line-previous-buffer mode-line-next-buffer
+   ;; `bindings.el`'s coding-system item and its help text.
+   mode-line-coding-system-map mode-line-mule-info-help-echo
+   mode-line-coding-system-describe mode-line-coding-system-set
+   *describe-coding-system-function*
+   *set-buffer-file-coding-system-command*
+   mode-line-read-only-help-echo mode-line-modified-help-echo
+   mode-line-remote-help-echo
+   ;; `bindings.el:128`'s default help text for the mode line, and the
+   ;; option that chooses it.
+   mode-line-default-help-echo *mode-line-default-help-echo*
+   ;; The major mode's and minor modes' buttons: the two help strings,
+   ;; their keymaps, the toggles map and its sorter (`bindings.el:404`),
+   ;; and the run a click's flattened string is cut into.
+   mode-line-major-mode-help-echo mode-line-minor-mode-help-echo
+   mode-line-major-mode-keymap mode-line-minor-mode-keymap
+   mode-line-mode-menu bindings--sort-menu-keymap string-property-run-at
+   ;; The line and column item and its menu (`bindings.el:620-762`).
+   mode-line-column-line-number-mode-map line-column-mode-menu
+   mode-line-position--column-line-properties
+   *mode-line-position* *mode-line-percent-position*
+   *mode-line-position-line-format* *mode-line-position-column-format*
+   *mode-line-position-column-line-format*
+   *column-number-indicator-zero-based*
+   percent99 mode-line-symbol-value
+   ;; The two evaluation steps a lighter goes through, which
+   ;; `mouse.scm`'s completion table and `help-fns.scm`'s
+   ;; `describe-minor-mode` family read.
+   minor-mode-variable-true? minor-mode-indicator-value minor-mode-lighter
    render! redisplay-frames! *redisplay-in-progress* *after-redisplay-hook*
    fontification-functions set!fontification-functions!
    force-mode-line-update
@@ -479,6 +544,15 @@
    ;; binding that says which window's rows are being built)
    note-mouse-highlight clear-mouse-face! mouse-highlight mouse-face-at
    *drawing-window*
+   ;; The help-echo machinery of `note_mouse_highlight`: the seam
+   ;; `keyboard.scm`'s `show-help-echo` is installed through, and the
+   ;; clear the front end calls when the pointer leaves the frame.
+   *show-help-echo-function* clear-help-echo!
+   help-echo-at string-help-echo-at
+   ;; The seam `mode-line-change-eol` reaches `set-buffer-file-coding-system`
+   ;; through; `mule-cmds.scm` installs it as it loads (it cannot be
+   ;; imported here - `mule-cmds` imports `files`, which imports this).
+   *set-buffer-file-coding-system-function*
    ;; the glyph the pointer is on, which is what decides whether a motion
    ;; report is a movement at all - see `remember-mouse-glyph'
    remember-mouse-glyph
@@ -974,6 +1048,628 @@
       ;;--------------------------------------------------------------
       (eq? (selected-window) (*old-selected-window*)))
 
+    ;;----------------------------------------------------------------
+    ;; The mode line as a set of buttons - `bindings.el`'s own commands
+    ;;----------------------------------------------------------------
+    ;;
+    ;; `mode-line-modified`, `mode-line-remote`, `%n` and the buffer
+    ;; identification are *propertized strings* in Emacs: a `local-map`
+    ;; (or `keymap`) property makes the characters a button and a
+    ;; `mouse-face` makes them light up under the pointer. This renderer
+    ;; honours both already - the click path reads the clicked string's
+    ;; maps (`lookup-keymaps`, `keyboard.scm`) and `draw-mode-line!`
+    ;; paints the `mouse-face` run - so what was missing was the
+    ;; constructs themselves and the commands they name.
+    ;;
+    ;; **The `help-echo` properties are displayed by
+    ;; `note_mouse_highlight`** (at the end of this file): Emacs shows
+    ;; them through `show-help-function` (`keyboard.c:2259`) and
+    ;; `tooltip.el`, and both are ported now.
+
+    (define (mode-line-default-help-echo window)
+      ;; GNU Emacs's `mode-line-default-help-echo` (`bindings.el:128`):
+      ;; "Return default help echo text for WINDOW's mode line."
+      ;;
+      ;; This is the help a stretch of the mode line with no `help-echo`
+      ;; property of its own shows - the C hangs it off the window as
+      ;; `w->mode_line_help_echo` when the mode line is formatted and
+      ;; `note_line_or_margin_highlight` falls back to it. The four
+      ;; conditions are the C's, each spelling out when a mouse button
+      ;; would do something: select the window, drag its bottom edge,
+      ;; make it the only window, delete it.
+      ;;--------------------------------------------------------------
+      (let* ((frame (window-frame window))
+             (line-1a
+              ;; "Show text to select window only if the window is not
+              ;; selected."
+              (not (eq? window (frame-selected-window frame))))
+             (line-1b
+              ;; "Show text to drag mode line if either the window is not
+              ;; at the bottom of its frame or the minibuffer window of
+              ;; this frame can be resized." The check matches a
+              ;; corresponding one in `mouse-drag-mode-line`.
+              (or (not (window-at-side-p window 'bottom))
+                  (let ((mini-window (frame-minibuffer-window frame)))
+                    (and (eq? frame (window-frame mini-window))
+                         (or (minibuffer-window-active-p mini-window)
+                             (not (*resize-mini-windows*)))))))
+             (line-2
+              ;; "Show text make window occupy the whole frame only if it
+              ;; doesn't already do that."
+              (not (eq? window (frame-root-window frame))))
+             (line-3
+              ;; "Show text to delete window only if that's possible."
+              (not (eq? window (frame-root-window frame)))))
+        ;; The `if` is not a `when`: Elisp's nil for "no help" must be
+        ;; `#f`, and this function's answer is passed to `(string? ...)`
+        ;; - a `when` that does not fire answers the *unspecified* value,
+        ;; which is true in Scheme.
+        ;;
+        ;; **Every piece is an `if` and not a `when`.** Elisp's `concat`
+        ;; reads nil as "contributes nothing", which `(fns.c)`'s port
+        ;; spells with `#f`; the *unspecified* value a `when` answers
+        ;; when its test fails is not nil, and `concat` rejects it
+        ;; ("Wrong type argument: sequencep"). This is the `when`-as-a-
+        ;; value trap the handoffs name, met inside a `concat`.
+        (if (or line-1a line-1b line-2 line-3)
+            (concat
+             (if (or line-1a line-1b)
+                 (concat
+                  "mouse-1: "
+                  (if line-1a "Select window" #f)
+                  (if line-1b
+                      (if line-1a " (drag to resize)" "Drag to resize")
+                      #f)
+                  (if (or line-2 line-3) "\n" #f))
+                 #f)
+             (if line-2
+                 (concat
+                  "mouse-2: Make window occupy whole frame"
+                  (if line-3 "\n" #f))
+                 #f)
+             (if line-3 "mouse-3: Remove window from frame" #f))
+            #f)))
+
+    (define-custom *mode-line-default-help-echo* mode-line-default-help-echo
+      "Default help text for the mode line.
+If the value is a string, it specifies the tooltip or echo area
+message to display when the mouse is moved over the mode line.
+If the value is a function, call that function with one argument
+- the window whose mode line to display.  If the text at the
+mouse position has a `help-echo' text property, that overrides
+this variable."
+      :type '(choice (const :tag "No help" :value nil)
+                     function
+                     (string :tag "Text"))
+      :group 'mode-line)
+
+    (define *set-buffer-file-coding-system-function* (make-parameter #f))
+
+    (define *set-buffer-file-coding-system-command* (make-parameter #f))
+    ;; ^ The *command* - `bindings.el`'s coding-system item mouse-3 calls
+    ;; it interactively, so it needs the prompt, which the one-argument
+    ;; seam above does not have. `mule-cmds.scm` installs both.
+
+    (define *describe-coding-system-function* (make-parameter #f))
+    ;; ^ `describe-coding-system` (`mule-diag.el:408`), which is
+    ;; `mule-diag.scm`'s and above this library; installed as it loads.
+    ;; ^ The seam `mode-line-change-eol` reaches `set-buffer-file-coding-system`
+    ;; through. That function is `mule-cmds.scm`'s, and `mule-cmds`
+    ;; imports `files` and `minibuffer`, which import this library - so
+    ;; the call has to come *down* from there, as `barf-if-buffer-read-only`
+    ;; comes down into `command.scm`. `mule-cmds.scm` installs it as it
+    ;; loads; a session without that library gets an error naming the
+    ;; function, which is the honest report.
+
+    (define (make-mode-line-mouse-map mouse function)
+      ;; GNU Emacs's `make-mode-line-mouse-map` (`bindings.el:30`):
+      ;; "Return a keymap with single entry for mouse key MOUSE on the
+      ;; mode line. MOUSE is defined to run function FUNCTION with no
+      ;; args in the buffer corresponding to the mode line clicked."
+      ;;--------------------------------------------------------------
+      (let ((map (make-sparse-keymap)))
+        (define-key map (vector 'mode-line mouse) function)
+        map))
+
+    (define-command (mode-line-toggle-read-only event)
+      "Like toggling `read-only-mode', for the mode-line."
+      (interactive "e")
+      (with-selected-window (posn-window (event-start event))
+        (read-only-mode 'toggle)))
+
+    (define-command (mode-line-toggle-modified event)
+      "Toggle the buffer-modified flag from the mode-line."
+      (interactive "e")
+      (with-selected-window (posn-window (event-start event))
+        (set-buffer-modified-p (not (buffer-modified-p)))
+        (force-mode-line-update)))
+
+    (define-command (mode-line-widen event)
+      "Widen a buffer from the mode-line."
+      (interactive "e")
+      (with-selected-window (posn-window (event-start event))
+        (widen)
+        (force-mode-line-update)))
+
+    (define-command (mode-line-change-eol event)
+      "Cycle through the various possible kinds of end-of-line styles."
+      (interactive "e")
+      (with-selected-window (posn-window (event-start event))
+        (let* ((eol (coding-system-eol-type
+                     (buffer-local-value (current-buffer)
+                                         'buffer-file-coding-system
+                                         'utf-8-unix)))
+               (set (or (*set-buffer-file-coding-system-function*)
+                        (error "~a"
+                               (string-append
+                                "`set-buffer-file-coding-system' is not"
+                                " available (import (schemacs editor mule-cmds))")))))
+          ;; `(cond ((eq eol 0) 'dos) ((eq eol 1) 'mac) (t 'unix))` in the
+          ;; C, whose eol types are the integers this tree spells as
+          ;; symbols - an undecided eol (`#f`) takes the same `unix`
+          ;; branch there and here.
+          (set (cond ((eq? eol 'unix) 'dos)
+                     ((eq? eol 'dos) 'mac)
+                     (else 'unix))))))
+
+    ;; The buffer-name commands, `bindings.el:874-884`: a click on the
+    ;; name goes to the previous buffer and mouse-3 to the next, in the
+    ;; *clicked* window.
+
+    (define-command (mode-line-previous-buffer event)
+      "Like `previous-buffer', but temporarily select EVENT's window."
+      (interactive "e")
+      (with-selected-window (posn-window (event-start event))
+        ;; `(previous-buffer)` in Emacs: the default count, and the quiet
+        ;; arm - this tree's commands take the optional arguments
+        ;; explicitly (the `split-window-below` rule).
+        (previous-buffer #f #f)))
+
+    (define-command (mode-line-next-buffer event)
+      "Like `next-buffer', but temporarily select EVENT's window."
+      (interactive "e")
+      (with-selected-window (posn-window (event-start event))
+        (next-buffer #f #f)))
+
+    (define mode-line-read-only-map
+      (make-mode-line-mouse-map 'mouse-1 mode-line-toggle-read-only))
+    (define mode-line-modified-map
+      (make-mode-line-mouse-map 'mouse-1 mode-line-toggle-modified))
+    (define mode-line-widen-map
+      (make-mode-line-mouse-map 'mouse-2 mode-line-widen))
+    (define mode-line-change-eol-map
+      (make-mode-line-mouse-map 'mouse-1 mode-line-change-eol))
+
+    ;; The coding-system item's map - `bindings.el:74-88`. Emacs binds
+    ;; two anonymous `(lambda (e) (interactive "e") ...)` functions;
+    ;; here they are named commands, because a binding in this tree is a
+    ;; procedure and only a command has an interactive specification.
+    (define-command (mode-line-coding-system-describe event)
+      "Describe WINDOW's buffer coding system from the mode line."
+      (interactive "e")
+      (with-selected-window (posn-window (event-start event))
+        (let ((coding (buffer-local-value (window-buffer (selected-window))
+                                          'buffer-file-coding-system
+                                          'utf-8-unix)))
+          (when (and (*enable-multibyte-characters*) coding)
+            ((or (*describe-coding-system-function*)
+                 (error "~a"
+                        (string-append
+                         "`describe-coding-system' is not available"
+                         " (import (schemacs editor mule-diag))")))
+             coding)))))
+
+    (define-command (mode-line-coding-system-set event)
+      "Set the buffer coding system from the mode line."
+      (interactive "e")
+      (with-selected-window (posn-window (event-start event))
+        (let ((command (*set-buffer-file-coding-system-command*)))
+          (if command
+              (call-interactively command)
+              (error "~a"
+                     (string-append
+                      "`set-buffer-file-coding-system' is not available"
+                      " (import (schemacs editor mule-cmds))"))))))
+
+    (define mode-line-coding-system-map
+      (let ((map (make-sparse-keymap)))
+        (define-key map (vector 'mode-line 'mouse-1)
+                    mode-line-coding-system-describe)
+        (define-key map (vector 'mode-line 'mouse-3)
+                    mode-line-coding-system-set)
+        map))
+
+    (define (mode-line-mule-info-help-echo window object point)
+      ;; GNU Emacs's `mode-line-mule-info-help-echo` (`bindings.el:188`):
+      ;; "Return help text specifying WINDOW's buffer coding system."
+      ;;--------------------------------------------------------------
+      (with-current-buffer (window-buffer window)
+        (let ((coding (buffer-local-value (current-buffer)
+                                          'buffer-file-coding-system
+                                          ;; `%z` reads it the same way,
+                                          ;; with the same literal: the
+                                          ;; variable is `files.scm`'s,
+                                          ;; above this library.
+                                          'utf-8-unix)))
+          (if coding
+              (format #f
+                      (string-append
+                       "Buffer coding system (~a): ~a\n"
+                       "mouse-1: Describe coding system\n"
+                       "mouse-3: Set coding system")
+                      (if (*enable-multibyte-characters*) "multi-byte" "unibyte")
+                      coding)
+              "Buffer coding system: none specified"))))
+
+    (define mode-line-buffer-identification-map
+      ;; `bindings.el:775`'s `defvar-keymap` less its header-line half
+      ;; (this tree has no header line): mouse-1 is the previous buffer,
+      ;; mouse-3 the next. Emacs also binds the header line's `down-`
+      ;; events to `ignore` "so that the global keymap won't shine
+      ;; through"; the mode line needs none, its `down-mouse-1` being the
+      ;; drag handle - and an unbound press on this map is disposed of by
+      ;; the C's mouse-event fallback anyway.
+      (let ((map (make-sparse-keymap)))
+        (define-key map (vector 'mode-line 'mouse-1) mode-line-previous-buffer)
+        (define-key map (vector 'mode-line 'mouse-3) mode-line-next-buffer)
+        map))
+
+    ;; The mode name's and the lighters' buttons - `bindings.el:571-596`.
+    ;;
+    ;; **Departure**: Emacs binds the two menus as `(menu-item ... :filter
+    ;; ...)` values and `read_char`'s menu prompting pops the keymap a
+    ;; filter answers. This tree has neither the filter arm in a key
+    ;; lookup nor the menu-prompting path, so the presses are bound to
+    ;; the commands `mouse.scm` defines that build the same menu and pop
+    ;; it at the click (`mouse-menu-major-mode-menu`,
+    ;; `mode-line-minor-mode-menu`). `mouse.el`'s own menu builders -
+    ;; `mouse-menu-major-mode-map`, `bindings--sort-menu-keymap` - are
+    ;; the C code, ported where they belong.
+
+    (define mode-line-major-mode-help-echo
+      ;; `bindings.el:600`
+      "Major mode\nmouse-1: Display major mode menu\nmouse-2: Show help for major mode\nmouse-3: Toggle minor modes")
+
+    (define mode-line-minor-mode-help-echo
+      ;; `bindings.el:539`
+      "Minor mode\nmouse-1: Display minor mode menu\nmouse-2: Show help for minor mode\nmouse-3: Toggle minor modes")
+
+    (define mode-line-major-mode-keymap
+      (let ((map (make-sparse-keymap)))
+        (define-key map (vector 'mode-line 'down-mouse-1)
+                    'mouse-menu-major-mode-menu)
+        (define-key map (vector 'mode-line 'mouse-2) 'describe-mode)
+        (define-key map (vector 'mode-line 'down-mouse-3)
+                    'mode-line-minor-mode-menu)
+        map))
+
+    (define mode-line-minor-mode-keymap
+      (let ((map (make-sparse-keymap)))
+        (define-key map (vector 'mode-line 'down-mouse-1)
+                    'mouse-minor-mode-menu)
+        (define-key map (vector 'mode-line 'mouse-2)
+                    'mode-line-minor-mode-help)
+        (define-key map (vector 'mode-line 'down-mouse-3)
+                    'mode-line-minor-mode-menu)
+        map))
+
+    ;; `bindings.el:404-460', the toggles menu and its sort. The entries
+    ;; Emacs has whose modes this tree carries, with the same labels,
+    ;; help strings and `:button` forms - less the ones this tree's
+    ;; imports reach, which is what keeps a click from signalling.
+    ;;
+    ;; **The `:button` expressions name this tree's readers.** Emacs's
+    ;; minor-mode variable and command share one symbol; here the
+    ;; command is a procedure and the state is a buffer-local slot
+    ;; whose accessor is the reader (`buffer-overwrite-mode`,
+    ;; `font-lock-mode-on?`, `buffer-auto-fill-function`) - and
+    ;; `menu-item-eval-property` evaluates the form in the ambient
+    ;; module, the editor's user environment, which `imports.scm`
+    ;; fills. A user's own `imports.scm` that omits a library disables
+    ;; the item quietly, the same rule the menu-bar items live by.
+    (define mode-line-mode-menu
+      (let ((map (make-sparse-keymap "Minor Modes")))
+        (define-key map (vector 'auto-fill-mode)
+          '(menu-item "Auto fill (Fill)" auto-fill-mode
+                      :help "Automatically insert new lines"
+                      :button (:toggle . (buffer-auto-fill-function
+                                          (current-buffer)))))
+        (define-key map (vector 'font-lock-mode)
+          '(menu-item "Font Lock" font-lock-mode
+                      :help "Syntax coloring"
+                      :button (:toggle . (font-lock-mode-on?))))
+        (define-key map (vector 'overwrite-mode)
+          '(menu-item "Overwrite (Ovwrt)" overwrite-mode
+                      :help "Overwrite mode: typed characters replace existing text"
+                      :button (:toggle . (buffer-overwrite-mode
+                                          (current-buffer)))))
+        map))
+
+    (define (bindings--menu-item-string item)
+      ;; GNU Emacs's `bindings--menu-item-string` (`bindings.el:404`):
+      ;; "Return the menu-item string for ITEM, or nil if not a
+      ;; menu-item." `(eval name t)` is the string itself for the
+      ;; menus here, whose item names are literals.
+      (cond
+       ((and (pair? item) (eq? (car item) 'menu-item) (pair? (cdr item)))
+        (let ((name (cadr item)))
+          (and (string? name) name)))
+       ((and (pair? item) (string? (car item)))
+        (car item))
+       (else #f)))
+
+    (define (bindings--sort-menu-keymap map)
+      ;; GNU Emacs's `bindings--sort-menu-keymap` (`bindings.el:410`);
+      ;; "Sort the bindings in MAP in alphabetical order by menu-item
+      ;; string. The order of bindings in a keymap matters only when it
+      ;; is used as a menu."
+      ;;
+      ;; **The answer is a record keymap here**, where Emacs `nconc`s a
+      ;; list keymap onto a fresh one: `x-popup-menu` takes the record.
+      ;; The sorted entries are defined back to front, because
+      ;; `define-key` prepends and a menu draws in the map's own order.
+      (let ((bindings '())
+            (prompt (keymap-prompt map)))
+        (map-keymap
+         (lambda (key item)
+           (set! bindings (cons (cons key item) bindings)))
+         map)
+        (let ((sorted (sort bindings
+                            (lambda (a b)
+                              (string<? (or (bindings--menu-item-string (cdr a))
+                                            "")
+                                        (or (bindings--menu-item-string (cdr b))
+                                            "")))))
+              (out (make-sparse-keymap prompt)))
+          (for-each
+           (lambda (entry)
+             (define-key out (vector (car entry)) (cdr entry)))
+           (reverse sorted))
+          out)))
+
+    ;;----------------------------------------------------------------
+    ;; The line and column item - `bindings.el:620-762'
+    ;;----------------------------------------------------------------
+    ;;
+    ;; `mode-line-position` is what decides whether the line and column
+    ;; show at all, and the percentages in front of them. The three
+    ;; modes are `simple.scm`'s; their values are read through the
+    ;; construct's symbol conditionals, which `mode-line-symbol-value`
+    ;; resolves.
+
+    (define mode-line-column-line-number-mode-map
+      ;; `bindings.el:620`'s keymap. **Departure**: Emacs binds
+      ;; `[mode-line down-mouse-1]` to the menu keymap itself and
+      ;; `read_char`'s menu prompting pops it; this tree has no such
+      ;; prompting, so the press is bound to the command `mouse.scm`
+      ;; defines (`mode-line-line-column-menu`) - the same shape as the
+      ;; mode name's and the lighters' menus.
+      (let ((map (make-sparse-keymap)))
+        (define-key map (vector 'mode-line 'down-mouse-1)
+                    'mode-line-line-column-menu)
+        map))
+
+    (define line-column-mode-menu
+      ;; The `menu-map` of `bindings.el:621-636', less the header-line
+      ;; half. The `:button` forms name the modes' generated readers,
+      ;; for the reason `mode-line-mode-menu`'s do.
+      (let ((menu-map (make-sparse-keymap
+                       "Toggle Line and Column Number Display")))
+        (define-key menu-map (vector 'size-indication-mode)
+          '(menu-item "Display Size Indication" size-indication-mode
+                      :help "Toggle displaying a size indication in the mode-line"
+                      :button (:toggle . (size-indication-mode-variable))))
+        (define-key menu-map (vector 'line-number-mode)
+          '(menu-item "Display Line Numbers" line-number-mode
+                      :help "Toggle displaying line numbers in the mode-line"
+                      :button (:toggle . (line-number-mode-variable))))
+        (define-key menu-map (vector 'column-number-mode)
+          '(menu-item "Display Column Numbers" column-number-mode
+                      :help "Toggle displaying column numbers in the mode-line"
+                      :button (:toggle . (column-number-mode-variable))))
+        menu-map))
+
+    (define mode-line-position--column-line-properties
+      ;; `bindings.el:721`'s `defconst`, the properties the line and
+      ;; column text carries.
+      (list 'local-map mode-line-column-line-number-mode-map
+            'mouse-face 'mode-line-highlight
+            'help-echo "Line number and Column number\nmouse-1: Display Line and Column Mode Menu"))
+
+    (define-custom *mode-line-percent-position* '(-3 "%p")
+      "Specification of \"percentage offset\" of window through buffer.
+This option specifies both the field width and the type of offset
+displayed in `mode-line-position', a component of the default
+`mode-line-format'.
+
+ nil        -- do not display the percentage offset
+ '(-3 \"%o\") -- size of text above the window top as percentage of
+                   text outside the window
+ '(-3 \"%p\") -- size of text above the window top as percentage of
+                   all the buffer text
+ '(-3 \"%P\") -- size of text above the window bottom as percentage
+                   of all the buffer text
+ '(6 \"%q\")  -- percentage offsets of both top and bottom of the
+                   window, separated by a dash"
+      :type '(choice (const :tag "No percentage" nil)
+                     (cons integer string))
+      :version "28.1"
+      :group 'mode-line)
+
+    (define-custom *mode-line-position-line-format* '(" L%l")
+      "Format used to display line numbers in the mode line.
+This is used when `line-number-mode' is switched on.  The \"%l\"
+format spec will be replaced by the line number.
+
+Also see `mode-line-position-column-line-format'."
+      :type '(list string)
+      :version "28.1"
+      :group 'mode-line)
+
+    (define-custom *mode-line-position-column-format* '(" C%c")
+      "Format used to display column numbers in the mode line.
+This is used when `column-number-mode' is switched on.  The
+\"%c\" format spec is replaced by the zero-based column number,
+and \"%C\" is replaced by the one-based column number.
+
+Also see `mode-line-position-column-line-format'."
+      :type '(list string)
+      :version "28.1"
+      :group 'mode-line)
+
+    (define-custom *mode-line-position-column-line-format* '(" (%l,%c)")
+      "Format used to display combined line/column numbers in the mode line.
+This is used when `column-number-mode' and `line-number-mode' are
+switched on.  The \"%c\" format spec will be replaced by the
+column number, which is zero-based if
+`column-number-indicator-zero-based' is non-nil, and one-based if
+`column-number-indicator-zero-based' is nil."
+      :type '(list string)
+      :version "28.1"
+      :group 'mode-line)
+
+    (define-custom *column-number-indicator-zero-based* #t
+      "When non-nil, mode line displays column numbers zero-based.
+
+This variable has effect only when Column Number mode is turned on,
+which displays column numbers in the mode line."
+      :type 'boolean
+      :group 'mode-line)
+
+    (define-custom *mode-line-position*
+      (list
+       (append (list ':propertize (list "" 'mode-line-percent-position))
+               (list 'local-map mode-line-column-line-number-mode-map
+                     'mouse-face 'mode-line-highlight
+                     'help-echo "Window Scroll Percentage\nmouse-1: Display Line and Column Mode Menu"))
+       (list 'size-indication-mode
+             (list 8 (propertize " of %I"
+                                 'local-map mode-line-column-line-number-mode-map
+                                 'mouse-face 'mode-line-highlight
+                                 'help-echo "Size indication mode\nmouse-1: Display Line and Column Mode Menu")))
+       (list 'line-number-mode
+             (list 'column-number-mode
+                   (list 'column-number-indicator-zero-based
+                         (list 10 (append
+                                   (list ':propertize
+                                         'mode-line-position-column-line-format)
+                                   mode-line-position--column-line-properties))
+                         (list 10 (append
+                                   (list ':propertize
+                                         (list ':eval
+                                               (lambda ()
+                                                 (string-replace
+                                                  "%c" "%C"
+                                                  (car (*mode-line-position-column-line-format*))))))
+                                   mode-line-position--column-line-properties)))
+                   (list 6 (append
+                            (list ':propertize
+                                  'mode-line-position-line-format)
+                            mode-line-position--column-line-properties)))
+             (list 'column-number-mode
+                   (list 'column-number-indicator-zero-based
+                         (list 6 (append
+                                  (list ':propertize
+                                        'mode-line-position-column-format)
+                                  mode-line-position--column-line-properties))
+                         (list 6 (append
+                                  (list ':propertize
+                                        (list ':eval
+                                              (lambda ()
+                                                (string-replace
+                                                 "%c" "%C"
+                                                 (car (*mode-line-position-column-format*))))))
+                                  mode-line-position--column-line-properties))))))
+      "Mode line construct for displaying the position in the buffer.
+Normally displays the buffer percentage and, optionally, the
+buffer size, the line number and the column number."
+      :type 'sexp
+      :group 'mode-line)
+
+    ;; The help text `bindings.el` hangs on these items. They read their
+    ;; window rather than the current buffer, which is the C's contract
+    ;; for a `help-echo` function - `(WINDOW OBJECT POS)`.
+
+    (define (mode-line-read-only-help-echo window object point)
+      "Return help text specifying WINDOW's buffer read-only status."
+      (format #f "Buffer is ~a\nmouse-1: Toggle"
+              (if (buffer-read-only? (window-buffer window))
+                  "read-only"
+                  "writable")))
+
+    (define (mode-line-modified-help-echo window object point)
+      "Return help text specifying WINDOW's buffer modification status."
+      (format #f "Buffer is ~amodified\nmouse-1: Toggle modification state"
+              (if (buffer-modified-p (window-buffer window)) "" "not ")))
+
+    (define (mode-line-remote-help-echo window object point)
+      (let ((dir (buffer-local-value (window-buffer window)
+                                     'default-directory #f)))
+        (if (string? dir)
+            (string-append (if (file-remote-p dir)
+                               "Current directory is remote: "
+                               "Current directory is local: ")
+                           dir)
+            "Current directory is nil")))
+
+    (define mode-line-modified
+      ;; GNU Emacs's `mode-line-modified` (`bindings.el:251`): `%1*` for
+      ;; the read-only flag and `%1+` for the modified one, each with its
+      ;; own map and the highlight face. The `%1*` expansion inherits
+      ;; these properties through `inherit-mode-line-properties`, which
+      ;; is the C's `display_mode_element` applying the enclosing
+      ;; string's properties to what a `%` produces.
+      ;; **The `help-echo` values are the functions, not their symbols.**
+      ;; `bindings.el` writes `'help-echo 'mode-line-read-only-help-echo`,
+      ;; and Emacs resolves the symbol through its obarray because
+      ;; `FUNCTIONP` is true for a symbol with a function definition.
+      ;; This tree has no function obarray, so the value is the procedure
+      ;; itself - the same choice a keymap here makes when it holds a
+      ;; command. `show-help-echo` calls a procedure value and evaluates
+      ;; anything else.
+      (list (propertize "%1*"
+                        'help-echo mode-line-read-only-help-echo
+                        'local-map mode-line-read-only-map
+                        'mouse-face 'mode-line-highlight)
+            (propertize "%1+"
+                        'help-echo mode-line-modified-help-echo
+                        'local-map mode-line-modified-map
+                        'mouse-face 'mode-line-highlight)))
+
+    (define mode-line-remote
+      ;; GNU Emacs's `mode-line-remote` (`bindings.el:269`): `%1@` with a
+      ;; highlight face and a help string that says whether the buffer's
+      ;; directory is remote.
+      (list (propertize "%1@"
+                        'mouse-face 'mode-line-highlight
+                        'help-echo mode-line-remote-help-echo)))
+
+    (define mode-line-narrowed
+      ;; The `%n` element of Emacs's `mode-line-modes` (`bindings.el:605`)
+      ;; with its map: "mouse-2: Remove narrowing from buffer".
+      (propertize " Narrow"
+                  'help-echo "mouse-2: Remove narrowing from buffer"
+                  'mouse-face 'mode-line-highlight
+                  'local-map mode-line-widen-map))
+
+    (define (propertized-buffer-identification fmt)
+      ;; GNU Emacs's `propertized-buffer-identification` (`bindings.el:786`):
+      ;; "Return a list suitable for `mode-line-buffer-identification'.
+      ;; FMT is a format specifier such as \"%12b\". This function adds
+      ;; text properties for face, help-echo, and local-map to it."
+      ;;--------------------------------------------------------------
+      (list (propertize fmt
+                        'face 'mode-line-buffer-id
+                        'help-echo
+                        "Buffer name\nmouse-1: Previous buffer\nmouse-3: Next buffer"
+                        'mouse-face 'mode-line-highlight
+                        'local-map mode-line-buffer-identification-map)))
+
+    (define mode-line-buffer-identification
+      ;; GNU Emacs's `mode-line-buffer-identification` (`bindings.el:797`),
+      ;; whose default is `(propertized-buffer-identification "%12b")`.
+      (propertized-buffer-identification "%12b"))
+
     (define (mode-line-eol-desc)
       ;; The mode-line mnemonic for the EOL convention of WINDOW's buffer:
       ;; GNU Emacs's `mode-line-eol-desc' (`bindings.el:101'), which reads
@@ -985,15 +1681,31 @@
       ;; `coding-system-eol-type-mnemonic''s (`mule.el'): `":"' for UNIX,
       ;; `"(DOS)"' for DOS and `"(Mac)"' for Mac, with an undecided eol
       ;; giving `eol-mnemonic-undecided', which is `":"' too.
+      ;;
+      ;; **The mnemonic is a button**: Emacs propertizes it with a
+      ;; `keymap` for `mode-line-change-eol` and the highlight face, and
+      ;; the help string names the convention. Emacs caches the string
+      ;; per eol (`mode-line-eol-desc-cache`); a mode line is formatted
+      ;; once per redisplay and the string is a handful of characters, so
+      ;; the cache is not worth its state here.
       ;;--------------------------------------------------------------
       (let* ((window (*mode-line-window*))
              (cs (buffer-local-value (window-buffer window)
                                      'buffer-file-coding-system
                                      'utf-8-unix))
-             (eol (coding-system-eol-type cs)))
-        (cond ((eq? eol 'dos) "(DOS)")
-              ((eq? eol 'mac) "(Mac)")
-              (else ":"))))
+             (eol (coding-system-eol-type cs))
+             (desc (cond ((eq? eol 'dos) "(DOS)")
+                         ((eq? eol 'mac) "(Mac)")
+                         (else ":"))))
+        (propertize desc
+                    'help-echo
+                    (format #f "End-of-line style: ~a\nmouse-1: Cycle"
+                            (cond ((eq? eol 'unix) "Unix-style LF")
+                                  ((eq? eol 'dos) "DOS-style CRLF")
+                                  ((eq? eol 'mac) "Mac-style CR")
+                                  (else "Undecided")))
+                    'keymap mode-line-change-eol-map
+                    'mouse-face 'mode-line-highlight)))
 
     (define (mode-line-mode-name)
       ;; GNU Emacs's `mode-line-modes'' first element: the buffer's
@@ -1020,10 +1732,22 @@
       (let ((window (*mode-line-window*)))
         (if (not window)
             ""
-            (string-append "(" (mode-name (window-buffer window))
-                           (mode-line-minor-modes)
-                           (if (buffer-narrowed-p) " Narrow" "")
-                           ")"))))
+            ;; `concat`, not `string-append`: the `%n` element is a
+            ;; propertized string and only `concat` keeps its properties
+            ;; (the `%1*` rule again).
+            ;;
+            ;; The mode name is the major-mode *button*: `bindings.el`'s
+            ;; `(:propertize ("" mode-name) help-echo "Major mode..."
+            ;; mouse-face mode-line-highlight local-map
+            ;; mode-line-major-mode-keymap)` (`:601-611`).
+            (concat "("
+                    (propertize (mode-name (window-buffer window))
+                                'mouse-face 'mode-line-highlight
+                                'help-echo mode-line-major-mode-help-echo
+                                'local-map mode-line-major-mode-keymap)
+                    (mode-line-minor-modes)
+                    (if (buffer-narrowed-p) mode-line-narrowed "")
+                    ")"))))
 
 
     (define (minor-mode-indicator-value buffer indicator)
@@ -1102,21 +1826,58 @@
       ;;
       ;; `mode-line--minor-modes` computes more than this - the
       ;; `mode-line-collapse-minor-modes` hiding, and the clickable menu
-      ;; `mode-line--make-lighter-menu` makes - and neither is carried,
-      ;; there being one lighter here and no mode-line mouse maps.
+      ;; `mode-line--make-lighter-menu` makes - and neither is carried:
+      ;; the hiding is a 31.1 option nothing here sets, and the menu is
+      ;; `mouse.scm`'s `minor-mode-menu-from-indicator`, bound on the
+      ;; lighters' own map below.
       ;;--------------------------------------------------------------
       (let ((window (*mode-line-window*)))
         (if (not window)
             ""
             (let ((buffer (window-buffer window)))
-              (apply string-append
-                     (map (lambda (entry)
-                            (if (minor-mode-variable-true? buffer (car entry))
-                                (minor-mode-lighter
-                                 (minor-mode-indicator-value buffer
-                                                             (cadr entry)))
-                                ""))
-                          (*minor-mode-alist*)))))))
+              ;; "Minor mode\nmouse-1: Display minor mode menu\n..." -
+              ;; `mode-line--minor-modes`' propertized `("" ,visible)`
+              ;; (`bindings.el:544-552`).
+              ;;
+              ;; **One string per lighter, not one for the group.** In
+              ;; Emacs each element of `("" ,visible)` is its own string
+              ;; object, so `posn-object` over a lighter is that lighter
+              ;; - which is what lets `mouse-minor-mode-menu` find the
+              ;; one clicked (measured: a click on the third lighter of
+              ;; `(Fundamental Ovwrt Fill)` answers `" Fill"`). This
+              ;; renderer flattens the line, so `mode-line-lighter` - an
+              ;; index, the stand-in for that identity, as
+              ;; `mode-line-elt-no` is for a format element - marks each
+              ;; lighter's run, and the posn and hover walks stop at it.
+              ;; `concat`, not `string-append`: the per-lighter
+              ;; properties below would be dropped by the latter (the
+              ;; `%1*` rule again).
+              (apply concat
+                     (let loop ((entries (*minor-mode-alist*))
+                                (index 0)
+                                (acc '()))
+                       (if (null? entries)
+                           (reverse acc)
+                           (let* ((entry (car entries))
+                                  (lighter
+                                   (if (minor-mode-variable-true? buffer (car entry))
+                                       (minor-mode-lighter
+                                        (minor-mode-indicator-value buffer
+                                                                    (cadr entry)))
+                                       "")))
+                             (loop (cdr entries)
+                                   (+ index 1)
+                                   (cons (if (string=? lighter "")
+                                             ""
+                                             (propertize
+                                              lighter
+                                              'mouse-face 'mode-line-highlight
+                                              'help-echo
+                                              mode-line-minor-mode-help-echo
+                                              'local-map
+                                              mode-line-minor-mode-keymap
+                                              'mode-line-lighter index))
+                                         acc))))))))))
 
     (define (mode-line-front-space)
       ;; GNU Emacs's `mode-line-front-space' (`bindings.el:185'): "Mode
@@ -1143,7 +1904,17 @@
       ;; rather than named, because a symbol in this tree's format
       ;; resolves to nothing (see `*mode-line-format*').
       ;;--------------------------------------------------------------
-      (list "%z" (list ':eval mode-line-eol-desc)))
+      ;; The `%z` element carries the coding-system item's map, help
+      ;; and highlight - `bindings.el:216-220`'s `(propertize "%z"
+      ;; 'help-echo 'mode-line-mule-info-help-echo 'mouse-face
+      ;; 'mode-line-highlight 'local-map mode-line-coding-system-map)`.
+      ;; `expand-mode-line-string` copies a literal run's properties and
+      ;; the `%z` construct's text inherits them, as `%1*` does.
+      (list (propertize "%z"
+                        'help-echo mode-line-mule-info-help-echo
+                        'mouse-face 'mode-line-highlight
+                        'local-map mode-line-coding-system-map)
+            (list ':eval mode-line-eol-desc)))
 
     (define *global-mode-string*
       ;; GNU Emacs's `global-mode-string` (`bindings.el`): "String that
@@ -1189,13 +1960,15 @@
       ;; short name and leaves a long one alone), then the line and column
       ;; of the window's own point (`mode-line-position').
       ;;
-      ;; Emacs's default also names variables in the format - `mode-line-mule-info',
-      ;; `mode-line-position', `mode-line-modes' and so on - and a symbol in
-      ;; the format is evaluated at display time. This editor has no variable
-      ;; registry yet, so a symbol here resolves to nothing, exactly as an
-      ;; unbound variable does in Emacs; the default therefore spells out what
-      ;; it shows rather than naming it. When the elisp layer brings a variable
-      ;; registry, the names go back in.
+      ;; Emacs's default also names variables in the format -
+      ;; `mode-line-mule-info', `mode-line-position', `mode-line-modes'
+      ;; and so on - and a symbol element is evaluated and its value
+      ;; processed as a construct. `mode-line-position` is named that
+      ;; way now that `mode-line-symbol-value` reads the three
+      ;; registries the tree keeps (buffer slots, global defaults,
+      ;; custom readers); the rest of the default is still spelled out
+      ;; where this tree's construct is a function rather than a
+      ;; variable.
       ;;--------------------------------------------------------------
       (make-parameter
        ;; `mode-line-front-space' and `mode-line-mule-info' first, which
@@ -1211,17 +1984,21 @@
        ;; space becomes load-bearing.
        (list (list ':eval mode-line-front-space)
              (list ':eval mode-line-mule-info)
-             (list "%1*" "%1+")
+             mode-line-modified
              ;; `mode-line-remote', which Emacs has right here - between
              ;; `mode-line-modified' and `mode-line-window-dedicated'.
-             "%1@"
+             mode-line-remote
              " "
-             ;; `mode-line-buffer-identification' (`bindings.el:797'):
+             ;; `mode-line-buffer-identification' (`bindings.el:797`):
              ;; `%12b` carrying the `mode-line-buffer-id` face, so a
              ;; theme's colour for the buffer name is applied and the
-             ;; default one makes it bold.
-             (list ':propertize "%12b" 'face 'mode-line-buffer-id)
-             " -- L" "%l" " C" "%c"
+             ;; default one makes it bold - and the map that makes a
+             ;; click on the name go to the previous buffer.
+             mode-line-buffer-identification
+             ;; `mode-line-position' - named, as Emacs's default format
+             ;; names it. A symbol element is evaluated and its value
+             ;; processed as a construct (`mode-line-symbol-value`).
+             'mode-line-position
        ;; and the mode name, where Emacs's default puts `mode-line-modes':
        ;; after the position, two spaces along. Emacs names the variable
        ;; in the format and evaluates it; there is no variable registry
@@ -1427,15 +2204,35 @@
       ;;--------------------------------------------------------------
       (if (memq (*window-system*) '(x w32 ns pgtk)) #t #f))
 
+    (define (percent99 n d)
+      ;; GNU Emacs's `percent99` (`xdisp.c:29432`): "Return the
+      ;; percentage N of D, rounded up, capped at 99." The C computes
+      ;; `(d - 1 + 100.0 * n) / d` in floating point and truncates;
+      ;; the same arithmetic over exact integers answers the same.
+      ;;--------------------------------------------------------------
+      (min (quotient (+ (* 100 n) (- d 1)) d) 99))
+
+    (define (window-bottom-position window)
+      ;; GNU Emacs's `BUF_Z (b) - w->window_end_pos` - the buffer
+      ;; position the window's last drawn glyph is at. The window's
+      ;; `end-pos` is stored as a distance from the *text* end, so the
+      ;; text's Z is added back here. Before the first redisplay the
+      ;; answer is the end of the buffer, which prints "All"/"Bottom",
+      ;; the same as a fresh Emacs window does.
+      ;;--------------------------------------------------------------
+      (let ((ed (window-buffer window)))
+        (- (buffer-text-z (text-editor-text ed))
+           (%window-end-pos window))))
+
     (define (mode-line-construct spec window)
       ;; The text one `%'-construct stands for: GNU Emacs's
       ;; `decode_mode_spec'. SPEC is the character after the `%'.
       ;;
-      ;; The constructs this editor can answer are the ones about the buffer
-      ;; and the window's point. The rest - the percentages of the buffer
-      ;; above or below the window (`%p', `%P', `%o', `%q'), the coding
-      ;; systems (`%z', `%Z'), the process (`%s') and the recursion depth
-      ;; (`%[', `%]') - are printed as they stand, which is what Emacs does
+      ;; The constructs this editor can answer are the ones about the
+      ;; buffer and the window's point, and the percentages of the
+      ;; buffer above or below the window (`%o', `%p', `%P', `%q'). The
+      ;; rest - the process (`%s') and the recursion depth (`%[',
+      ;; `%]') - are printed as they stand, which is what Emacs does
       ;; with a construct it does not recognise either.
       ;;--------------------------------------------------------------
       ;; Only the constructs that ask for the position pay for it, and
@@ -1505,6 +2302,64 @@
                          (else
                           (string-append (number->string (quotient n 1000000))
                                          "M")))))
+          ;; The percentages - `xdisp.c:29757-29809`. `%o' is the
+          ;; proportion of the window's travel through the buffer,
+          ;; `%p' the text above the window top as a percentage of all
+          ;; the text, `%P' the same for the window bottom, and `%q'
+          ;; both at once. The "All"/"Top"/"Bottom" words are the C's,
+          ;; and so is the `Top` prefix on `%P`.
+          ((#\o)
+           (let* ((toppos (window-start window))
+                  (botpos (window-bottom-position window))
+                  (begv (buffer-beg ed))
+                  (zv (buffer-z ed)))
+             (cond ((<= zv botpos)
+                    (if (<= toppos begv) "All" "Bottom"))
+                   ((<= toppos begv) "Top")
+                   (else
+                    (format #f "~2d%"
+                            (percent99 (- toppos begv)
+                                       (+ (- toppos begv) (- zv botpos))))))))
+          ((#\p)
+           (let* ((pos (window-start window))
+                  (begv (buffer-beg ed))
+                  (zv (buffer-z ed)))
+             (if (<= (%window-end-pos window)
+                     (- (buffer-text-z (text-editor-text ed)) zv))
+                 (if (<= pos begv) "All" "Bottom")
+                 (if (<= pos begv)
+                     "Top"
+                     (format #f "~2d%" (percent99 (- pos begv)
+                                                  (- zv begv)))))))
+          ((#\P)
+           (let* ((toppos (window-start window))
+                  (botpos (window-bottom-position window))
+                  (begv (buffer-beg ed))
+                  (zv (buffer-z ed)))
+             (if (<= zv botpos)
+                 (if (<= toppos begv) "All" "Bottom")
+                 (string-append
+                  (if (< begv toppos) "Top" "")
+                  (format #f "~2d%" (percent99 (- botpos begv)
+                                               (- zv begv)))))))
+          ((#\q)
+           (let* ((toppos (window-start window))
+                  (botpos (window-bottom-position window))
+                  (begv (buffer-beg ed))
+                  (zv (buffer-z ed)))
+             (if (and (<= toppos begv) (<= zv botpos))
+                 "All   "
+                 (let ((top-perc (if (<= toppos begv)
+                                     0
+                                     (percent99 (- toppos begv)
+                                                (- zv begv))))
+                       (bot-perc (if (<= zv botpos)
+                                     100
+                                     (percent99 (- botpos begv)
+                                                (- zv begv)))))
+                   (if (= top-perc bot-perc)
+                       (format #f "~d%" top-perc)
+                       (format #f "~d-~d%" top-perc bot-perc))))))
           ;; `%z' is the buffer's coding system, `%Z' the same with its
           ;; end-of-line conversion. On a *terminal* Emacs names the
           ;; keyboard's and the terminal's first, in that order - so a
@@ -1597,7 +2452,7 @@
                         (text-properties-at position str))))
         (if (null? props) text (apply propertize text props))))
 
-    (define (expand-mode-line-string str window)
+    (define (expand-mode-line-string str window . rest)
       ;; STR with its `%'-constructs expanded: GNU Emacs's processing of a
       ;; string in a mode line. A `%' followed by digits is a field width, as
       ;; in `%12b'; a `%' followed by anything else is a construct. A `%' at
@@ -1614,14 +2469,30 @@
       ;; buffer name, a line number) arrives without them - which is what
       ;; Emacs gives it too.
       ;;--------------------------------------------------------------
-      (let ((n (string-length str)))
+      ;;
+      ;; **Every character this expands carries the format element's
+      ;; number** - GNU Emacs's `mode-line-elt-no`, added by
+      ;; `store_mode_line_string` (`xdisp.c:29000`) to each part it
+      ;; stores. It is what marks the boundaries of an element in the
+      ;; flattened line: Emacs's redisplay tracks each element as its own
+      ;; string object, and this property is the flattened stand-in for
+      ;; that identity. `format-mode-line`'s own answer carries it too
+      ;; (measured on Emacs 31.1: `(format-mode-line '("%z" "%1*" "%1+"))`
+      ;; is `#("UUU--" 0 3 (mode-line-elt-no 2) 3 4 (mode-line-elt-no 3)
+      ;; 4 5 (mode-line-elt-no 4))`).
+      (let* ((elt-no (and (pair? rest) (car rest)))
+             (n (string-length str)))
+        (define (tag text)
+          (if elt-no
+              (propertize text 'mode-line-elt-no elt-no)
+              text))
         (let loop ((i 0) (pct #f) (width #f) (start 0) (acc '()))
           (if (>= i n)
               (let* ((pieces (reverse
                               (if (< start n)
                                   (cons (mode-line-substring str start n) acc)
                                   acc))))
-                (if (null? pieces) "" (apply concat pieces)))
+                (tag (if (null? pieces) "" (apply concat pieces))))
               (let ((c (string-ref str i)))
                 (cond
                  ((and (char=? c #\%) (not width))
@@ -1662,10 +2533,18 @@
                       (loop (+ i 1) pct (+ (* 10 width)
                                            (- (char->integer c) (char->integer #\0)))
                             start acc)
-                      (let ((text (inherit-mode-line-properties
-                                   (pad-mode-line-field
-                                    (mode-line-construct c window) width)
-                                   str pct)))
+                      ;; **The properties go on the *constructed* text,
+                      ;; not on the field's padding.** Emacs's
+                      ;; `store_mode_line_string` adds the element's
+                      ;; properties to the string it was given and then
+                      ;; appends padding spaces that get only the
+                      ;; `mode-line-elt-no` marker (`xdisp.c:29080`) - so
+                      ;; `%12b`'s padding is not part of the buffer
+                      ;; name's hover run and is not clickable.
+                      (let ((text (pad-mode-line-field
+                                   (inherit-mode-line-properties
+                                    (mode-line-construct c window) str pct)
+                                   width)))
                         (loop (+ i 1) #f #f (+ i 1)
                               (let ((acc (if (< start pct)
                                              (cons (mode-line-substring str start pct)
@@ -1675,6 +2554,39 @@
                  (else
                   (loop (+ i 1) pct width start acc))))))))
 
+    (define (mode-line-symbol-value symbol buffer)
+      ;; The value a mode-line construct names - GNU Emacs's
+      ;; `symbol-value` as `display_mode_element` uses it, over the three
+      ;; places this tree keeps variables:
+      ;;
+      ;;   1. the buffer's own slot (a `define-minor-mode` mode, a
+      ;;      DEFVAR_PER_BUFFER like `truncate-lines`),
+      ;;   2. the global default (`default-value`, where a `:global`
+      ;;      minor mode's state lives),
+      ;;   3. a customizable variable's reader (`define-custom` keeps it
+      ;;      on the symbol as `custom-reader` - under the tree's
+      ;;      starred spelling, so `mode-line-percent-position` in a
+      ;;      construct finds `*mode-line-percent-position*`).
+      ;;
+      ;; **This is the "variable registry" the mode-line-format comment
+      ;; used to say was missing.** It is not an obarray: a plain
+      ;; `define`d variable is not reachable by name, which is the same
+      ;; gap `describe-variable` has, and the reason the mode-line
+      ;; variables are `define-custom`s.
+      ;;--------------------------------------------------------------
+      (let ((starred (string->symbol
+                      (string-append "*" (symbol->string symbol) "*"))))
+        (let ((reader (or (get symbol 'custom-reader)
+                          (get starred 'custom-reader))))
+          (cond
+           ((and buffer (local-variable-p symbol buffer))
+            (buffer-local-value buffer symbol #f))
+           ((default-boundp symbol)
+            (default-value symbol #f))
+           (reader
+            (reader (if (get symbol 'custom-reader) symbol starred)))
+           (else #f)))))
+
     (define (format-mode-line format . args)
       ;; GNU Emacs's `format-mode-line': the mode line FORMAT produces for a
       ;; window, WINDOW being the second argument or the selected window.
@@ -1683,12 +2595,30 @@
       ;;--------------------------------------------------------------
       (let ((window (if (pair? args) (car args) (selected-window))))
         (parameterize ((*mode-line-window* window))
+          ;; **Emacs's `mode_line_elt_no`** (`xdisp.c:13934`),
+          ;; incremented on *entry* to `display_mode_element`
+          ;; (`:28500`) for every element processed: a list and each of
+          ;; its members get a number of their own, while a string's
+          ;; `%`-expansions share the string's number (the C's note: "an
+          ;; element could be stored by parts. For example, "a%b" is
+          ;; stored as two elements ... but they should be considered as
+          ;; one element"). It reaches the answer as the
+          ;; `mode-line-elt-no` property, which is what makes an
+          ;; element's hover run stop at the element's edge.
+          (let ((element-number 0))
           (let process ((construct format))
+            (set! element-number (+ element-number 1))
+            (let ((this-element element-number))
             (cond
              ((not construct) "")
-             ((string? construct) (expand-mode-line-string construct window))
+             ((string? construct) (expand-mode-line-string construct window this-element))
              ((integer? construct) "")
-             ((symbol? construct) "")
+             ((symbol? construct)
+              ;; "A symbol is evaluated and the result is processed as
+              ;; a construct" (`display_mode_element`) - the same rule
+              ;; the conditional form below uses for its test.
+              (process (mode-line-symbol-value construct
+                                              (window-buffer window))))
              ((pair? construct)
               (cond
                ((and (eq? (car construct) ':propertize)
@@ -1708,17 +2638,28 @@
                      (pair? (cdr construct)))
                 (process ((cadr construct))))
                ((symbol? (car construct))
-                (process (if (and (pair? (cdr construct))
-                                  (pair? (cddr construct)))
-                             (caddr construct)
-                             #f)))
+                ;; GNU Emacs's conditional element
+                ;; (`display_mode_element`): "If the symbol's value is
+                ;; non-nil, process the second element; otherwise
+                ;; process the third, if any." This was a placeholder
+                ;; that always took the *else* branch - harmless while
+                ;; no format used one, wrong the moment
+                ;; `mode-line-position` did.
+                (process (if (mode-line-symbol-value
+                              (car construct) (window-buffer window))
+                             (and (pair? (cdr construct)) (cadr construct))
+                             (and (pair? (cdr construct))
+                                  (pair? (cddr construct))
+                                  (caddr construct)))))
                ((integer? (car construct))
                 (let* ((width (car construct))
                        (rest (if (pair? (cdr construct)) (cadr construct) #f))
                        (text (process rest)))
                   (if (< width 0)
                       (if (> (string-length text) (- width))
-                          (substring text 0 (- width))
+                          ;; `mode-line-substring`, not `substring`:
+                          ;; `Fsubstring` carries the properties.
+                          (mode-line-substring text 0 (- width))
                           text)
                       (pad-mode-line-element text width))))
                ;; `concat`, not `string-append`: the latter drops the
@@ -1727,7 +2668,7 @@
                ;; the rest of the line. GNU Emacs's `format-mode-line`
                ;; joins with `concat` for exactly this reason.
                (else (apply concat (map process construct)))))
-             (else ""))))))
+             (else ""))))))))
 
     (define (mode-line-string window)
       ;; The window's mode line: GNU Emacs's `MODE-LINE-STRING' is what
@@ -2170,11 +3111,21 @@
     (define %mouse-face-beg #f)
     (define %mouse-face-end #f)
     (define %mouse-face-attrs #f)
+    (define %mouse-face-string #f)
     ;; ^ `Mouse_HLInfo`'s `mouse_face_window`, `mouse_face_beg_*`/
     ;; `mouse_face_end_*` and `mouse_face_face_id`: the window whose text
     ;; is under the pointer, the run to paint, and the face to paint it
     ;; with. Emacs also records the beg/end *rows and columns*; those are
     ;; derived here from the positions when the rows are built.
+    ;;
+    ;; **`mouse-face-string` is the string the run is in**, when the
+    ;; pointer is over a mode line rather than buffer text - Emacs's
+    ;; `note_line_or_margin_highlight` has the same two cases, and its
+    ;; `mouse_face_beg_col`/`_end_col` count columns of the drawn string.
+    ;; BEG and END are then *string* indices (as in the C, where the
+    ;; property walk is over STRING), and a lit buffer position can never
+    ;; be taken for a lit string index because `attrs-at-buffer-position`
+    ;; ignores the run while this is set.
 
     (define *drawing-window* (make-parameter #f))
     ;; ^ Dynamic, for the same reason GNU Emacs's `it.w` is: bound around
@@ -2215,6 +3166,7 @@
       ;;--------------------------------------------------------------
       (if (and mouse-highlight
                %mouse-face-window
+               (not %mouse-face-string)
                (eq? (*drawing-window*) %mouse-face-window)
                (>= position %mouse-face-beg)
                (< position %mouse-face-end))
@@ -3807,7 +4759,7 @@
             (mode-line-truncate str width)
             (concat str (make-string (- width len) #\space)))))
 
-    (define (draw-mode-line! line base row-y x0)
+    (define (draw-mode-line! line base row-y x0 . rest)
       ;; DRAW LINE at X0 in BASE, one `write-glyphs!` per run of equal
       ;; `face` text property, merged onto BASE - GNU Emacs's
       ;; `display_mode_element` drawing each run with
@@ -3821,8 +4773,20 @@
       ;; sets the start only when the *previous* face had no box, so a
       ;; run of adjacent boxed faces - a mode line's buffer name over the
       ;; mode-line face, say - is one box and not a row of them.
+      ;;
+      ;; **The fifth argument is the mouse-face run under the pointer**,
+      ;; `(BEG END VALUE)`, when this line is the one being hovered:
+      ;; those characters are drawn with VALUE merged over the face they
+      ;; already have, which is `face_at_string_position` with MOUSE true
+      ;; and the glyph's own face as the base (`xdisp.c:36955`). A run
+      ;; of text is therefore split where the hover begins and ends, and
+      ;; each piece is drawn as its own run.
       ;;--------------------------------------------------------------
-      (let* ((len (string-length line))
+      (let* ((mouse (and (pair? rest) (car rest)))
+             (m-beg (and mouse (car mouse)))
+             (m-end (and mouse (cadr mouse)))
+             (m-value (and mouse (caddr mouse)))
+             (len (string-length line))
              (runs
               (let loop ((i 0) (acc '()))
                 (if (>= i len)
@@ -3834,26 +4798,83 @@
                                                    k 'face line)
                                                   face)))
                                     k
-                                    (find (+ k 1)))))
-                           (attrs (merge-face-vectors
-                                   (if face (merge-face-ref face '()) '())
-                                   (merge-face-ref base '())))
-                           (box (let ((v (attribute-value attrs ':box)))
-                                  (and (not (eq? v *undefined-face-attribute*))
-                                       v))))
-                      (loop j (cons (list i j face box) acc)))))))
-        (let loop ((rest runs) (prev-boxed? #f))
+                                    (find (+ k 1))))))
+                      (loop j (cons (list i j face) acc))))))
+             ;; The runs split at the hover's edges. A run that the hover
+             ;; does not touch stays one piece, which is the ordinary
+             ;; mode line with no pointer on it.
+             (segments
+              (let loop ((rest runs) (acc '()))
+                (if (null? rest)
+                    acc
+                    (let* ((run (car rest))
+                           (i (car run))
+                           (j (cadr run))
+                           (face (caddr run)))
+                      (loop (cdr rest)
+                            (append
+                             acc
+                             (if (and mouse (< (max i m-beg) (min j m-end)))
+                                 (let ((mid-beg (max i m-beg))
+                                       (mid-end (min j m-end)))
+                                   (append
+                                    (if (< i mid-beg)
+                                        (list (list i mid-beg face #f))
+                                        '())
+                                    (list (list mid-beg mid-end face #t))
+                                    (if (< mid-end j)
+                                        (list (list mid-end j face #f))
+                                        '())))
+                                 (list (list i j face #f)))))))))
+             ;; The token and the box of each piece, once: the same
+             ;; work either side of a hover boundary, and the box of the
+             ;; *next* piece is what closes the previous one.
+             (prepared
+              (map (lambda (seg)
+                     (let* ((face (caddr seg))
+                            (lit? (cadddr seg))
+                            (attrs
+                             (merge-face-vectors
+                              (if lit?
+                                  (merge-face-ref m-value (if face face '()))
+                                  (if face (merge-face-ref face '()) '()))
+                              (merge-face-ref base '())))
+                            (box (let ((v (attribute-value attrs ':box)))
+                                   (and (not (eq? v *undefined-face-attribute*))
+                                        v)))
+                            (token (if lit?
+                                       (face->attribute
+                                        (merge-face-ref m-value
+                                                        (if face face '()))
+                                        base)
+                                       (if face
+                                           (face->attribute face base)
+                                           (face->attribute base base)))))
+                       (list (car seg) (cadr seg) token box lit?)))
+                   segments)))
+        (let loop ((rest prepared) (prev-boxed? #f) (prev-lit? #f))
           (when (pair? rest)
-            (let* ((run (car rest))
-                   (i (car run))
-                   (j (cadr run))
-                   (face (caddr run))
-                   (box (cadddr run))
+            (let* ((piece (car rest))
+                   (i (car piece))
+                   (j (cadr piece))
+                   (token (caddr piece))
+                   (box (cadddr piece))
+                   (lit? (list-ref piece 4))
                    (next (if (pair? (cdr rest)) (cadr rest) #f))
                    (next-boxed? (and next (cadddr next) #t))
-                   (token (if face
-                              (face->attribute face base)
-                              (face->attribute base base))))
+                   (next-lit? (and next (list-ref next 4)))
+                   ;; `pgtk_draw_glyph_string` (`pgtkterm.c:2048`): the
+                   ;; box's vertical edges are where the boxed *run*
+                   ;; begins and ends, **and a mouse-face run always gets
+                   ;; them** - `(hl == DRAW_MOUSE_FACE && (prev == NULL
+                   ;; || prev->hl != s->hl))`. The mode line's own face
+                   ;; has a box too, so without the second rule a
+                   ;; highlight inside the line's box lost its left and
+                   ;; right edges and drew only the top and bottom ones.
+                   (left? (or (and (not prev-boxed?) #t)
+                              (and lit? (not prev-lit?))))
+                   (right? (or (and (not next-boxed?) #t)
+                               (and lit? (not next-lit?)))))
               (write-run! (current-display)
                           (list (mode-line-substring line i j))
                           row-y (+ x0 i)
@@ -3862,9 +4883,8 @@
                 (draw-box! (current-display) box token (+ x0 i) row-y
                            (- j i)
                            (cdr (display-cell-size (current-display)))
-                           (and (not prev-boxed?) #t)
-                           (and (not next-boxed?) #t)))
-              (loop (cdr rest) (and box #t)))))
+                           left? right?))
+              (loop (cdr rest) (and box #t) (and lit? #t)))))
         ;; **`write_row`'s last three lines, which apply to any row.** A
         ;; mode line that fills the window arms the terminal's wrap;
         ;; `cmplus` books that as "moved to the next row", so `cm` ends
@@ -4062,7 +5082,20 @@
              (face (if (eq? window (selected-window))
                        'mode-line-active
                        'mode-line-inactive))
-             (record (list line face y x0)))
+             ;; **The hover run, if the pointer is on this line.** The
+             ;; string the pointer found must be this line - a redisplay
+             ;; formats a fresh string every time, so the test is by
+             ;; content and properties, as the record's is - and then
+             ;; `(BEG END VALUE)` is painted over it.
+             (mouse-run
+              (and (eq? window %mouse-face-window)
+                   %mouse-face-string
+                   (equal-including-properties line %mouse-face-string)
+                   (list %mouse-face-beg %mouse-face-end %mouse-face-attrs)))
+             ;; **The run is part of the record**: a mode line whose text
+             ;; did not change still has to be redrawn when the pointer
+             ;; moves onto or off its items.
+             (record (list line face y x0 mouse-run)))
         (unless (and (not (windows-or-buffers-changed?))
                      (not (frame-garbaged-p (window-frame window)))
                      ;; **Properties count**, which `equal?` does not see:
@@ -4070,7 +5103,7 @@
                      ;; row.
                      (equal-including-properties (window-last-mode-line window)
                                                  record))
-          (draw-mode-line! line face y x0)
+          (draw-mode-line! line face y x0 mouse-run)
           (set!window-last-mode-line window record))
         ;; **The separator between side-by-side windows.** GNU Emacs
         ;; draws it one of two ways, and this is the branch:
@@ -5238,6 +6271,7 @@
             (set! %mouse-face-beg #f)
             (set! %mouse-face-end #f)
             (set! %mouse-face-attrs #f)
+            (set! %mouse-face-string #f)
             #t)))
 
     ;;----------------------------------------------------------------
@@ -5291,6 +6325,63 @@
         (not (window-at-side-p window 'top)))
        (else #f)))
 
+    (define (string-mouse-face-at string position)
+      ;; The `mouse-face` in effect at POSITION in STRING, as
+      ;; `(VALUE BEG END)`, or #f - GNU Emacs's
+      ;; `note_line_or_margin_highlight` (`xdisp.c:36899`).
+      ;;
+      ;; The run is the *string*'s: the backward walk starts at
+      ;; `charpos + 1` so that a run beginning at the character under the
+      ;; pointer is included, the forward walk at the character itself,
+      ;; and a walk that finds nothing is the string's own edge. That is
+      ;; the C's `Fprevious_single_property_change (charpos + 1, ...)`
+      ;; and `Fnext_single_property_change (pos, ...)` with their nil
+      ;; answers replaced by 0 and `SCHARS`.
+      ;;--------------------------------------------------------------
+      ;;
+      ;; **The run cannot cross a format element either.** In Emacs each
+      ;; element is its own string object, so the property walk within it
+      ;; stops at its edge; this tree's line is one flattened string, and
+      ;; `mode-line-elt-no` is the stand-in for that identity. Without
+      ;; it the four adjacent items of Emacs's default line (`:`, the two
+      ;; flags and the remote flag, all sharing the `mode-line-highlight`
+      ;; value) lit up together, where Emacs boxes them one at a time.
+      ;;--------------------------------------------------------------
+      (let ((n (string-length string)))
+        (and (> n 0)
+             (let* ((pos (min (max position 0) (- n 1)))
+                    (value (get-text-property pos 'mouse-face string)))
+               (and value
+                    (let ((beg (or (previous-single-property-change
+                                    (+ pos 1) 'mouse-face string #f)
+                                   0))
+                          (end (or (next-single-property-change
+                                    pos 'mouse-face string #f)
+                                   n))
+                          (elt-beg
+                           (or (previous-single-property-change
+                                (+ pos 1) 'mode-line-elt-no string #f)
+                               0))
+                          (elt-end
+                           (or (next-single-property-change
+                                pos 'mode-line-elt-no string #f)
+                               n))
+                          ;; A lighter's own run, for the reason the
+                          ;; element's is here: Emacs's lighters are
+                          ;; separate string objects, and hovering one
+                          ;; lights only it.
+                          (lit-beg
+                           (or (previous-single-property-change
+                                (+ pos 1) 'mode-line-lighter string #f)
+                               0))
+                          (lit-end
+                           (or (next-single-property-change
+                                pos 'mode-line-lighter string #f)
+                               n)))
+                      (list value
+                            (max beg elt-beg lit-beg)
+                            (min end elt-end lit-end))))))))
+
     (define (string-pointer-at string position)
       ;; The `pointer` text property of STRING at POSITION, clamped to the
       ;; string - "CHARPOS can be beyond the last position of STRING due,
@@ -5300,6 +6391,42 @@
         (and (> n 0)
              (get-text-property (min (max position 0) (- n 1))
                                 'pointer string))))
+
+    (define (string-property-run-at posn prop)
+      ;; The substring of POSN's string around its position that shares
+      ;; PROP's value - what Emacs gets free from a posn's *string
+      ;; object*: each mode-line element there is a string of its own, so
+      ;; `posn-object` is exactly the run. This renderer's mode line is
+      ;; one flattened string, so the run is cut out here.
+      ;;
+      ;; It is how a click on the minor-mode lighters finds `(""
+      ;; ,visible)` - the string `lookup-minor-mode-from-indicator`
+      ;; compares against a lighter (`mouse.el:298`, `bindings.el:956`).
+      ;;--------------------------------------------------------------
+      (let ((s (posn-string posn)))
+        (and (pair? s)
+             (let* ((string (car s))
+                    (n (string-length string)))
+               (and (> n 0)
+                    (let* ((pos (min (max (cdr s) 0) (- n 1)))
+                           (run (lambda (p)
+                                  (list (or (previous-single-property-change
+                                             (+ pos 1) p string #f)
+                                            0)
+                                        (or (next-single-property-change
+                                             pos p string #f)
+                                            n))))
+                           (own (run prop))
+                           ;; The walk cannot cross a format element
+                           ;; (`mode-line-elt-no`) any more than a
+                           ;; lighter's own run (`mode-line-lighter`) -
+                           ;; both stand in for the per-string identity
+                           ;; Emacs's redisplay keeps.
+                           (elt (run 'mode-line-elt-no))
+                           (lit (run 'mode-line-lighter)))
+                      (substring string
+                                 (max (car own) (car elt) (car lit))
+                                 (min (cadr own) (cadr elt) (cadr lit)))))))))
 
     (define (string-keymap-at? string position)
       ;; Whether the string under the pointer is a clickable mode-line
@@ -5375,6 +6502,148 @@
              (display-define-frame-cursor display frame
                                           (frame-cursor-for-posn posn run)))))
 
+    ;;----------------------------------------------------------------
+    ;; The help echo - `note_mouse_highlight`'s other half
+    ;;----------------------------------------------------------------
+    ;;
+    ;; "If the mouse moved onto or out of a `mouse-face` region, start
+    ;; displaying the highlighted text" is half of `note_mouse_highlight`
+    ;; (`xdisp.c:37061`); the other half is the `help-echo` property, the
+    ;; text a tooltip shows. The C finds it in three places - an overlay's
+    ;; property, the buffer's text property, or the *string* drawn on a
+    ;; mode line or tab line - and hands it, with the window and object it
+    ;; was found in, to `show_help_echo` (`keyboard.c:2259`), which runs
+    ;; the display function `tooltip.el` installs.
+    ;;
+    ;; **A named departure**: the C makes a `help-echo` *event* and
+    ;; `read_char` shows it between commands, so a help function's
+    ;; side-effects run in the command loop. This renderer calls
+    ;; `show-help-echo` from the motion handler itself, as it already
+    ;; does for the mouse face, because this front end's pointer events
+    ;; are dispatched from Gtk signals and there is no read to carry the
+    ;; event. `show_help_echo` swallows errors either way, so what runs
+    ;; where is the only difference.
+
+    (define *show-help-echo-function* (make-parameter #f))
+    ;; ^ `show_help_echo` is `keyboard.c`'s and this library is below
+    ;; `keyboard.scm`, so the call comes *up* through this parameter,
+    ;; which `keyboard.scm` installs at load - the `*menu-bar-items-function*`
+    ;; pattern in reverse. #f until then, and nothing is shown.
+
+    (define %help-echo-previous #f)
+    ;; ^ The C's `help_echo_string` as the last motion left it. The motion
+    ;; handler generates a help event when either the new value or this
+    ;; one is non-nil, which is what makes moving off a help item clear
+    ;; the tooltip.
+
+    (define (window-mode-line-help-echo window)
+      ;; `display_mode_lines`' computation of `w->mode_line_help_echo`
+      ;; (`xdisp.c:28141`): the buffer-local option is a function of the
+      ;; window or a string, and nil is "use the string's own property or
+      ;; nothing". Emacs computes it when the mode line is formatted; the
+      ;; answer is the same at hover time and this asks then.
+      ;;--------------------------------------------------------------
+      (let ((default (buffer-local-value (window-buffer window)
+                                         'mode-line-default-help-echo
+                                         (*mode-line-default-help-echo*))))
+        (cond ((procedure? default)
+               (let ((value (default window)))
+                 (and (string? value) value)))
+              ((string? default) default)
+              (else #f))))
+
+    (define (string-help-echo-at string position)
+      ;; The `help-echo` property in the string drawn at POSITION - the
+      ;; C's `Fget_text_property (pos, Qhelp_echo, string)` with its
+      ;; clamp (`xdisp.c:36732`: "CHARPOS can be beyond the last position
+      ;; of STRING due, e.g., to min-width `display' property").
+      ;;--------------------------------------------------------------
+      (let ((n (string-length string)))
+        (and (> n 0)
+             (get-text-property (min (max position 0) (- n 1))
+                                'help-echo string))))
+
+    (define (text-help-echo-at window position)
+      ;; The help echo of the buffer text at POSITION, as
+      ;; `(HELP WINDOW OBJECT POS)` - the C's `check_help_echo`
+      ;; (`xdisp.c:37583`): the highest-priority overlay with the
+      ;; property first, then the text property. OBJECT is the overlay
+      ;; when one answered, the buffer otherwise.
+      ;;--------------------------------------------------------------
+      (let ((buffer (window-buffer window)))
+        (with-current-buffer buffer
+          (let loop ((overlays (overlays-at position #t)))
+            (cond
+             ((null? overlays)
+              (let ((help (get-text-property position 'help-echo buffer)))
+                (and help (list help window buffer position))))
+             ((overlay-get (car overlays) 'help-echo)
+              (list (overlay-get (car overlays) 'help-echo)
+                    window (car overlays) position))
+             (else (loop (cdr overlays))))))))
+
+    (define (help-echo-at posn)
+      ;; What POSN is over, as `(HELP WINDOW OBJECT POS)` or #f. The
+      ;; string case is `note_line_or_margin_highlight`'s
+      ;; (`xdisp.c:36749`), and the mode-line fallback is its
+      ;; `w->mode_line_help_echo` arm: only the mode line has one, and
+      ;; its object is nil with position -1.
+      ;;--------------------------------------------------------------
+      (let ((window (posn-window posn))
+            (area (posn-area posn))
+            (string-pos (posn-string posn)))
+        (cond
+         ((pair? string-pos)
+          (let ((string (car string-pos))
+                (position (cdr string-pos)))
+            (cond
+             ((string-help-echo-at string position)
+              => (lambda (help) (list help window string position)))
+             ((and (eq? area 'mode-line) (window-type? window))
+              (let ((help (window-mode-line-help-echo window)))
+                (and help (list help window #f -1))))
+             (else #f))))
+         ;; "If the mouse is on a part of the mode line without any text
+         ;; (e.g. past the right edge of the mode line text), use that
+         ;; window's mode line help echo if it has been set"
+         ;; (`xdisp.c:36741`). The C reaches this arm with STRING being
+         ;; nil, which is a posn with no `posn-string` here.
+         ((and (eq? area 'mode-line) (window-type? window))
+          (let ((help (window-mode-line-help-echo window)))
+            (and help (list help window #f -1))))
+         ((and (window-type? window) (integer? (posn-point posn)))
+          (text-help-echo-at window (posn-point posn)))
+         (else #f))))
+
+    (define (clear-help-echo!)
+      ;; The C's leave path (`pgtkterm.c`'s button/leave handlers store a
+      ;; nil help event): tell the display there is no help any more.
+      ;; The front end calls this when the pointer leaves the frame; a
+      ;; motion to a position with no help reaches the same state through
+      ;; `note-mouse-highlight`.
+      ;;--------------------------------------------------------------
+      (when %help-echo-previous
+        (let ((show (*show-help-echo-function*)))
+          (when show (show #f #f #f #f))))
+      (set! %help-echo-previous #f))
+
+    (define (%note-help-echo help-entry)
+      ;; Hand HELP-ENTRY to the display when the C would generate a help
+      ;; event: the new value or the previous one is non-nil. A repeat of
+      ;; the same help goes out again, because the C does too - the
+      ;; deduplication is `tooltip-show-help`'s `(equal previous-help
+      ;; msg)`, which keeps a repeated string from restarting the
+      ;; tooltip's delay.
+      ;;--------------------------------------------------------------
+      (when (or help-entry %help-echo-previous)
+        (let ((show (*show-help-echo-function*)))
+          (when show
+            (show (and help-entry (car help-entry))
+                  (and help-entry (cadr help-entry))
+                  (and help-entry (caddr help-entry))
+                  (and help-entry (cadddr help-entry))))))
+      (set! %help-echo-previous help-entry))
+
     (define (note-mouse-highlight frame x y)
       ;; GNU Emacs's `note_mouse_highlight` (`xdisp.c:37061`): what the
       ;; `mouse-face` machinery runs on every pointer movement - "If the
@@ -5405,10 +6674,32 @@
              (posn (and (not gone?) (posn-at-x-y x y frame)))
              (window (and posn (posn-window posn)))
              (position (and posn (posn-point posn)))
+             ;; What the pointer is over, for the tooltip. Emacs sets the
+             ;; help variables before the cursor decision and the face
+             ;; work, and identical positions go out again - see
+             ;; `%note-help-echo`.
+             (help-entry (and (not gone?) posn (help-echo-at posn)))
              (run (and mouse-highlight
                        (window-type? window)
                        (integer? position)
-                       (mouse-face-at window position))))
+                       (mouse-face-at window position)))
+             ;; **A mode line is not a buffer position at all** - the posn
+             ;; has no `posn-point' - it has the *drawn string* and the
+             ;; character in it (`store_mode_line_string`), and that is
+             ;; where `bindings.el`'s mode-line items keep their
+             ;; `mouse-face`. Emacs's `note_line_or_margin_highlight`
+             ;; takes the same two cases: a buffer position, or a string
+             ;; and a character in it.
+             (string-run
+              (and mouse-highlight
+                   (pair? posn)
+                   (eq? (posn-area posn) 'mode-line)
+                   (let ((s (posn-string posn)))
+                     (and (pair? s)
+                          (string-mouse-face-at (car s) (cdr s)))))))
+        ;; The help echo is not gated on `mouse-highlight` in the C
+        ;; either: that variable only decides whether text lights up.
+        (%note-help-echo help-entry)
         ;; The pointer's shape, before the face: the C's `set_cursor` is
         ;; the last thing `note_mouse_highlight` does, but it is the part
         ;; that has nothing to do with `mouse-highlight`, and a mode line
@@ -5419,6 +6710,31 @@
         (let ((changed?
                (cond
                 ((or gone? (not mouse-highlight)) (clear-mouse-face!))
+                (string-run
+                 (let ((value (car string-run))
+                       (string (car (posn-string posn))))
+                   (if (and (eq? window %mouse-face-window)
+                            (eq? string %mouse-face-string)
+                            (= (cadr string-run) %mouse-face-beg)
+                            (= (caddr string-run) %mouse-face-end)
+                            (equal? value %mouse-face-attrs))
+                       #f
+                       (begin
+                         (unless (eq? window %mouse-face-window)
+                           (clear-mouse-face!))
+                         (set! %mouse-face-window window)
+                         (set! %mouse-face-string string)
+                         (set! %mouse-face-beg (cadr string-run))
+                         (set! %mouse-face-end (caddr string-run))
+                         ;; The *value*, not a merged vector: the mode
+                         ;; line merges it over the glyph's own face -
+                         ;; `face_at_string_position` with MOUSE true and
+                         ;; `glyph->face_id` as the base (`xdisp.c:36955`)
+                         ;; - where the buffer-text branch below merges
+                         ;; over the default face, as the C does there.
+                         (set! %mouse-face-attrs value)
+                         (mark-window-display-accurate-1 window #f)
+                         #t))))
                 ((or (not (window-type? window)) (not run))
                  (clear-mouse-face!))
                 (else
@@ -5427,6 +6743,7 @@
                          (car run)
                          (merge-face-ref 'default (face-attributes-empty)))))
                    (if (and (eq? window %mouse-face-window)
+                            (not %mouse-face-string)
                             (= (cadr run) %mouse-face-beg)
                             (= (caddr run) %mouse-face-end)
                             (equal? attrs %mouse-face-attrs))
@@ -5435,6 +6752,7 @@
                          (unless (eq? window %mouse-face-window)
                            (clear-mouse-face!))
                          (set! %mouse-face-window window)
+                         (set! %mouse-face-string #f)
                          (set! %mouse-face-beg (cadr run))
                          (set! %mouse-face-end (caddr run))
                          (set! %mouse-face-attrs attrs)
@@ -5743,15 +7061,29 @@
                       ;; and nothing else, so the next item starts at
                       ;; column N. Drawing the space as well put the next
                       ;; item one column past the frame's edge.
+                      ;; **`concat`, not `string-append`.** The C's
+                      ;; renderer copies each caption with its text
+                      ;; properties (`store_mode_line_string` adds the
+                      ;; element's properties and `display_string` keeps
+                      ;; them), and `tab-bar-format` leans on that:
+                      ;; `tab-bar-tab-name-format-face` puts the current
+                      ;; tab's `tab-bar-tab` face and the others'
+                      ;; `tab-bar-tab-inactive` on the caption, and the
+                      ;; close button's `close-tab` property and a menu
+                      ;; item's `menu-item` property too. `string-append`
+                      ;; builds a fresh string and drops all of it - so
+                      ;; every tab was drawn in the bar's own face and
+                      ;; looked alike. This is the same rule the mode
+                      ;; line and the tab line follow.
                       (if target
                           (loop (+ i 6) (+ x pad)
-                                (string-append acc
-                                               (if (> pad 0)
-                                                   (make-string pad #\space)
-                                                   "")))
+                                (concat acc
+                                        (if (> pad 0)
+                                            (make-string pad #\space)
+                                            "")))
                           (loop (+ i 6) (+ x (menu-item-width name))
-                                (string-append acc name))))))))
-        (draw-mode-line! (string-append
+                                (concat acc name))))))))
+        (draw-mode-line! (concat
                           text (make-string (max 0 (- width (string-length text)))
                                             #\space))
                          'tab-bar y 0)))

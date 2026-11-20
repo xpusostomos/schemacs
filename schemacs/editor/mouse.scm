@@ -56,6 +56,7 @@
           ignore)
     (only (schemacs editor frame)
           frame? frame-height frame-selected-window mouse-position
+          window-type? selected-window
           select-window selected-window set-window-start! window-buffer
           window-edges window-height window-point window-type?
           ;; `mouse-minibuffer-check` asks whether a prompt is up: the
@@ -68,7 +69,7 @@
           frame-parameter frame-width window-live-p minibuffer-window
           *resize-mini-windows* selected-frame select-frame raise-frame
           set-mouse-position)
-    (only (schemacs editor editfns) goto-char point)
+    (only (schemacs editor editfns) goto-char point message)
     ;; The mark a drag sets, and the region it leaves active:
     ;; `push-mark', `pop-mark', `activate-mark' and `region-active-p' are
     ;; simple.el's. `push-mark' and not `set-mark', which is Emacs's own
@@ -93,11 +94,22 @@
     ;; with `redisplay'.
     (only (schemacs editor xdisp)
           *mode-line-format* track-mouse vertical-motion
-          window-end window-start)
+          window-end window-start posn-at-x-y
+          ;; The mode-line menus: the two hooks `mouse-menu-major-mode-map`
+          ;; runs, the toggles map and its sorter, the lighter two-step
+          ;; `lookup-minor-mode-from-indicator` repeats, and the run a
+          ;; click's flattened string is cut into.
+          *activate-menubar-hook* *menu-bar-update-hook*
+          mode-line-mode-menu bindings--sort-menu-keymap
+          line-column-mode-menu
+          minor-mode-indicator-value minor-mode-lighter
+          minor-mode-variable-true? string-property-run-at)
     ;; `mouse-position' - the pointer's own frame row, which is what
     ;; decides whether a drag has left the window - is the display's
     ;; answer, so the display is what is asked.
-    (only (schemacs editor keymap) define-key *default-keymap*)
+    (only (schemacs editor keymap)
+          define-key *default-keymap* make-sparse-keymap lookup-key keymapp
+          set-keymap-parent map-keymap)
     ;; a sparse keymap to hand to `set-transient-map', which is Emacs's
     ;; `(make-sparse-keymap)' in that same place
     (prefix (schemacs editor keymap) km:)
@@ -111,11 +123,16 @@
     ;; a drag has moved on.
     (only (schemacs editor keyboard)
           set-transient-map sit-for *key-translation-map*
+          ;; `show_help_echo` (`keyboard.c`) fixes a help string through
+          ;; `mouse-fixup-help-message`, which is this file's; the seam
+          ;; is installed at the bottom of this file.
+          *mouse-fixup-help-message-function*
           ;; the display's own event value, which is where a motion
           ;; event's *position* is - `read-key-event' answers only the key
           *last-read-event*)
     (only (schemacs editor command)
-          *last-command-event* current-prefix-arg define-command)
+          *last-command-event* current-prefix-arg define-command
+          command-record-named)
     ;; The two `mouse-1-click-*` options are defcustoms.
     (only (schemacs editor custom) define-custom)
     ;; The buffer menu: the buffers, their mode names, and the popup that
@@ -123,18 +140,32 @@
     (only (schemacs editor buffer)
           buffer-file-name buffer-list buffer-modified-p buffer-name
           buffer-read-only? with-current-buffer)
-    (only (schemacs editor files) expand-file-name)
+    ;; `expand-file-name` is `fileio.c`'s and `fileio.scm` defines it;
+    ;; `files.scm` only re-exports it. Importing it from there rather
+    ;; than from `files` keeps the cycle out: `files` loads
+    ;; `(schemacs map-ynp)`, which needs `*query-replace-map*` from
+    ;; `replace`, which loads `isearch` -> `help-fns` -> `help`, and
+    ;; `help` imports this library.
+    (only (schemacs editor fileio) expand-file-name)
     (only (schemacs editor window) switch-to-buffer
           window-resize-pixelwise window-left-sibling window-right-sibling
           adjust-window-trailing-edge window-at-side-p one-window-p
           delete-window delete-other-windows)
     (only (schemacs editor xdisp) format-mode-line)
-    (only (schemacs editor buffer) buffer-local-value major-mode mode-name)
+    (only (schemacs editor buffer) buffer-local-value major-mode mode-name
+          current-local-map)
     (only (schemacs editor menu) x-popup-menu)
     ;; `string-match` is `search.c`'s.
     (only (schemacs editor search) string-match)
     (only (guile) sort)
-    (only (schemacs editor subr) nthcdr posn-area posn-string)
+    (only (schemacs editor subr) nthcdr posn-area posn-string
+          *minor-mode-alist* *minor-mode-map-alist* *minor-mode-list*
+          string-replace posn-object
+          ;; `subr.el`'s, used by `mouse-menu-non-singleton`.
+          keymap-canonicalize)
+    ;; `lookup-minor-mode-from-indicator` asks whether a lighter's mode
+    ;; is on, the first of the two steps the mode line takes.
+    (only (schemacs editor intervals) get)
     ;; `mouse-posn-property` reads the `follow-link` and `mouse-face`
     ;; *text* properties, and `get-char-property` is the overlay-aware
     ;; reader Emacs's own uses.
@@ -143,12 +174,23 @@
     (only (schemacs editor keyboard) key-binding)
     ;; `mouse--last-down` keeps a time, and the one question asked of it
     ;; is how many seconds ago it was.
-    (only (schemacs editor timefns) current-time float-time))
+    (only (schemacs editor timefns) current-time float-time)
+    ;; `capitalize`, for the generated minor-mode menu's title.
+    (only (schemacs editor casefiddle) capitalize)
+    ;; **A seam, not an import.** `popup-menu` and `menu-bar-edit-menu`
+    ;; are `menu-bar.scm`'s, and `menu-bar` imports `isearch`, which
+    ;; imports `help-fns`, which imports `help`, which imports this
+    ;; library - so importing it here is a cycle. `menu-bar.scm`
+    ;; installs both through the parameters below as it loads.
+    ;; `concat` keeps the string's properties and `%substring` is Emacs's
+    ;; `substring`; both are what `mouse-fixup-help-message` rewrites the
+    ;; help text with.
+    (only (schemacs editor fns) concat %substring))
 
   (export *mouse-1-click-follows-link* *mouse-1-click-in-non-selected-windows*
           mouse-event-areas-with-no-buffer-positions mouse--last-down
           mouse--down-1-maybe-follows-link mouse--click-1-maybe-follows-link
-          mouse-posn-property mouse-on-link-p
+          mouse-posn-property mouse-on-link-p mouse-fixup-help-message
           posn-set-point mouse-set-point mouse-drag-region mouse-drag-track
           mouse-minibuffer-check
           mouse-set-region mouse-start-end mouse--drag-set-mark-and-point
@@ -158,7 +200,18 @@
           mouse-buffer-menu mouse-buffer-menu-map mouse-buffer-menu-alist
           mouse-buffer-menu-split
           *mouse-buffer-menu-mode-mult* *mouse-buffer-menu-maxlen*
-          mark mouse-key?)
+          mark mouse-key?
+          ;; `mouse.el`'s mode-line menus. The two parameters are the
+          ;; seams `menu-bar.scm` installs; the commands are what the
+          ;; mode name and the lighters are bound to.
+          *popup-menu-function* *menu-bar-edit-menu*
+          *describe-function-function*
+          mouse-menu-non-singleton mouse-menu-major-mode-map
+          mouse-menu-major-mode-menu mode-line-minor-mode-menu
+          mode-line-line-column-menu
+          lookup-minor-mode-from-indicator minor-mode-menu-from-indicator
+          mouse-minor-mode-menu
+          describe-minor-mode-completion-table-for-indicator)
 
   (begin
 
@@ -1165,6 +1218,296 @@ and selects that window."
               (action pos)))
          (else action))))
 
+    (define (mouse-fixup-help-message msg)
+      ;; GNU Emacs's `mouse-fixup-help-message` (`mouse.el:1894`): "Fix
+      ;; help message MSG for `mouse-1-click-follows-link'." A `help-echo`
+      ;; that says "mouse-2: ..." becomes "mouse-1: ..." - or "double-"
+      ;; or "Long " - when the pointer is on a link and Mouse-1 will
+      ;; follow it, which is what makes a Dired name or an Occur line
+      ;; describe the button that will actually work.
+      ;;
+      ;; The C asks `mouse-pixel-position` and feeds its pixels to
+      ;; `posn-at-x-y`; this tree's `posn-at-x-y` counts *cells*, and
+      ;; `mouse-position` is the query that answers those - a named
+      ;; departure, and the same position either way.
+      ;;--------------------------------------------------------------
+      (let* ((setting (*mouse-1-click-follows-link*))
+             (mp (and setting
+                      (string? msg)
+                      (string-match "\\`mouse-2" msg)
+                      (mouse-position)))
+             (pos (and mp (cdr mp)))
+             (posn (and pos (pair? pos)
+                        (number? (car pos)) (>= (car pos) 0)
+                        (number? (cdr pos)) (>= (cdr pos) 0)
+                        (posn-at-x-y (car pos) (cdr pos) (car mp))))
+             (on-link? (and posn
+                            (window-type? (posn-window posn))
+                            (with-current-buffer
+                                (window-buffer (posn-window posn))
+                              (mouse-on-link-p posn)))))
+        (if on-link?
+            (concat (cond ((eq? setting 'double) "double-")
+                          ((and (integer? setting) (< setting 0)) "Long ")
+                          (else ""))
+                    "mouse-1" (%substring msg 7))
+            msg)))
+
+    ;;----------------------------------------------------------------
+    ;; The mode-line menus - `mouse.el:222-330'
+    ;;----------------------------------------------------------------
+    ;;
+    ;; The mode line's mode name and minor-mode lighters carry
+    ;; `mode-line-major-mode-keymap` and `mode-line-minor-mode-keymap`
+    ;; (`bindings.el:571-615`), and these are the pieces they name.
+    ;;
+    ;; **Departure**: Emacs binds the menus as `(menu-item ... :filter
+    ;; ...)` values whose filter returns a keymap, and `read_char`'s menu
+    ;; prompting pops a keymap reached by a click. This tree has neither
+    ;; the filter arm in a key lookup nor the menu-prompt path, so the
+    ;; down-mouse bindings name two commands here that build the same
+    ;; menu and pop it at the click (`mouse-menu-major-mode-menu`,
+    ;; `mode-line-minor-mode-menu`). `mouse-menu-major-mode-map` and
+    ;; `minor-mode-menu-from-indicator` themselves are Emacs's.
+
+    (define *popup-menu-function* (make-parameter #f))
+    ;; ^ `popup-menu` (`menu-bar.el:2690`), installed by `menu-bar.scm`.
+
+    (define *menu-bar-edit-menu* (make-parameter #f))
+    ;; ^ `menu-bar-edit-menu` (`menu-bar.el:497`), installed by the same
+    ;; library - the major-mode menu's fallback when the mode has no menu
+    ;; of its own.
+
+    (define *describe-function-function* (make-parameter #f))
+    ;; ^ The seam `minor-mode-menu-from-indicator`'s generated "Help for
+    ;; minor mode" item reaches `describe-function` through. That
+    ;; function is `help-fns.scm`'s and that library is above this one,
+    ;; so it installs this parameter as it loads; without it the item is
+    ;; left out of the menu.
+
+    (define (mouse-menu-non-singleton menubar)
+      ;; GNU Emacs's `mouse-menu-non-singleton` (`mouse.el:326`):
+      ;; "Return menu keybar MENUBAR, or a lone submenu inside it. If
+      ;; MENUBAR defines exactly one submenu, return just that submenu."
+      ;;
+      ;; `keymap-canonicalize` is the C's walk over the canonical form,
+      ;; which is what lets `map-keymap` see a sparse map's every entry.
+      ;;--------------------------------------------------------------
+      (if menubar
+          (let ((submap #f))
+            (map-keymap
+             (lambda (k v) (set! submap (if submap #t (cons k v))))
+             (keymap-canonicalize menubar))
+            (if (eq? submap #t)
+                menubar
+                (and (pair? submap)
+                     (lookup-key menubar (vector (car submap))))))
+          #f))
+
+    (define (mouse-menu-major-mode-map)
+      ;; GNU Emacs's `mouse-menu-major-mode-map` (`mouse.el:309`): the
+      ;; menu a click on the major mode name pops up.
+      ;;
+      ;; A mode that puts a `[menu-bar]` submenu in its local map gets
+      ;; that menu, titled "<Mode> Mode"; a mode with none gets the Edit
+      ;; menu - Emacs's own fallback (`newmap = menu-bar-edit-menu`).
+      ;;--------------------------------------------------------------
+      (run-hooks (*activate-menubar-hook*))
+      (run-hooks (*menu-bar-update-hook*))
+      (let* ((ancestor
+              (mouse-menu-non-singleton
+               (and (current-local-map)
+                    (lookup-key (current-local-map) (vector 'menu-bar)))))
+             (newmap (if ancestor
+                         (make-sparse-keymap
+                          (string-append (format-mode-line (mode-name)) " Mode"))
+                         (*menu-bar-edit-menu*))))
+        (when ancestor
+          (set-keymap-parent newmap ancestor))
+        newmap))
+
+    (define-command (mouse-menu-major-mode-menu event)
+      "Pop up the major mode menu at EVENT.
+
+The menu is `mouse-menu-major-mode-map`'s - Emacs reaches it through a
+filtered `menu-item`; this tree pops it from a command (see the note
+above the mode-line menus)."
+      (interactive "@e")
+      ((*popup-menu-function*) (mouse-menu-major-mode-map) event))
+
+    (define-command (mode-line-minor-mode-menu event)
+      "Pop up the menu of minor modes at EVENT.
+This is `mode-line-mode-menu`, sorted by name - `bindings.el`'s
+`:filter bindings--sort-menu-keymap`."
+      (interactive "@e")
+      ((*popup-menu-function*) (bindings--sort-menu-keymap mode-line-mode-menu)
+                               event))
+
+    (define-command (mode-line-line-column-menu event)
+      "Pop up the line and column display menu at EVENT.
+This is `mode-line-column-line-number-mode-map`'s menu
+(`bindings.el:621-636`); Emacs binds the menu keymap directly and
+pops it through `read_char`'s menu prompting, which this tree does
+not have - so the press names this command, as the mode name's and
+the lighters' presses do."
+      (interactive "@e")
+      ((*popup-menu-function*) line-column-mode-menu event))
+
+    (define (lookup-minor-mode-from-indicator indicator . rest)
+      ;; GNU Emacs's `lookup-minor-mode-from-indicator` (`help.el:1403`):
+      ;; "Return a minor mode symbol from its indicator on the mode
+      ;; line." A leading space is stripped from both sides of the
+      ;; comparison, because a lighter starts with its own space.
+      ;;
+      ;; **Placement**: `help.el`'s function, but the one user is
+      ;; `minor-mode-menu-from-indicator` below, and `help.el` is above
+      ;; this library - `describe-minor-mode-from-indicator` imports it
+      ;; from here, as `posn-set-point` is imported from here by `subr.el`'s
+      ;; owner.
+      ;;
+      ;; The indicator is evaluated the way the mode line builds it -
+      ;; `minor-mode-indicator-value` and `minor-mode-lighter`, in the
+      ;; buffer of WINDOW (or the selected window) - where Emacs calls
+      ;; `format-mode-line` and reads the selected window's buffer.
+      ;;--------------------------------------------------------------
+      (let ((window (or (and (pair? rest) (car rest)) (selected-window))))
+        (let* ((buffer (window-buffer window))
+               (indicator (if (and (> (string-length indicator) 0)
+                                   (char=? (string-ref indicator 0) #\space))
+                              (substring indicator 1)
+                              indicator)))
+          (let loop ((modes (*minor-mode-alist*)))
+            (if (null? modes)
+                #f
+                (let* ((entry (car modes))
+                       (minor-mode (car entry))
+                       (anindicator
+                        (minor-mode-lighter
+                         (minor-mode-indicator-value buffer (cadr entry))))
+                       (anindicator
+                        (if (and (string? anindicator)
+                                 (> (string-length anindicator) 0)
+                                 (char=? (string-ref anindicator 0) #\space))
+                            (substring anindicator 1)
+                            anindicator)))
+                  (if (equal? indicator anindicator)
+                      minor-mode
+                      (loop (cdr modes)))))))))
+
+    (define (describe-minor-mode-completion-table-for-indicator)
+      ;; GNU Emacs's `describe-minor-mode-completion-table-for-indicator`
+      ;; (`help.el:1331`): "the active lighters, with the leading space
+      ;; removed" - it `format-mode-line`s each `minor-mode-alist` entry,
+      ;; which answers "" for a mode that is off (measured on Emacs
+      ;; 31.1: with `overwrite-mode` and `auto-fill-mode` on the table is
+      ;; `("Ovwrt" "Fill")`).
+      ;;
+      ;; **Placement**: `help.el`'s, but beside
+      ;; `lookup-minor-mode-from-indicator` and the two functions the
+      ;; mode line evaluates a lighter with - they are what it is made
+      ;; of, and `help-fns.scm` imports it from here.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (let loop ((alist (*minor-mode-alist*)) (acc '()))
+          (if (null? alist)
+              (reverse acc)
+              (let* ((entry (car alist))
+                     (i (if (minor-mode-variable-true? buffer (car entry))
+                            (minor-mode-lighter
+                             (minor-mode-indicator-value buffer (cadr entry)))
+                            "")))
+                (loop (cdr alist)
+                      (cond ((not (string? i)) acc)
+                            ((= 0 (string-length i)) acc)
+                            ((char=? (string-ref i 0) #\space)
+                             (cons (substring i 1) acc))
+                            (else (cons i acc)))))))))
+
+    (define-command (minor-mode-menu-from-indicator indicator . rest)
+      ;; GNU Emacs's `minor-mode-menu-from-indicator` (`mouse.el:222`):
+      ;; "Show menu for minor mode specified by INDICATOR." A command -
+      ;; M-x prompts for the indicator - and the click path passes the
+      ;; clicked lighter's string, its window and its event.
+      ;;
+      ;; The mode-line-compact disambiguation arm is not carried - the
+      ;; option is not ported, and Emacs without it behaves as this does:
+      ;; the indicator must equal a whole lighter, which is the
+      ;; single-lighter case. The generated menu is "Turn off" plus
+      ;; "Help", the second only when a help library has installed the
+      ;; seam.
+      ;;--------------------------------------------------------------
+      (interactive
+       (list (completing-read
+              "Minor mode indicator: "
+              (describe-minor-mode-completion-table-for-indicator))))
+      (let* ((window (and (pair? rest) (car rest)))
+             (event (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+             (indicator (if (pair? indicator) (car indicator) indicator)))
+        (when (not (string? indicator))
+          (error "Wrong type argument: stringp, ~s" indicator))
+        (let* ((minor-mode (if (symbol? indicator)
+                               indicator
+                               (lookup-minor-mode-from-indicator
+                                indicator window)))
+               ;; "`mm-fun` is `(or (get minor-mode :minor-mode-function)
+               ;; minor-mode)`" (`mouse.el:274`): `add-minor-mode`
+               ;; records a different toggle function when a mode has
+               ;; one. Nothing here passes `TOGGLE-FUN`, so the property
+               ;; is never set - the lookup is Emacs's shape, not a
+               ;; stand-in.
+               (mm-fun (and minor-mode
+                            (or (get minor-mode ':minor-mode-function)
+                                minor-mode)))
+               (map (and minor-mode
+                         (let ((cell (assq minor-mode (*minor-mode-map-alist*))))
+                           ;; Elisp's `(cdr-safe ...)': a mode with no
+                           ;; map is the ordinary case.
+                           (and (pair? cell) (cdr cell)))))
+               (menu (and map (keymapp map)
+                          (lookup-key map (vector 'menu-bar)))))
+          (unless minor-mode
+            (error "Cannot find minor mode for `~a'" indicator))
+          (when (and (not menu) mm-fun
+                     ;; "`(if (fboundp mm-fun) ...)`" (`mouse.el:282`,
+                     ;; bug#20201): a mode whose function no longer
+                     ;; exists gets no generated menu. The command table
+                     ;; is what `fboundp` is here.
+                     (command-record-named (symbol->string mm-fun)))
+            ;; `mouse.el:283-291`'s keymap. Emacs builds it as a *list*
+            ;; keymap, `(keymap TITLE (turn-off menu-item ...) (help
+            ;; menu-item ...))`; `x-popup-menu` takes a record here, so
+            ;; it is made with `define-key` - back to front, because
+            ;; `define-key` prepends and a menu draws the map's own
+            ;; order.
+            (let ((generated
+                   (make-sparse-keymap
+                    (format #f "~a - ~a" indicator
+                            (capitalize
+                             (string-replace "-" " "
+                                             (symbol->string minor-mode)))))))
+              (when (*describe-function-function*)
+                (define-key generated (vector 'help)
+                  (list 'menu-item "Help for minor mode"
+                        (lambda ()
+                          ((*describe-function-function*) mm-fun)))))
+              (define-key generated (vector 'turn-off)
+                (list 'menu-item "Turn off minor mode" mm-fun))
+              (set! menu generated)))
+          (if menu
+              ((*popup-menu-function*) menu event)
+              (message "No menu available")))))
+
+    (define-command (mouse-minor-mode-menu event)
+      "Show minor-mode menu for EVENT on minor modes area of the mode line."
+      (interactive "@e")
+      (let* ((posn (event-start event))
+             (window (posn-window posn)))
+        ;; Emacs's `posn-object` is the lighters' own string; this
+        ;; tree's mode line is one flattened string, so the run carrying
+        ;; the minor-mode keymap is the nearest thing.
+        (minor-mode-menu-from-indicator
+         (string-property-run-at posn 'local-map) window event)))
+
     ;;----------------------------------------------------------------
     ;; The mode line, dragged and clicked - `mouse.el:775-800', `:871-1180'
     ;;----------------------------------------------------------------
@@ -1228,9 +1571,14 @@ and selects that window."
              ;; displays."
              (charwise (not (or window-resize-pixelwise tty)))
              (position-x-y (mouse-position-for-drag-line tty))
+             ;; Elisp's `(car nil)'/`(cdr nil)' are nil; Scheme's are
+             ;; errors. A terminal with no mouse has no position at all,
+             ;; and `mouse-position-in-root-frame` answers #f there - the
+             ;; press still has to install the drag, whose `move` never
+             ;; runs without a motion event.
              (position (if (eq? line 'vertical)
-                           (car position-x-y)
-                           (cdr position-x-y)))
+                           (and (pair? position-x-y) (car position-x-y))
+                           (and (pair? position-x-y) (cdr position-x-y))))
              (last-position position)
              (residue 0)
              (forward #t)
@@ -1444,5 +1792,11 @@ This command must be bound to a mouse click."
       mouse--click-1-maybe-follows-link)
     (define-key *key-translation-map* (kbd "<double-mouse-1>")
       mouse--click-1-maybe-follows-link)
+
+    ;; `show_help_echo` (`keyboard.c:2259`) applies
+    ;; `mouse-fixup-help-message` to every help string it is about to
+    ;; display. That function is this library's and `keyboard.scm` is
+    ;; below it, so it arrives there through this seam.
+    (*mouse-fixup-help-message-function* mouse-fixup-help-message)
 
     ))

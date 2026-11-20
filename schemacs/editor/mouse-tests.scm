@@ -905,10 +905,19 @@
                   (list 2 -2)
                   (list (- (window-height top) h-top)
                         (- (window-height bottom) h-bottom)))
-      ;; A key the map does not bind ends the drag and restores
-      ;; `track-mouse`.
-      (*last-read-event* (list 'mouse-1 (list top 'mode-line (cons 1 row) 0)))
-      (dispatch-key f 'mouse-1)
+      ;; **A `drag-mouse-1` ends the drag** - the release of a real drag,
+      ;; which the front end names `drag-mouse-1` once the pointer has
+      ;; moved (`mouse.el:3783`), and which `mouse-drag-line`'s transient
+      ;; map binds to its own exit. A *no-motion* `mouse-1` release does
+      ;; not: `read_key_sequence` disposes of an unbound up click
+      ;; (`keyboard.c:12115`) instead of running a command, so neither
+      ;; the map nor `track-mouse` is touched by it - the C's own comment
+      ;; at the vertical-line binding ("swallow also a mouse-1 event ...
+      ;; to allow mouse-1 clicks to get through") assumes exactly that.
+      (*last-read-event* (list 'drag-mouse-1
+                               (list top 'mode-line (cons 1 row) 0)
+                               (list top 'mode-line (cons 1 (+ row 2)) 0)))
+      (dispatch-key f 'drag-mouse-1)
       (test-equal "the drag ends and mouse tracking is restored" #f track-mouse))))
 
 

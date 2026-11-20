@@ -184,7 +184,6 @@
     (only (schemacs editor font-core) turn-on-font-lock)
     (only (schemacs editor timer) run-at-time cancel-timer timer?)
     (only (schemacs editor seq) seq-some seq-take)
-    (only (schemacs editor files) rename-uniquely)
     (only (schemacs editor xdisp)
           overlay-arrow-position overlay-arrow-string)
     (only (schemacs editor search)
@@ -199,6 +198,7 @@
    *query-replace-history*
    *query-replace-lazy-highlight*
    *query-replace-map*
+   *rename-uniquely-function*
    *query-replace-read-from-default*
    *query-replace-read-from-regexp-default*
    perform-replace
@@ -1924,6 +1924,15 @@ You can add this to `occur-hook' if you always want a separate
                                "*")
                        (or unique-p (not interactive-p)))))
 
+    (define *rename-uniquely-function* (make-parameter #f))
+    ;; ^ A seam for `rename-uniquely` (`files.el:6747`), which
+    ;; `occur-rename-buffer` calls where Emacs does. The *function* is
+    ;; `files.scm`'s, and this library cannot import that one: `files`
+    ;; loads `(schemacs map-ynp)` for `save-some-buffers`, `map-ynp`
+    ;; imports `*query-replace-map*` from here, and an import back into
+    ;; `files` would close the cycle. `files.scm` installs this as it
+    ;; loads, as it does the other seams it owns.
+
     (define *occur--final-pos* (make-parameter #f))
     ;; ^ GNU Emacs's `occur--final-pos' (`replace.el:2076'), a dynamic
     ;; variable `occur-1` `let`-binds and `occur-engine` sets - a
@@ -2002,7 +2011,7 @@ If a match spreads across multiple lines, all those lines are shown."
                                                      boo))))
                           active-bufs)
             (with-current-buffer buf-name
-              (rename-uniquely)))
+              ((*rename-uniquely-function*))))
           ;; Now find or create the output buffer.
           (let ((occur-buf (get-buffer-create buf-name)))
             (with-current-buffer occur-buf

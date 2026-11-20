@@ -64,7 +64,11 @@
           read-key-sequence-vector lookup-keymaps undefined
           *unread-command-events* *this-command-keys*
           help-char help-event-list
-          *overriding-terminal-local-map* *overriding-local-map*)
+          *overriding-terminal-local-map* *overriding-local-map*
+          ;; "Substitute key descriptions and quotes in HELP" - the C
+          ;; calls `substitute-command-keys` and this is the seam it
+          ;; arrives through, installed at the bottom of this file.
+          *help-echo-substitute-function*)
     (only (schemacs editor keymap)
           key-description keymapp lookup-key keymap-order keymap-bindings
           keymap-index get-keyelt make-sparse-keymap define-key
@@ -106,7 +110,7 @@
     ;; `format` is `editfns.scm`'s Emacs `format`, not Guile's.
     (only (schemacs editor editfns) message format)
     ;; the face and the property store
-    (only (schemacs editor textprop) add-text-properties)
+    (only (schemacs editor textprop) add-text-properties get-text-property)
     ;; `get` is the `suppress-keymap` property test, `accessible-keymaps`
     ;; is where a description starts, and `*tab-width*` is the unit
     ;; `describe-map--fill-columns` pads in.
@@ -115,7 +119,7 @@
 
   (export substitute-quotes substitute-command-keys key-valid-p
           help--key-description-fontified
-          help-buffer help-setup-xref help--window-setup with-help-window
+          help-buffer help-key help-setup-xref help--window-setup with-help-window
           help-fns-function-name help--describe-command
           help--describe-map-compare help--shadow-lookup
           describe-map describe-map--align-section
@@ -457,6 +461,14 @@
        (if (and *help-xref-following* (derived-mode-p 'help-mode))
            (current-buffer)
            (get-buffer-create "*Help*"))))
+
+    (define (help-key)
+      ;; GNU Emacs's `help-key' (`help.el:58'): "Return `help-char' in a
+      ;; format suitable for the `keymap-set' KEY argument." It is how
+      ;; the question-askers write it into a prompt, and why the prompt
+      ;; says `C-h' (or whatever `help-char' has been set to).
+      ;;--------------------------------------------------------------
+      (key-description (vector help-char)))
 
     (define (help-setup-xref item interactive-p)
       ;; GNU Emacs's `help-setup-xref' (`help-mode.el:496`): "Invoked
@@ -1557,5 +1569,20 @@ If INSERT (the prefix arg) is non-nil, insert the message in the buffer."
     ;; `narrow-map` and `mule-keymap` record.
     (define-key *default-keymap* (kbd "C-h ?") help-for-help)
     (define-key *default-keymap* (kbd "C-h C-h") help-for-help)
+
+    ;; `help_echo_substitute_command_keys` (`keyboard.c:2219') runs
+    ;; `substitute-command-keys` over a `help-echo` or menu `:help`
+    ;; string - "unless its first character has a non-nil
+    ;; `help-echo-inhibit-substitution' property". That test needs a
+    ;; string text property, which only `textprop.scm` has, and
+    ;; `keyboard.scm` is below it, so the whole function is the seam's
+    ;; value and is installed here.
+    (*help-echo-substitute-function*
+     (lambda (help)
+       (if (and (string? help)
+                (> (string-length help) 0)
+                (get-text-property 0 'help-echo-inhibit-substitution help))
+           help
+           (substitute-command-keys help))))
 
 ))

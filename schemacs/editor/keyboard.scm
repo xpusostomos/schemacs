@@ -161,7 +161,12 @@
     (only (schemacs editor xdisp)
           render! redisplay-frames! *menu-bar-items-function*
           *tab-bar-items-function* *tab-bar-keymap-function*
-          *tool-bar-items-function* *tool-bar-keymap-function*)
+          *tool-bar-items-function* *tool-bar-keymap-function*
+          ;; The redisplay hands it the help-echo it found under the
+          ;; pointer; `show-help-echo` is this library's (`keyboard.c`),
+          ;; and the redisplay is below, so it is the one installed the
+          ;; other way round from the rest: see the tail of this file.
+          *show-help-echo-function*)
     ;; The development back door, which the command loop gives its turn
     ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
     (only (scheme-utils repl server) poll-repl! repl-running? repl-wake)
@@ -196,7 +201,10 @@
           posn-area posn-window posn-point posn-string event-start)
     (only (schemacs editor character)
           char-meta char-alt char-super char-hyper char-shift char-ctl
-          parse-modifiers-uncached event-convert-list)
+          parse-modifiers-uncached event-convert-list
+          ;; The C's mouse-event fallback reads an event's modifiers and
+          ;; its base type (`keyboard.c:12115`).
+          event-modifiers event-basic-type)
     )
 
   (export
@@ -244,6 +252,11 @@
    *menu-bar-final-items* *overriding-local-map-menu-flag*
    menu-bar-items parse-menu-item menu-separator-name?
    tab-bar-items lookup-keymaps
+   ;; `keyboard.c`'s help echo: the display function the tooltip library
+   ;; installs, and the two seams upper libraries fill in.
+   *show-help-function* *help-echo-substitute-function*
+   *mouse-fixup-help-message-function*
+   show-help-echo help-echo-substitute-command-keys
    ;; `keyboard.c`'s tool-bar half, the same way: `tool_bar_items` and
    ;; `parse_tool_bar_item` are C-internal in Emacs, and the front end
    ;; here is Scheme. The slot indices are the C's `TOOL_BAR_ITEM_*`
@@ -965,7 +978,11 @@
       (cond
        ((km:keymap-type? km)
         (make<modal-lookup-state-type> (list km) '()))
-       ((and (list? km) (pair? km) (km:keymap-type? (car km)))
+       ;; A keymap *list* `(keymap MAP ...)` - what `access-keymap`
+       ;; answers when a key is a prefix in two maps - is one keymap.
+       ((km:keymapp km)
+        (make<modal-lookup-state-type> (list km) '()))
+       ((and (list? km) (pair? km) (km:keymapp (car km)))
         (make<modal-lookup-state-type> km '()))
        ((null? km)
         (error "no keymap to look a key sequence up in"))
@@ -981,13 +998,25 @@
 
     (define (modal-lookup-state-lookup state event)
       ;; Look ONE event up in the state's keymaps, in precedence order.
+      ;;
+      ;; **The whole list goes to ONE lookup**, as the C hands its
+      ;; `current_binding` - a keymap *list* - to `follow_key`
+      ;; (`keyboard.c:12062`). `access-keymap` searches the list for the
+      ;; event and, when several maps bind it as a *prefix*, answers a
+      ;; keymap list `(keymap M1 M2 ...)`; the next event is looked up in
+      ;; that whole list, which is how a prefix in one map that does not
+      ;; bind the next event falls through to another map's prefix.
+      ;;
+      ;; **Walking the maps one at a time loses exactly that**, and the
+      ;; symptom was a mode-line drag that never ended: the drag's
+      ;; transient map binds `[mode-line]` to itself but not
+      ;; `[mode-line mouse-1]`; the global map has the `[mode-line
+      ;; mouse-1]` prefix. Map by map, the transient map's prefix won and
+      ;; the release was unbound - Emacs's `set-transient-map` doc says
+      ;; what should happen instead: "if no match for a key is found in
+      ;; MAP, the normal key lookup sequence then continues."
       ;;--------------------------------------------------------------
-      (let loop ((maps (modal-lookup-state-keymaps state)))
-        (cond
-         ((null? maps) #f)
-         (else
-          (let ((got (km:keymap-lookup (car maps) (list event))))
-            (or got (loop (cdr maps))))))))
+      (km:keymap-lookup (modal-lookup-state-keymaps state) (list event)))
 
     (define (key-binding key . rest)
       ;; GNU Emacs's `key-binding' (`keymap.c`): "Return the binding for
@@ -1036,11 +1065,11 @@
              (action-or-map (modal-lookup-state-lookup state event)))
         (set!modal-lookup-state-index-stack state stack)
         (cond
-         ((and action-or-map (not (km:keymap-type? action-or-map)))
+         ((and action-or-map (not (km:keymapp action-or-map)))
           (set!modal-lookup-state-keymaps state '())
           (do-action full-key action-or-map)
           #f)
-         ((km:keymap-type? action-or-map)
+         ((km:keymapp action-or-map)
           (set!modal-lookup-state-keymaps state (list action-or-map))
           (do-wait-next full-key action-or-map) #t)
          (else
@@ -1136,6 +1165,68 @@
               (dispatch-key-1 frame key mouse-posn #f))
             (dispatch-key-1 frame key mouse-posn #f))))
 
+    (define (%unbound-mouse-reduction event)
+      ;; One step of GNU Emacs's reduction of an unbound mouse event
+      ;; (`keyboard.c:12100-12210`): "Attempt to reduce an unbound mouse
+      ;; event to a simpler event that is bound: Drags reduce to clicks.
+      ;; Double-clicks reduce to clicks. ... Up/Down-clicks are
+      ;; eliminated."
+      ;;
+      ;; Answers the event to try next in the *same* map, the symbol
+      ;; `drop` for an up or down click - which the C disposes of by
+      ;; reading another event, running nothing and reporting nothing -
+      ;; or #f for anything that is not a mouse click, which keeps the
+      ;; "last event alone" rule for keyboard prefixes.
+      ;;
+      ;; **Why this matters**: a mode-line item's map binds
+      ;; `[mode-line mouse-1]` and nothing else. A press on it
+      ;; (`down-mouse-1`) is therefore unbound in that map, and without
+      ;; this rule the dispatcher retried it alone and found the *text*
+      ;; binding `mouse-drag-region`, which cannot act on a mode-line
+      ;; position - "Wrong type argument in position 2: #f" from
+      ;; `mouse-drag-track`. Emacs drops the press instead.
+      ;;--------------------------------------------------------------
+      (let ((modifiers (and (symbol? event) (event-modifiers event))))
+        (cond
+         ((not modifiers) #f)
+         ;; `triple-mouse-1` is tried first as a double, as the C's
+         ;; `modifiers ^= (double | triple)` does.
+         ((memq 'triple modifiers)
+          (event-convert-list (list 'double (event-basic-type event))))
+         ((or (memq 'double modifiers) (memq 'drag modifiers))
+          (event-basic-type event))
+         ((or (memq 'down modifiers) (memq 'click modifiers))
+          'drop)
+         (else #f))))
+
+    (define (%run-reduced-click prefix-maps event run)
+      ;; The rest of the C's loop: a reduced click is looked up in the
+      ;; *same* keymap the failed event was in, and what is still unbound
+      ;; keeps reducing until it is bound or is an up/down click.
+      ;; Answers like a chord: #t when the reduced event is itself a
+      ;; prefix keymap, #f when it ran a command or nothing was found.
+      ;;--------------------------------------------------------------
+      (let loop ((ev event))
+        (let* ((sub (new-modal-lookup-state prefix-maps))
+               (found? #f)
+               (result
+                (modal-lookup-state-step!
+                 sub ev
+                 (lambda (fp action)
+                   (set! found? #t)
+                   (run sub action))
+                 (lambda (fp action)
+                   (set! found? #t)
+                   #t)
+                 (lambda (fp) #f))))
+          (cond
+           (found? (and result #t))
+           (else
+            (let ((next (%unbound-mouse-reduction ev)))
+              (cond ((eq? next 'drop) #f)
+                    (next (loop next))
+                    (else #f))))))))
+
     (define (dispatch-key-1 frame key position silent?)
       ;; Dispatch one key *event* through the modal keymap lookup. The
       ;; modal lookup state persists across events while a chord
@@ -1194,7 +1285,13 @@
               ;; reads the completed chord off it for `*this-command-keys*'
               ;; and the undefined-key message.
               (set!frame-keymap-state frame state)
-              (let* ((run
+              ;; `letrec*` and not `let*`: the `fail` closure calls
+              ;; `fail-alone` and reads `prefix-maps`, which are bound
+              ;; after it in this list - a `let*` would leave both
+              ;; unbound inside the closure (the compiler says so, and
+              ;; the mouse fallback then dies on the one path it exists
+              ;; for).
+              (letrec* ((run
                       (lambda (st action)
                         ;; **The chord that ran the command**, which
                         ;; `set-transient-map`'s keep test reads - GNU
@@ -1239,6 +1336,16 @@
                           " is undefined"))))
                      (fail
                       (lambda (full-path)
+                        ;; **The C's mouse-event fallback comes first**:
+                        ;; an unbound mouse click is reduced or dropped,
+                        ;; never retried alone (`%unbound-mouse-reduction`).
+                        (let ((reduced (%unbound-mouse-reduction key)))
+                          (cond
+                           ((eq? reduced 'drop) #f)
+                           (reduced (%run-reduced-click prefix-maps reduced run))
+                           (else (fail-alone full-path))))))
+                     (fail-alone
+                      (lambda (full-path)
                         ;; **Emacs's "last event alone" rule.** When a
                         ;; sequence that began with a prefix has no
                         ;; binding, `read_key_sequence` throws the prefix
@@ -1277,6 +1384,11 @@
                           ;; the one corner this does not take.
                           (unless (or found? silent?)
                             (report-undefined full-path)))))
+                     ;; The map the failed event was looked up in - the
+                     ;; prefix's map for the second event of a chord.
+                     ;; `modal-lookup-state-step!` empties it as it
+                     ;; fails, so it is taken before the step.
+                     (prefix-maps (modal-lookup-state-keymaps state))
                      (result
                       (modal-lookup-state-step!
                        state key
@@ -2920,15 +3032,98 @@ With argument, insert ARG copies of the character."
                   sequence)
                  (else (loop (cdr rest) found)))))))))))
 
-    (define (help-echo-substitute-command-keys string)
-      ;; `help_echo_substitute_command_keys' (`keyboard.c'): Emacs runs
-      ;; `substitute-command-keys' over a menu item's help string. That
-      ;; function is not ported - it needs `documentation' and the
-      ;; keymap-description machinery - so the string is carried through
-      ;; unchanged. Named departure: a `:help' containing `\[command]'
-      ;; shows the escape.
+    ;;----------------------------------------------------------------
+    ;; The help echo - `show_help_echo` (`keyboard.c:2259`)
+    ;;----------------------------------------------------------------
+
+    (define *show-help-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `show-help-function` (`keyboard.c:14824`): "Function
+    ;; to call to display help for menu or tool bar item, if mouse is
+    ;; over it. It is called with the help string as argument. If nil,
+    ;; the echo area is used."
+    ;;
+    ;; **A parameter, not a plain variable.** Emacs `defvar`s it and only
+    ;; `setq`s it (tooltip.el, tty-tip.el, pc-win.el); here it is written
+    ;; by `tooltip.scm`, which imports this library, and the tree's
+    ;; cross-library spelling for a variable another library assigns is a
+    ;; parameter - the seam convention. Read as `(*show-help-function*)`.
+
+    (define *help-echo-substitute-function* (make-parameter (lambda (help) help)))
+    ;; ^ The seam `help-echo-substitute-command-keys` substitutes
+    ;; through. `substitute-command-keys` is `help.scm`'s, which imports
+    ;; this library, so it arrives from above as a parameter that library
+    ;; installs at load - the `*barf-if-buffer-read-only-function*` shape.
+    ;; The default carries the string through unchanged, which is what a
+    ;; session with no help library gets.
+
+    (define *mouse-fixup-help-message-function* (make-parameter (lambda (msg) msg)))
+    ;; ^ `mouse-fixup-help-message` (`mouse.el:1894`) is `mouse.scm`'s,
+    ;; and `mouse.scm` imports this library - so `show-help-echo` reaches
+    ;; it through this parameter, which that library installs at load.
+
+    (define (help-echo-substitute-command-keys help)
+      ;; GNU Emacs's `help_echo_substitute_command_keys`
+      ;; (`keyboard.c:2219`): "Substitute key descriptions and quotes in
+      ;; HELP, unless its first character has a non-nil
+      ;; `help-echo-inhibit-substitution' property."
+      ;;
+      ;; The inhibit test needs `get-text-property` on a string, which is
+      ;; `textprop.scm`'s and above this library, so it is applied by the
+      ;; seam's installer (`help.scm`) and not here. The answer is used
+      ;; both by `show_help_echo` below and by menu item parsing
+      ;; (`parse_menu_item`'s `:help`).
       ;;--------------------------------------------------------------
-      string)
+      (if (string? help)
+          ((*help-echo-substitute-function*) help)
+          help))
+
+    (define (%show-help help)
+      ;; The half of `show_help_echo` that runs once HELP is known to be a
+      ;; string or nil. `mouse-fixup-help-message` is applied to a string
+      ;; only - "The `mouse-fixup-help-message' Lisp function can call
+      ;; `mouse_position_hook', which resets the `mouse_moved' flags" -
+      ;; and the display function is called with the substituted text.
+      ;;--------------------------------------------------------------
+      (when (string? help)
+        (set! help ((*mouse-fixup-help-message-function*) help)))
+      (let ((function (*show-help-function*)))
+        (when function
+          (function (help-echo-substitute-command-keys help)))))
+
+    (define (show-help-echo help window object pos)
+      ;; GNU Emacs's `show_help_echo` (`keyboard.c:2259`): "Display the
+      ;; help-echo property of the character after the mouse pointer.
+      ;; Either show it in the echo area, or call `show-help-function' to
+      ;; display it by other means (maybe in a tooltip)."
+      ;;
+      ;; HELP may be a string, a function, or a form:
+      ;;
+      ;;   "If HELP is nil, that means clear the previous help echo.
+      ;;    If HELP is a string, display that string. If HELP is a
+      ;;    function, call it with OBJECT and POS as arguments; the
+      ;;    function should return a help string or nil for none. For all
+      ;;    other types of HELP, evaluate it to obtain a string."
+      ;;
+      ;; WINDOW, OBJECT and POS are the C's: the window the help was
+      ;; generated in, the object it was found in (a buffer, an overlay,
+      ;; a display string, or nil), and the position within it. The
+      ;; errors a bad function or form raises are swallowed, as the C's
+      ;; `safe_calln`/`safe_eval` swallow them - this runs from a Gtk
+      ;; signal handler, where a raise is fatal.
+      ;;--------------------------------------------------------------
+      (cond
+       ((or (not help) (string? help)) (%show-help help))
+       (else
+        (let ((value (guard (ex (#t #f))
+                       (if (procedure? help)
+                           (help window object pos)
+                           (eval help (current-module))))))
+          ;; "If HELP is not a string, return without doing anything" -
+          ;; the C's early return, which is *not* a clear: a function
+          ;; that answers nil for this position leaves whatever was
+          ;; showing in place.
+          (when (string? value)
+            (%show-help value))))))
 
     (define (parse-menu-item item inmenubar)
       ;; GNU Emacs's `parse_menu_item' (`keyboard.c:8899'): "This
@@ -3716,5 +3911,11 @@ With argument, insert ARG copies of the character."
     ;; read-char-event" and thirty suites died at load. The same rule as
     ;; `define-key` after the command it binds: a binding resolves when
     ;; the form runs.
+
+    ;; The redisplay's help-echo seam: `note_mouse_highlight` is
+    ;; `xdisp.c`'s and `show_help_echo` is this library's, which imports
+    ;; it - so the redisplay calls back up through this parameter, as it
+    ;; does for the menu bar's items.
+    (*show-help-echo-function* show-help-echo)
 
     ))

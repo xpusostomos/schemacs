@@ -76,9 +76,16 @@
     ;; terminal draws no bars, but Emacs preloads the file in every build
     ;; and a click from a terminal mouse would reach the same command.
     (only (schemacs editor scroll-bar))
+    ;; `tooltip.el` is preloaded in Emacs and turning it on is its load:
+    ;; the mode installs `show-help-function` and the delay timer, and
+    ;; with no mouse on a terminal the echo-area half is what would show.
+    (only (schemacs editor tooltip))
     ;; The multilingual commands (`C-x RET ...`), which install their own
     ;; keys - `mule-cmds.el`. Not for a name: for the load.
     (only (schemacs editor mule-cmds))
+    ;; `describe-coding-system`, which the mode line's coding-system
+    ;; item's mouse-1 reaches through xdisp's seam.
+    (only (schemacs editor mule-diag))
     ;; `dired.el': C-x d binds at load, the same reason again.
     (only (schemacs editor dired))
     ;; `tab-bar.el`: `C-x t ...` and the `[tab-bar]` binding are made

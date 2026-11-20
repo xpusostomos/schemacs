@@ -460,8 +460,8 @@
       ;; GNU Emacs's `display-supports-face-attributes-p': whether the
       ;; display can show the attributes in OPTIONS, a plist. A terminal
       ;; can show weight, slant, underline and inverse-video and not much
-      ;; else, and `(supports :box t)' - which several of the standard
-      ;; specs test - is what this answers no to.
+      ;; else; a window-system frame can also show a box, which is the
+      ;; `(supports :box t)' several of the standard specs test.
       ;;--------------------------------------------------------------
       (let loop ((rest options))
         (cond
@@ -469,6 +469,15 @@
          ((memq (car rest) '(:weight :slant :underline :inverse-video
                                       :foreground :background))
           (loop (cddr rest)))
+         ;; **A window-system frame draws a box and a terminal does
+         ;; not.** `(supports :box t)' is the conjunct `mode-line-highlight'
+         ;; and a good many theme specs are built on, and the C's
+         ;; `Fdisplay_supports_face_attributes_p' answers it by asking the
+         ;; frame's output what it can draw: a toolkit frame can, a
+         ;; terminal's character cells cannot. Answering no always sent a
+         ;; GUI frame to the spec's `:inherit highlight' branch.
+         ((eq? (car rest) ':box)
+          (if (*window-system*) (loop (cddr rest)) #f))
          (else #f))))
 
     (define (face-spec-set-match-display display)
@@ -942,6 +951,16 @@
           "Face for the selected mode line.
 This inherits from the `mode-line` face.")
 
+    (defface 'mode-line-highlight
+          '((((supports :box t) (class color grayscale) (min-colors 88)
+              (background light))
+             :box (:line-width 2 :color "grey40" :style released-button))
+            (((supports :box t) (class color grayscale) (min-colors 88)
+              (background dark))
+             :box (:line-width 2 :color "grey80" :style released-button))
+            (#t :inherit highlight))
+          "Basic mode line face for highlighting.")
+
     (defface 'mode-line-buffer-id
           '((#t (:weight bold)))
           "Face used for buffer identification parts of the mode line.")
@@ -984,6 +1003,12 @@ This inherits from the `mode-line` face.")
     (defface 'tab-bar
           '((((class color) (min-colors 88) (background light)) :inherit variable-pitch :background "grey85" :foreground "black") (((class color) (min-colors 88) (background dark)) :inherit variable-pitch :background "grey20" :foreground "white") (((class mono)) :background "grey") (#t :inverse-video #t))
           "Tab bar face.")
+
+    (defface 'tooltip
+          '((((class color)) :background "lightyellow" :foreground "black" :inherit variable-pitch) (t :inherit variable-pitch))
+          "Face for tooltips.
+When using the GTK toolkit, NS, or Haiku, this face will only
+be used if `use-system-tooltips' is nil.")
 
     (defface 'tab-bar-tab
           '((default :inherit tab-bar) (((class color) (min-colors 88) (background light)) :box (:line-width 1 :style released-button)) (((class color) (min-colors 88) (background dark)) :box (:line-width 1 :style released-button) :background "grey40" :foreground "white") (#t :inverse-video nil))

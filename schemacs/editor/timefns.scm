@@ -67,6 +67,7 @@
           lisp-time-arguments
           time-equal-p
           time-less-p
+          time-since
           time-subtract
           )
 
@@ -99,7 +100,23 @@
       ;;--------------------------------------------------------------
       (cond
        ((not time) (%now-arguments))
-       ((number? time) (cons time 0))
+       ;; A non-integer number is seconds *and a fraction*, and the
+       ;; picoseconds field is what holds the fraction - `(float-time)`
+       ;; is the value `tooltip-hide-time` stores and `time-since`
+       ;; subtracts. `(cons time 0)` left the fraction in the seconds
+       ;; field, and the exact `floor-quotient`/`ash` arithmetic below
+       ;; then raised "Wrong type argument ... -37.0".
+       ((number? time)
+        (if (integer? time)
+            (cons (exact time) 0)
+            ;; `exact` because `floor` of an inexact argument answers an
+            ;; inexact integer, and the arithmetic below is the C's
+            ;; integer arithmetic - `(ash 1.7e9 -16)` is a type error.
+            (let* ((secs (exact (floor time)))
+                   (psec (exact (round (* (- time secs) 1000000000000)))))
+              (if (>= psec 1000000000000)
+                  (cons (+ secs 1) (- psec 1000000000000))
+                  (cons secs psec)))))
        ((pair? time)
         (if (list? time)
             (cons (+ (* (car time) 65536) (cadr time))
@@ -232,6 +249,20 @@
                 (logand secs #xffff)
                 (quotient rem 1000000)
                 (remainder rem 1000000)))))
+
+    (define (time-since time)
+      ;; GNU Emacs's `time-since' (`time-date.el:192'): "Return the time
+      ;; elapsed since TIME. TIME should be either a time value or a
+      ;; date-time string." `time-subtract' takes nil A as the current
+      ;; time, so the differential is the whole function; the string arm
+      ;; needs `date-to-time', which is not ported (nothing here passes
+      ;; a date string).
+      ;;
+      ;; **Placement**: `time-date.el` is not otherwise ported, and this
+      ;; is a one-line caller of `time-subtract' - the rule
+      ;; `with-buffer-unmodified-if-unchanged' took into `fill.scm'.
+      ;;--------------------------------------------------------------
+      (time-subtract #f time))
 
     ;;----------------------------------------------------------------
     ;; Formatting

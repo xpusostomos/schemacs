@@ -65,6 +65,9 @@ SUITES = [
     'schemacs/editor/env-tests.scm',
     'schemacs/editor/fileio-tests.scm',
     'schemacs/editor/files-tests.scm',
+    # `map-ynp.el` - `map-y-or-n-p`, the question-asker `save-some-buffers`
+    # asks through, its prompts and every answer key.
+    'schemacs/map-ynp-tests.scm',
     'schemacs/editor/indentc-tests.scm',
     # `fill.el` - the paragraph filler, its justification half and
     # `fill-individual-paragraphs`, each expectation Emacs 31.1's own.
@@ -73,6 +76,7 @@ SUITES = [
     'schemacs/editor/coding-tests.scm',
     'schemacs/editor/charset-tests.scm',
     'schemacs/editor/mule-cmds-tests.scm',
+    'schemacs/editor/mule-diag-tests.scm',
     # `mule-util.el`'s `truncate-string-to-width`, which the tab line's
     # truncated tab name stands on.
     'schemacs/editor/mule-util-tests.scm',
@@ -98,6 +102,11 @@ SUITES = [
     'schemacs/editor/tool-bar-tests.scm',
     'schemacs/editor/casefiddle-tests.scm',
     'schemacs/editor/mouse-tests.scm',
+    # `bindings.el`'s clickable mode-line items: the propertized
+    # constructs, the commands, and the hover face.
+    'schemacs/editor/mode-line-tests.scm',
+    # `tooltip.el` and the help-echo half of `note_mouse_highlight`.
+    'schemacs/editor/tooltip-tests.scm',
     'schemacs/repl-client-tests.scm',
     'schemacs/editor/loadup-tests.scm',
     'schemacs/editor/fns-tests.scm',

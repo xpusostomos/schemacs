@@ -116,6 +116,7 @@
    ;; `add-minor-mode' for why the alist lives here and not with the mode
    ;; line that reads it.
    *minor-mode-alist* *minor-mode-list* *minor-mode-map-alist*
+   y-or-n-p-use-read-key y-or-n-p-history-variable
    *global-minor-modes* add-minor-mode
    regexp-unmatchable
    string-prefix-p
@@ -135,6 +136,7 @@
    event-modifiers event-basic-type apply-modifiers event-convert-list
    run-hook-with-args
    run-hook-with-args-until-success
+   run-hook-with-args-until-failure
    *after-change-major-mode-hook*
    *change-major-mode-after-body-hook*
    *delayed-after-hook-functions*
@@ -153,7 +155,7 @@
    nthcdr
    ;; `nth' and the `posn-' cluster - see the note on them below.
    nth event-start event-end
-   posn-window posn-area posn-point posn-x-y posn-string
+   posn-window posn-area posn-point posn-x-y posn-string posn-object
    ;; The seam `event-start`/`event-end` reach the point-position
    ;; fallback through (`xdisp.scm` installs it).
    *event--posn-at-point-function*
@@ -661,6 +663,29 @@
                       (%kill-buffer temp-buffer)))))))))
 
     ;;------------------------------------------------------------------
+    ;; The `y-or-n-p' variables (subr.el, beside the question itself)
+    ;;------------------------------------------------------------------
+
+    (define y-or-n-p-use-read-key #f)
+    (set! y-or-n-p-use-read-key y-or-n-p-use-read-key)
+    ;; ^ GNU Emacs's `y-or-n-p-use-read-key' (`subr.el:4102'): "Use
+    ;; `read-key' when reading answers to "y or n" questions by
+    ;; `y-or-n-p'." Nil is Emacs 31's default. A plain variable, as Emacs
+    ;; declares it - nothing `let`-binds it, a user `setq`s it - and the
+    ;; self-assignment keeps the compiler from folding its reads (the
+    ;; `*enable-disabled-menus-and-buttons*` rule).
+    ;;
+    ;; `map-y-or-n-p` reads it and takes the minibuffer arm when it is
+    ;; nil, which is the only arm this tree carries.
+
+    (define y-or-n-p-history-variable #f)
+    (set! y-or-n-p-history-variable y-or-n-p-history-variable)
+    ;; ^ GNU Emacs's `y-or-n-p-history-variable' (`subr.el:4039'):
+    ;; "History list symbol to add `y-or-n-p' answers to." Nil is the
+    ;; default, which `map-y-or-n-p` reads as the default history
+    ;; (`(or y-or-n-p-history-variable t)`).
+
+    ;;------------------------------------------------------------------
     ;; Minor modes
     ;;------------------------------------------------------------------
 
@@ -681,16 +706,26 @@
     ;; by anything here yet; `add-minor-mode' keeps it because it is one
     ;; of the three things that function maintains.
 
-    (define *minor-mode-alist* (make-parameter (list (list 'overwrite-mode 'overwrite-mode))))
+    (define *minor-mode-alist*
+      (make-parameter
+       (list (list 'abbrev-mode " Abbrev")
+             (list 'overwrite-mode 'overwrite-mode)
+             (list 'auto-fill-function " Fill")
+             ;; "not really a minor mode..." - the recording lighter.
+             (list 'defining-kbd-macro 'mode-line-defining-kbd-macro))))
     ;; ^ GNU Emacs's `minor-mode-alist' (`bindings.el:976'): "Alist
     ;; saying how to show minor modes in the mode line. Each element
     ;; looks like (VARIABLE STRING); STRING is included in the mode line
     ;; if VARIABLE's value is non-nil. ... Actually, STRING need not be a
     ;; string; any mode-line construct is okay."
     ;;
-    ;; The initial value is bindings.el's own list, of which only the
-    ;; `overwrite-mode' entry is carried - `abbrev-mode',
-    ;; `auto-fill-function' and `defining-kbd-macro' are not ported.
+    ;; The initial value is bindings.el's own list, all four entries.
+    ;; Only `overwrite-mode` and `auto-fill-function` can ever show: the
+    ;; other two name state this tree has not ported (abbrev mode and
+    ;; keyboard-macro recording), and a variable with no value reads
+    ;; false, which is Emacs's answer for a mode that is off. The
+    ;; `mode-line-defining-kbd-macro` symbol is not evaluated unless the
+    ;; mode is on, so it being unbound is invisible.
     ;;
     ;; **Placement, a departure.** Emacs declares this in `bindings.el',
     ;; and this tree declares the other mode-line variables there too
@@ -863,6 +898,21 @@
               (else
                (apply (car rest) args)
                (loop (cdr rest))))))
+
+    (define (run-hook-with-args-until-failure hook . args)
+      ;; GNU Emacs's `run-hook-with-args-until-failure' (`eval.c:2908' -
+      ;; the `funcall_not` handler of `run_hook_with_args`): "Call each
+      ;; function in order with arguments ARGS, stopping at the first one
+      ;; that returns nil, and return nil.  Otherwise (if all functions
+      ;; return non-nil, or if there are no functions to call), return
+      ;; t." HOOK is the list of procedures, as its two siblings take it.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (cond ((not hook) '())
+                             ((procedure? hook) (list hook))
+                             (else hook))))
+        (cond ((null? rest) #t)
+              ((apply (car rest) args) (loop (cdr rest)))
+              (else #f))))
 
     (define (run-hook-with-args-until-success hook . args)
       ;; GNU Emacs's `run-hook-with-args-until-success' (`eval.c:2927'):
@@ -1677,6 +1727,16 @@
       ;; GNU Emacs's `posn-x-y': the pixel coordinates, as a pair.
       ;;--------------------------------------------------------------
       (nth 2 position))
+
+    (define (posn-object position)
+      ;; GNU Emacs's `posn-object` (`subr.el:2127`, a `defsubst`):
+      ;; "Return the object (image or string) of POSITION. Value is a
+      ;; list (image ...) for an image object, a cons cell (STRING .
+      ;; STRING-POS) for a string object, and nil for a buffer
+      ;; position." The definition is `(or (posn-image position)
+      ;; (posn-string position))', and this tree has no images.
+      ;;--------------------------------------------------------------
+      (posn-string position))
 
     (define (posn-string position)
       ;; GNU Emacs's `posn-string' (`subr.el:2015'): "Return the string

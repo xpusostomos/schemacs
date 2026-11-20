@@ -42,6 +42,23 @@ import os, pty, re, select, shutil, signal, socket, subprocess, sys, time, base6
 # checks do use.
 TEST_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-test-config-')
 
+# The mode line, as the checks below find it. `mode-line-position`
+# (`bindings.el:727`) draws the percentage word or `NN%` and then the
+# line number - `Top L1`, `All L3`, ` 5% L20` - so a row with both is the
+# mode line. It used to be found by the tree's old `-- L1 C0` spelling,
+# which Emacs does not have and which the position construct replaced.
+MODE_LINE_RE = re.compile(
+    r"(?:Top|All|Bot|Bottom|[0-9]+%).*(?: L[0-9]+|\([0-9]+,[0-9]+\))")
+
+def mode_line_has_line(row, n):
+    """Whether the mode line ROW says point is on line N.
+
+    `mode-line-position` draws the line as ` L<n>` when only Line Number
+    mode is on, and as ` (n,col)` when Column Number mode is on too - the
+    battery's init turns that on, so both shapes count.
+    """
+    return (" L%d" % n) in row or ("(%d," % n) in row
+
 # **And it holds an init file that inhibits the startup screen.** The tree
 # ships a `schemacs/splash.txt', so every editor started with a file
 # argument shows the file above and the splash below
@@ -56,7 +73,14 @@ NO_SPLASH_INIT = (
     '(import (schemacs editor startup))\n'
     '(import (schemacs editor frame))\n'
     '(import (schemacs editor menu-bar))\n'
+    '(import (schemacs editor simple))\n'
     '(set! inhibit-startup-screen #t)\n'
+    ';; **Column Number mode is on for these checks.** Emacs\'s default\n'
+    ';; mode line shows only the line number (`mode-line-position`,\n'
+    ';; `bindings.el:727`), and several checks below read the *column*\n'
+    ';; off the mode line as their oracle for where point is. With this\n'
+    ';; mode on the position reads ` (LINE,COL)`.\n'
+    '(column-number-mode 1)\n'
     ';; The frame exists before the init file is read, so the mode has to\n'
     ';; be turned off on it as well as on the frames to come.\n'
     '(menu-bar-mode -1)\n'
@@ -746,6 +770,16 @@ def check_save_y_n():
     # inferred from silence.
     screen, exited = drive([b"X", C_x + C_c, WAIT(b"Save file"), b"y", EXITED],
                            path, report_exit=True)
+    # The prompt is `map-y-or-n-p`'s, so it is Emacs 31.1's - the option
+    # list included. Measured on Emacs with the same command:
+    #
+    #   Save file /tmp/x.txt? (y, n, !, ., q, M-~, C-r, C-f, d or C-h)
+    #
+    # Ours has no `d` (diff needs subprocesses), which is the only
+    # difference this check allows.
+    if "(`y'" in screen or "(y, n, !, ., q" not in screen:
+        problems.append("the save prompt is not map-y-or-n-p's: %r"
+                        % [l for l in screen.split("\n") if "Save file" in l][-1:])
     if not exited or open(path).read() != "Xhello\n":
         problems.append("a bare `y' did not save the buffer and quit "
                         "(exited=%s file=%r)" % (exited, open(path).read()))
@@ -764,6 +798,13 @@ def check_save_y_n():
     if "exit anyway" not in screen:
         problems.append("after `n' the exit-anyway question did not "
                         "come up")
+    # ...and it is `yes-or-no-p`'s own prompt, not just the words: the
+    # question appears without another keypress (the WAIT above) and
+    # asks for the whole word.
+    if "exit anyway? (yes or no)" not in screen:
+        problems.append("the exit-anyway question is not `yes-or-no-p`'s: %r"
+                        % [l for l in screen.split("\n")
+                           if "exit anyway" in l][-1:])
     if open(path).read() != "hello\n":
         problems.append("`n' was taken as a save (file %r)"
                         % open(path).read())
@@ -935,11 +976,11 @@ def check_wide_columns():
         port.write("x中y|Z\n")
     problems = []
     screen = screen_of(drive([], path))
-    if "L1 C0" not in screen:
+    if "(1,0)" not in screen:
         problems.append("the mode line did not start at column 0: %s"
-                        % [row for row in screen.split("\n") if "L1" in row])
+                        % [row for row in screen.split("\n") if "(1," in row])
     screen = screen_of(drive([C_f, C_f], path))
-    if "L1 C3" not in screen:
+    if "(1,3)" not in screen:
         problems.append("after a wide character the column is not 3 "
                         "(one cell for x, two for the CJK character): %s"
                         % [row for row in screen.split("\n") if "L1" in row])
@@ -1021,7 +1062,7 @@ def check_text_scale_command():
     # The buffer-local scaling, whose lighter the mode line shows.
     out = drive([b"\x1b", b"x", b"text-scale-increase", b"\r"], path,
                 settle=2.5)
-    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    mode = [r for r in screen_of(out).split("\n") if MODE_LINE_RE.search(r)]
     if not mode or "+1" not in mode[-1]:
         problems.append("M-x text-scale-increase did not put `+1` in the "
                         "mode line: %r" % (mode[-1][:80] if mode else None,))
@@ -1136,14 +1177,14 @@ def check_isearch_ring():
 
     The file has the pattern twice, so the second search must land on the
     *second* occurrence: the mode line's column is what tells them apart
-    (C15, not C7).
+    ((1,15), not (1,7)).
     """
     path = "/tmp/pty-check-ring.txt"
     open(path, "w").write("one 111 two 111 three\n")
     out = drive([C_s, b"1", b"1", b"1", WAIT(b"I-search: 111"), RET,
-                 C_s, C_s, WAIT(b"C15"), RET], path)
+                 C_s, C_s, WAIT(b"(1,15)"), RET], path)
     # **The give-up marker contains the text that was waited for** - it
-    # reads "[[harness: gave up waiting for b'C15']]" - so the marker
+    # reads "[[harness: gave up waiting for b'(1,15)']]" - so the marker
     # itself has to be tested first, or this passes on a timeout. (It did:
     # the ring-less tree "passed" because the marker held the string.)
     if "gave up waiting" in out:
@@ -1159,7 +1200,7 @@ def check_isearch_ring():
     # loop. `M-n`/`M-p` also compared the event with `(kbd "M-p")` - a
     # *vector* of events - which never matched.
     out = drive([C_s, b"1", b"1", b"1", WAIT(b"I-search: 111"), RET,
-                 C_s, b"\x1b", b"p", WAIT(b"C15"), RET], path)
+                 C_s, b"\x1b", b"p", WAIT(b"(1,15)"), RET], path)
     if "gave up waiting" in out:
         return ["C-s M-p did not walk the search ring (screen %r)"
                 % out[-300:]]
@@ -1258,9 +1299,9 @@ def check_occur():
     if "gave up waiting" in out:
         problems.append("the second become-occur drive did not draw " + \
                         "the list (screen %r)" % out[-300:])
-    elif "C6" not in plain(out):
+    elif "(1,6)" not in plain(out):
         problems.append("RET on an occurrence did not go to it: the " + \
-                        "source buffer's mode line never read C6 (the " + \
+                        "source buffer's mode line never read (1,6) (the " + \
                         "zero-based column of the match) " + \
                         "(screen %r)" % out[-300:])
     return problems
@@ -1738,7 +1779,7 @@ def check_completions():
     # else. (The buffer's name is in that mode line as `*Completions*' -
     # the format's `%12b' is a floor, not a ceiling: a longer name shows
     # in full, as a terminal Emacs 31 confirms.)
-    mode_lines = [r for r in screen.split("\n") if "--" in r and " L" in r]
+    mode_lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
     if len(mode_lines) != 2:
         problems.append("after `?' there are %d windows, expected 2"
                         % len(mode_lines))
@@ -1823,7 +1864,7 @@ def check_completion_tab_tab():
     path = os.path.join(directory, "alpha.txt")
 
     def mode_lines(screen):
-        return [r for r in screen.split("\n") if "--" in r and " L" in r]
+        return [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
 
     # First TAB: the directory is already a valid completion, so the
     # message appears and no window opens.
@@ -1913,7 +1954,7 @@ def check_completion_window():
         open(os.path.join(directory, name), "w").write("x\n")
     path = os.path.join(directory, "a1.txt")
     typed = directory + "/"
-    mode = lambda s: [r for r in s.split("\n") if "--" in r and " L" in r]
+    mode = lambda s: [r for r in s.split("\n") if MODE_LINE_RE.search(r)]
     problems = []
 
     # Fitted height: the list's whole content (two help lines, a blank,
@@ -1972,7 +2013,7 @@ def check_completion_window():
         problems.append("the list is split into one of the halves: a "
                         "candidate row carries the vertical border, so the "
                         "window is not full width at the bottom")
-    if not any("|" in r for r in rows if "--" in r and " L" in r):
+    if not any("|" in r for r in rows if MODE_LINE_RE.search(r)):
         problems.append("the side-by-side windows above lost their border")
     return problems
 
@@ -2035,7 +2076,7 @@ def check_completion_resize():
         open(os.path.join(directory, "a%d.txt" % i), "w").write("x\n")
     path = os.path.join(directory, "a1.txt")
     typed = directory + "/"
-    mode = lambda s: [r for r in s.split("\n") if "--" in r and " L" in r]
+    mode = lambda s: [r for r in s.split("\n") if MODE_LINE_RE.search(r)]
     problems = []
 
     # Two windows, the list up, the terminal grown, C-g, and the list
@@ -2057,7 +2098,7 @@ def check_completion_resize():
                         "lines, expected 3 (the C-g did not reclaim the "
                         "space, or the list is gone)" % len(ml))
     else:
-        order = [i for i, r in enumerate(rows) if "--" in r and " L" in r]
+        order = [i for i, r in enumerate(rows) if MODE_LINE_RE.search(r)]
         if not (order[0] < order[1] < order[2]):
             problems.append("the windows are not stacked top to bottom")
         if "Completions" not in ml[2]:
@@ -2134,14 +2175,14 @@ def check_completion_ui():
     # The completions window is open before C-g is pressed: without this
     # the two checks below would pass on a window that never opened.
     screen = screen_of(drive(find + [b"ap", b"\t"], path))
-    mode_lines = [r for r in screen.split("\n") if "--" in r and " L" in r]
+    mode_lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
     if len(mode_lines) != 2:
         problems.append("TAB did not open a completions window at all: %d "
                         "windows, expected 2" % len(mode_lines))
 
     # C-g leaves the minibuffer *and* takes the completions window with it.
     screen = screen_of(drive(find + [b"ap", b"\t", C_g], path))
-    mode_lines = [r for r in screen.split("\n") if "--" in r and " L" in r]
+    mode_lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
     if len(mode_lines) != 1:
         problems.append("after C-g there are %d windows, expected 1: the "
                         "completions window outlived the minibuffer"
@@ -2155,7 +2196,7 @@ def check_completion_ui():
     # onto one. (So this RET makes a new file named `ap', which is what Emacs
     # does too.)
     screen = screen_of(drive(find + [b"ap", b"\t", RET], path))
-    mode_lines = [r for r in screen.split("\n") if "--" in r and " L" in r]
+    mode_lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
     if len(mode_lines) != 1:
         problems.append("after RET there are %d windows, expected 1: the "
                         "completions window outlived the minibuffer"
@@ -2170,7 +2211,7 @@ def check_completion_ui():
         screen = screen_of(drive(find + keys, path))
         if "FRUIT" not in screen:
             return None
-        lines = [r for r in screen.split("\n") if "--" in r and " L" in r]
+        lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
         return lines[0].strip() if lines else None
 
     first = visited_a_file([b"ap", b"\t", M_DOWN, RET])
@@ -2653,7 +2694,7 @@ def check_scratch():
     if not any("(Lisp Interaction)" in r for r in rows):
         problems.append("the mode line does not say (Lisp Interaction), so "
                         "*scratch* did not get `initial-major-mode`: %r"
-                        % [r for r in rows if "--" in r][:2])
+                        % [r for r in rows if MODE_LINE_RE.search(r)][:2])
     try:
         log = open(SCRATCH_HOOK_LOG).read()
     except OSError:
@@ -2799,7 +2840,7 @@ def check_switch_buffer():
     out = drive([C_x + b"b", b"*scratch*", RET], path)
     if "Wrong type argument" in out:
         problems.append("RET reported a wrong type argument: %r" % out[-300:])
-    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    mode = [r for r in screen_of(out).split("\n") if MODE_LINE_RE.search(r)]
     if not mode or "*scratch*" not in mode[-1]:
         problems.append("C-x b *scratch* RET did not switch to it: %r"
                         % (mode[-1][:60] if mode else None,))
@@ -2809,7 +2850,7 @@ def check_switch_buffer():
     if "[No match]" in out:
         problems.append("a name that is not a buffer yet was refused: %r"
                         % out[-300:])
-    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    mode = [r for r in screen_of(out).split("\n") if MODE_LINE_RE.search(r)]
     if not mode or "pty-fresh" not in mode[-1]:
         problems.append("C-x b pty-fresh RET did not make and show the buffer: "
                         "%r" % (mode[-1][:60] if mode else None,))
@@ -3037,7 +3078,7 @@ def check_kill_buffer():
     # RET takes the default and kills it: the window is given another
     # buffer, and nothing is said about the one that went
     out = drive([C_x + b"k", RET], path)
-    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    mode = [r for r in screen_of(out).split("\n") if MODE_LINE_RE.search(r)]
     if not mode or "pty-check-kill.txt" in mode[-1]:
         problems.append("C-x k RET did not kill and replace the buffer: %r"
                         % (mode[-1][:60] if mode else None,))
@@ -3089,7 +3130,7 @@ def check_kill_buffer():
         problems.append("C-x k on a modified buffer did not ask its "
                         "question: %r" % out[-300:])
     # `n' leaves it alive, so its name is still on the mode line ...
-    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    mode = [r for r in screen_of(out).split("\n") if MODE_LINE_RE.search(r)]
     if not mode or "pty-check-kill.txt" not in mode[-1]:
         problems.append("answering n killed the buffer anyway: %r"
                         % (mode[-1][:60] if mode else None,))
@@ -3103,7 +3144,7 @@ def check_kill_buffer():
     open(path, "w").write("KILL-ME\n")
     out = drive([b"x", C_x + b"k", WAIT(b"Kill buffer"), RET,
                  WAIT(b"modified; kill anyway?"), b"y", RET], path)
-    mode = [r for r in screen_of(out).split("\n") if "-- L" in r]
+    mode = [r for r in screen_of(out).split("\n") if MODE_LINE_RE.search(r)]
     if not mode or "pty-check-kill.txt" in mode[-1]:
         problems.append("answering y did not kill the buffer: %r"
                         % (mode[-1][:60] if mode else None,))
@@ -3632,8 +3673,8 @@ def check_goto_line():
     out = drive([C_x + C_f, path.encode(), RET,
                  b"\x1b", b"g", b"g", b"3", RET], path)
     screen = screen_of(out)
-    mode = [r for r in screen.split("\n") if "-- L" in r]
-    if not mode or "L3" not in mode[-1]:
+    mode = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
+    if not mode or not mode_line_has_line(mode[-1], 3):
         problems.append("M-g g 3 RET did not put point on the third line "
                         "(mode line: %r)" % (mode[-1][:40] if mode else None,))
     if "Mark set" not in out:
@@ -3642,8 +3683,8 @@ def check_goto_line():
     out = drive([C_x + C_f, path.encode(), RET, C_u, b"2",
                  b"\x1b", b"g", b"g"], path)
     screen = screen_of(out)
-    mode = [r for r in screen.split("\n") if "-- L" in r]
-    if not mode or "L2" not in mode[-1]:
+    mode = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
+    if not mode or not mode_line_has_line(mode[-1], 2):
         problems.append("C-u 2 M-g g did not put point on the second line "
                         "(mode line: %r)" % (mode[-1][:40] if mode else None,))
     return problems
@@ -4497,7 +4538,7 @@ def check_quit_signal():
         if "Backtrace" in screen or "%quit-condition" in screen:
             problems.append("C-g during isearch raised an uncaught quit: %r"
                             % screen.split("\n")[-3:])
-        mode_lines = [r for r in screen.split("\n") if "--" in r and " L" in r]
+        mode_lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
         if not any("**" in row for row in mode_lines):
             problems.append("after C-g during isearch the editor did not "
                             "take the next key: %r" % mode_lines)
@@ -4580,7 +4621,7 @@ def check_buffer_menu():
 
     # C-x o into the list, then q to take its window off the frame
     screen = screen_of(drive([C_x + b"\x02", C_x + b"o", b"q"], path))
-    mode_lines = [r for r in screen.split("\n") if "--" in r and "L" in r]
+    mode_lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
     if len(mode_lines) != 1:
         problems.append("after q there are %d windows, expected 1"
                         % len(mode_lines))

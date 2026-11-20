@@ -136,7 +136,6 @@
        save-buffer buffer-file-coding-system
        kill-buffer
        handle-delete-frame
-       save-answer-char->decision
        ;; `read-file-name`'s dialog branch and the predicate that chooses
        ;; it - the dialog group below.
        read-file-name read-directory-name next-read-file-uses-dialog-p)
@@ -198,6 +197,7 @@
  (only (schemacs editor paragraphs) mark-paragraph)
  (only (schemacs editor simple)
        special-mode-map
+       column-number-mode
        *kill-do-not-save-duplicates* *kill-ring* *kill-ring-max*
        *kill-ring-yank-pointer*
        *last-command* *pending-undo-list* undo--last-change-was-undo-p
@@ -858,19 +858,6 @@
           (coding-system-name
            (buffer-file-coding-system
             (find-file-noselect "/tmp/fe-crlf-coding.txt"))))))
-
-;; The answer to "Save file X? " decides what happens: y and SPC save the
-;; buffer, ! saves it and the rest without asking, . saves it and stops
-;; asking, n, DEL and other keys leave it and go on to the next, and q,
-;; RET, ESC (and end of input) stop asking altogether - `map-y-or-n-p',
-;; which is how GNU Emacs's `save-some-buffers' asks ("ESC or q to
-;; exit"). C-g is not among these: it signals quit, so the whole command
-;; is abandoned rather than the answer being read.
-(test-equal '(save save save-all skip skip quit quit quit skip
-               save-then-quit skip)
-  (map save-answer-char->decision
-       (list #\y #\space #\! #\n (integer->char 127) #\q #\return
-             #\esc #\z #\. #f)))
 
 ;; `files--buffers-needing-to-be-saved' is what keeps a completing
 ;; `C-x C-f' from making `C-x C-c' ask about the help window: a modified
@@ -1992,8 +1979,16 @@
 ;; the two different numbers are here to catch.
 ;; The mode name is on the end of the line now: `mode-line-modes' is
 ;; where Emacs puts it, two spaces after the position.
-(test-equal '("-UUU:**- alpha.txt    -- L1 C3  (Fundamental)"
-              "-UUU:**- alpha.txt    -- L1 C0  (Fundamental)")
+;;
+;; **Column Number mode is on for this test.** Emacs's default mode line
+;; shows only the line number (`mode-line-position`'s `line-number-mode`
+;; arm), so two windows on line 1 would read alike; the column is what
+;; tells the two points apart, and with both modes on `mode-line-position`
+;; draws ` (LINE,COL)` - the `line-number-mode` + `column-number-mode`
+;; arm. It is turned on around the assertions and off again because it is
+;; a *global* mode.
+(test-equal '("-UUU:**- alpha.txt   All (1,3)      (Fundamental)"
+              "-UUU:**- alpha.txt   All (1,0)      (Fundamental)")
   (let* ((frame (frame-with "alpha\nbeta\n"))
          (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
@@ -2003,8 +1998,12 @@
     ;; selected, and that is a fact about the current frame - outside it
     ;; every window answers with its own marker, which is where this test
     ;; was quietly reading both of them
-    (parameterize ((*current-frame* frame))
-      (map (lambda (w) (mode-line-string w)) (window-list frame)))))
+    (dynamic-wind
+     (lambda () (column-number-mode 1))
+     (lambda ()
+       (parameterize ((*current-frame* frame))
+         (map (lambda (w) (mode-line-string w)) (window-list frame))))
+     (lambda () (column-number-mode -1)))))
 
 ;; ...and it says so in the echo area too, in GNU Emacs's own words:
 ;; `define-minor-mode' messages `"%s %sabled%s"' (`easy-mmode.el:395')
@@ -2036,9 +2035,9 @@
 ;; The lighter is what makes the key visible at all: until the next
 ;; character is typed the buffer is unchanged, so without it the Insert
 ;; key looks like it did nothing. It toggles back off on a second press.
-(test-equal '("-UUU:**- alpha.txt    -- L1 C0  (Fundamental)"
-              "-UUU:**- alpha.txt    -- L1 C0  (Fundamental Ovwrt)"
-              "-UUU:**- alpha.txt    -- L1 C0  (Fundamental)")
+(test-equal '("-UUU:**- alpha.txt   All L1     (Fundamental)"
+              "-UUU:**- alpha.txt   All L1     (Fundamental Ovwrt)"
+              "-UUU:**- alpha.txt   All L1     (Fundamental)")
   (let* ((frame (frame-with "alpha\nbeta\n"))
          (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
@@ -2080,9 +2079,9 @@
 ;; **A terminal cannot show the scaling itself** - the glyphs are the
 ;; terminal's font - so the lighter is the honest check here, and the
 ;; pixels are checked in `pgtk-tests.scm`.
-(test-equal '("-UUU:**- alpha.txt    -- L1 C0  (Fundamental)"
-              "-UUU:**- alpha.txt    -- L1 C0  (Fundamental +1)"
-              "-UUU:**- alpha.txt    -- L1 C0  (Fundamental)")
+(test-equal '("-UUU:**- alpha.txt   All L1     (Fundamental)"
+              "-UUU:**- alpha.txt   All L1     (Fundamental +1)"
+              "-UUU:**- alpha.txt   All L1     (Fundamental)")
   (let* ((frame (frame-with "alpha\nbeta\n"))
          (ed (frame-editor frame)))
     (set!text-editor-buffer-name ed "alpha.txt")
@@ -2421,9 +2420,14 @@
     (set!text-editor-buffer-name ed "probe.txt")
     (with-current-buffer ed (insert "X"))
     ;; point is where the insert left it, one character in, and `%c'
-    ;; counts from zero - so C1, not C0
-    (string=? "-UUU:**- probe.txt    -- L1 C1  (Fundamental)"
-              (format-in frame (*mode-line-format*)))))
+    ;; counts from zero - so 1, not 0. Column Number mode is on around
+    ;; the check so the number is on the line at all.
+    (dynamic-wind
+     (lambda () (column-number-mode 1))
+     (lambda ()
+       (string=? "-UUU:**- probe.txt   All (1,1)      (Fundamental)"
+                 (format-in frame (*mode-line-format*))))
+     (lambda () (column-number-mode -1)))))
 
 ;; The `%l' cache is only good while nothing *before the line it names*
 ;; has changed - a line number counts from `point-min', so an edit above

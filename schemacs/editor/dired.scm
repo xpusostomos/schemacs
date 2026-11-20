@@ -2305,16 +2305,17 @@ for SWITCHES."
     ;; nil and which "can also be a list of command symbols" - `#f' or a
     ;; list here, since Elisp's nil is both.
     (define *dired-deletion-confirmer*
-      (make-parameter (lambda (prompt) (yes-or-no-p (*current-frame*) prompt))))
+      (make-parameter (lambda (prompt) (yes-or-no-p prompt))))
     ;; ^ GNU Emacs's `dired-deletion-confirmer' (dired.el:4304), which is
     ;; "`yes-or-no-p'; or `y-or-n-p'?" as its comment says. Emacs holds
     ;; the *symbol* and calls it with the prompt; every variable of this
     ;; tree holds procedures rather than names, so the procedure is what
-    ;; is held here - and it is a one-argument *closure* over
-    ;; `yes-or-no-p' rather than `yes-or-no-p' itself, because this
-    ;; tree's `yes-or-no-p' takes the frame it is asking on as well as
-    ;; the prompt. Without the closure the confirmation came apart with
-    ;; "Wrong number of arguments to #<procedure yes-or-no-p (a b)>".
+    ;; is held here. It is a one-argument closure rather than the
+    ;; procedure itself only because the variable is a *parameter* whose
+    ;; value the user may swap for `y-or-n-p' - the closure keeps the
+    ;; swap's arity. (`yes-or-no-p' itself now takes one argument, as
+    ;; Emacs's does; it used to take the frame as well, and the closure
+    ;; was what covered that.)
     (define *dired-recursive-deletes* (make-parameter 'top))
     ;; ^ GNU Emacs's `dired-recursive-deletes' (dired.el:4183), whose
     ;; default value is `top': "ask for each top directory only".

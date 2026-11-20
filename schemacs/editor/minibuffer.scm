@@ -217,6 +217,9 @@
     (only (schemacs editor keyboard)
           abort-recursive-edit exit-recursive-edit read-key-event
           recursive-edit signal-quit
+          ;; `yes-or-no-p`'s pause after an answer that is neither yes
+          ;; nor no is `sit-for`'s, `sleep-for` being unported.
+          sit-for
           ;; `completion--in-region-1` asks whether the repeated key was
           ;; S-TAB; `this-command-keys` is how it knows.
           *this-command-keys*)
@@ -355,7 +358,7 @@ read-number-history
    ;; `read-number-history' would have wanted its accessors exported
    make<history> history? history-entries set!history-entries
    execute-extended-command *extended-command-history*
-   yes-or-no-p
+   yes-or-no-p yes-or-no-prompt yes-or-no-p-history
    ;; `minibuf.c`'s `Vminibuffer_selected_window`
    *minibuffer-selected-window* minibuffer-selected-window
    )
@@ -611,6 +614,15 @@ read-number-history
                      (list (window-buffer mini)
                            (window-start mini)
                            (window-point mini)))))
+             (_ (and frame (set!frame-message frame "")))
+        ;; ^ GNU Emacs's `clear_message (1, 1)` (`minibuf.c:905`) at the
+        ;; top of `read_minibuf`: the echo area's message goes before the
+        ;; prompt takes the row. Without it a message the last command
+        ;; left - the answer `map-y-or-n-p` echoes after its question -
+        ;; is what the renderer shows *instead of this prompt*
+        ;; (`display_echo_area` draws `echo_area_buffer[0]` when it is
+        ;; non-nil, `xdisp.c:13783`), so a second question appeared only
+        ;; when the next keypress's redisplay cleared it.
              ;; point, counting from zero into TEXT, or #f for its end
              (at (if (not (pair? initial))
                      #f
@@ -659,7 +671,16 @@ read-number-history
                               (point-max)))))
         (let ((mb (make<minibuffer>
                    ed prompt (or keymap minibuffer-local-map) default
-                   (or history minibuffer-history) 0 #f)))
+                   ;; HIST nil is the default history. HIST t is "do
+                   ;; not record this answer" (`read-from-minibuffer`'s
+                   ;; docstring, minibuf.c:1331): Emacs leaves the symbol
+                   ;; t in `Vminibuffer_history_variable`, and
+                   ;; `add-to-history`'s `(listp history)` is false for
+                   ;; it, so nothing is recorded. Here it is stored as
+                   ;; #t and the four readers below answer "no entries"
+                   ;; for it, the same `listp` test.
+                   (or history minibuffer-history)
+                   0 #f)))
           ;; The minibuffer inherits the *asking* buffer's
           ;; `default-directory', as Emacs's does: a relative name typed in
           ;; the prompt is relative to the buffer that asked, not to the
@@ -774,8 +795,10 @@ read-number-history
                     (when (and (*history-add-new-input*)
                                (< 0 (string-length answer)))
                       (let ((h (minibuffer-history-of mb)))
-                        (set!history-entries
-                         h (cons answer (history-entries h)))))
+                        ;; "If HIST is t, history is not recorded."
+                        (when (history? h)
+                          (set!history-entries
+                           h (cons answer (history-entries h))))))
                     answer))))
              ;; the unwind: the minibuffer window goes back to the buffer
              ;; it was showing, and the window this prompt began in is the
@@ -817,7 +840,7 @@ read-number-history
       (interactive "p")
       (let* ((mb (*minibuffer*))
              (h (and mb (minibuffer-history-of mb)))
-             (entries (if h (history-entries h) '()))
+             (entries (if (history? h) (history-entries h) '()))
              (position (if mb (minibuffer-position mb) 0))
              (next (min (+ position count) (length entries))))
         ;; position 0 means what the user typed rather than an entry
@@ -836,7 +859,7 @@ read-number-history
       (interactive "p")
       (let* ((mb (*minibuffer*))
              (h (and mb (minibuffer-history-of mb)))
-             (entries (if h (history-entries h) '()))
+             (entries (if (history? h) (history-entries h) '()))
              (position (if mb (minibuffer-position mb) 0))
              (next (max 0 (- position count))))
         (when mb
@@ -1361,19 +1384,52 @@ previous element of the minibuffer history in the minibuffer."
 
     (define-key *default-keymap* (kbd "M-x") execute-extended-command)
 
-    (define (yes-or-no-p frame prompt)
-      ;; GNU Emacs's `yes-or-no-p': the whole word, then RET. Being
-      ;; fussier than `y-or-n-p' is the point - the answer to a question
-      ;; about losing work should take some effort to give. C-g abandons
-      ;; the command that asked.
+    (define yes-or-no-prompt "(yes or no) ")
+    (set! yes-or-no-prompt yes-or-no-prompt)
+    ;; ^ GNU Emacs's `yes-or-no-prompt' (`fns.c:6881'): "String to
+    ;; append when `yes-or-no-p' asks a question. For best results this
+    ;; should end in a space." A plain variable, as the C's DEFVAR is.
+
+    (define yes-or-no-p-history (make<history> '()))
+    ;; ^ The history `yes-or-no-p' records its answers in - the
+    ;; `yes-or-no-p-history` symbol of `fns.c:6812`, which is a history
+    ;; record here because this tree's histories are records.
+
+    (define (yes-or-no-p prompt)
+      ;; GNU Emacs's `yes-or-no-p' (`fns.c:3613'): "Ask user a yes-or-no
+      ;; question. Return t if answer is yes, and nil if the answer is
+      ;; no." The whole word, then RET: being fussier than `y-or-n-p' is
+      ;; the point - the answer to a question about losing work should
+      ;; take some effort to give.
+      ;;
+      ;; The C's rules: the prompt gets a space appended when it does not
+      ;; end in a blank, and `yes-or-no-prompt' after that
+      ;; (`(yes or no) '); an answer that is neither "yes" nor "no" says
+      ;; "Please answer yes or no." and asks again. Not carried:
+      ;; `use-short-answers`' `y-or-n-p` arm (`y-or-n-p` is above this
+      ;; library) and the dialog-box arm (`x-popup-dialog`); `ding`,
+      ;; `discard-input` and `sleep-for` are unported, so the pause is
+      ;; `sit-for`'s.
       ;;--------------------------------------------------------------
-      (let loop ()
-        (let ((answer (read-from-minibuffer (string-append prompt "(yes or no) "))))
-          (cond
-           ((string-ci=? answer "yes") #t)
-           ((string-ci=? answer "no") #f)
-           (else (set!frame-message frame "Please answer yes or no.")
-                 (loop))))))
+      (let* ((n (string-length prompt))
+             (full-prompt
+              (string-append
+               prompt
+               (if (and (< 0 n) (not (char-whitespace? (string-ref prompt (- n 1)))))
+                   " "
+                   "")
+               yes-or-no-prompt)))
+        (let loop ()
+          (let ((answer (string-downcase
+                         (read-from-minibuffer full-prompt #f #f
+                                               yes-or-no-p-history #f))))
+            (cond
+             ((string=? answer "yes") #t)
+             ((string=? answer "no") #f)
+             (else
+              (message "Please answer yes or no.")
+              (sit-for 2)
+              (loop)))))))
 
     ;;----------------------------------------------------------------
     ;; The completion styles

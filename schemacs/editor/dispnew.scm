@@ -58,6 +58,9 @@
    lookup-face
    menu-show
    x-file-dialog
+   ;; `x-show-tip` / `x-hide-tip` (`xfns.c`, and the Gtk build's in
+   ;; `pgtkfns.c`): the tooltip window `tooltip.el` asks for.
+   display-show-tip display-hide-tip
    screen-size
    column-width
    line-height
@@ -749,6 +752,30 @@
     (define-method (x-file-dialog (d <display>) prompt dir default-filename
                                   mustmatch only-dir)
       (error "Window system frame should be used"))
+
+    (define-generic display-show-tip)
+    ;; GNU Emacs's `x-show-tip` (`xfns.c:8940`; the Gtk build's is
+    ;; `pgtkfns.c:3077`): "Show STRING in a tooltip window ... on FRAME,
+    ;; and hide it after TIMEOUT seconds." Answers whether a tip was
+    ;; shown - the C answers nil either way, but the caller here
+    ;; (`x-hide-tip`'s "was one open") is what needs the distinction, and
+    ;; `tooltip-show` only *tests* for the display's existence.
+    ;;
+    ;; **PARMS, DX and DY are not passed down**, and on the Gtk build
+    ;; that is exactly the C: with `use-system-tooltips` (the default)
+    ;; `Fx_show_tip` calls `xg_show_tooltip (f, string)` and goes
+    ;; straight to arming the hide timer, so the frame parameters and
+    ;; the offsets never reach the display. A tooltip on this front end
+    ;; is a *system* tooltip whose position the desktop chooses, which is
+    ;; what real Emacs shows on the same desktop.
+    (define-method (display-show-tip (d <display>) frame string timeout) #f)
+
+    (define-generic display-hide-tip)
+    ;; GNU Emacs's `x-hide-tip` (`xfns.c`): hide the tooltip if one is
+    ;; shown, and answer non-nil when there was one. `pgtk_hide_tip`
+    ;; cancels the hide timer first (`pgtkfns.c:2963`), which the Gtk
+    ;; method below does.
+    (define-method (display-hide-tip (d <display>)) #f)
 
     (define-generic screen-size)
     ;; The display's size in pixels, as `(WIDTH . HEIGHT)' - Emacs's

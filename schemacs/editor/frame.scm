@@ -229,7 +229,8 @@
    frame-quit-cont
    frame-output
    frame-selected-window
-   mouse-position mouse-absolute-pixel-position set-mouse-position
+   mouse-position mouse-pixel-position mouse-absolute-pixel-position
+   set-mouse-position
    minibuffer-window tty-type mouse-position-in-root-frame
    set-mouse-pixel-position raise-frame
    frame-type?
@@ -793,6 +794,34 @@
         (if position
             (cons frame position)
             (cons frame (cons #f #f)))))
+
+    (define (mouse-pixel-position)
+      ;; GNU Emacs's `mouse-pixel-position` (`frame.c:3325`): "Return a
+      ;; list (FRAME X . Y) giving the current mouse frame and position.
+      ;; The position is given in pixel units, where (0, 0) is the
+      ;; upper-left corner of the frame. ... If Emacs is running on a
+      ;; mouseless terminal or hasn't been programmed to read the mouse
+      ;; position, it returns the selected frame for FRAME and nil for X
+      ;; and Y."
+      ;;
+      ;; The C calls the *same* terminal hook as `mouse-position` and
+      ;; then converts nothing - the hook's x/y are already pixels, and
+      ;; `Fmouse_position` is the one that divides them into cells. This
+      ;; tree's displays answer pixels through
+      ;; `display-mouse-absolute-pixel-position` (whose Gtk method is
+      ;; frame-relative), so that is the query; a terminal, which has no
+      ;; pointer, answers the C's nil pair.
+      ;;
+      ;; **Departure**: `mouse-position-function` is not carried, as in
+      ;; `mouse-position` above.
+      ;;--------------------------------------------------------------
+      (let* ((frame (*current-frame*))
+             (position (and frame
+                            (let ((display (frame-output frame)))
+                              (and display
+                                   (display-mouse-absolute-pixel-position
+                                    display))))))
+        (cons frame (or position (cons #f #f)))))
 
     (define (minibuffer-window . args)
       ;; GNU Emacs's `minibuffer-window` (`window.c`): "Return the
@@ -4255,8 +4284,18 @@
          (when frame (set-message! frame text)))))
     (*current-message-function*
      (lambda ()
+       ;; `Fcurrent_message` (`xdisp.c`) answers nil when there is no
+       ;; message: after `(message "")` the echo area is empty, which
+       ;; Emacs reads as nil. `frame-message` is the frame's *slot* and
+       ;; holds the empty string once it has been cleared, so the empty
+       ;; string is spelled nil here - the seam is where the Lisp
+       ;; question is answered.
        (let ((frame (*current-frame*)))
-         (and frame (frame-message frame)))))
+         (and frame
+              (let ((message (frame-message frame)))
+                (and (string? message)
+                     (> (string-length message) 0)
+                     message))))))
 
     ;; `insdel.c`'s `adjust_suspend_auto_hscroll` (`insdel.c:226`): "If
     ;; the selected window's old pointm is adjacent or covered by the

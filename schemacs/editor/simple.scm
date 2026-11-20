@@ -282,6 +282,12 @@
    ;; the hooks `define-minor-mode' made for them, under the names it
    ;; derives from the mode names - Emacs's `MODE-hook' variables
    overwrite-mode-hook binary-overwrite-mode-hook
+   ;; The three mode-line visibility modes and their generated readers -
+   ;; `mode-line-position`'s `:button` forms name the readers, because
+   ;; here the command and the variable cannot share a name.
+   line-number-mode column-number-mode size-indication-mode
+   line-number-mode-variable column-number-mode-variable
+   size-indication-mode-variable
    *overwrite-mode-textual* *overwrite-mode-binary*
    *activate-mark-hook* *deactivate-mark-hook*
    *exchange-point-and-mark-highlight-region*
@@ -498,6 +504,42 @@ a specialization of overwrite mode, entered by setting the
       (lambda (v)
         (set!buffer-overwrite-mode (current-buffer)
                                    (if v 'overwrite-mode-binary #f))))
+
+    ;;----------------------------------------------------------------
+    ;; The three mode-line visibility modes - `simple.el:9420-9437'
+    ;;----------------------------------------------------------------
+    ;;
+    ;; `line-number-mode' is on by default and `column-number-mode' and
+    ;; `size-indication-mode' are off, which is what decides what
+    ;; Emacs's `mode-line-position' construct draws. They are global
+    ;; minor modes with no body: the redisplay reads their values when it
+    ;; formats the line.
+
+    (define-minor-mode line-number-mode
+      "Toggle line number display in the mode line (Line Number mode).
+
+Line numbers do not appear for very large buffers and buffers
+with very long lines; see variables `line-number-display-limit'
+and `line-number-display-limit-width'.
+
+See `mode-line-position-line-format' for how this number is
+presented."
+      :init-value #t
+      :global #t
+      :group 'mode-line)
+
+    (define-minor-mode column-number-mode
+      "Toggle column number display in the mode line (Column Number mode).
+
+See `mode-line-position-column-format' for how this number is
+presented."
+      :global #t
+      :group 'mode-line)
+
+    (define-minor-mode size-indication-mode
+      "Toggle buffer size display in the mode line (Size Indication mode)."
+      :global #t
+      :group 'mode-line)
 
     ;; GNU Emacs's two bindings for the Insert key: `[insert]'
     ;; (`bindings.el:1438') and `[insertchar]' (`bindings.el:1441').
@@ -984,9 +1026,17 @@ just inserts a newline without doing any indentation."
       (interactive "P")
       (let* ((frame (*current-frame*))
              (ed (current-buffer))
-             (on? (if uarg
-                      (< 0 (uarg->integer 1 uarg))
-                      (not (buffer-read-only? ed)))))
+             ;; `(read-only-mode 'toggle)' is what `bindings.el`'s
+             ;; `mode-line-toggle-read-only` calls, and it is the symbol
+             ;; `define-minor-mode` reads as "flip it" - no number, so
+             ;; `uarg->integer` must not see it. Its generated body is
+             ;; `(if (and (numberp arg) (< arg 1)) nil t)` for every other
+             ;; non-nil ARG, which the `(< 0 ...)` here already gives a
+             ;; number.
+             (on? (cond
+                   ((eq? uarg 'toggle) (not (buffer-read-only? ed)))
+                   (uarg (< 0 (uarg->integer 1 uarg)))
+                   (else (not (buffer-read-only? ed))))))
         (set!buffer-read-only ed on?)
         (set!frame-message
          frame

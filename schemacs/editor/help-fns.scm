@@ -53,7 +53,18 @@
     (only (schemacs editor buffer) buffer-local-value current-buffer
           *current-buffer* with-current-buffer *inhibit-read-only*)
     (only (schemacs editor subr) *minor-mode-alist* *global-minor-modes*
-          replace-regexp-in-string)
+          *minor-mode-list* replace-regexp-in-string
+          ;; `mode-line-minor-mode-help` reads the clicked posn's string.
+          posn-object event-start intern)
+    ;; The `describe-minor-mode` family's three dependencies: the
+    ;; indicator lookup and its completion table are `mouse.scm`'s (placed
+    ;; there because they are what the mode line evaluates), and the seam
+    ;; below is how the generated "Help" menu item reaches
+    ;; `describe-function`.
+    (only (schemacs editor mouse)
+          lookup-minor-mode-from-indicator
+          describe-minor-mode-completion-table-for-indicator
+          *describe-function-function*)
     (only (schemacs editor casefiddle) capitalize)
     ;; the two steps of a minor mode's indicator, `xdisp.scm`'s
     (only (schemacs editor xdisp) minor-mode-indicator-value
@@ -100,6 +111,10 @@
 
   (export *describe-mode-outline*
           describe-mode describe-mode--minor-modes
+          describe-minor-mode describe-minor-mode-from-symbol
+          describe-minor-mode-from-indicator
+          describe-minor-mode-completion-table-for-symbol
+          mode-line-minor-mode-help
           describe-syntax internal-describe-syntax-value describe-symbol
           describe-function describe-function-1 help-fns--key-bindings
           help-fns--insert-bindings help-fns--insert-menu-bindings
@@ -671,6 +686,100 @@ documentation for the major and minor modes of that buffer."
                                    ",\n\t  is a prefix character for `backward-prefix-chars'"))))))))))
         syntax))
 
+    ;;----------------------------------------------------------------
+    ;; `describe-minor-mode` and its two directions - `help.el:1293-1400'
+    ;;----------------------------------------------------------------
+    ;;
+    ;; **Placement departure**: these are `help.el`'s, and this library
+    ;; is above `help.scm` - the mirror order would put them there, and
+    ;; `describe-minor-mode-from-symbol` calls `describe-function` and
+    ;; `describe-variable`, which are defined *here*. Emacs gets away
+    ;; with it because a name resolves through one obarray; here the
+    ;; dependency decides the file.
+
+    (define (describe-minor-mode-completion-table-for-symbol)
+      ;; GNU Emacs's `describe-minor-mode-completion-table-for-symbol`
+      ;; (`help.el:1316`): "In order to list up all minor modes,
+      ;; minor-mode-list is used here instead of minor-mode-alist."
+      (let loop ((modes (*minor-mode-list*)) (acc '()))
+        (if (null? modes)
+            (reverse acc)
+            (loop (cdr modes)
+                  (if (symbol? (car modes))
+                      (cons (symbol->string (car modes)) acc)
+                      acc)))))
+
+    (define-command (describe-minor-mode-from-symbol symbol)
+      "Display documentation of a minor mode given as a symbol, SYMBOL."
+      (interactive
+       (list (intern (completing-read
+                      "Minor mode symbol: "
+                      (describe-minor-mode-completion-table-for-symbol)))))
+      ;; "`(if (fboundp symbol) (describe-function symbol)
+      ;; (describe-variable symbol))`" (`help.el:1321'). The command
+      ;; table is this tree's `fboundp`.
+      (if (command-record-named (symbol->string symbol))
+          (describe-function symbol)
+          (describe-variable symbol)))
+
+    (define-command (describe-minor-mode-from-indicator indicator . rest)
+      "Display documentation of a minor mode specified by INDICATOR.
+If you call this function interactively, you can give indicator which
+is currently activated with completion.
+
+If non-nil, EVENT is a mouse event used to establish which minor
+mode lighter was clicked."
+      (interactive
+       (list (completing-read
+              "Minor mode indicator: "
+              (describe-minor-mode-completion-table-for-indicator))))
+      ;; EVENT is `rest`'s first element and is not read: Emacs uses it
+      ;; only for the `mode-line-compact` disambiguation arm, which is
+      ;; not carried - that option is not ported, and without it Emacs's
+      ;; own answer is the whole-lighter comparison
+      ;; `lookup-minor-mode-from-indicator` makes.
+      (when (pair? indicator)
+        (set! indicator (car indicator)))
+      (let ((minor-mode (if (symbol? indicator)
+                            indicator
+                            (lookup-minor-mode-from-indicator indicator))))
+        (if minor-mode
+            (describe-minor-mode-from-symbol minor-mode)
+            (error "Cannot find minor mode for `~a'" indicator))))
+
+    (define-command (describe-minor-mode minor-mode)
+      "Display documentation of a minor mode given as MINOR-MODE.
+MINOR-MODE can be a minor mode symbol or a minor mode indicator string
+appeared on the mode-line."
+      (interactive
+       (list (completing-read
+              "Minor mode: "
+              (append (describe-minor-mode-completion-table-for-symbol)
+                      (describe-minor-mode-completion-table-for-indicator)))))
+      (if (symbol? minor-mode)
+          (set! minor-mode (symbol->string minor-mode)))
+      (let ((symbols (describe-minor-mode-completion-table-for-symbol))
+            (indicators (describe-minor-mode-completion-table-for-indicator)))
+        (cond
+         ((member minor-mode symbols)
+          (describe-minor-mode-from-symbol (intern minor-mode)))
+         ((member minor-mode indicators)
+          (describe-minor-mode-from-indicator minor-mode))
+         (else
+          (error "No such minor mode: ~a" minor-mode)))))
+
+    (define-command (mode-line-minor-mode-help event)
+      "Describe minor mode for EVENT on minor modes area of the mode line."
+      (interactive "@e")
+      ;; Emacs: "`(let ((indicator (car (nth 4 (car (cdr event))))))
+      ;; (describe-minor-mode-from-indicator indicator event))`"
+      ;; (`bindings.el:956'). The fourth slot of a posn is its object -
+      ;; `posn-object` - and the car of that pair is the drawn string.
+      (let ((object (posn-object (event-start event))))
+        (describe-minor-mode-from-indicator
+         (and (pair? object) (car object))
+         event)))
+
     (define-command (describe-syntax . rest)
       ;; GNU Emacs's `describe-syntax' (`help-fns.el:2027'): "Describe
       ;; the syntax specifications in the syntax table of BUFFER. The
@@ -863,6 +972,9 @@ Returns the documentation as a string, also."
     ;; the command a key runs; help.scm is below this library, so the two
     ;; meet at the seam help.scm declares.
     (*describe-function-1-function* describe-function-1)
+
+    ;; `mouse.el`'s generated minor-mode menu's "Help" item.
+    (*describe-function-function* describe-function)
 
     ;; `help-map`'s `f` and `v`, and the flat keys this tree's lookup
     ;; takes (see the note beside `C-h b` in help.scm).

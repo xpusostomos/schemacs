@@ -13,7 +13,9 @@
        detect-coding-bytes detect-coding-system
        find-operation-coding-system *file-coding-system-alist*
        coding-system-bom check-coding-system coding-system-eol-type
-       coding-system-doc-string coding-system-aliases coding-system-list)
+       coding-system-doc-string coding-system-aliases coding-system-list
+       define-coding-system-alias coding-system-change-text-conversion)
+ (only (schemacs editor mule) merge-coding-systems)
  (only (schemacs editor search) string-match)
  (scheme file)
  (rnrs io ports)
@@ -694,12 +696,103 @@
                    (loop (cdr n) (eq? (coding-system-base (car n)) (car n))))
                   (else (loop (cdr n) ok)))))))
 
-(test-equal "coding-system-aliases leads with the name itself"
-  ;; Emacs answers `(utf-8 mule-utf-8 cp65001)' - it has aliases and this
-  ;; tree does not - but `(car ...)' is the name in both, which is what
-  ;; its one caller reads.
+(test-equal "coding-system-aliases leads with the canonical name"
+  ;; Emacs answers `(utf-8 mule-utf-8 cp65001)' - it defines two aliases
+  ;; of UTF-8 that this tree does not - so the `(car ...)` is the name in
+  ;; both, which is what `print-coding-system-briefly` reads.
   '(utf-8 utf-8)
   (list (car (coding-system-aliases 'utf-8))
         (car (coding-system-aliases 'utf-8))))
 
 (test-end "schemacs_editor_coding")
+
+;;----------------------------------------------------------------
+;; Aliases, and the two conversions `merge-coding-systems` is made of
+;;----------------------------------------------------------------
+;;
+;; Every expectation is Emacs 31.1's own answer: `(coding-system-aliases
+;; 'dos)` is `(undecided-dos dos)` there, `(coding-system-change-eol-conversion
+;; 'dos 'mac)` is `undecided-mac`, and an alias of a *base* coding system
+;; gets subsidiaries - `foo-unix`, `foo-dos`, `foo-mac` - through the
+;; C's `make_subsidiaries`.
+
+(test-begin "schemacs_editor_coding_aliases")
+
+(test-equal "unix, dos and mac are aliases of the undecided variants"
+  '((undecided-unix unix) (undecided-dos dos) (undecided-mac mac))
+  (list (coding-system-aliases 'unix)
+        (coding-system-aliases 'dos)
+        (coding-system-aliases 'mac)))
+
+(test-equal "and asking by the alias answers the same list"
+  (coding-system-aliases 'undecided-dos)
+  (coding-system-aliases 'dos))
+
+(test-equal "binary is an alias of no-conversion, which has no variants"
+  '(#t #f (no-conversion binary))
+  (list (coding-system-p 'binary)
+        (coding-system-p 'binary-unix)
+        (coding-system-aliases 'no-conversion)))
+
+(test-equal "change-eol: a base answers its variant"
+  '(utf-8-dos utf-8-mac)
+  (list (coding-system-change-eol-conversion 'utf-8 'dos)
+        (coding-system-change-eol-conversion 'utf-8 'mac)))
+
+(test-equal "change-eol: no eol requested strips back to the base"
+  '(utf-8 utf-8 no-conversion)
+  (list (coding-system-change-eol-conversion 'utf-8 #f)
+        (coding-system-change-eol-conversion 'utf-8-dos #f)
+        (coding-system-change-eol-conversion 'no-conversion #f)))
+
+(test-equal "change-eol: a fixed eol has no other"
+  '(no-conversion #f)
+  (list (coding-system-change-eol-conversion 'no-conversion 'unix)
+        (coding-system-change-eol-conversion 'no-conversion 'dos)))
+
+(test-equal "change-eol: through an alias, to the base's variant"
+  'undecided-mac
+  (coding-system-change-eol-conversion 'dos 'mac))
+
+(test-equal "change-text-conversion moves the base and keeps the eol"
+  '(utf-8-dos utf-8)
+  (list (coding-system-change-text-conversion 'dos 'utf-8)
+        (coding-system-change-text-conversion 'undecided 'utf-8)))
+
+(test-equal "merge: dos over a UTF-8 buffer is utf-8-dos, not dos"
+  'utf-8-dos
+  (merge-coding-systems 'dos 'utf-8-unix))
+
+(test-equal "merge: an eol-less first takes the second's eol"
+  'utf-8-dos
+  (merge-coding-systems 'utf-8 'utf-8-dos))
+
+(test-equal "merge: a settled first keeps its own"
+  'utf-8-unix
+  (merge-coding-systems 'utf-8-unix 'utf-8-dos))
+
+;; Emacs's `make_subsidiaries`: a base's alias gets the three variants.
+(define-coding-system-alias 'test-alias-utf8 'utf-8)
+
+(test-equal "an alias of a base makes -unix/-dos/-mac aliases"
+  '(#t #t #t)
+  (list (coding-system-p 'test-alias-utf8-unix)
+        (coding-system-p 'test-alias-utf8-dos)
+        (coding-system-p 'test-alias-utf8-mac)))
+
+(test-equal "each subsidiary alias shares a variant's spec"
+  ;; A variant's `coding-system-base` is the *base* name in Emacs too:
+  ;; measured, `(coding-system-base 'foo-dos)` is `utf-8`, and so is
+  ;; `(coding-system-base 'utf-8-dos)`.
+  '(utf-8 utf-8 utf-8)
+  (map coding-system-base
+       (list 'test-alias-utf8-unix 'test-alias-utf8-dos 'test-alias-utf8-mac)))
+
+(test-equal "the alias is appended to the base's own list"
+  'test-alias-utf8
+  (let loop ((n (coding-system-aliases 'utf-8)))
+    (cond ((null? n) #f)
+          ((eq? (car n) 'test-alias-utf8) (car n))
+          (else (loop (cdr n))))))
+
+(test-end "schemacs_editor_coding_aliases")

@@ -86,7 +86,7 @@
              (prompt (and (pair? query) (pair? (cdr query))
                           (pair? (cddr query)) (caddr query))))
         (if verbose
-            (yes-or-no-p (*current-frame*) prompt)
+            (yes-or-no-p prompt)
             (y-or-n-p prompt))))
 
     (define (disabled-command-function . rest)

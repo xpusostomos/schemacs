@@ -61,6 +61,12 @@
     ;; `kbd' is `subr.el''s: a key description to the vector of events
     ;; a `define-key' takes.
     (only (schemacs editor subr) kbd)
+    ;; The seam `mode-line-change-eol` (the clickable EOL mnemonic) calls
+    ;; `set-buffer-file-coding-system` through - the renderer is below
+    ;; this library and cannot import it.
+    (only (schemacs editor xdisp)
+          *set-buffer-file-coding-system-function*
+          *set-buffer-file-coding-system-command*)
     )
 
   (export
@@ -197,6 +203,26 @@ don't want to mark the buffer modified, specify t for NOMODIFY."
           (set-buffer-modified-p #t))
         (message "Coding system for saving this buffer is now %s"
                  (buffer-file-coding-system buffer))))
+
+    ;; The mode line's EOL mnemonic is a button whose command lives in
+    ;; the renderer; it calls `set-buffer-file-coding-system` through
+    ;; this, as `bindings.el`'s `mode-line-change-eol` calls it directly.
+    ;; The install is here, after the definition, because a seam that named
+    ;; a function defined further down this file would be unbound when the
+    ;; form ran (the `read-char-event` rule).
+    ;;
+    ;; The seam takes the one argument `mode-line-change-eol` gives -
+    ;; Emacs's call is `(set-buffer-file-coding-system (cond ...))`, so
+    ;; FORCE and NOMODIFY are nil.
+    (*set-buffer-file-coding-system-function*
+     (lambda (coding-system)
+       (set-buffer-file-coding-system coding-system #f #f)))
+
+    ;; And the *command* itself, for `bindings.el`'s coding-system item
+    ;; mouse-3: Emacs calls `(call-interactively
+    ;; 'set-buffer-file-coding-system)`, so the prompt is the point.
+    (*set-buffer-file-coding-system-command*
+     set-buffer-file-coding-system)
 
     (define-command (revert-buffer-with-coding-system coding-system force)
       ;; C-x RET r runs this. GNU Emacs's

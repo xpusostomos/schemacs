@@ -36,13 +36,27 @@
         (only (schemacs editor buffer) get-buffer-create buffer-list)
         (only (schemacs editor menu-bar)
               menu-bar-separator global-buffers-menu-map
-              menu-bar-update-buffers frame-or-buffer-changed-p))
+              menu-bar-update-buffers frame-or-buffer-changed-p
+              popup-menu))
 
 (test-begin "schemacs_editor_menu_bar_menus")
 
 (test-equal "the bar has the menus this tree can back, in display order"
   '("File" "Edit" "Buffers")
   (map cadr (menu-bar-items)))
+
+;; GNU Emacs's `popup-menu` (`menu-bar.el:2682`) takes
+;; `(menu &optional position prefix from-menu-bar)`, so a Lisp caller
+;; passes one or two arguments. It was defined with all four *required*
+;; here, and the mode-line menus - whose seam calls `(popup-menu menu
+;; event)` - raised "Wrong number of arguments" on every press. A #f map
+;; short-circuits before `x-popup-menu`, so these calls reach only the
+;; arity and the position normalisation.
+(test-assert "popup-menu's three optional arguments are optional"
+  (and (eq? (popup-menu #f) #f)
+       (eq? (popup-menu #f #f) #f)))
+(test-assert "popup-menu accepts the prefix and menu-bar arguments"
+  (eq? (popup-menu #f #f #f #f) #f))
 
 (test-equal "an item's key sequence reaches its command"
   '(save-buffer save-buffers-kill-terminal

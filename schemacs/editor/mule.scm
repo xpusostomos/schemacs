@@ -32,8 +32,9 @@
     (scheme char)
     (only (guile) string-contains)
     (only (schemacs editor coding)
-          coding-system-p coding-system-eol-type
-          coding-system-change-eol-conversion)
+          coding-system-p coding-system-base coding-system-eol-type
+          coding-system-change-eol-conversion
+          coding-system-change-text-conversion)
     ;; `string-match' is what both alist lookups match a pattern with -
     ;; `auto-coding-alist-lookup' over the file name and
     ;; `auto-coding-regexp-alist-lookup' over the file's first bytes. It is
@@ -459,16 +460,26 @@
       ;; GNU Emacs's `merge-coding-systems' (`mule.el:1202'): "Fill in any
       ;; unspecified aspects of coding system FIRST from SECOND."
       ;;
-      ;; Two aspects can be unspecified. Emacs's `undecided' is one - it
-      ;; is the coding system that says nothing about *text* conversion -
-      ;; and it is not carried here, so the branch that merges it has no
-      ;; case to fire on. The *eol* is the other, and it is one this tree
-      ;; does have: a coding system whose eol-type is #f is `utf-8' before
-      ;; a file made it `utf-8-dos', and merging is what stops `C-x RET f
-      ;; utf-8' from throwing away the line ends the buffer was read with.
+      ;; Two aspects can be unspecified, and the C's order matters:
+      ;;
+      ;;   * the *text* conversion, which `undecided` and its aliases
+      ;;     (`unix`, `dos`, `mac`) leave open - `(coding-system-base
+      ;;     first)` is `undecided`, and FIRST takes SECOND's base;
+      ;;   * the *eol*, which a base like `utf-8` leaves open - FIRST
+      ;;     takes SECOND's eol.
+      ;;
+      ;; That first branch is what makes `(set-buffer-file-coding-system
+      ;; 'dos)` on a UTF-8 buffer set `utf-8-dos` and not the bare `dos`:
+      ;; the text half comes from the buffer's previous coding system and
+      ;; only the line ends change. It could not fire until `undecided`
+      ;; became a real coding system here (2026-11-20).
       ;;--------------------------------------------------------------
       ;; FIRST and SECOND are coding system *names*, as everywhere else.
-      (let ((eol (and second (coding-system-eol-type second))))
+      (let* ((base (and second (coding-system-base second)))
+             (eol (and second (coding-system-eol-type second)))
+             (first (if (and first (eq? (coding-system-base first) 'undecided))
+                        (coding-system-change-text-conversion first base)
+                        first)))
         (if (and first (not (coding-system-eol-type first)) eol)
             (coding-system-change-eol-conversion first eol)
             first)))

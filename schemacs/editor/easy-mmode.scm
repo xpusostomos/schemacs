@@ -68,7 +68,7 @@
     (only (schemacs editor intervals) put)
     ;; `default-value` and `set-default` are what a `:global` mode's state
     ;; is stored in - `data.c`'s, as `buffer-local-value` is `buffer.c`'s.
-    (only (schemacs editor data) default-value set-default)
+    (only (schemacs editor data) default-value set-default default-boundp)
     (only (schemacs editor editfns) current-message message)
     (only (schemacs editor command)
           called-interactively? current-prefix-arg define-command
@@ -456,6 +456,20 @@
                              #f)))
                    #`(begin
                        #,accessors
+                       ;; GNU Emacs's `(defvar MODE INIT)` for a
+                       ;; `:global` mode: the `defvar` also *binds* the
+                       ;; variable, and only when it is not already
+                       ;; bound - a reload must not overwrite what the
+                       ;; user set. The generated accessors' fallback is
+                       ;; not enough on its own: `default-boundp` is
+                       ;; false until something writes the default, and
+                       ;; `mode-line-symbol-value` (which resolves a
+                       ;; construct's symbol) asks `default-boundp`
+                       ;; before it can use any fallback.
+                       #,@(if globalp
+                              (list #`(unless (default-boundp #,quoted-mode)
+                                        (set-default #,quoted-mode #,init)))
+                              '())
                        ;; The hook the generated function runs. Emacs's
                        ;; `(defvar MODE-hook nil)'; here a hook is a
                        ;; parameter holding its list, which is what this

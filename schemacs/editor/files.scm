@@ -69,8 +69,16 @@
     ;; minibuffer for one.
     (only (schemacs editor xdisp) file-remote-p force-mode-line-update)
     ;; The commands here install their own keys, as files.el does.
+    ;; `define-custom` for the exit and save options below -
+    ;; `kill-emacs-query-functions', `confirm-kill-emacs' and the rest
+    ;; are `defcustom`s in files.el, and `custom.scm' imports nothing
+    ;; that could come back here.
+    (only (schemacs editor custom) define-custom)
     (only (schemacs editor command)
           current-prefix-arg define-command called-interactively?
+          ;; `save-some-buffers-action-alist`'s `C-f` answer sets
+          ;; `quit-flag`, as the C's lambda does.
+          *quit-flag*
           *interactive-read-file-name-function*
           *interactive-read-directory-name-function*
           ;; a mode named in an alist is a *symbol*, and the command table
@@ -81,7 +89,7 @@
     ;; buffer in the selected window, which is a window operation.
     ;; `find-file-other-window' shows one in the OTHER window.
     (only (schemacs editor window)
-          pop-to-buffer-same-window
+          pop-to-buffer-same-window display-buffer save-window-excursion
           ;; `set-buffer-major-mode`'s one caller in this tree, installed
           ;; at the bottom of this file.
           *set-buffer-major-mode-function*
@@ -108,7 +116,7 @@
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs editor subr)', which is below this library.
     (only (schemacs editor subr)
-          kbd run-hook-with-args-until-success
+          kbd run-hook-with-args-until-success run-hook-with-args-until-failure
           run-hooks string-suffix-p assoc-default *delay-mode-hooks*
           *change-major-mode-after-body-hook* *after-change-major-mode-hook*
           ;; `with-temp-file` below is built on the temp-buffer macro.
@@ -259,7 +267,13 @@
     ;; variables `kill-buffer--possibly-save' reads to decide whether the
     ;; answer to its question is a word or a key. `use-dialog-box-p' is
     ;; defined below, and answers false.
-    (only (schemacs map-ynp) *use-short-answers*)
+    (only (schemacs map-ynp) *use-short-answers* map-y-or-n-p)
+    ;; `occur-rename-buffer` calls `rename-uniquely` where Emacs does, but
+    ;; `replace.scm` cannot import this library: it loads `(schemacs
+    ;; map-ynp)`, `map-ynp` imports `*query-replace-map*` from `replace`,
+    ;; and an import back would close the cycle. The call arrives through
+    ;; this seam, which is installed where the command is defined below.
+    (only (schemacs editor replace) *rename-uniquely-function*)
     ;; For deciding whether a file can be written, which is what makes a
     ;; visited file read-only (GNU Emacs's `file-writable-p', plus the
     ;; permission bits it also consults); and the directory reading and
@@ -377,14 +391,21 @@ directory-name-p
    executable-find exec-path *exec-suffixes*
    ;; files.el's directory creation and subr.el's temp-file macro
    make-directory with-temp-file
-   save-answer-char->decision
 save-buffer
    set-visited-file-name
    write-file
    rename-uniquely
    save-buffers-kill-terminal
+   save-buffers-kill-emacs
    handle-delete-frame
    save-some-buffers
+   save-some-buffers-action-alist
+   save-some-buffers-functions
+   *save-some-buffers-default-predicate*
+   *save-some-buffers--switch-window-callback*
+   *kill-emacs-query-functions*
+   *confirm-kill-emacs*
+   *confirm-kill-processes*
    y-or-n-p
    )
 
@@ -770,40 +791,96 @@ file names with wildcards."
             (delete-frame frame #t)
             (save-buffers-kill-terminal))))
 
-    (define-command (save-buffers-kill-terminal)
-      ;; GNU Emacs's `save-buffers-kill-emacs': offer to save what
-      ;; needs saving, then - since the user may have said no - ask
-      ;; whether to go ahead and lose it. Either question abandoned
-      ;; with C-g cancels the exit.
-      "Quit the editor (bound to C-x C-c), offering to save first."
-      (interactive)
-      (let ((frame (*current-frame*))
-            (quit! (lambda ()
-                     ((frame-quit-cont (*current-frame*)) 'quit))))
-        ;; The asking happens only when there is something worth
-        ;; asking about - `files--buffers-needing-to-be-saved', with
-        ;; Emacs's predicate `t'. The minibuffer and `*Completions*'
-        ;; are modified a good deal of the time and visit no file, so
-        ;; a `C-x C-c' asked right after `C-x C-f' does not offer to
-        ;; save the help buffer: there is nothing on the list.
-        (when (files--buffers-needing-to-be-saved #t)
-          (save-some-buffers frame #t))
-        ;; Then Emacs's `and' legs: without a modified file-visiting
-        ;; buffer there is nothing more to ask and it kills; with
-        ;; one, it asks whether to go ahead, and kills on "yes".
-        ;; C-g in the question abandons the whole command, and
-        ;; nothing is killed.
-        (if (let scan ((buffers (buffer-list)))
-              (and (pair? buffers)
-                   (let ((buffer (car buffers)))
-                     (or (and (buffer-file-name buffer)
-                              (buffer-modified-p buffer))
-                         (scan (cdr buffers))))))
-            (when (yes-or-no-p frame
-                               "Modified buffers exist; exit anyway? ")
-              (quit!))
-            (quit!))))
+    ;;----------------------------------------------------------------
+    ;; Leaving the editor - files.el's `save-buffers-kill-emacs'
+    ;;----------------------------------------------------------------
 
+    (define-custom *kill-emacs-query-functions* '()
+      "Functions to call with no arguments to query about killing Emacs.
+If any of these functions returns nil, killing Emacs is canceled.
+`save-buffers-kill-emacs' calls these functions, but `kill-emacs',
+the low level primitive, does not.  See also `kill-emacs-hook'."
+      :type 'hook
+      :group 'convenience)
+
+    (define-custom *confirm-kill-emacs* #f
+      "How to ask for confirmation when leaving Emacs.
+If nil, the default, don't ask at all.  If the value is non-nil, it should
+be a predicate function; for example `yes-or-no-p'."
+      :type '(choice (const :tag "Ask with yes-or-no-p" yes-or-no-p)
+                     (const :tag "Ask with y-or-n-p" y-or-n-p)
+                     (const :tag "Don't confirm" nil)
+                     (function :tag "Predicate function"))
+      :group 'convenience)
+
+    (define-custom *confirm-kill-processes* #t
+      "Non-nil if Emacs should confirm killing processes on exit.
+If this variable is nil, the value of
+`process-query-on-exit-flag' is ignored.  Otherwise, if there are
+processes with a non-nil `process-query-on-exit-flag', Emacs will
+prompt the user before killing them."
+      :type 'boolean
+      :group 'convenience)
+
+    (define-command (save-buffers-kill-emacs . args)
+      ;; GNU Emacs's `save-buffers-kill-emacs' (`files.el:8666'):
+      ;; "Offer to save each buffer, then kill this Emacs process. With
+      ;; prefix ARG, silently save all file-visiting buffers without
+      ;; asking."
+      ;;
+      ;; **"Kill this Emacs process" is the front end's quit**, which is
+      ;; the continuation `frame-quit-cont` holds - `kill-emacs` itself
+      ;; is the C's and has no counterpart here (its `kill-emacs-hook`
+      ;; is not carried either; named in DEPARTURES.md).
+      ;;
+      ;; Not carried from the C, each named where it would be: the
+      ;; dialog-box arm (`x-popup-dialog` for "Unsaved Buffers"), and
+      ;; the whole active-processes question (`process-list`,
+      ;; `process-query-on-exit-flag` - there are no subprocesses).
+      ;;--------------------------------------------------------------
+      "Offer to save each buffer, then kill this Emacs process.
+With prefix ARG, silently save all file-visiting buffers without asking."
+      (interactive (list (current-prefix-arg) #f))
+      (let ((arg (and (pair? args) (car args)))
+            (restart (and (pair? args) (pair? (cdr args)) (cadr args))))
+      ;; Don't use save-some-buffers-default-predicate, because we want
+      ;; to ask about all the buffers before killing Emacs.
+      (when (or (files--buffers-needing-to-be-saved #t)
+                (let need-save ((funcs save-some-buffers-functions))
+                  (cond ((null? funcs) #f)
+                        (((car funcs) 'query) #t)
+                        (else (need-save (cdr funcs))))))
+        (save-some-buffers arg #t))
+      (let ((confirm (*confirm-kill-emacs*)))
+        (when (and (or (not (let scan ((buffers (buffer-list)))
+                              (and (pair? buffers)
+                                   (let ((buffer (car buffers)))
+                                     (or (and (buffer-file-name buffer)
+                                              (buffer-modified-p buffer))
+                                         (scan (cdr buffers)))))))
+                       (begin
+                         (set! confirm #f)
+                         (yes-or-no-p "Modified buffers exist; exit anyway? ")))
+                   (run-hook-with-args-until-failure
+                    (*kill-emacs-query-functions*))
+                   (or (not confirm)
+                       (confirm (format #f "Really ~a Emacs? "
+                                        (if restart "restart" "exit")))))
+          ((frame-quit-cont (*current-frame*)) 'quit)))))
+
+    (define-command (save-buffers-kill-terminal . args)
+      ;; GNU Emacs's `save-buffers-kill-terminal' (`files.el:8737'):
+      ;; "Offer to save each buffer, then kill the current connection. If
+      ;; the current frame has no client, kill Emacs itself using
+      ;; `save-buffers-kill-emacs'."
+      ;;
+      ;; A frame here is never a client frame (`server.el` is not
+      ;; ported), so the first branch cannot be taken.
+      ;;--------------------------------------------------------------
+      "Offer to save each buffer, then kill this Emacs process (C-x C-c).
+With prefix ARG, silently save all file-visiting buffers, then kill."
+      (interactive (list (current-prefix-arg)))
+      (save-buffers-kill-emacs (and (pair? args) (car args)) #f))
 
     (define (use-dialog-box-p)
       ;; GNU Emacs's `use-dialog-box-p' (`subr.el:4121'): "Return non-nil
@@ -958,27 +1035,69 @@ file names with wildcards."
     ;; `(schemacs editor minibuffer)' now.
     ;;------------------------------------------------------------------
 
-    (define (save-answer-char->decision answer)
-      ;; What an answer to "Save file X? " means, in the terms the
-      ;; asking loop acts on. The keys are GNU Emacs's, from
-      ;; `map-y-or-n-p`, which `save-some-buffers` asks through: `y' or
-      ;; SPC saves this buffer and goes on to the next, `n', DEL or any
-      ;; other key leaves it and goes on, `!' saves it and saves the rest
-      ;; without asking, `q', RET or ESC stops asking here, and `.'
-      ;; saves this one and then stops (Emacs: "ESC or q to exit").
-      ;; Emacs's remaining answers - `C-r' and `d' (look at the buffer
-      ;; and its differences from the file before deciding) - need
-      ;; features this frontend does not have. C-g never arrives here:
-      ;; it abandons the whole command.
-      ;;--------------------------------------------------------------
-      (cond
-       ((not answer) 'skip)                       ; end of input
-       ((or (char=? answer #\y) (char=? answer #\space)) 'save)
-       ((char=? answer #\!) 'save-all)
-       ((char=? answer #\.) 'save-then-quit)
-       ((or (char=? answer #\q) (char=? answer #\return)
-            (char=? answer #\esc)) 'quit)
-       (else 'skip)))
+    ;;----------------------------------------------------------------
+    ;; Asking about unsaved buffers - files.el's `save-some-buffers'
+    ;;----------------------------------------------------------------
+
+    (define save-some-buffers-action-alist
+      (list
+       ;; `?\M-~': skip this buffer and mark it unmodified. Returning t
+       ;; means "the object has been acted upon", so it is not asked
+       ;; about again.
+       (list (vector-ref (kbd "M-~") 0)
+             (lambda (buf)
+               (with-current-buffer buf
+                 (set-buffer-modified-p #f))
+               #t)
+             "skip this buffer and mark it unmodified")
+       ;; `?\C-r': view this buffer. Emacs's two arms are
+       ;; `display-buffer` when recursive minibuffers are off (the
+       ;; default) and a `view-mode-enter` plus `recursive-edit` when
+       ;; they are on. `view-mode` and `enable-recursive-minibuffers`
+       ;; are not ported, so the first arm is the one written, and
+       ;; `other-window-scroll-buffer` (window.el, unported) is not set.
+       ;; Return nil to ask about BUF again.
+       (list (vector-ref (kbd "C-r") 0)
+             (lambda (buf)
+               (display-buffer buf)
+               #f)
+             "view this buffer")
+       ;; `?\C-f': view this buffer and quit.
+       (list (vector-ref (kbd "C-f") 0)
+             (lambda (buf)
+               ((*save-some-buffers--switch-window-callback*) buf)
+               (*quit-flag* #t)
+               ;; `setq` answers the value it set, which is what the C's
+               ;; lambda returns; a parameter's setter answers the
+               ;; unspecified value, so the t is spoken out loud.
+               #t)
+             "view this buffer and quit")))
+      ;; ^ GNU Emacs's `save-some-buffers-action-alist' (`files.el:6452'):
+      ;; "ACTION-ALIST argument used in call to `map-y-or-n-p'."
+      ;;
+      ;; **Two entries are not carried**: `?\C-r`'s recursive arm (see
+      ;; its lambda) and `?d`'s "view changes in this buffer", which
+      ;; needs `diff-no-select` and therefore subprocesses. Both are
+      ;; named, not faked: what a user sees is a prompt without `d`.
+    (set! save-some-buffers-action-alist save-some-buffers-action-alist)
+
+    (define-custom *save-some-buffers-default-predicate* #f
+      "Default predicate for `save-some-buffers'.
+
+This allows you to stop `save-some-buffers' from asking
+about certain files that you'd usually rather not save.
+
+This function is called (with no parameters) from the buffer to
+be saved.  When the function's symbol has the property
+`save-some-buffers-function', the higher-order function is supposed
+to return a predicate used to check buffers."
+      :type '(choice (const :tag "Default" nil)
+                     (function :tag "Custom function"))
+      :group 'auto-save)
+
+    ;; `save-some-buffers-root' (files.el:6518) is not carried: it builds
+    ;; its predicate from `project-current` and `file-in-directory-p`,
+    ;; and neither is ported.
 
     (define (files--buffers-needing-to-be-saved pred)
       ;; GNU Emacs's `files--buffers-needing-to-be-saved': the modified
@@ -1016,51 +1135,160 @@ file names with wildcards."
                         (cons buffer kept)
                         kept))))))
 
-    (define (save-some-buffers frame pred)
-      ;; Ask whether to save each buffer that needs saving, and save it
-      ;; if the answer is yes: GNU Emacs's `save-some-buffers', whose
-      ;; candidates are `files--buffers-needing-to-be-saved' and whose
-      ;; questions go through `map-y-or-n-p` - the answers are the ones
-      ;; `save-answer-char->decision' spells out. Emacs also saves, up
-      ;; front and without asking, any buffer that has
-      ;; `buffer-save-without-query' set; nothing in this frontend sets
-      ;; it.
+    (define save-some-buffers-functions '())
+    (set! save-some-buffers-functions save-some-buffers-functions)
+    ;; ^ GNU Emacs's `save-some-buffers-functions' (`files.el:6554'):
+    ;; "Functions to be run by `save-some-buffers' after saving the
+    ;; buffers. ... If the first argument is `query', then the function
+    ;; should return non-nil if there is something to be saved". A plain
+    ;; variable: Emacs `defvar`s it and libraries `add-hook` onto it,
+    ;; nothing `let`-binds it.
+
+    (define *save-some-buffers--switch-window-callback* (make-parameter #f))
+    ;; ^ GNU Emacs's `save-some-buffers--switch-window-callback'
+    ;; (`files.el:6450'): "what the `C-f' answer calls to name the buffer
+    ;; it wants to end up in". Emacs `let`-binds it around the questions,
+    ;; which is the tree's test for a parameter.
+
+    (define-command (save-some-buffers arg pred)
+      ;; GNU Emacs's `save-some-buffers' (`files.el:6569'): "Save some
+      ;; modified file-visiting buffers. Asks user about each one. ...
+      ;; This command first saves any buffers where
+      ;; `buffer-save-without-query' is non-nil, without asking."
       ;;
-      ;; Each saved buffer is saved in its own right, made current for
-      ;; the save as Emacs's action is `(with-current-buffer buffer
-      ;; (save-buffer))': saving one buffer must not touch another.
+      ;; Every question is `map-y-or-n-p`'s - so the prompt reads
+      ;;
+      ;;   Save file /tmp/x.txt? (`y', `n', `!', `.', `q', `M-~', `C-r' or `C-h')
+      ;;
+      ;; and the answers are `query-replace-map`'s plus the action alist's.
+      ;;
+      ;; `buffer-save-without-query' is a `defvar-local` in Emacs; this
+      ;; tree's buffer-locals are a per-buffer table read with a
+      ;; default, which is how it is read here. Nothing sets it yet.
       ;;--------------------------------------------------------------
-      (let ask ((buffers (files--buffers-needing-to-be-saved pred)))
-        (if (null? buffers)
-            #f
-            (let* ((ed (car buffers))
-                   (rest (cdr buffers))
-                   (file (text-editor-file-name ed))
-                   (answer
-                    (read-char-from-minibuffer
-                     (string-append
-                      ;; GNU Emacs asks about the file it would write,
-                      ;; and about the buffer when it visits no file but
-                      ;; offered to be asked.
-                      (if file
-                          (string-append "Save file " file "? ")
-                          (string-append
-                           "Save buffer "
-                           (or (text-editor-buffer-name ed) "*scratch*")
-                           "? "))
-                      "(y, n, !, ., q, or C-g) "))))
-              (case (save-answer-char->decision answer)
-                ((save)
-                 (with-current-buffer ed (save-buffer))
-                 (ask rest))
-                ((save-all)
-                 (for-each (lambda (buffer)
-                             (with-current-buffer buffer (save-buffer)))
-                           (cons ed (reverse rest))))
-                ((save-then-quit)
-                 (with-current-buffer ed (save-buffer)))
-                ((quit) #f)
-                (else (ask rest)))))))
+      "Save some modified file-visiting buffers.  Asks user about each one.
+You can answer \\`y' or \\`SPC' to save, \\`n' or \\`DEL' not to save,
+\\`M-~' not to save and also mark the buffer as unmodified, \\`C-r'
+to look at the buffer in question with `view-buffer' before
+deciding, \\`!' to save the buffer and all remaining
+buffers without any further querying, \\`.' to save only the
+current buffer and skip the remaining ones and \\`q' or \\`RET' to exit
+the function without saving any more buffers.  \\`C-h' displays a
+help message describing these options.
+
+This command first saves any buffers where `buffer-save-without-query' is
+non-nil, without asking.
+
+Optional argument ARG (interactively, prefix argument) non-nil means save
+all with no questions.
+Optional second argument PRED determines which buffers are considered:
+If PRED is nil, all the file-visiting buffers are considered.
+If PRED is t, then certain non-file buffers will also be considered.
+If PRED is a function, it is called with no argument in each buffer and
+should return non-nil if that buffer should be considered.
+PRED defaults to the value of `save-some-buffers-default-predicate'."
+      (interactive (list (current-prefix-arg) #f))
+      (unless pred
+        (set! pred
+              ;; "Allow `pred' to be a function that returns a predicate
+              ;; with lexical bindings in its original environment."
+              (if (and (symbol? (*save-some-buffers-default-predicate*))
+                       (get (*save-some-buffers-default-predicate*)
+                            'save-some-buffers-function))
+                  ((*save-some-buffers-default-predicate*))
+                  (*save-some-buffers-default-predicate*))))
+      (let* ((switched-buffer #f)
+             (queried #f)
+             (autosaved-buffers '())
+             (files-done 0)
+             (inhibit-message #f))
+        (parameterize
+            ((*save-some-buffers--switch-window-callback*
+              (lambda (buffer) (set! switched-buffer buffer))))
+          ;; The C's `unwind-protect` around the whole body is the
+          ;; `dynamic-wind` below; the body itself is
+          ;; `save-window-excursion`'s, which restores the frame's
+          ;; window layout however the questions end.
+          (dynamic-wind
+            (lambda () #f)
+            (lambda ()
+              (save-window-excursion
+                ;; First save any buffers that we're supposed to save
+                ;; unconditionally.  That way the following code won't
+                ;; ask about them.
+                (for-each
+                 (lambda (buffer)
+                   (with-current-buffer buffer
+                     (when (and (buffer-local-value
+                                 buffer 'buffer-save-without-query #f)
+                                (buffer-modified-p buffer))
+                       (set! autosaved-buffers
+                             (cons (buffer-name) autosaved-buffers))
+                       (save-buffer))))
+                 (buffer-list))
+                ;; Ask about those buffers that merit it, and record
+                ;; the number thus saved.
+                (set! files-done
+                      (map-y-or-n-p
+                       (lambda (buffer)
+                         (if arg
+                             #t
+                             (begin
+                               (set! queried #t)
+                               (if (buffer-file-name buffer)
+                                   (if (or (string=?
+                                            (buffer-name buffer)
+                                            (file-name-nondirectory-part
+                                             (buffer-file-name buffer)))
+                                           (string-match
+                                            (string-append
+                                             "\\<"
+                                             (regexp-quote
+                                              (file-name-nondirectory-part
+                                               (buffer-file-name buffer)))
+                                             "<[^>]*>\\'")
+                                            (buffer-name buffer)))
+                                       ;; The buffer name is similar to
+                                       ;; the file name.
+                                       (format #f "Save file ~a? "
+                                               (buffer-file-name buffer))
+                                       ;; The buffer and file names are
+                                       ;; dissimilar; display both.
+                                       (format #f "Save file ~a (buffer ~a)? "
+                                               (buffer-file-name buffer)
+                                               (buffer-name buffer)))
+                                   ;; No file name.
+                                   (format #f "Save buffer ~a? "
+                                           (buffer-name buffer))))))
+                       (lambda (buffer)
+                         (with-current-buffer buffer
+                           (save-buffer)))
+                       (files--buffers-needing-to-be-saved pred)
+                       '("buffer" "buffers" "save")
+                       save-some-buffers-action-alist
+                       #f))
+                ;; Allow other things to be saved at this time, like
+                ;; abbrevs.
+                (for-each
+                 (lambda (func)
+                   (set! inhibit-message
+                         (or (funcall func #f arg) inhibit-message)))
+                 save-some-buffers-functions)
+                (or queried (> files-done 0) inhibit-message
+                    (cond
+                     ((null? autosaved-buffers)
+                      (when (called-interactively? save-some-buffers)
+                        (files--message "(No files need saving)")))
+                     ((= (length autosaved-buffers) 1)
+                      (files--message "(Saved ~a)" (car autosaved-buffers)))
+                     (else
+                      (files--message
+                       "(Saved ~a files: ~a)" (length autosaved-buffers)
+                       (mapconcat identity autosaved-buffers ", ")))))))
+            (lambda ()
+              (when switched-buffer
+                (pop-to-buffer-same-window switched-buffer)))))))
+
     ;;----------------------------------------------------------------
     ;; File names
     ;;------------------------------------------------------------------
@@ -2429,7 +2657,6 @@ If the current buffer now contains an empty file that you just visited
       (when (and (buffer-modified-p (current-buffer))
                  (buffer-file-name (current-buffer))
                  (not (yes-or-no-p
-                       (*current-frame*)
                        (format #f "Kill and replace buffer `~a' without saving it? "
                                (buffer-name (current-buffer))))))
         (error "Aborted"))
@@ -2487,7 +2714,6 @@ If the current buffer now contains an empty file that you just visited
           (error "File ~a no longer readable!" file-name))
          ((or noconfirm
               (yes-or-no-p
-               (*current-frame*)
                ;; Emacs's `(if (buffer-modified-p) (format "Discard ...")
                ;; (format "Revert ..."))' - the two `format' calls are
                ;; separate there and separate here, which is also what
@@ -4073,6 +4299,9 @@ or multiple mail buffers, etc."
           (force-mode-line-update))))
 
     (*set-buffer-major-mode-function* set-buffer-major-mode)
+    (*rename-uniquely-function* rename-uniquely)
+    ;; ^ See the seam's comment in `replace.scm`: `occur-rename-buffer`
+    ;; is Emacs's call and this is where the command it names is defined.
     ;; ^ The caller `buffer.c' has and this tree did not:
     ;; `window-normalize-buffer-to-switch-to' creates a buffer for a name
     ;; it has not seen and then runs the mode on it (`window.el:9519'), so

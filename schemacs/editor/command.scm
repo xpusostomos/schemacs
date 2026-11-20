@@ -1257,7 +1257,17 @@
       (let ((record (cond ((command-type? command) command)
                           ((symbol? command) (command-record-named command))
                           (else (command-record-of command)))))
-        (cond ((not record) (error "Not a command" command))
+        (cond
+         ((not record)
+          ;; **A bare procedure with no command record.** Emacs writes
+          ;; menu items as `(lambda () (interactive) ...)` - the
+          ;; minor-mode menu's "Help for minor mode" is one
+          ;; (`mouse.el:270`) - and a Scheme lambda cannot declare an
+          ;; interactive form, so it is called with no arguments. Only
+          ;; a procedure is accepted; anything else is Emacs's error.
+          (if (procedure? command)
+              (command)
+              (error "Not a command" command)))
               ((command-interactive-spec record)
                (run-command record (current-prefix-arg)))
               (else (run-command record)))))

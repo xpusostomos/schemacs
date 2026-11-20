@@ -13839,3 +13839,566 @@ after touching `window--resize-*`, `split-window` or the window record.
 
 `window-tests.scm` 18 pins the stored axis and the nested horizontal drag
 (the pair resizes, the frame-wide window keeps its width).
+
+# The mode line as a set of buttons (2026-11-20)
+
+Chris: *"ok implement some of the missing menus and features of the mode
+line"*. This pass is the items `bindings.el` makes clickable, the
+commands they name, and the hover highlight they ask for.
+DEPARTURES.md's 2026-11-20 section has the C each rule came from and the
+full list of what is left.
+
+## What is in
+
+- **`xdisp.scm`**: `make-mode-line-mouse-map` (`bindings.el:30`), the
+  four commands (`mode-line-toggle-read-only`, `-toggle-modified`,
+  `-widen`, `mode-line-change-eol`) and the buffer-name pair
+  (`mode-line-previous-buffer`/`-next-buffer`), all `define-command`s
+  with `(interactive "e")` and `with-selected-window` on the clicked
+  posn's window - so a click acts on *that* window's buffer.
+- **The constructs**: `mode-line-modified` (`%1*` and `%1+`, each with
+  its own `local-map` and the highlight face), `mode-line-remote`,
+  `mode-line-narrowed` (the `%n` element), and
+  `propertized-buffer-identification` / `mode-line-buffer-identification`
+  (`%12b` with the map that makes mouse-1 previous and mouse-3 next).
+- **The EOL mnemonic is propertized** with a `keymap` for
+  `mode-line-change-eol` and a help string, as `mode-line-eol-desc` is.
+- **The hover face on a mode line** (`note-mouse-highlight`'s string
+  branch): the run comes from the clicked string's `mouse-face`
+  property and `draw-mode-line!` paints those characters with the value
+  merged over the face they already have. A mode line whose run changed
+  is redrawn because the run is part of `window-last-mode-line`'s
+  record.
+- **`coding.scm`**: `define-coding-system-alias` with Emacs's
+  subsidiaries, the four `mule-conf.el` aliases, the real
+  `coding-system-change-eol-conversion` and
+  `coding-system-change-text-conversion`; `mule.scm`'s
+  `merge-coding-systems` now carries both of the C's branches.
+- Tests: `mode-line-tests.scm` (37, a new suite), `coding-tests.scm`
+  62 + 14, and `display-supports-face-attributes-p` answers `:box` on a
+  window-system frame so a Gtk frame gets `mode-line-highlight`'s
+  rosette rather than the tty's `:inherit highlight`.
+
+## What to know before touching it
+
+- **`%1*` is the read-only item and `%1+` the modified one.** Both show
+  the *state* (both are `*` when modified), but a click on the first
+  toggles read-only and a click on the second toggles modified. A first
+  test that expected clicking `*` to clear the modified bit was testing
+  the wrong item.
+- **The EOL command reaches `set-buffer-file-coding-system` through a
+  seam** (`*set-buffer-file-coding-system-function*` in `xdisp.scm`,
+  installed by `mule-cmds.scm` as it loads, as a one-argument
+  `lambda`). The renderer is below `files`, so it cannot import the
+  command. A session without `mule-cmds` gets an error naming the
+  function - write error templates with `~a`, not `%s`: `(error "%s"
+  x)` shows the literal `%s` because the reporter only formats messages
+  containing `~`.
+- **A seam installed for a function in the same library goes after its
+  definition** (the `read-char-event` rule), and the function must take
+  the arguments the caller gives - `set-buffer-file-coding-system`
+  takes three and the command gives one.
+- **The hover run is compared by content** (`equal-including-properties`
+  against the recorded string), because a redisplay formats a fresh
+  string each time. The record includes the run so a pointer moving
+  onto or off an item redraws a line whose characters did not change.
+- **`display-supports-face-attributes-p` is evaluated when a frame
+  recalculates the faces**, which the Gtk front end does inside
+  `with-gtk-display` *after* setting `*window-system*` - that is why
+  `(supports :box t)` can answer per front end.
+- **The test fixture must clear the modified flag**: inserting text to
+  build a buffer marks it modified, and `%1*` then reads `*`.
+- `(buffer-read-only? ed)` reads the buffer's *slot*; a
+  `set-buffer-local-value!` of `'buffer-read-only` does nothing to it.
+  Use `set!buffer-read-only`.
+
+## The press that precedes every click (2026-11-20, the same day)
+
+Chris, on the finished items: *"Wrong type argument in position 2: #f"*,
+*"when clicking mode"*, *"and when clicking buffer name"*. A click is a
+`down-mouse-1` and then a `mouse-1`; the item's map binds only the
+release, and the dispatcher's "last event alone" fallback retried the
+press in the whole map list, found the text command `mouse-drag-region`,
+and ran it on a mode-line position. Emacs *disposes of* an unbound mouse
+up/down click instead (`read_key_sequence`, `keyboard.c:12115`).
+
+- `%unbound-mouse-reduction` / `%run-reduced-click` in `keyboard.scm`
+  carry that fallback: drag/double/triple clicks reduce to their plain
+  click in the same map, up/down clicks are dropped silently, and only a
+  non-mouse event still takes the last-event-alone rule that `C-x C-g`
+  needs.
+- **The callbacks' `let*` became a `letrec*`**: `fail` calls
+  `fail-alone` and reads `prefix-maps`, both bound *after* it in the
+  list. A `let*` leaves them unbound inside the closure and the compiler
+  says "possibly unbound"; the failure appears only on the mouse path.
+- A **no-motion `mouse-1` release does not end a mode-line drag** -
+  Emacs drops it too; the drag map's exit is `[drag-mouse-1]`.
+  `mouse-tests`' drag test was sending `mouse-1` as "a key the map does
+  not bind", which only worked because of the old fallback; it sends
+  `drag-mouse-1` now.
+- **`mode-line-tests` must import `(schemacs editor mouse)`**: the
+  `[mode-line ...]` bindings are that library's, and without it a click
+  on a plain stretch has no binding at all - which looked like a bug in
+  the click path for half an hour.
+
+## The hover box and the item a run belongs to (2026-11-20, second report)
+
+Chris, using it: *"mouse over in real emacs mode line draws a box around
+it, not just lines top and bottom. also each character in the left mode
+section is a separately highlighting target, whereas you have 3
+characters highlighting at once."* DEPARTURES.md has the C; this is what
+to know.
+
+- **The box's left and right edges are the mouse-face rule.**
+  `pgtk_draw_glyph_string` adds them when `hl == DRAW_MOUSE_FACE`,
+  regardless of the neighbours' boxes; the mode line's own face is
+  boxed, so the ordinary rule drew only top and bottom. `draw-mode-line!`
+  tracks which prepared pieces are lit and passes the edges at the lit
+  run's boundaries.
+- **`format-mode-line` now tags every element's output with
+  `mode-line-elt-no`**, as Emacs's `store_mode_line_string` does (the
+  counter increments on entry to `display_mode_element`). The hover run
+  walks `mouse-face` *and* this property, so it stops at the element's
+  edge - Emacs gets the same result because each element is its own
+  string object in the glyph row.
+- **A `%` construct's properties go on its constructed text, not on the
+  field padding** (inherited before padding, not after): Emacs's padding
+  gets only the elt-no marker, so `%12b`'s padding is not part of the
+  name's target.
+- Test traps: `member`, not `memq`, to find a recorded `(x cells left?
+  right?)` call. And a `set-face-attribute` on `mode-line` does not reach
+  `mode-line-active`, whose `:inherit mode-line` comes from the defface
+  spec - the box test sets a dark `*frame-background-mode*` and
+  recalculates the faces instead, which is what puts the box on a Gtk
+  frame too.
+
+## Verified
+
+All **78** suites pass (`mode-line-tests` 51, `coding-tests` 76,
+`tty-editor-tests` 348 unchanged), the touched libraries compile with
+no warnings, and `imports.scm` is regenerated (101 libraries, 3768
+names). `tools/pty-check.py` cannot click - a terminal has no mouse -
+so the dispatch is exercised by the suite through `dispatch-key`, which
+is exactly what both front ends call for one event; the Gtk path's only
+extra step is `posn-at-x-y`, which the suite uses to build each event.
+
+## Still open, named in DEPARTURES.md
+
+The **mode-line menus** (major mode, minor modes, the position menu):
+they need `get_keyelt`'s `:filter` evaluation and
+`read_char_x_menu_prompt`'s popup rule, and the list of every function
+and what each waits for is in DEPARTURES.md. **`help-echo` display** is
+the other: the properties are carried, `tooltip.el`/`x-show-tip` are
+not ported, so hovering says nothing yet.
+
+# Handoff — the help echo and tooltips (2026-11-20)
+
+Chris: *"real emacs has tool tips as you hover so you can see what that
+function does."* The `help-echo` properties the mode-line work had
+carried were displayed by nothing; they are now displayed, and the chain
+is Emacs's own, bottom up:
+
+```
+note_mouse_highlight (xdisp.c)  -> finds help-echo (overlay, text property,
+                                   mode-line/tab-line string, or the window's
+                                   mode-line-default-help-echo fallback)
+  -> show_help_echo (keyboard.c:2259)   -> show-help-function
+     = tooltip-show-help (tooltip.el)   -> a delayed timer
+       -> tooltip-show -> x-show-tip -> display-show-tip (a dispnew generic)
+          -> pgtk.scm: Gtk's tooltip object with OUR custom label
+```
+
+What landed, in one line each:
+
+- **`keyboard.scm`**: `show-help-echo` (string / function / form,
+  `safe_calln`-style), `help-echo-substitute-command-keys` with the
+  substitution seam `*help-echo-substitute-function*`, the
+  `*show-help-function*` parameter, and the `mouse.fixup` seam
+  `*mouse-fixup-help-message-function*`. Installs
+  `*show-help-echo-function*` at the end of the file for `xdisp.scm`,
+  which is below it.
+- **`xdisp.scm`**: `help-echo-at` (the three places Emacs looks),
+  `string-help-echo-at`, `text-help-echo-at`,
+  `window-mode-line-help-echo` (`w->mode_line_help_echo`), the
+  `mode-line-default-help-echo` function and its defcustom
+  `*mode-line-default-help-echo*`, `%help-echo-previous`, and the call
+  from `note_mouse-highlight`.
+- **`tooltip.scm`** (new): the whole of `tooltip.el` - the mode, the
+  five delays and the parameters, the timeout machine, `tooltip-show`,
+  `tooltip-hide`, the echo-area half, `x-show-tip`/`x-hide-tip`, and the
+  debugger helpers that need no processes.
+- **`dispnew.scm`**: `display-show-tip`/`display-hide-tip` generics.
+- **`pgtk.scm`**: the Gtk method - a custom `GtkLabel` (wrapping off)
+  handed to Gtk's tooltip object through `query-tooltip`, plus
+  `gtk_widget_trigger_tooltip_query` so the tip appears at Emacs's
+  delay rather than Gtk's hover schedule.
+- **`mouse.scm`**: `mouse-fixup-help-message` (the "mouse-2" -> "mouse-1"
+  rewrite over links) and its seam install.
+- **`frame.scm`**: `mouse-pixel-position`; `current-message`'s seam now
+  answers nil for a cleared message.
+- **`timefns.scm`**: `time-since`; `lisp-time-arguments` handles a
+  non-integer time exactly.
+- Both front ends import `(schemacs editor tooltip)` (preloaded in Emacs,
+  and its load is what turns the mode on); `loadup.scm` lists it;
+  `imports.scm` is regenerated.
+
+## The traps, in the order they cost time
+
+0. **The tooltip is on Gtk's tooltip object with a custom label, not
+   `gtk_widget_set_tooltip_text`.** The plain text tooltip is what the
+   PGTK C does, but Gtk's default tooltip label wraps, and a wrapped
+   multi-line tooltip gets sized before the wrap is measured - Chris
+   saw the last line clipped. Emacs's own non-PGTK GTK code solves this
+   by building a label with `gtk_label_set_line_wrap (FALSE)` and
+   handing it over with `gtk_tooltip_set_custom` (`qttip_cb`,
+   `gtkutil.c:837`); that is the shape here. If tooltips ever stop
+   appearing, check the `query-tooltip` handler is connected (the area
+   and the outer window) and that it returns `#t`.
+
+   **The label needs `g_object_ref`, or the editor dies on the second
+   hover.** Gtk parents the custom label into its tooltip window and
+   drops its reference when that window goes; guile-gi's proxy is not a
+   strong reference, so the label was freed under the proxy and the next
+   query raised `gtk_label_set_text: assertion GTK_IS_LABEL (label)
+   failed`, then `g_object_unref`/`instance with invalid (NULL) class
+   pointer` - Chris hit exactly this while mousing over the mode-line
+   items. Emacs pins its label with `g_object_ref` (`qttip_cb`,
+   `gtkutil.c:861`); guile-gi exposes no ref, so `pgtk.scm` calls it
+   through `dynamic-func` (libgobject). The ref is never dropped, one per
+   display, as in Emacs. Reproduced and fixed under broadway: three
+   show/hide cycles, zero Gtk criticals, editor alive.
+
+1. **`concat` and `when`.** `mode-line-default-help-echo` builds its
+   answer with `concat`, and Elisp's `concat` ignores nil. A `when`
+   that does not fire answers the *unspecified* value, which `concat`
+   rejects ("Wrong type argument: sequencep"). Every piece is an `if`
+   with `#f` now. This is the `when`-as-a-value trap the earlier
+   handoffs name, met inside `concat` for the second time.
+
+2. **A function-valued `help-echo` is the procedure here.** `bindings.el`
+   writes the *symbol*, and Emacs's `FUNCTIONP` resolves it through the
+   obarray. There is no function obarray in this tree, so
+   `mode-line-modified`/`mode-line-remote` store the procedure, and
+   `show-help-echo` calls a procedure value. `mode-line-tests` pins it.
+
+3. **`define-minor-mode` does not run a mode's body at load.**
+   `tooltip-mode`'s `show-help-function` install happens because Emacs's
+   defcustom `:set` calls the mode during `:initialize`. The macro here
+   drops `:set`/`:initialize`, so `tooltip.scm` ends with
+   `(tooltip-mode 1)`. Any future global mode with `:init-value t` whose
+   body installs something needs the same call.
+
+4. **`current-message` must answer nil, not "".** `tooltip-show-help-non-mode`
+   and `tooltip-hide` distinguish "no message" from "a message"; the
+   frame's slot holds `""` after a clear, so the seam translates it.
+
+5. **Inexact times.** `(float-time)` is what `tooltip-hide-time` stores;
+   `time-since`/`time-subtract` used `(cons time 0)` for a number and
+   then exact arithmetic, which raised on `(ash 1.7e9 -16)`.
+   `lisp-time-arguments` now splits a non-integer into exact
+   seconds+picoseconds.
+
+## How to check it live
+
+- **In a terminal editor**: nothing hovers, because there is still no
+  mouse reporting - the echo-area half is all a tty would use.
+- **On a Gtk frame under broadway**: drive the *chain*, not the popup.
+  Build a frame, `(note-mouse-highlight f col row)` from the REPL, wait
+  past the 0.7s delay, then read the widget's tooltip text back:
+  `(widget:get-tooltip-text (pgtk-window (frame-output f)))` - it should
+  be the help string the item names, and `#f` after the pointer leaves.
+  Broadway has no pointer, so Gtk's popup itself cannot be shown or
+  inspected there; `gtk_window_list_toplevels` will not contain it.
+- **The recording display** in `tooltip-tests.scm` covers
+  `tooltip-show`'s half without Gtk.
+
+## Not carried
+
+`x-pre-popup-menu-hook`, `menu-or-popup-active-p` (NS), the tooltip
+process helpers (no subprocesses), `tooltip-reuse-hidden-frame` and the
+tooltip *frame* of the non-system path, `message-truncate-lines`, and
+help-echo on images/fringes. DEPARTURES.md's 2026-11-20 section has the
+reasons.
+
+# The mode-line menus, the tooltip crash and the stuck drag (2026-11-20)
+
+Three pieces of work in one session: the mode name's and the lighters'
+menus (`bindings.el:571-596`, `mouse.el:222-330`, `help.el:1293-1400`),
+the Gtk tooltip's lifetime, and a key-lookup departure that made a
+mode-line drag unstoppable. DEPARTURES.md's 2026-11-20 section has the C
+and every named departure; this is what the next session needs.
+
+## The menus
+
+- **A press on the mode name now pops its menu** (`mouse-menu-major-mode-menu`),
+  a press on a lighter pops that mode's (`mouse-minor-mode-menu`), mouse-2
+  on the name runs `describe-mode`, mouse-2 on a lighter runs
+  `mode-line-minor-mode-help`, and mouse-3 on either pops the toggles
+  menu (`mode-line-minor-mode-menu`). Emacs binds these through
+  `(menu-item ... :filter ...)` and the lookup has no filter arm here, so
+  the two presses bind commands that call the C's own builders -
+  `mouse-menu-major-mode-map` and `bindings--sort-menu-keymap`.
+- **`mouse.scm` cannot import `menu-bar.scm`.** `menu-bar` imports
+  `isearch` -> `help-fns` -> `help` -> `mouse`, so `popup-menu` and
+  `menu-bar-edit-menu` reach `mouse.scm` through two parameters -
+  `*popup-menu-function*` and `*menu-bar-edit-menu*` - which
+  `menu-bar.scm` installs as it loads. If a mode-line menu ever does
+  nothing in a build, check those installs first.
+- **Each lighter is its own run.** Emacs's redisplay keeps one string
+  object per lighter, so `posn-object` answers `" Fill"` and not the
+  group; this renderer flattens the line, so each lighter carries a
+  `mode-line-lighter` index and `string-property-run-at` /
+  `string-mouse-face-at` stop at it. The bug that surfaced this:
+  `apply string-append` drops text properties - use `concat`.
+- **`*minor-mode-alist*`'s default is bindings.el's four entries again.**
+  The missing `(auto-fill-function " Fill")` is why the Fill lighter had
+  never appeared; the ` Fill` and ` Ovwrt` strings are what the click
+  and the completion table compare against.
+- **The `:button` toggle forms name this tree's readers**
+  (`buffer-overwrite-mode`, `font-lock-mode-on?`,
+  `buffer-auto-fill-function`), because `menu-item-eval-property`
+  evaluates in the ambient module and a minor mode's command and
+  variable cannot share a name here. A test that evaluates one must
+  import the reader **and** `current-buffer`.
+- `describe-minor-mode` and its two directions are in `help-fns.scm`
+  (placement departure: they call `describe-function`), and the
+  completion/lookup pair is in `mouse.scm` beside the mode-line
+  machinery. `C-h` has no key for them; they are M-x only, as in Emacs.
+- **Tests**: `mode-line-tests.scm`'s `schemacs_editor_mode_line_menus`
+  group (73 passes in file) pins the maps, the help strings, the
+  per-lighter runs, the press-to-menu path with a recording popup, the
+  Help item through a stubbed `*describe-function-function*`, the
+  sorted toggles menu, the toggle's evaluated reader, and the
+  `menu-bar-edit-menu` fallback. `tools/pty-check.py` cannot click
+  (a terminal has no mouse), so the suite's `dispatch-key` is the
+  end-to-end path.
+
+## The tooltip crash (Chris's Gtk-CRITICAL paste)
+
+`gtk_label_set_text: assertion 'GTK_IS_LABEL (label)' failed`, then
+`g_object_unref`/invalid class pointer. Gtk parents the custom tooltip
+label into its tooltip window and drops its reference when that window
+goes; a guile-gi proxy is not a strong reference, so the label was freed
+under it. Emacs pins its label with `g_object_ref` (`qttip_cb`,
+`gtkutil.c:861`); guile-gi exposes no ref, so `pgtk.scm` calls it through
+`dynamic-func` and never drops it - one label per display, held on the
+display record. Verified under broadway: three show/hide cycles, zero
+criticals, editor alive.
+
+## The stuck drag was a lookup departure
+
+Chris: mousing over the read-only flag showed the box and the drag
+cursor, clicking went into drag mode and stayed there until C-g.
+`%unbound-mouse-reduction` treated the release as "drop" because the
+lookup never found the item's own `[mode-line mouse-1]`: the command
+loop's modal lookup looked the event up **one map at a time**, where
+Emacs's `read_key_sequence` hands `follow_key` one `current_binding` - a
+**keymap list** - and `access_keymap_1` collects a prefix answer from
+every map in it. A release the transient map did not bind therefore had
+to fall through to the item's map, and did not. `modal-lookup-state-lookup`
+now passes the whole list to one `keymap-lookup`; the step's
+command-or-prefix test is `keymapp` (not `keymap-type?`), because a
+prefix answer to a list is `(keymap M1 M2)` - a list, not a record.
+The regression test is `mode-line-tests.scm`'s
+`schemacs_editor_mode_line_press_release` group, seen failing with the
+old per-map walk.
+
+**The box and the drag cursor over the remote flag are Emacs's own** - it
+has no `local-map` (`xdisp.c:36790-36810`), so the mode line's drag
+handle shows through. Clicking it now runs the drag's release and the
+drag ends; before the fix the transient map could not be popped.
+
+## Still open
+
+- `mode-line-compact` (and with it `describe-minor-mode-from-indicator`'s
+  disambiguation arm) is not ported.
+- The mode-line `mouse-face` run is per element now; a *theme* that sets
+  `mode-line-highlight` differently from `mode-line` still shows on the
+  text, not in the box edges, unless the box is in the face - the
+  existing note stands.
+- `tooltip-tests.scm` and `mode-line-tests.scm` are in
+  `tools/run-suites.py`; the pty battery on this tree is **100/100**
+  (the run after the mode-line menus landed).
+
+# `mode-line-position` and the mode line's variable registry (2026-11-20)
+
+Chris chose "port it whole" for the last remaining mode-line menu. The
+default mode line now reads like Emacs 31.1's - `All L1`, not the old
+`-- L1 C0` - because the position item is Emacs's construct, with the
+percentage constructs and the three visibility modes under it.
+DEPARTURES.md's same-day section has the C and every named departure.
+
+## What to know before touching it
+
+- **A construct's symbol is now evaluated.** `format-mode-line`'s
+  `(SYMBOL THEN ELSE)` conditional used to take its ELSE arm
+  unconditionally (the test's value was never read); it now reads the
+  symbol through `mode-line-symbol-value`, and a bare symbol element is
+  evaluated and processed as a construct - both are Emacs's
+  `display_mode_element`.
+- **`mode-line-symbol-value` reads three registries**: the buffer's
+  slots, the global default table, then a `define-custom` reader - tried
+  under the bare name and under the tree's starred spelling, because a
+  construct says `mode-line-position` and `define-custom` records
+  `*mode-line-position*`. A plain `define`d variable is *not* reachable;
+  that is the same gap `describe-variable` has, and the reason the five
+  position variables are `define-custom`s.
+- **`define-minor-mode` now emits `(unless (default-boundp MODE)
+  (set-default MODE INIT))` for a `:global` mode** - Emacs's `defvar`
+  rule. It is a macro change: **recompile every library that uses it**
+  or the stale `.go` keeps the old expansion (`bound?=#f` is the
+  symptom). `default-boundp` had to be imported into `easy-mmode.scm`
+  for the template to resolve.
+- **The percentage constructs are `%o`, `%p`, `%P`, `%q`**, with
+  `percent99` (`(d - 1 + 100n) / d`, capped at 99) and
+  `window-bottom-position` (`BUF_Z - window_end_pos`; our `end-pos` is
+  stored as a distance from the text end, so the text's Z is added
+  back). A fully visible buffer prints `All`; the top of a taller one
+  prints `Top`; the end prints `Bottom`.
+- **`line-column-mode-menu` is popped by `mode-line-line-column-menu`**,
+  a command in `mouse.scm` bound in `mode-line-column-line-number-mode-map`
+  - the same stand-in the other two mode-line menus use, because the
+  lookup has no menu-prompt path.
+- **The pty battery's init turns `column-number-mode` on.** Several
+  checks read the *column* off the mode line as their point oracle, and
+  the default no longer shows it; with the mode on the line reads
+  `(LINE,COL)` and those checks wait for `(1,15)` / `(1,6)` / `(1,0)`.
+  `tty-editor-tests`'s two column tests wrap their assertions in
+  `(column-number-mode 1)` / `(column-number-mode -1)` for the same
+  reason.
+- **The tree's whole-mode-line test strings changed**:
+  `-UUU:**- alpha.txt   All L1     (Fundamental)` (one fewer space
+  before `All` than the old `" -- "` spelling - the construct starts at
+  the position with no leading space).
+
+## Still open
+
+- `mode-line-collapse-minor-modes` (Emacs 31.1's lighter hiding) and
+  `mode-line-invisible-mode`.
+- `%s` (the process construct) and `%[`/`%]` (recursion depth) are still
+  printed as they stand; there are no processes and no recursive
+  minibuffer edits to report.
+- A `risky-local-variable` marking is not carried; there is no
+  `risky-local-variable-p`.
+
+## Tests
+
+`mode-line-tests.scm`'s `schemacs_editor_mode_line_position` group (86
+passes in file): the construct's exact answer in a fully visible buffer
+(`"All L1   "`, and `"All (1,0)    "` with Column Number mode on), the
+`All`/`Top`/`Bottom` words and `%q`'s `100%` tail on a 100-line buffer,
+`percent99`'s arithmetic, the map's press binding, and the three menu
+toggles' display order and initial states.
+
+## `popup-menu`'s arity (2026-11-20, same session)
+
+Chris: *"clicking on the mode in the menu bar: Wrong number of arguments
+to #<procedure popup-menu (menu position prefix from-menu-bar)>"* - the
+mode-line menus' seam calls `(popup-menu menu event)`, and the procedure
+had been defined with all four of Elisp's arguments **required**. It
+takes a rest parameter now, `(menu . rest)`, reading position, prefix and
+from-menu-bar the way the tree reads every optional argument. If a menu
+"does nothing" or raises like this, check the arity of what the seam
+points at first: the recorder in `mode-line-tests` accepted any number of
+arguments, so the suite could not see it, and only `menu-bar-menus-tests`
+(a real `popup-menu` with a #f map, which short-circuits before
+`x-popup-menu`) pins it.
+
+## The popup, the right margin, the scroll bar, and the coding-system
+## item (2026-11-20, same session)
+
+Chris's four reports, and what each turned out to be (DEPARTURES.md has
+the C):
+
+1. **The menu popped at the top-left.** `menu-show`'s Gtk method was
+   handing cell coordinates to `gtk_menu_popup_at_rect`, which wants
+   pixels. It converts with `cell-x`/`cell-y` now.
+2. **The mode line / tab bar / tab line stopped a few pixels short.**
+   The grid is whole cells; the leftover strip kept the frame's
+   background. `%pgtk-write-run` and `clear-end-of-line!` extend the run
+   that ends at the grid's last column to the pixel edge - Emacs's
+   clipped final space (`display_mode_line`'s "Fill up with spaces").
+   Verified live under broadway at a 741-pixel-wide window (cell 9):
+   the mode-line row's pixel at x=740 is the mode-line background.
+3. **The scroll bar was inset.** Emacs puts it at the window's *pixel*
+   right edge; ours sat at the last column edge. The Gtk scroll-bar
+   method moves a right-hand bar whose right edge is the frame's last
+   cell edge by the remainder. Verified: margin-start 723 + width 18 =
+   741 at a 741-pixel allocation.
+4. **The `U` was not clickable.** `%z` now carries
+   `mode-line-coding-system-map` (mouse-1 describes, mouse-3 sets),
+   `mouse-face`, and `mode-line-mule-info-help-echo`, as
+   `bindings.el:74-88`/`:216-220` do. `describe-coding-system` is in a
+   new `mule-diag.scm` (mule-diag.el's coding-system half), its output
+   byte-identical to Emacs 31.1's for `utf-8-unix`, `no-conversion` and
+   `utf-8`. `mule-cmds.scm` installs the second seam
+   (`*set-buffer-file-coding-system-command*`) so mouse-3 can call the
+   command *interactively* (the prompt is the point).
+   `mode-line-tests`' `mode_line_coding` group and the new
+   `mule-diag-tests.scm` pin it.
+
+**Also**: the pty battery's mode-line row selectors used the tree's old
+`-- L1 C0` spelling in *nine* places (a `MODE_LINE_RE` now matches
+Emacs's shape - `Top L1`, `All (1,3)`), and `mode_line_has_line` accepts
+both the ` L<n>` and `(n,col)` forms. A full battery on the tree before
+the selectors were fixed gave 89/100 with every failure a "0 windows"
+count: the checks were counting mode lines by the old spelling, not
+seeing a real fault.
+
+# The save prompt, `map-y-or-n-p`, and `yes-or-no-p` (2026-11-21)
+
+Chris, quitting with `C-x C-c` on a modified buffer: the save question
+had no blinking cursor at the end, a different option list, and after
+`n` the exit-anyway prompt only appeared on the next keypress.
+
+**The cause was one primitive that was never ported**: `save-some-buffers`
+spelled its own single-key question with `read-char-from-minibuffer`
+instead of asking through `map-y-or-n-p` (`map-ynp.el`), so nothing had
+Emacs's prompt, its answers, or its echo. All of it is in now -
+`map-y-or-n-p`, `save-some-buffers` in files.el's shape,
+`save-some-buffers-action-alist`, `save-buffers-kill-emacs`,
+`save-window-excursion`, `run-hook-with-args-until-failure` and a
+re-ported `yes-or-no-p` (it had taken a *frame*; Emacs takes one
+argument). DEPARTURES.md's 2026-11-21 section has the C for each rule
+and every named gap; the ones worth knowing before touching it:
+
+- **`quit-flag` is raised by Emacs's evaluator, not by the setter.**
+  `map-y-or-n-p`'s `quit` answer is `(setq quit-flag t)` + `try-again`,
+  and the quit is signalled by `maybe_quit` in `eval_sub` on the *next
+  call* - before the re-ask's own `(setq quit-flag nil)`. Scheme has no
+  such check, so `step` calls `(maybe-quit)` at its top; without it C-g
+  in a `map-y-or-n-p` question asks again for ever (measured: a hang).
+- **`query-replace-map` is a plain variable** (a keymap made at load),
+  and `unread-command-events` **is a parameter** - both were read the
+  wrong way in the first draft, and the first gives "Wrong type to
+  apply: #<<keymap-type> ... *query-replace-map*>".
+- **`read-from-minibuffer`'s argument order is PROMPT INITIAL KEYMAP
+  HISTORY DEFAULT** - a history passed in the DEFAULT slot makes an
+  empty answer *be* the value, which surfaced as "expecting string: #t"
+  from `read-minibuffer-1`'s history add.
+- **HIST `t` means "do not record"** (`read-from-minibuffer`'s
+  docstring). It is stored as `#t` and every reader asks `history?`
+  first, which is Emacs's own `(listp history)` test.
+- **The answers are events**: the action alist's keys are the one
+  element inside `(kbd "M-~")`/`(kbd "C-r")`/`(kbd "C-f")`, because
+  `map-y-or-n-p` wraps each in a vector, as the C wraps a character.
+- **`save-buffers-kill-terminal` and `save-buffers-kill-emacs` take
+  `&optional` arguments**: written as rest parameters, or
+  `handle-delete-frame`'s `(save-buffers-kill-terminal)` is an arity
+  error.
+- The prompt's option list is Emacs's, less `d` (diff needs
+  subprocesses): `Save file X? (y, n, !, ., q, M-~, C-r, C-f or C-h)`.
+  Measured on Emacs 31.1, and `schemacs/map-ynp-tests.scm` pins the
+  string.
+- `@@ (schemacs map-ynp)` is not in `imports.scm` (only
+  `(schemacs editor ...)` libraries are), so M-: cannot call
+  `map-y-or-n-p`; every command that uses it imports it. The new suite
+  is in `tools/run-suites.py`.
+- **`yes-or-no-p` takes one argument now** (Emacs's); the two call
+  sites that still passed a frame (`find-alternate-file`,
+  `revert-buffer`) signalled inside `string-length` and their commands
+  died silently behind the command loop's guard - `revert-buffer`'s pty
+  check is what found it. When a signature changes, grep every caller;
+  the battery is the net that catches the ones the suites miss.
+- Verified on the settled tree: all suites pass and
+  `tools/pty-check.py` is **100/100**.

@@ -82,6 +82,7 @@
     (schemacs editor icons)
     (schemacs editor easy-mmode)
     (except (schemacs editor window)  *cursor-in-echo-area* window-live-p window-normal-size window-size)
+    (schemacs editor mule-diag)
     (schemacs editor novice)
     (schemacs editor warnings)
     (schemacs editor doc)
@@ -122,6 +123,7 @@
     (schemacs editor tabulated-list)
     (schemacs editor text-mode)
     (schemacs editor tool-bar)
+    (schemacs editor tooltip)
     (schemacs editor mule-util)
     (schemacs editor tty-colors)
     (except (schemacs editor subr)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd)
@@ -257,6 +259,7 @@
     *coding-system-table*
     *colon-double-space*
     *color-name-rgb-alist*
+    *column-number-indicator-zero-based*
     *command-execute--query-function*
     *command-table*
     *comment-auto-fill-only-comments*
@@ -282,6 +285,8 @@
     *completions-format*
     *completions-header-format*
     *completions-max-height*
+    *confirm-kill-emacs*
+    *confirm-kill-processes*
     *confirm-nonexistent-file-or-buffer*
     *current-buffer*
     *current-editor-function*
@@ -311,7 +316,9 @@
     *delete-by-moving-to-trash*
     *delete-horizontal-space-function*
     *describe-bindings-show-prefix-commands*
+    *describe-coding-system-function*
     *describe-function-1-function*
+    *describe-function-function*
     *describe-mode-outline*
     *directory-abbrev-alist*
     *directory-files-no-dot-files-regexp*
@@ -428,6 +435,7 @@
     *gui-last-cut-in-clipboard*
     *gui-last-cut-in-primary*
     *help--help-screen-function*
+    *help-echo-substitute-function*
     *help-for-help-use-variable-pitch*
     *help-mode-function*
     *help-xref-following*
@@ -482,6 +490,7 @@
     *kill-buffer-hook*
     *kill-buffer-query-functions*
     *kill-do-not-save-duplicates*
+    *kill-emacs-query-functions*
     *kill-read-only-ok*
     *kill-ring*
     *kill-ring-max*
@@ -546,6 +555,7 @@
     *max-eol-check-count*
     *max-mini-window-height*
     *menu-bar-close-window*
+    *menu-bar-edit-menu*
     *menu-bar-final-items*
     *menu-bar-items-function*
     *menu-bar-mode*
@@ -574,7 +584,13 @@
     *minor-mode-alist*
     *minor-mode-list*
     *minor-mode-map-alist*
+    *mode-line-default-help-echo*
     *mode-line-format*
+    *mode-line-percent-position*
+    *mode-line-position*
+    *mode-line-position-column-format*
+    *mode-line-position-column-line-format*
+    *mode-line-position-line-format*
     *mode-line-window*
     *mode-require-final-newline*
     *mouse-1-click-follows-link*
@@ -583,6 +599,7 @@
     *mouse-buffer-menu-mode-groups*
     *mouse-buffer-menu-mode-mult*
     *mouse-event-keys*
+    *mouse-fixup-help-message-function*
     *mouse-scroll-delay*
     *mouse-scroll-min-lines*
     *next-error-found-function*
@@ -615,6 +632,7 @@
     *pending-undo-list*
     *point-before-last-command-or-undo*
     *point-marker-function*
+    *popup-menu-function*
     *post-self-insert-hook*
     *pre-command-hook*
     *prefix-cu*
@@ -650,11 +668,14 @@
     *redisplay-in-progress*
     *region-beginning-function*
     *region-end-function*
+    *rename-uniquely-function*
     *replace-buffer-in-windows-function*
     *require-final-newline*
     *resize-mini-windows*
     *run-hooks-function*
     *save-silently*
+    *save-some-buffers--switch-window-callback*
+    *save-some-buffers-default-predicate*
     *saved-region-selection*
     *scheme-mit-dialect*
     *scratch-buffer-name*
@@ -676,10 +697,14 @@
     *sentence-end-double-space*
     *sentence-end-without-period*
     *sentence-end-without-space*
+    *set-buffer-file-coding-system-command*
+    *set-buffer-file-coding-system-function*
     *set-buffer-major-mode-function*
     *set-marker-function*
     *set-marker-insertion-type-function*
     *set-message-function*
+    *show-help-echo-function*
+    *show-help-function*
     *show-trailing-whitespace*
     *special-event-map*
     *split-string-default-separators*
@@ -766,6 +791,15 @@
     *tool-bar-lines-default-function*
     *tool-bar-position*
     *tool-bar-system-style-function*
+    *tooltip-delay*
+    *tooltip-frame-parameters*
+    *tooltip-functions*
+    *tooltip-hide-delay*
+    *tooltip-recent-seconds*
+    *tooltip-resize-echo-area*
+    *tooltip-short-delay*
+    *tooltip-x-offset*
+    *tooltip-y-offset*
     *track-eol*
     *transient-mark-mode*
     *transpose-sexps-function*
@@ -801,6 +835,7 @@
     *words-include-escapes*
     *x-pre-popup-menu-hook*
     *x-select-request-type*
+    *x-show-tooltip-timeout*
     *yank-pop-change-selection*
     <display>
     <glyph-matrix>
@@ -903,6 +938,7 @@
     beginning-of-visual-line
     binary-overwrite-mode
     binary-overwrite-mode-hook
+    bindings--sort-menu-keymap
     blink-cursor--rescan-frames
     blink-cursor--should-blink
     blink-cursor-check
@@ -1065,6 +1101,7 @@
     clear-frame-area!
     clear-glyph-matrix
     clear-glyph-matrix-row
+    clear-help-echo!
     clear-minibuffer-message
     clear-mouse-face!
     clear-prefix!
@@ -1078,6 +1115,7 @@
     coding-system-base-name
     coding-system-bom
     coding-system-change-eol-conversion
+    coding-system-change-text-conversion
     coding-system-doc-string
     coding-system-eol-type
     coding-system-for-file
@@ -1088,10 +1126,13 @@
     coding-system-name
     coding-system-p
     coding-system-raw?
+    coding-system-type
     coding-system?
     coding-write-char
     color-dark-p
     color-values-from-color-spec
+    column-number-mode
+    column-number-mode-variable
     column-width
     combine-windows
     command-doc-string
@@ -1284,6 +1325,7 @@
     defface
     define-alias
     define-charset
+    define-coding-system-alias
     define-command
     define-custom
     define-derived-mode
@@ -1332,6 +1374,8 @@
     derived-mode-syntax-table-name
     describe-bindings
     describe-buffer-bindings
+    describe-coding-system
+    describe-current-coding-system
     describe-function
     describe-function-1
     describe-key
@@ -1339,6 +1383,11 @@
     describe-map
     describe-map--align-section
     describe-map--fill-columns
+    describe-minor-mode
+    describe-minor-mode-completion-table-for-indicator
+    describe-minor-mode-completion-table-for-symbol
+    describe-minor-mode-from-indicator
+    describe-minor-mode-from-symbol
     describe-mode
     describe-mode--minor-modes
     describe-symbol
@@ -1459,6 +1508,7 @@
     display-draw-vertical-border
     display-font-families
     display-graphic-p
+    display-hide-tip
     display-images-p
     display-menu-bar
     display-mouse-absolute-pixel-position
@@ -1473,6 +1523,7 @@
     display-set-mouse-pixel-position
     display-set-size!
     display-set-window-scroll-bar
+    display-show-tip
     display-startup-screen
     display-supports-face-attributes-p
     display-text-width
@@ -1899,6 +1950,8 @@
     help--window-setup
     help-buffer
     help-char
+    help-echo-at
+    help-echo-substitute-command-keys
     help-event-list
     help-fns--ensure-empty-line
     help-fns--insert-bindings
@@ -1908,6 +1961,7 @@
     help-fns-function-name
     help-for-help
     help-for-help-buffer-name
+    help-key
     help-key-description
     help-map
     help-mode
@@ -2161,6 +2215,7 @@
     lazy-highlight-cleanup
     left-char
     line-beginning-position
+    line-column-mode-menu
     line-display-offsets
     line-display-rows
     line-display-texts
@@ -2174,6 +2229,8 @@
     line-move-visual
     line-next-start
     line-number-at-pos
+    line-number-mode
+    line-number-mode-variable
     line-texts-column
     line-texts-glyphs
     line-texts-offsets
@@ -2253,6 +2310,7 @@
     lookup-face
     lookup-key
     lookup-keymaps
+    lookup-minor-mode-from-indicator
     ls-lisp--insert-directory
     ls-lisp--sanitize-switches
     ls-lisp-classify
@@ -2290,6 +2348,7 @@
     make-local-variable
     make-marker
     make-menu-state
+    make-mode-line-mouse-map
     make-overlay
     make-scan-error
     make-separator-line
@@ -2423,12 +2482,48 @@
     minibufferp
     minor-mode-indicator-value
     minor-mode-lighter
+    minor-mode-menu-from-indicator
+    minor-mode-variable-true?
     modal-lookup-state-key-index
     modal-lookup-state-keymaps
     modal-lookup-state-step!
     modal-lookup-state-type?
+    mode-line-buffer-identification
+    mode-line-buffer-identification-map
+    mode-line-change-eol
+    mode-line-change-eol-map
+    mode-line-coding-system-describe
+    mode-line-coding-system-map
+    mode-line-coding-system-set
+    mode-line-column-line-number-mode-map
+    mode-line-default-help-echo
+    mode-line-line-column-menu
+    mode-line-major-mode-help-echo
+    mode-line-major-mode-keymap
+    mode-line-minor-mode-help
+    mode-line-minor-mode-help-echo
+    mode-line-minor-mode-keymap
+    mode-line-minor-mode-menu
     mode-line-minor-modes
+    mode-line-mode-menu
+    mode-line-modified
+    mode-line-modified-help-echo
+    mode-line-modified-map
+    mode-line-mule-info-help-echo
+    mode-line-narrowed
+    mode-line-next-buffer
+    mode-line-position--column-line-properties
+    mode-line-previous-buffer
+    mode-line-read-only-help-echo
+    mode-line-read-only-map
+    mode-line-remote
+    mode-line-remote-help-echo
     mode-line-string
+    mode-line-symbol-value
+    mode-line-toggle-modified
+    mode-line-toggle-read-only
+    mode-line-widen
+    mode-line-widen-map
     mode-line-window-selected-p
     mode-name
     modify-all-frames-parameters
@@ -2449,10 +2544,16 @@
     mouse-drag-track
     mouse-event-areas-with-no-buffer-positions
     mouse-face-at
+    mouse-fixup-help-message
     mouse-highlight
     mouse-key?
+    mouse-menu-major-mode-map
+    mouse-menu-major-mode-menu
+    mouse-menu-non-singleton
     mouse-minibuffer-check
+    mouse-minor-mode-menu
     mouse-on-link-p
+    mouse-pixel-position
     mouse-position
     mouse-position-in-root-frame
     mouse-posn-property
@@ -2584,6 +2685,7 @@
     parse-solitary-modifier
     parse-tool-bar-item
     pending-uarg
+    percent99
     perform-replace
     place-undo-boundary!
     plist-get
@@ -2608,6 +2710,7 @@
     posn-area
     posn-at-point
     posn-at-x-y
+    posn-object
     posn-point
     posn-set-point
     posn-string
@@ -2634,6 +2737,7 @@
     previous-single-char-property-change
     previous-single-property-change
     primitive-undo
+    print-coding-system-briefly
     prog--text-at-point-or-region-p
     prog--text-at-point-p
     prog-fill-reindent-defun
@@ -2645,6 +2749,7 @@
     prog-mode-hook
     prog-mode-map
     propertize
+    propertized-buffer-identification
     provide-theme
     provided-mode-derived-p
     push-left-right-boundary
@@ -2773,6 +2878,7 @@
     run-buffer-list-update-hook!
     run-command
     run-hook-with-args
+    run-hook-with-args-until-failure
     run-hook-with-args-until-success
     run-hooks
     run-mode-hooks
@@ -2781,8 +2887,8 @@
     run-with-idle-timer
     run-with-timer
     sanitize-char-width
-    save-answer-char->decision
     save-buffer
+    save-buffers-kill-emacs
     save-buffers-kill-terminal
     save-current-buffer
     save-excursion
@@ -2790,6 +2896,9 @@
     save-restriction
     save-selected-window
     save-some-buffers
+    save-some-buffers-action-alist
+    save-some-buffers-functions
+    save-window-excursion
     scan-error-end
     scan-error-message
     scan-error-start
@@ -3111,6 +3220,7 @@
     set-visited-file-name
     set-window-buffer!
     set-window-buffer-start-and-point
+    set-window-combination-axis!
     set-window-combination-limit
     set-window-configuration
     set-window-current-matrix!
@@ -3133,6 +3243,7 @@
     set-windows-or-buffers-changed!
     shell-quote-argument
     show-command
+    show-help-echo
     show-prefix-echo!
     show-text-editor
     shrink-mini-window
@@ -3144,6 +3255,8 @@
     single-menu-item
     sinherit
     sit-for
+    size-indication-mode
+    size-indication-mode-variable
     skip-chars-backward
     skip-chars-forward
     skip-line-prefix
@@ -3181,12 +3294,14 @@
     string-collate-lessp
     string-empty-p
     string-equal
+    string-help-echo-at
     string-intervals
     string-lessp
     string-match
     string-match-p
     string-pixel-width
     string-prefix-p
+    string-property-run-at
     string-replace
     string-search-forward
     string-suffix-p
@@ -3494,6 +3609,7 @@
     texts-width
     time-equal-p
     time-less-p
+    time-since
     time-subtract
     timer-args
     timer-armed?
@@ -3542,6 +3658,25 @@
     tool-bar-separator-image-expression
     tool-bar-setup
     tool-bar-style
+    tooltip-cancel-delayed-tip
+    tooltip-delay
+    tooltip-event-buffer
+    tooltip-expr-to-print
+    tooltip-help-message
+    tooltip-help-tips
+    tooltip-hide
+    tooltip-hide-time
+    tooltip-identifier-from-point
+    tooltip-last-mouse-motion-event
+    tooltip-mode
+    tooltip-mode-variable
+    tooltip-previous-message
+    tooltip-show
+    tooltip-show-help
+    tooltip-show-help-non-mode
+    tooltip-start-delayed-tip
+    tooltip-timeout
+    tooltip-timeout-id
     track-mouse
     transient-mark-mode
     transpose-chars
@@ -3692,6 +3827,7 @@
     window-child
     window-child-count
     window-children
+    window-combination-axis
     window-combination-limit
     window-combination-p
     window-combined-p
@@ -3805,6 +3941,7 @@
     window-sizable-p
     window-size
     window-size-fixed-p
+    window-stacked?
     window-start
     window-start-at-line-beg
     window-state-buffers
@@ -3851,8 +3988,10 @@
     write-glyphs!
     x-file-dialog
     x-get-clipboard
+    x-hide-tip
     x-popup-menu
     x-popup-menu-1
+    x-show-tip
     xselect--encode-string
     xselect--int-to-cons
     xselect-convert-to-atom
@@ -3866,8 +4005,12 @@
     xselect-convert-to-string
     xselect-convert-to-targets
     y-or-n-p
+    y-or-n-p-history-variable
+    y-or-n-p-use-read-key
     yank
     yank-pop
     yes-or-no-p
+    yes-or-no-p-history
+    yes-or-no-prompt
     zap-to-char
     ))

@@ -694,7 +694,9 @@
           (let loop ((maps keymap) (retval #f))
             (cond
              ((null? maps) retval)
-             ((not (keymap-type? (car maps))) (loop (cdr maps) retval))
+             ;; An element is a keymap *or* a keymap list - the C's
+             ;; `get_keymap` answers both (`keymap.c:197`).
+             ((not (keymapp (car maps))) (loop (cdr maps) retval))
              (else
               (let ((val (access-keymap (car maps) event noinherit)))
                 (cond

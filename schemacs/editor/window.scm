@@ -224,7 +224,7 @@
    temp-buffer-window-show
    window-live-p
    with-current-buffer-window
-   with-selected-window save-selected-window
+   with-selected-window save-selected-window save-window-excursion
    window-position
    window-hscroll
    set-window-hscroll!
@@ -2649,6 +2649,29 @@ by this function.  This happens in an interactive call."
              (lambda () #f)
              (lambda () body ...)
              (lambda () (select-window saved-window)))))))
+
+    (define-syntax save-window-excursion
+      ;; GNU Emacs's `save-window-excursion' (`subr.el:5304'):
+      ;; "Execute BODY, then restore previous window configuration.
+      ;; This macro saves the window configuration on the selected frame,
+      ;; executes BODY, then calls `set-window-configuration' to restore
+      ;; the saved window configuration.  The return value is the last
+      ;; form in BODY.  The window configuration is also restored if BODY
+      ;; exits nonlocally."
+      ;;
+      ;; **Placement departure**: Emacs has this in `subr.el`, but a
+      ;; `subr.scm` macro cannot reach `current-window-configuration` -
+      ;; `(schemacs editor window)` is above it - so the macro lives
+      ;; beside the two functions it names, as `save-selected-window`
+      ;; does. The C's `unwind-protect` is the tree's `dynamic-wind`.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((save-window-excursion body ...)
+         (let ((wconfig (current-window-configuration)))
+           (dynamic-wind
+             (lambda () #f)
+             (lambda () body ...)
+             (lambda () (set-window-configuration wconfig)))))))
 
     (define (quit-restore-window window bury-or-kill)
       ;; GNU Emacs's `quit-restore-window' (window.el): "Deal with

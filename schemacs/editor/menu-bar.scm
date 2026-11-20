@@ -64,7 +64,7 @@
     ;; The Buffers menu rebuilds its keymap in place, so the clearing is
     ;; here: `hash-clear!` is Guile's, and the order list is the keymap's
     ;; own export.
-    (only (guile) format filter hash-clear! sort)
+    (only (guile) caddr format filter hash-clear! sort)
     ;; the debug guard's report, and `display` (not `(scheme base)`'s)
     (only (scheme write) display)
     (only (schemacs editor character) kbd)
@@ -157,7 +157,14 @@
     (only (schemacs editor subr) assq-delete-all)
     (only (schemacs editor marker) marker-position)
     ;; "Menu Bar mode disabled ..." - `message` is `editfns.c`'s.
-    (only (schemacs editor editfns) message))
+    (only (schemacs editor editfns) message)
+    ;; The two seams `mouse.scm` leaves for this library: the popup a
+    ;; mode-line menu is shown with, and the Edit menu the major-mode
+    ;; menu falls back to. Imported here - and not `menu-bar` there -
+    ;; because `menu-bar` imports `isearch` -> `help-fns` -> `help` ->
+    ;; `mouse`, so the dependency runs this way only.
+    (only (schemacs editor mouse)
+          *popup-menu-function* *menu-bar-edit-menu*))
 
   (export
    menu-bar-separator
@@ -1158,9 +1165,17 @@ created in the future."
        ;; Some other value.
        (else position)))
 
-    (define (popup-menu menu position prefix from-menu-bar)
-      ;; GNU Emacs's `popup-menu` (`menu-bar.el:2690`): "Popup MENU and
+    (define (popup-menu menu . rest)
+      ;; GNU Emacs's `popup-menu` (`menu-bar.el:2682`): "Popup MENU and
       ;; call the selected option."
+      ;;
+      ;; **The three optional arguments are a rest parameter**, this
+      ;; tree's spelling of Elisp's `&optional position prefix
+      ;; from-menu-bar` (a command's interactive expression supplies a
+      ;; fixed parameter's value, but this one is called from Lisp too).
+      ;; It used to take all four as *required* parameters, and the
+      ;; mode-line menus - whose seam calls `(popup-menu menu event)` -
+      ;; raised "Wrong number of arguments" on every press.
       ;;
       ;; **This is what a menu-bar item binds**, so it is where a click
       ;; on the bar becomes a command: `x-popup-menu` shows the menu and
@@ -1170,6 +1185,12 @@ created in the future."
       ;; shows that one next - which is how a nested submenu works on a
       ;; TTY, `tty_menu_show` drawing one menu at a time.
       ;;--------------------------------------------------------------
+      (let ((position (and (pair? rest) (car rest)))
+            (prefix (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+            (from-menu-bar (and (pair? rest)
+                                (pair? (cdr rest))
+                                (pair? (cddr rest))
+                                (caddr rest))))
       (let ((map menu)
             (frame (selected-frame))
             (event #f)
@@ -1265,7 +1286,7 @@ created in the future."
                       ;; arguments - it is the tree's `(lambda ()
                       ;; (interactive) ...)`
                       (cmd))))))))
-        #f))
+        #f)))
 
     (define-command (menu-bar-open . rest)
       "Start key navigation of the menu bar in FRAME.
@@ -1333,4 +1354,10 @@ menu-bar menu to be dropped down."
     ;; *copying* keys the global map has bound, and F10's own binding is
     ;; one of the keys it copies: built before that line, F10 inside a
     ;; menu would not pop it down.
-    ))
+
+    ;; `mouse.el`'s mode-line menus are shown by `popup-menu` and fall
+    ;; back to `menu-bar-edit-menu` - both defined above, both above the
+    ;; library that needs them. `mouse.scm` reads them through parameters
+    ;; (the seam rule); this installs them.
+    (*popup-menu-function* popup-menu)
+    (*menu-bar-edit-menu* menu-bar-edit-menu)))

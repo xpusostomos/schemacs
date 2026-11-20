@@ -1547,7 +1547,13 @@
                  (pt:pgtk-popup-build-tree 0 "A Title")))))
 
 (test-equal "the title itself is an unselectable plain item"
-  '(#t none)
+  ;; **`#f`, not `#t`.** The C builds the title with an *enabled* widget
+  ;; value (`make_widget_value (title, NULL, true, Qnil)`) and only a
+  ;; GTK/NS popup with a `hide` property says otherwise - but a GTK
+  ;; menu item with no `call_data` is the one Emacs draws as a
+  ;; *disabled* heading, which is what real Emacs shows (measured), so
+  ;; the tree is built with the title insensitive.
+  '(#f none)
   (begin
     (menu:list-of-panes '(("Solo" ("Only" . only))))
     (let ((title (menu:widget-value-contents

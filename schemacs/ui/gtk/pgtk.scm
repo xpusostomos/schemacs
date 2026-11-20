@@ -52,6 +52,9 @@
     (only (srfi srfi-1) alist-delete iota make-list)
     (only (guile) ash logand logior lognot inexact->exact round
           get-internal-real-time internal-time-units-per-second)
+    ;; The tooltip's hide timer is an editor timer, as it is in Emacs's
+    ;; Gtk build (`run-at-time` in `Fx_show_tip`, `pgtkfns.c:3319`).
+    (only (schemacs editor timer) run-at-time cancel-timer)
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
     (cairo)
@@ -171,6 +174,13 @@
           radio-menu-item:join-group
           container:remove container:get-children
           label:set-text widget:set-sensitive widget:set-tooltip-text
+          ;; The tooltip: `qttip_cb`'s custom label and the query that
+          ;; makes Gtk show it now rather than on its own next hover
+          ;; query - `xg_show_tooltip` relies on Gtk's own schedule,
+          ;; which may already have run before Emacs decided.
+          label:set-line-wrap label:set-xalign
+          widget:set-has-tooltip widget:trigger-tooltip-query
+          tooltip:set-custom
           widget:set-halign widget:set-valign orientable:set-orientation
           ;;----------------------------------------------------------------
           ;; The tool bar's widgets - gtkutil.c's `xg_create_tool_bar`
@@ -220,6 +230,10 @@
           ;; a private generic too, so `raise-frame` on a Gtk frame was a
           ;; no-op.
           display-raise-frame
+          ;; `x-show-tip`/`x-hide-tip`'s display half - GNU Emacs's
+          ;; `xg_show_tooltip`/`xg_hide_tooltip` (`gtkutil.c:997`, the
+          ;; HAVE_PGTK arm).
+          display-show-tip display-hide-tip
           ;; the file chooser the menu's Open and the tool bar's Open
           ;; button reach through `read-file-name`
           x-file-dialog
@@ -1230,6 +1244,17 @@
       ;; `f->output_data.pgtk->current_cursor`: what the widget's cursor
       ;; currently is, so an unchanged shape costs nothing.
       (current-cursor #:init-value #f #:accessor pgtk-current-cursor)
+      ;; The tooltip: the C's `tip_timer` and whether one is showing.
+      ;; `pgtk_hide_tip` cancels the timer first (`pgtkfns.c:2963`) and
+      ;; answers "was one open" from the widget, which has no such state
+      ;; to read here, so it is kept beside it.
+      (tip-timer #:init-value #f #:accessor pgtk-tip-timer)
+      (tip-active? #:init-value #f #:accessor pgtk-tip-active?)
+      ;; The custom label `qttip_cb` hands Gtk's tooltip object (one per
+      ;; display, pinned with `g_object_ref`) and the text the next query
+      ;; should show.
+      (tip-label #:init-value #f #:accessor pgtk-tip-label)
+      (tip-text #:init-value "" #:accessor pgtk-tip-text)
       ;; The scroll bars this display has made: `((WINDOW . BAR) ...)`,
       ;; where a BAR is a vector `#(WINDOW BOX WIDGET ADJUSTMENT
       ;; DRAGGING)`. GNU Emacs's `struct x_output` has no such table: its
@@ -1990,6 +2015,15 @@
                       #f))
                 #f))))
 
+    (define (pgtk-allocated-pixels d)
+      ;; The frame's size in pixels - the widget's allocation, or the
+      ;; grid's at the current font for a display with no widget (a test
+      ;; display), the same fallback `pgtk-ensure-surface!` uses.
+      ;;--------------------------------------------------------------
+      (or (pgtk-allocation d)
+          (cons (* (pgtk-columns d) *cell-width*)
+                (* (pgtk-rows d) *cell-height*))))
+
     (define (pgtk-cells d)
       ;; The grid, from the allocation. Falls back to what is remembered
       ;; when there is no window yet, which is what a test sees.
@@ -2455,6 +2489,118 @@
           (set! (pgtk-current-cursor d) cursor))
         cursor))
 
+    ;;----------------------------------------------------------------
+    ;; Tooltips - `qttip_cb` and `xg_prepare_tooltip` (`gtkutil.c:837`)
+    ;;----------------------------------------------------------------
+    ;;
+    ;; Emacs's plain Gtk build sets a *system* tooltip's text
+    ;; (`gtk_widget_set_tooltip_text`, `gtkutil.c:997`) and lets Gtk draw
+    ;; it. That is one call, but Gtk's default tooltip label wraps its
+    ;; text, and a wrapped tooltip is sized by Gtk before the wrap is
+    ;; measured - a multi-line help text then shows with its last line
+    ;; cut off. Emacs met this long before: its non-PGTK Gtk path builds
+    ;; its own label for exactly this reason -
+    ;;
+    ;;   "Change stupid Gtk+ default line wrapping."
+    ;;   (gtk_label_set_line_wrap (GTK_LABEL (x->ttip_lbl), FALSE))
+    ;;
+    ;; - and hands it to the tooltip object with `gtk_tooltip_set_custom`
+    ;; (`qttip_cb`, `:837`-`:882`; prepared in `xg_prepare_tooltip`,
+    ;; `:890`). That is what this is: Gtk still owns the popup and its
+    ;; placement - which is the only way a tooltip positions correctly on
+    ;; Wayland, where a plain window cannot move itself - but the *text*
+    ;; is our label, unwrapped and measured in full.
+    ;;
+    ;; **`gtk_widget_trigger_tooltip_query` is called after the text is
+    ;; set**, which Emacs does not do. Gtk runs its own hover timer and
+    ;; queries only while the pointer moves; Emacs decides at its 0.7s
+    ;; delay, after the pointer has usually stopped, so without the
+    ;; trigger the tooltip would wait for the next pixel of movement.
+
+    (define (pgtk-cancel-tip-timer! d)
+      (when (pgtk-tip-timer d)
+        (cancel-timer (pgtk-tip-timer d))
+        (set! (pgtk-tip-timer d) #f)))
+
+    (define g-object-ref
+      ;; `g_object_ref`, the same call Emacs makes on its tooltip label
+      ;; (`qttip_cb`, `gtkutil.c:861`). **The label must outlive Gtk's
+      ;; tooltip window.** Gtk parents the custom widget into that window
+      ;; and drops its reference when the window goes; guile-gi's proxy
+      ;; is not a strong reference of its own, so without this the label
+      ;; is freed underneath the proxy and the next query raises
+      ;; `gtk_label_set_text: assertion GTK_IS_LABEL (label) failed` -
+      ;; measured, and it took the editor with it. guile-gi exposes no
+      ;; ref, so the C call is made the way the Pango text already is.
+      ;; One ref per display is never dropped, as Emacs never drops its
+      ;; own.
+      (pango-foreign-fn "libgobject-2.0.so.0" "g_object_ref" '* (list '*)))
+
+    (define (pgtk-ensure-tip-label! d)
+      ;; The label `qttip_cb` makes on the first tooltip: wrapping off
+      ;; ("Change stupid Gtk+ default line wrapping"), left-aligned (Gtk
+      ;; centres a multi-line label otherwise), pinned with a real
+      ;; `g_object_ref`, and handed to Gtk's tooltip object with
+      ;; `gtk_tooltip_set_custom` from the `query-tooltip` handler. Gtk
+      ;; then sizes the popup from the label's preferred size, which is
+      ;; why a multi-line help is not clipped.
+      ;;
+      ;; The handler is connected to the drawing area *and* the outer
+      ;; window. Gtk emits `query-tooltip` on the widget under the
+      ;; pointer, walking up the parent chain until one with
+      ;; `has-tooltip` claims it: for text and the mode line that is the
+      ;; area (the deepest widget), and for anything beside it - a
+      ;; scroll bar in the overlay - the window.
+      ;;--------------------------------------------------------------
+      (or (pgtk-tip-label d)
+          (let ((label (make <GtkLabel>)))
+            (label:set-line-wrap label #f)
+            (label:set-xalign label 0.0)
+            (g-object-ref (pgtk-widget-pointer label))
+            (set! (pgtk-tip-label d) label)
+            (for-each
+             (lambda (widget)
+               (widget:set-has-tooltip widget #t)
+               (connect widget (make <signal> #:name "query-tooltip")
+                        (lambda (w x y keyboard-mode tooltip)
+                          (label:set-text label (or (pgtk-tip-text d) ""))
+                          (tooltip:set-custom tooltip label)
+                          ;; #t: "the tooltip is ready, show it".
+                          #t)))
+             (filter (lambda (w) w)
+                     (list (pgtk-area d) (pgtk-window d))))
+            label)))
+
+    (define-method (display-show-tip (d <pgtk-display>) frame string timeout)
+      (let ((win (pgtk-window d)))
+        (when win
+          (pgtk-cancel-tip-timer! d)
+          (pgtk-ensure-tip-label! d)
+          (set! (pgtk-tip-text d) string)
+          (widget:set-has-tooltip win #t)
+          (when (pgtk-area d) (widget:set-has-tooltip (pgtk-area d) #t))
+          (widget:trigger-tooltip-query win)
+          (set! (pgtk-tip-active? d) #t)
+          ;; "Let the tip disappear after timeout seconds."
+          (set! (pgtk-tip-timer d)
+                (run-at-time timeout #f
+                             (lambda () (display-hide-tip d))))
+          #t)))
+
+    (define-method (display-hide-tip (d <pgtk-display>))
+      (pgtk-cancel-tip-timer! d)
+      (let ((win (pgtk-window d))
+            (was-open? (pgtk-tip-active? d)))
+        (when win
+          (set! (pgtk-tip-text d) "")
+          ;; No widget under the pointer claims a tooltip any more; a
+          ;; query now is what makes Gtk take the open one down.
+          (widget:set-has-tooltip win #f)
+          (when (pgtk-area d) (widget:set-has-tooltip (pgtk-area d) #f))
+          (widget:trigger-tooltip-query win))
+        (set! (pgtk-tip-active? d) #f)
+        was-open?))
+
     (define-method (column-width (d <pgtk-display>)) 1)
     (define-method (line-height (d <pgtk-display>)) 1)
     (define-method (face-metrics (d <pgtk-display>) face-attrs)
@@ -2614,9 +2760,18 @@
                  cr (or (face-token-background token)
                         (colour->rgb (face-attribute 'default ':background))
                         (list 1.0 1.0 1.0)))
-          (cairo-rectangle cr (cell-x x) y
-                           (* *cell-width* width) *cell-height*)
-          (cairo-fill cr))))
+          (let* ((grid (car (pgtk-cells d)))
+                 (alloc (car (pgtk-allocated-pixels d)))
+                 ;; The leftover pixels of the last cell take the row's
+                 ;; face, as `fill_stretch_glyph` gives them to the last
+                 ;; glyph - the same rule as `%pgtk-write-run`.
+                 (rest (if (= (+ x width) grid)
+                           (- alloc (* *cell-width* grid))
+                           0)))
+            (cairo-rectangle cr (cell-x x) y
+                             (+ (* *cell-width* width) (max rest 0))
+                             *cell-height*)
+            (cairo-fill cr)))))
 
     (define-method (update-window-begin! (d <pgtk-display>)) #t)
     (define-method (update-window-end! (d <pgtk-display>)) #t)
@@ -2694,6 +2849,23 @@
                            (* *cell-width* (text-cells text))
                            *cell-height*)
           (cairo-fill cr)
+          ;; **The last cell of a row is stretched to the frame's pixel
+          ;; edge**, which is what GNU Emacs does with the final glyph of
+          ;; a row (`produce_stretch_glyph`/`fill_stretch_glyph`: the
+          ;; row's last glyph takes the leftover pixels so the mode line,
+          ;; the tab bar and the tab line reach the frame edge). The grid
+          ;; is `floor (pixels / cell width)` cells, so without this a
+          ;; strip narrower than one cell at the right keeps the frame's
+          ;; background - visible wherever the row's face has its own.
+          (let* ((grid (car (pgtk-cells d)))
+                 (alloc (car (pgtk-allocated-pixels d)))
+                 (rest (- alloc (* *cell-width* grid))))
+            (when (and (> rest 0)
+                       (= (+ x (text-cells text)) grid))
+              (cairo-rectangle cr (+ (cell-x x)
+                                     (* *cell-width* (text-cells text)))
+                               y rest *cell-height*)
+              (cairo-fill cr)))
           ;; An unspecified foreground is the *frame's* - the default
           ;; face's foreground, which is `FRAME_FOREGROUND_PIXEL` after
           ;; `realize_named_face` merged it in (`xfaces.c:6590`). Black
@@ -4455,7 +4627,17 @@
         (when title
           (let ((sep1 (make-widget-value "--" #f #f #f))
                 (sep2 (make-widget-value "--" #f #f #f))
-                (wv-title (make-widget-value title #f #t #f)))
+                ;; **The title is insensitive.** The C's
+                ;; `make_widget_value (title, NULL, true, Qnil)`
+                ;; (`pgtkmenu.c:759`) makes it *enabled*, but it gets no
+                ;; activate handler (`xg_create_one_menuitem` connects
+                ;; one only for `item->call_data`): a click on it closes
+                ;; the menu with no selection, which `pgtk_menu_show`
+                ;; turns into a Cancel - `Quit` in the echo area - and a
+                ;; real Emacs on this desktop draws the title greyed and
+                ;; does not let it be chosen. Insensitive is that
+                ;; behaviour on this toolkit.
+                (wv-title (make-widget-value title #f #f #f)))
             (set!widget-value-next sep2 (widget-value-contents root))
             (set!widget-value-next sep1 sep2)
             (set!widget-value-button-type wv-title 'none)
@@ -4601,8 +4783,15 @@
     (define-method (menu-show (d <pgtk-display>) frame x y flags title)
       ;; GNU Emacs's `terminal->menu_show_hook` for a Gtk frame:
       ;; `pgtk_menu_show` (`pgtkmenu.c:588`).
+      ;;
+      ;; **X and Y arrive in cells and Gtk wants pixels.** The display
+      ;; interface's coordinates are the renderer's - one per cell - and
+      ;; `gtk_menu_popup_at_rect` places its rectangle in *pixels*, so a
+      ;; menu asked for at the mode line went to the top-left of the
+      ;; screen (40 cells asked as 40 pixels). The cell-to-pixel mapping
+      ;; is the same `cell-x`/`cell-y` the renderer draws with.
       ;;--------------------------------------------------------------
-      (pgtk-menu-show d frame x y flags title))
+      (pgtk-menu-show d frame (cell-x x) (cell-y y) flags title))
 
     (define (pgtk-menu-selection! d call-data)
       ;; xmenu.c's `menubar_selection_callback` (`:794`): the clicked
@@ -5531,7 +5720,29 @@
             (set! bar (pgtk-make-scroll-bar d window))
             (set! (pgtk-scroll-bars d)
                   (cons (cons window bar) (pgtk-scroll-bars d))))
-          (pgtk-update-scroll-bar-pos d bar x y width height)
+          ;; **A right-hand bar is flush with the frame's pixel edge.**
+          ;; GNU Emacs puts it at `WINDOW_SCROLL_BAR_AREA_X (w) =
+          ;; WINDOW_BOX_RIGHT_EDGE_X` - the text box's *pixel* right edge
+          ;; - and gives it its configured pixel width
+          ;; (`pgtk_set_vertical_scroll_bar`, `pgtkterm.c:4248`), so its
+          ;; right edge is the window's pixel right edge whatever the
+          ;; columns divide into. The renderer hands over a column
+          ;; edge; when that edge is the frame's rightmost cell and the
+          ;; frame's pixels do not divide into cells exactly, the bar
+          ;; would otherwise stop several pixels short and leave the
+          ;; frame background showing to its right. The leftover pixels
+          ;; go to the text box's right edge instead - Emacs's right
+          ;; fringe, which this tree does not have - which is why the
+          ;; bar moves right by them and the gap is between the text and
+          ;; the bar, not beyond it.
+          (let* ((grid (* *cell-width* (car (pgtk-cells d))))
+                 (alloc (car (pgtk-allocated-pixels d)))
+                 (rest (if (and (eq? side 'right)
+                                (> alloc grid)
+                                (= (+ x width) grid))
+                           (- alloc grid)
+                           0)))
+            (pgtk-update-scroll-bar-pos d bar (+ x rest) y width height))
           (pgtk-set-scroll-bar-thumb d bar portion position whole)
           #t))))
 
