@@ -10,9 +10,12 @@
        *current-frame* *current-buffer* *default-frame-alist*
        new-frame frame-selected-window
        frame-change-stamp frame-window-change
-       set-window-buffer! select-window selected-frame)
+       set-window-buffer! select-window selected-frame
+       window-parent window-combination-axis window-combined-p
+       window-width window-left)
  (only (schemacs editor window)
        split-window delete-window delete-other-windows
+       adjust-window-trailing-edge
        current-window-configuration set-window-configuration
        *window-configuration-change-hook*
        run-window-change-functions)
@@ -182,5 +185,48 @@
                 (frame-window-change frame)
                 after-first
                 (- (frame-change-stamp frame) before)))))))
+
+
+;;----------------------------------------------------------------
+;; A combination's axis is stored, not guessed
+;;----------------------------------------------------------------
+;; Emacs keeps it in `w->vchild' / `w->hchild' and `WINDOW_VERTICAL_COMBINATION_P`
+;; reads that field. This tree inferred it from the children's
+;; rectangles, which a combination down to *one* child cannot answer -
+;; and a session that had one (a drag on the vertical line) then treated
+;; it as horizontal and tried to resize a frame-wide window: "Failed
+;; adjusting window". The axis is stored now, set by the split that makes
+;; the combination.
+(test-begin "schemacs_editor_window_combination_axis")
+
+(let* ((frame (fresh-frame))
+       (a (frame-selected-window frame))
+       (b (split-window a #f 'below)))
+  (test-equal "a split below makes a vertical combination"
+              'vertical (window-combination-axis (window-parent a)))
+  (test-equal "the upper window is in a vertical combination"
+              #t (window-combined-p a))
+  (test-equal "and not in a horizontal one"
+              #f (window-combined-p a 'horizontal))
+  (let* ((b2 (split-window b #f 'right))
+         (parent (window-parent b)))
+    (test-equal "a split on the right makes a horizontal combination"
+                'horizontal (window-combination-axis parent))
+    (test-equal "the outer combination is still vertical"
+                'vertical (window-combination-axis (window-parent a)))
+    ;; A horizontal drag on the lower pair changes the pair's widths and
+    ;; leaves the frame-wide window alone.
+    (let ((aw (window-width a))
+          (w1 (window-width b))
+          (w2 (window-width b2)))
+      (adjust-window-trailing-edge b 1 #t #f)
+      (test-equal "the pair's left window widened by one"
+                  (+ w1 1) (window-width b))
+      (test-equal "its sibling gave up one"
+                  (- w2 1) (window-width b2))
+      (test-equal "the window above the pair keeps the frame's width"
+                  aw (window-width a)))))
+
+(test-end "schemacs_editor_window_combination_axis")
 
 (test-end "schemacs_editor_window")

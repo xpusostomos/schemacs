@@ -83,6 +83,7 @@
    ;; specs
    custom-declare-face
    defface
+   face-differs-from-default-p
    face-spec-choose
    face-spec-recalc
    face-spec-reset-face
@@ -91,6 +92,7 @@
    face-spec-set-match-display
    ;; what the display can do, which the specs are chosen against
    display-supports-face-attributes-p
+   display-color-p
    *display-color-cells*
    *display-type*
    *face-attribute-name-alist*
@@ -319,6 +321,42 @@
               (face-attribute-merged-with attribute value inherit)
               value))))
 
+    (define (face-differs-from-default-p face . args)
+      ;; GNU Emacs's `face-differs-from-default-p' (`faces.el:304'):
+      ;; "Return non-nil if FACE displays differently from the default
+      ;; face."
+      ;;
+      ;; The C's walk is Emacs's: every attribute but `:inherit` and
+      ;; `:extend` (a difference in either teaches nothing about how the
+      ;; face looks), read with INHERIT t, and the first one that is
+      ;; neither `unspecified` nor unsupported by the display is the
+      ;; answer. `occur-1` asks it of `list-matching-lines-prefix-face`.
+      ;;--------------------------------------------------------------
+      (let* ((frame (if (pair? args) (car args) #f))
+             (attrs (let loop ((rest *face-attribute-name-alist*)
+                               (acc '()))
+                      (cond ((null? rest) (reverse acc))
+                            ((or (eq? (car (car rest)) ':inherit)
+                                 (eq? (car (car rest)) ':extend))
+                             (loop (cdr rest) acc))
+                            (else (loop (cdr rest)
+                                        (cons (car (car rest)) acc))))))
+             (differs #f))
+        (let loop ((rest attrs))
+          (cond (differs differs)
+                ((null? rest) #f)
+                (else
+                 (let* ((attr (car rest))
+                        (attr-val (face-attribute face attr frame #t)))
+                   (when (and (not (eq? attr-val 'unspecified))
+                              ;; Emacs passes FRAME here too; this
+                              ;; tree's function takes the attributes
+                              ;; alone (there is one frame).
+                              (display-supports-face-attributes-p
+                               (list attr attr-val)))
+                     (set! differs attr))
+                   (loop (cdr rest))))))))
+
     (define (face-all-attributes face . args)
       ;; GNU Emacs's `face-all-attributes': every attribute of FACE as an
       ;; alist, in `face-attribute-name-alist' order.
@@ -354,6 +392,20 @@
       ;; through to its `(t ...)' branch on an 8-colour terminal.
       ;;--------------------------------------------------------------
       (make-parameter 8))
+
+    (define (display-color-p . args)
+      ;; GNU Emacs's `display-color-p` (`faces.el:1967`): "Return t if
+      ;; DISPLAY supports color." On a window-system frame that is
+      ;; `xw_display_color_p` - true for every Gtk visual - and on a
+      ;; terminal `tty_display_color_p`, which is "more than two colour
+      ;; cells" (`frame.scm`'s `display-type` tests the same number).
+      ;;
+      ;; **The DISPLAY argument is not carried**: the colour state here
+      ;; is a binding around the display being worked on
+      ;; (`*display-color-cells*`), and every caller - the tool bar's
+      ;; image chooser is the first - asks about that one.
+      ;;--------------------------------------------------------------
+      (> (*display-color-cells*) 2))
 
     (define *frame-background-mode*
       ;; GNU Emacs's `frame-background-mode': `light' or `dark', or #f
@@ -908,6 +960,10 @@ This inherits from the `mode-line` face.")
           '((((type tty)) :inherit mode-line-inactive))
           "Face used for vertical window dividers on ttys.")
 
+    (defface 'scroll-bar
+          '((#t #f))
+          "Basic face for the scroll bar colors under X.")
+
     (defface 'header-line
           '((default :inherit mode-line) (((type tty)) :inverse-video #f :underline #t) (((class color grayscale) (background light)) :background "grey90" :foreground "grey20" :box #f) (((class color grayscale) (background dark)) :background "grey20" :foreground "grey90" :box #f) (((class mono) (background light)) :background "white" :foreground "black" :inverse-video #f :box #f :underline #t) (((class mono) (background dark)) :background "black" :foreground "white" :inverse-video #f :box #f :underline #t))
           "Basic header-line face.")
@@ -1080,6 +1136,16 @@ This face is added by `substitute-command-keys', which see.")
     (defface 'highlight
           '((((class color) (min-colors 88) (background light)) :background "darkseagreen2") (((class color) (min-colors 88) (background dark)) :background "darkolivegreen") (((class color) (min-colors 16) (background light)) :background "darkseagreen2") (((class color) (min-colors 16) (background dark)) :background "darkolivegreen") (((class color) (min-colors 8)) :background "green" :foreground "black") (#t :inverse-video #t))
           "Basic face for highlighting.")
+
+    (defface 'tool-bar
+          '((default
+              :box (:line-width 1 :style released-button)
+              :foreground "black")
+            (((type x w32 ns pgtk android) (class color))
+             :background "grey75")
+            (((type x) (class mono))
+             :background "grey"))
+          "Basic tool-bar face.")
 
     (defface 'cursor
           '((((background light)) :background "black") (((background dark)) :background "white"))

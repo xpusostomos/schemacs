@@ -16,7 +16,14 @@
         (only (srfi 64) test-assert test-equal test-begin test-end)
         (only (guile) string-contains)
         (only (schemacs editor buffer) allocate-buffer *current-buffer*
-              with-current-buffer get-buffer-create)
+              current-buffer with-current-buffer get-buffer-create
+              buffer-read-only? text-editor-undo-list)
+        ;; The Paste form asks the selection backend, as Emacs's does.
+        (only (schemacs editor select) gui-backend-selection-exists-p)
+        ;; The undo state the Undo/Redo `:enable` forms read.
+        (only (schemacs editor simple) undo undo--last-change-was-undo-p
+              *last-command* *pending-undo-list* *kill-ring*)
+        (only (guile) eval)
         (only (schemacs editor frame) *current-frame* new-frame)
         (only (schemacs editor editfns) insert buffer-string)
         (only (schemacs editor help-fns)
@@ -124,5 +131,79 @@
               (buffer-string)
               "It can also be invoked from the menu: File → Save.")
              #t)))))
+
+;;------------------------------------------------------------------
+;; The Edit menu's `:enable` forms
+;;
+;; Undo, Redo and Paste are greyed exactly when Emacs greys them, and the
+;; *same* forms drive the tool bar's buttons (`tool-bar-add-item-from-menu`
+;; copies the menu item, `:enable` included). Undo and Redo are Emacs 31's
+;; own tests (`menu-bar.el:600`, `:611`) over the buffer's undo list; the
+;; states below are the ones a user moves through: nothing to undo in a
+;; fresh buffer, Undo live after an edit, Redo live and Undo spent once
+;; the run ends, and Undo live again (the redo records are what it would
+;; undo further) while the run is not the last command.
+;;------------------------------------------------------------------
+
+(define (edit-menu-enable-form key)
+  ;; The raw `:enable` form of KEY's item in the Edit menu, as the menu
+  ;; and the tool bar hold it.
+  ;;--------------------------------------------------------------
+  (let* ((map (keymap-lookup *default-keymap* (kbd "<menu-bar> <edit>")))
+         (item (hashv-ref (keymap-bindings map) (vector-ref (kbd key) 0))))
+    ;; The binding is `(menu-item NAME CMD PROPS...)`: walk from the
+    ;; command, one element at a time, and the `:enable` keyword is found
+    ;; in the car position with its form in the cadr.
+    (let loop ((rest (cddr item)))
+      (cond ((or (not (pair? rest)) (not (pair? (cdr rest)))) #f)
+            ((eq? (car rest) ':enable) (cadr rest))
+            (else (loop (cdr rest)))))))
+
+(define (edit-menu-enable key)
+  ;; The form evaluated where the menu evaluates it - the editor's own
+  ;; environment, which for this suite's purposes is the module the
+  ;; formulas' names are imported into.
+  ;;--------------------------------------------------------------
+  (eval (edit-menu-enable-form key) (current-module)))
+
+;; A fresh buffer, then an edit, then that edit undone - the same steps
+;; `emacs -Q --batch` answers for (measured: `#f #f`, `#t #f`, then
+;; `#f #t` with `last-command` still `undo`, and `#t #t` once it is not).
+(test-equal '(#f #f  #t #f  #f #t  #t #t)
+  (let* ((ed (allocate-buffer))
+         (frame (new-frame ed 24 80)))
+    (parameterize ((*current-frame* frame)
+                   (*current-buffer* ed)
+                   (*last-command* #f)
+                   (*pending-undo-list* #f))
+      (let ((fresh (list (edit-menu-enable "<undo>")
+                         (edit-menu-enable "<undo-redo>"))))
+        (with-current-buffer ed (insert "abc"))
+        (let ((edited (list (edit-menu-enable "<undo>")
+                            (edit-menu-enable "<undo-redo>"))))
+          ;; The undo command as the menu would run it, with the command
+          ;; loop's `last-command` promotion after it.
+          (with-current-buffer ed (undo 1))
+          (*last-command* undo)
+          (let ((undone (list (edit-menu-enable "<undo>")
+                              (edit-menu-enable "<undo-redo>"))))
+            (*last-command* #f)
+            (let ((settled (list (edit-menu-enable "<undo>")
+                                 (edit-menu-enable "<undo-redo>"))))
+              (append fresh edited undone settled))))))))
+
+;; Paste: Emacs's form is "read-only off, and either the clipboard has an
+;; owner or the kill ring is not empty" (`menu-bar.el:556`). The kill
+;; ring here is `()` when empty - true in Scheme - so the form tests
+;; `pair?`; a test display has no selection owner.
+(test-equal '(#f #t)
+  (let* ((ed (allocate-buffer))
+         (frame (new-frame ed 24 80)))
+    (parameterize ((*current-frame* frame)
+                   (*current-buffer* ed)
+                   (*kill-ring* '()))
+      (let ((empty-ring (edit-menu-enable "<paste>")))
+        (*kill-ring* (list "abc"))
+        (list empty-ring (edit-menu-enable "<paste>"))))))
 
 (test-end "schemacs_editor_menu_bar_menus")

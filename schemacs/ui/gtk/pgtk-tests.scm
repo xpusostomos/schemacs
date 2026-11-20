@@ -22,7 +22,7 @@
  (scheme char)
  (only (guile) setvbuf delete-file getpid)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (oop goops) make)
+ (only (oop goops) make compute-applicable-methods)
  (prefix (only (schemacs ui gtk pgtk)
                <pgtk-display> initialize-pgtk-faces! pgtk-write-screenshot!
                note-mouse-movement pgtk-mouse-moved
@@ -75,6 +75,11 @@
  ;; `tsdh-dark`'s mode-line names no foreground - the case below.
  (only (schemacs editor theme) load-theme disable-theme)
  (only (schemacs editor keyboard) dispatch-input-event)
+ ;; The display interface's own generics: the pointer queries must be
+ ;; methods *of these*, not of a generic privately made in `pgtk.scm`.
+ (only (schemacs editor dispnew)
+       display-mouse-absolute-pixel-position display-set-mouse-pixel-position
+       display-raise-frame)
  ;; The `menu_items` array the popup's tree is built from, and the
  ;; `widget_value` accessors the checks below read it back with.
  (prefix (only (schemacs editor menu)
@@ -1647,3 +1652,75 @@
       (list (reverse seen) (pt:pgtk-queue d)))))
 
 (test-end "schemacs_pgtk_queue")
+
+;;----------------------------------------------------------------
+;; Underline - pgtkterm.c's `pgtk_draw_glyph_string'
+;;----------------------------------------------------------------
+;; `realize-face-token` has interned `:underline` since the face table
+;; was written, and nothing drew it: a face carrying only an underline -
+;; the `underline` face itself, which `list-matching-lines-buffer-name-face`
+;; names, and every `header-line` - came out plain. GNU Emacs draws a
+;; one-pixel line at `(font descent + 1) / 2` below the baseline
+;; (`pgtkterm.c:2662-2714`), and the pixel is the only thing that can see
+;; it.
+
+(test-begin "schemacs_pgtk_underline")
+
+(define (render-with-face text face)
+  ;; A frame on a display whose TEXT carries FACE over its whole length,
+  ;; rendered by the real `render!'.
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed
+      (insert text)
+      (put-text-property 1 (1+ (string-length text)) 'face face ed))
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame))
+        (xd:render! frame)))
+    d))
+
+;; Any ink at all in CELL's first-row column? The text there is a
+;; *space*, so without an underline the whole column is background -
+;; which is what makes this a test of the underline and not of a glyph.
+(define (ink-at pixel cell)
+  (let loop ((y 0))
+    (cond ((>= y cell-h) #f)
+          ((not (equal? (pixel (+ (* cell cell-w) 4) y) white)) #t)
+          (else (loop (+ y 1))))))
+
+(define underlined (shot-of (render-with-face "a a" 'underline)))
+(define not-underlined (shot-of (render-with-face "a a" 'default)))
+
+(test-equal '(#t #f)
+  (list (ink-at underlined 1) (ink-at not-underlined 1)))
+
+(test-end "schemacs_pgtk_underline")
+
+;;----------------------------------------------------------------
+;; The pointer queries are methods of the display interface's generics
+;;----------------------------------------------------------------
+;; `define-method` on a name that has not been imported silently makes a
+;; fresh generic in the defining module, and nothing - the compiler, the
+;; loader, or a test that merely calls the function - says a word. That is
+;; what happened to these two: `pgtk.scm` defined methods on private
+;; generics, `frame.scm`'s `mouse-absolute-pixel-position` called the real
+;; one (default method `#f`), and the answer was `(0 . 0)`, so
+;; `mouse-drag-line` sampled zeros and dragging a mode line resized
+;; nothing. Ask the real generic which methods are applicable to a
+;; `<pgtk-display>`: two (this display's and the default), not one.
+(test-begin "schemacs_pgtk_pointer_queries")
+(let ((d (make pt:<pgtk-display>)))
+  (test-equal "the absolute pixel position dispatches to this display"
+              2 (length (compute-applicable-methods
+                         display-mouse-absolute-pixel-position (list d))))
+  ;; The setter takes four arguments, and applicability is decided for
+  ;; the arguments given: with one, no method applies at all and the
+  ;; answer is #f rather than the default's.
+  (test-equal "and the pointer warp does too"
+              2 (length (compute-applicable-methods
+                         display-set-mouse-pixel-position
+                         (list d #f 0 0))))
+  (test-equal "and raising the frame"
+              2 (length (compute-applicable-methods
+                         display-raise-frame (list d #f)))))
+(test-end "schemacs_pgtk_pointer_queries")

@@ -20,8 +20,12 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is the first step of.
 
   (import
-    (only (schemacs editor subr) kbd run-hooks run-hook-with-args)
+    (only (schemacs editor subr) kbd run-hooks run-hook-with-args
+          assq-delete-all)
     (scheme base)
+    ;; `set-window-scroll-bars`'s optional arguments are read as the C's
+    ;; positional ones.
+    (only (scheme cxr) caddr cadddr cdddr)
     ;; `new-frame' takes an optional size, which is a `case-lambda': it
     ;; is not exported by `(scheme base)' and a missing import for it
     ;; reports as an unbound variable at run time rather than a
@@ -40,6 +44,12 @@
            column-width current-display delete-frame-display!
            display-cell-size display-selections-supported?
            display-mouse-position display-set-size! line-height
+           display-mouse-absolute-pixel-position
+           display-set-mouse-pixel-position
+           display-raise-frame
+           ;; The toolkit's own scroll bar width, which a frame with no
+           ;; `scroll-bar-width` parameter uses (`FRAME_CONFIG_SCROLL_BAR_WIDTH`).
+           display-default-scroll-bar-width
            resume-display! screen-size suspend-display!
            ;; `window-system-display?` is what tells a toolkit's menu bar
            ;; from a terminal's: see `frame-top-margin`.
@@ -112,7 +122,7 @@
           delq kill getpid SIGTSTP caddr
           ;; `exact->inexact` is Guile's; `w->normal_lines` is a float.
           exact->inexact
-          make-weak-key-hash-table hashq-ref hashq-set!)
+          make-weak-key-hash-table hashq-ref hashq-set! getenv)
     ;; `w->cursor_off_p' and the blink's timers are kept beside the
     ;; window and the frame rather than in the window, for the reason
     ;; `buffer.sld' gives for its own slots: the record is shared and
@@ -181,14 +191,26 @@
    ;; `FRAME_TOP_MARGIN (f)` - the rows above the text area - and
    ;; `FRAME_MENU_BAR_LINES (f)` / `FRAME_TAB_BAR_LINES (f)`.
    frame-top-margin frame-inner-width %frame-menu-bar-lines %frame-tab-bar-lines
+   %frame-tool-bar-lines *tool-bar-lines-default-function*
+   ;; `FRAME_VERTICAL_SCROLL_BAR_TYPE` and the configured width and
+   ;; column count - `frame.c`'s `config_scroll_bar_width`/`_cols`.
+   default-frame-scroll-bars scroll-bar-adjust-thumb-portion
+   %frame-vertical-scroll-bar-type frame-has-vertical-scroll-bars?
+   window-leftmost?
+   %frame-config-scroll-bar-width
+   %frame-config-scroll-bar-cols %frame-scroll-bar-area-width
+   %frame-scroll-bar-area-cols frame-scroll-bar-width
+   %frame-total-scroll-bar-cols
    ;; `f->menu_bar_vector` and `f->menu_bar_items_used`.
    frame-menu-bar-items set!frame-menu-bar-items
    frame-menu-bar-items-used set!frame-menu-bar-items-used
    frame-tab-bar-items set!frame-tab-bar-items
    frame-tab-bar-items-used set!frame-tab-bar-items-used
+   frame-tool-bar-items set!frame-tool-bar-items
+   frame-tool-bar-items-used set!frame-tool-bar-items-used
    ;; Frame parameters - `frame.c`'s `param_alist` and its readers.
    frame-parameters frame-parameter set-frame-parameter
-   modify-frame-parameters store-in-alist
+   modify-frame-parameters modify-all-frames-parameters store-in-alist
    *default-frame-alist* *initial-frame-alist*
    frame-parameters-alist
    ;; `FRAME_GARBAGED_P` and `SET_FRAME_GARBAGED` (`frame.h:1173`).
@@ -207,7 +229,9 @@
    frame-quit-cont
    frame-output
    frame-selected-window
-   mouse-position
+   mouse-position mouse-absolute-pixel-position set-mouse-position
+   minibuffer-window tty-type mouse-position-in-root-frame
+   set-mouse-pixel-position raise-frame
    frame-type?
    ;; `window.c`'s change stamp: `FRAME_WINDOW_CHANGE` and friends. The
    ;; window-tree functions set the flag; `run-window-change-functions`
@@ -257,12 +281,18 @@
    ;; display fact, and `simple.scm` is below the library that knows one.
    ;; `xdisp.scm` installs `window-scroll` at load.
    *window-scroll-function*
+   ;; The seam `set-window-scroll-bars` marks a window stale through - the
+   ;; glyph matrix is `xdisp.scm`'s. It installs the setter at load.
+   *mark-window-redisplay-function*
    %window-end-pos set!%window-end-pos
    %window-end-vpos set!%window-end-vpos
    %window-end-valid? set!%window-end-valid?
    %window-base-line-number set!%window-base-line-number
    %window-base-line-pos set!%window-base-line-pos
    set-window-start!
+   ;; `w->force_start`: set by `set-window-start!`, read and cleared by
+   ;; the redisplay (`xdisp.c:20746`).
+   window-force-start? set-window-force-start?!
    ;; the pair `set-window-start!` is, without the mode-line flag - what
    ;; the redisplay's own scrolling writes (see its definition).
    %window-start-set!
@@ -280,6 +310,7 @@
    change-frame-size do-pending-window-change frame-new-size-p
    window-body-height
    window-children
+   window-stacked? window-combination-axis set-window-combination-axis!
    window-internal?
    window-parent
    set!window-children
@@ -325,6 +356,13 @@
    %window-suspend-auto-hscroll? set!%window-suspend-auto-hscroll?
    %window-old-point set!%window-old-point
    window-body-width
+   ;; Where the text area begins and what the scroll bar takes from it -
+   ;; `WINDOW_BOX_LEFT_EDGE_X` and the `WINDOW_*_SCROLL_BAR_*` macros.
+   window-body-left
+   window-vertical-scroll-bar-type
+   window-config-scroll-bar-width window-config-scroll-bar-cols
+   window-scroll-bar-cols window-left-scroll-bar-cols window-right-scroll-bar-cols
+   %extract-dimension
    window-buffer
    window-edges
    window-frame
@@ -333,7 +371,7 @@
    window-left
    window-list
    window-point
-   window-right-border?
+   window-right-border? window-pixel-edges
    window-top
    window-width
    ;; The window tree's algebra - `window.c`'s `window-child`,
@@ -756,6 +794,108 @@
             (cons frame position)
             (cons frame (cons #f #f)))))
 
+    (define (minibuffer-window . args)
+      ;; GNU Emacs's `minibuffer-window` (`window.c`): "Return the
+      ;; minibuffer window of frame FRAME (default, the selected frame)."
+      ;;--------------------------------------------------------------
+      (frame-minibuffer-window
+       (if (pair? args) (or (car args) (*current-frame*)) (*current-frame*))))
+
+    (define (tty-type . args)
+      ;; GNU Emacs's `tty-type` (`term.c:2452`): "Return the type of the
+      ;; tty device that TERMINAL uses. Returns nil if TERMINAL is not on
+      ;; a tty device." A window-system display answers nil; a terminal
+      ;; answers the `TERM` it opened with.
+      ;;--------------------------------------------------------------
+      (let* ((arg (and (pair? args) (car args)))
+             (frame (cond ((or (not arg) (frame? arg)) (or arg (*current-frame*)))
+                          ((window-type? arg) (window-frame arg))
+                          (else (*current-frame*))))
+             (display (and frame (frame-output frame))))
+        (and display
+             (not (window-system-display? display))
+             (or (getenv "TERM") "unknown"))))
+
+    (define (mouse-absolute-pixel-position)
+      ;; GNU Emacs's `mouse-absolute-pixel-position` (`frame.el:2340`):
+      ;; "Return absolute position of mouse cursor in pixels. The
+      ;; position is returned as a cons cell (X . Y) ... relative to a
+      ;; position (0, 0) of the selected frame's terminal."
+      ;;
+      ;; Emacs dispatches on the frame type; here the display answers,
+      ;; through the same hole `mouse-position` asks (`frame.el`'s
+      ;; `pgtk-mouse-absolute-pixel-position` is `gdk_device_get_position`).
+      ;; A display that cannot say - a terminal - answers `(0 . 0)`, the
+      ;; C's fallback.
+      ;;
+      ;; **Departure**: the Gtk answer is the pointer's position
+      ;; *relative to the frame*, from the same query `mouse-position`
+      ;; makes, not the screen-absolute position the C asks Gdk for. The
+      ;; one caller is `mouse-drag-line`, which only ever subtracts two
+      ;; of these to get a distance; a constant offset cancels.
+      ;;--------------------------------------------------------------
+      (let ((frame (*current-frame*)))
+        (or (and frame
+                 (let ((display (frame-output frame)))
+                   (and display
+                        (display-mouse-absolute-pixel-position display))))
+            (cons 0 0))))
+
+    (define (mouse-position-in-root-frame)
+      ;; GNU Emacs's `mouse-position-in-root-frame` (`frame.c:7115`):
+      ;; "Return the position of `mouse-position` in coordinates of the
+      ;; root frame of the frame returned by `mouse-position`."
+      ;;
+      ;; **Departure**: there are no child frames here, so the recursion
+      ;; up the parent chain and the frames' own screen offsets have
+      ;; nothing to add; a frame-relative position is the root
+      ;; position. This is only reached by the terminal path of
+      ;; `mouse-drag-line`, and the terminal has no mouse to report.
+      ;;--------------------------------------------------------------
+      (let ((position (mouse-position)))
+        (and (frame? (car position))
+             (let ((xy (cdr position)))
+               (and (integer? (car xy)) (integer? (cdr xy)) xy)))))
+
+    (define (set-mouse-pixel-position frame x y)
+      ;; GNU Emacs's `set-mouse-pixel-position` (`frame.c:3453`): "Move
+      ;; the mouse pointer to pixel position (X,Y) in FRAME." A no-op
+      ;; for a frame that is not a window-system frame - which, on a
+      ;; terminal, is what the C's GPM-less build does too.
+      ;;--------------------------------------------------------------
+      (let ((display (frame-output frame)))
+        (if (and display (window-system-display? display))
+            (begin (display-set-mouse-pixel-position display x y) #f)
+            #f)))
+
+    (define (set-mouse-position frame x y)
+      ;; GNU Emacs's `set-mouse-position` (`frame.c:3403`): "Move the
+      ;; mouse pointer to the center of character cell (X,Y) in FRAME."
+      ;; `frame_char_to_pixel_position` (`:3373`) is the conversion: the
+      ;; cell's top-left corner plus half a cell, clamped to the frame.
+      ;;--------------------------------------------------------------
+      (let* ((char-width (frame-char-width frame))
+             (char-height (frame-char-height frame))
+             (pix-x (min (max (+ (* x char-width) (quotient char-width 2)) 0)
+                         (frame-width frame)))
+             (pix-y (min (max (+ (* y char-height) (quotient char-height 2)) 0)
+                         (frame-height frame))))
+        (set-mouse-pixel-position frame pix-x pix-y)))
+
+    (define (raise-frame . args)
+      ;; GNU Emacs's `raise-frame` (`frame.c:3664`): "Bring FRAME to the
+      ;; front, so it occludes any frames it overlaps. If FRAME is
+      ;; invisible or iconified, make it visible." `make_frame_visible`
+      ;; first, then the terminal's raise hook - which a terminal without
+      ;; overlapping frames does not have (the C guards the call).
+      ;;--------------------------------------------------------------
+      (let ((frame (if (pair? args) (car args) (*current-frame*))))
+        (set-frame-parameter frame 'visibility #t)
+        (let ((display (frame-output frame)))
+          (when display
+            (display-raise-frame display frame)))
+        #f))
+
     (define (window-wants-tab-line window)
       ;; GNU Emacs's `window_wants_tab_line` (`window.c:6101`): whether
       ;; WINDOW's redisplay draws a tab line above its text.
@@ -856,13 +996,123 @@
                    #t)
                   (else (loop (cdr rest)))))))))
 
+    (define (window-leftmost? window)
+      ;; GNU Emacs's `WINDOW_LEFTMOST_P` (`window.h:687`): no window sits
+      ;; to the left of WINDOW - the mirror of `window-right-border?`,
+      ;; over the frame's leaves. A left scroll bar's own drag handle is
+      ;; this window's left edge (`coordinates_in_window`,
+      ;; `window.c:1411-1418`).
+      ;;--------------------------------------------------------------
+      (let ((frame (window-frame window)))
+        (and frame
+             (let ((left (window-left window))
+                   (top (window-top window))
+                   (bottom (+ (window-top window) (window-height window))))
+               (let loop ((rest (window-list frame)))
+                 (cond
+                  ((null? rest) #t)
+                  ((eq? (car rest) window) (loop (cdr rest)))
+                  ((and (= (+ (window-left (car rest))
+                              (window-width (car rest)))
+                          left)
+                        (< (window-top (car rest)) bottom)
+                        (< top (+ (window-top (car rest))
+                                  (window-height (car rest)))))
+                   #f)
+                  (else (loop (cdr rest)))))))))
+
+    ;;----------------------------------------------------------------
+    ;; A window's scroll bars - `WINDOW_*_SCROLL_BAR_*` (`window.h`)
+    ;;----------------------------------------------------------------
+
+    (define (%extract-dimension dimension)
+      ;; GNU Emacs's `extract_dimension` (`window.c:8465`): nil is -1
+      ;; ("the frame's"), anything else is an integer in [0, INT_MAX].
+      ;;--------------------------------------------------------------
+      (cond ((not dimension) -1)
+            ((and (integer? dimension) (>= dimension 0)) dimension)
+            (else (error "Wrong type argument: ~a" dimension))))
+
+    (define (window-vertical-scroll-bar-type window)
+      ;; `WINDOW_VERTICAL_SCROLL_BAR_TYPE` (`window.h:877`): the side a
+      ;; window's vertical bar is on, or nil. The stored value is `t`
+      ;; ("use the frame's") until `set-window-scroll-bars` says
+      ;; otherwise, which is `make_window`'s `Qt` (`window.c:4615`).
+      ;;--------------------------------------------------------------
+      (let ((type (vector-ref (%window-slots window) 6)))
+        (cond ((eq? type #t) (%frame-vertical-scroll-bar-type
+                              (window-frame window)))
+              ((memq type '(left right)) type)
+              (else #f))))
+
+    (define (window-config-scroll-bar-width window)
+      ;; `WINDOW_CONFIG_SCROLL_BAR_WIDTH` (`window.h:923`): the width the
+      ;; bar would have, in pixels, whether or not one is displayed.
+      ;;--------------------------------------------------------------
+      (let ((width (vector-ref (%window-slots window) 7)))
+        (if (and (integer? width) (>= width 0))
+            width
+            (%frame-config-scroll-bar-width (window-frame window)))))
+
+    (define (window-config-scroll-bar-cols window)
+      ;; `WINDOW_CONFIG_SCROLL_BAR_COLS` (`window.h:933`).
+      ;;--------------------------------------------------------------
+      (let ((unit (max 1 (frame-char-width (window-frame window)))))
+        (quotient (+ (window-config-scroll-bar-width window) unit -1) unit)))
+
+    (define (window-scroll-bar-cols window)
+      ;; `WINDOW_SCROLL_BAR_COLS` (`window.h:955`): the columns the bar
+      ;; actually takes from the window, 0 when there is none.
+      ;;--------------------------------------------------------------
+      (if (window-vertical-scroll-bar-type window)
+          (window-config-scroll-bar-cols window)
+          0))
+
+    (define (window-left-scroll-bar-cols window)
+      (if (eq? (window-vertical-scroll-bar-type window) 'left)
+          (window-config-scroll-bar-cols window)
+          0))
+
+    (define (window-right-scroll-bar-cols window)
+      (if (eq? (window-vertical-scroll-bar-type window) 'right)
+          (window-config-scroll-bar-cols window)
+          0))
+
+    (define (window-body-left window)
+      ;; The frame column where WINDOW's text begins: the window's left
+      ;; edge plus a left scroll bar - `WINDOW_BOX_LEFT_EDGE_X` is the
+      ;; left edge, and `window_box`'s TEXT_AREA starts after the bar and
+      ;; the margins. There are no fringes or margins here.
+      ;;--------------------------------------------------------------
+      (+ (window-left window) (window-left-scroll-bar-cols window)))
+
+    (define (%frame-total-scroll-bar-cols frame)
+      ;; Every bar column in FRAME's window tree - what this tree's
+      ;; `frame-width` (a grid width, unlike Emacs's `FRAME_COLS`) has to
+      ;; contain. Used when the scroll bar mode changes, to keep the text
+      ;; width by moving the grid by the difference.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (window-list frame)) (sum 0))
+        (if (null? rest)
+            sum
+            (loop (cdr rest) (+ sum (window-scroll-bar-cols (car rest)))))))
+
     (define (window-body-width window)
       ;; The columns of the window available to text: GNU Emacs's
-      ;; `window-body-width', which is the window's width less the
-      ;; vertical border when it has a window to its right.
+      ;; `window-body-width' (`window.c:1095`), which is the window's
+      ;; width less its vertical scroll bar, the vertical border when it
+      ;; has a window to its right, and the margins and fringes.
+      ;;
+      ;; **The bar comes out of the window's own width here.** Emacs's
+      ;; window pixel width already includes the bar, so its body is
+      ;; `pixel_width - scroll_bar_area_width`; this tree's window
+      ;; rectangle is the grid the window owns, so the same subtraction
+      ;; is what leaves the text.
       ;;--------------------------------------------------------------
       (let ((width (window-width window)))
-        (if (window-right-border? window) (- width 1) width)))
+        (- width
+           (window-scroll-bar-cols window)
+           (if (window-right-border? window) 1 0))))
 
     (define (window-edges window)
       ;; The window's rectangle as (LEFT TOP RIGHT BOTTOM), Emacs's
@@ -873,6 +1123,20 @@
             (window-top window)
             (+ (window-left window) (window-width window))
             (+ (window-top window) (window-height window))))
+
+    (define (window-pixel-edges window)
+      ;; GNU Emacs's `window-pixel-edges` (`window.c`): "Return a list
+      ;; of the edge coordinates of WINDOW ... (LEFT TOP RIGHT BOTTOM),
+      ;; all measured in pixels, relative to the top-left corner of the
+      ;; window's frame." A cell is this tree's pixel - the display's
+      ;; unit, which is one character cell on a terminal and the frame's
+      ;; character cell on a toolkit display - so the answer is the
+      ;; window's own rectangle, the same as `window-edges`'s.
+      ;;--------------------------------------------------------------
+      (list (window-pixel-left window)
+            (window-pixel-top window)
+            (+ (window-pixel-left window) (window-pixel-width window))
+            (+ (window-pixel-top window) (window-pixel-height window))))
 
     (define (%window-start-set! window position)
       ;; The two lines that move `w->start' and record whether it begins a
@@ -967,11 +1231,27 @@
       ;; pair. What the DEFUN adds, and the redisplay's own writes do
       ;; not (`window.c:1969`), is `wset_update_mode_line (w)` - the mode
       ;; line shows point's line and the frame's menu bar is the current
-      ;; buffer's, and both are recomputed because of it.
+      ;; buffer's, and both are recomputed because of it - and
+      ;; `w->force_start = true` (`window.c:1968`), which tells the next
+      ;; redisplay to lay out from this start rather than recentre on
+      ;; point. Our scroll-to-cursor! reads it and, like the C, moves
+      ;; *point* into the window instead of moving the window.
       ;;--------------------------------------------------------------
       (%window-start-set! window position)
+      (set-window-force-start?! window #t)
       (set-update-mode-lines! #t)
       position)
+
+    (define (window-force-start? window)
+      ;; GNU Emacs's `w->force_start` (`window.h`): "Set to mean that
+      ;; `w->start` should be used as the window start for the next
+      ;; redisplay." Cleared by the redisplay that honours it.
+      ;;--------------------------------------------------------------
+      (vector-ref (%window-slots window) 9))
+
+    (define (set-window-force-start?! window value)
+      (vector-set! (%window-slots window) 9 value)
+      value)
 
     (define *window-scroll-function*
       ;; GNU Emacs's `scroll-up-command` (`simple.el:5175`) is
@@ -984,6 +1264,16 @@
       ;; sees the seam called.
       ;;--------------------------------------------------------------
       (make-parameter #f))
+
+    (define *mark-window-redisplay-function*
+      ;; GNU Emacs's `wset_redisplay` (`window.h`): mark one window's glyph
+      ;; matrix stale, so the next redisplay rebuilds it. The matrix is
+      ;; `xdisp.scm`'s, so the bit is reached through this seam - the same
+      ;; arrangement as `*window-scroll-function*`, and `xdisp.scm`
+      ;; installs the setter at load. A no-op until it does, which is what
+      ;; the suite's fabricated frames see.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda (window) #f)))
 
     (define *record-window-buffer-function*
       ;; GNU Emacs's `Fset_window_buffer` calls `record-window-buffer`
@@ -1055,7 +1345,20 @@
         (if (%window-point window)
             (set-marker (%window-point window) (buffer-pt buffer) buffer)
             (set!%window-point window (build-marker buffer (buffer-pt buffer))))
-        (set-window-start! window 1)
+        ;; **The start is written the way `set_window_buffer` writes it**,
+        ;; not through the DEFUN: the C sets `w->start` and
+        ;; `w->start_at_line_beg = false` and **clears `w->force_start`**
+        ;; (`window.c:4368-4380`). Calling `set-window-start!` here set
+        ;; the flag instead, and the next redisplay then kept the start
+        ;; and moved *point* - which, in a minibuffer window whose buffer
+        ;; is swapped in and out on every redisplay, moved the prompt's
+        ;; point into the read-only prompt field: every typed key then
+        ;; signalled "Text is read-only" and the answer came back as the
+        ;; default. Measured with `(read-from-minibuffer "Q 888 with: "
+        ;; #f #f #f "888")` and the keys X X RET: `(ANSWER "888")` with
+        ;; the flag and `(ANSWER "XX")` without.
+        (%window-start-set! window 1)
+        (set-window-force-start?! window #f)
         ;; **A window that changed buffer has nothing of the new one on
         ;; the screen**, so the frame is garbaged and the next redisplay
         ;; repaints all of it. GNU Emacs reaches the same place without a
@@ -1170,6 +1473,7 @@
        parameters garbaged new-width new-height new-size-p
        menu-bar-items menu-bar-items-used
        tab-bar-items tab-bar-items-used
+       tool-bar-items tool-bar-items-used
        change-stamp window-change old-selected-window number-of-windows)
       frame-type?
       ;; **`window.c`'s change stamp.** `FRAME_WINDOW_CHANGE` is set by
@@ -1305,6 +1609,14 @@
       (tab-bar-items frame-tab-bar-items set!frame-tab-bar-items)
       (tab-bar-items-used frame-tab-bar-items-used
                           set!frame-tab-bar-items-used)
+      ;; `f->tool_bar_items` and `f->n_tool_bar_items` (`frame.h`):
+      ;; "A vector holding tool bar items while they are parsed in
+      ;; function tool_bar_items. Each item occupies TOOL_BAR_ITEM_NSLOTS
+      ;; elements" - twelve slots per item (`dispextern.h:3453`), where
+      ;; the menu bar uses four and the tab bar six.
+      (tool-bar-items frame-tool-bar-items set!frame-tool-bar-items)
+      (tool-bar-items-used frame-tool-bar-items-used
+                           set!frame-tool-bar-items-used)
       ;; ^ `f->menu_bar_vector` and `f->menu_bar_items_used`
       ;; (`frame.h`): the menu bar's items as the redisplay last built
       ;; them, `[KEY NAME DEFS X KEY NAME DEFS X ...]`, X being the
@@ -1358,6 +1670,27 @@
     ;; A frame's parameters start from this.
 
     (define *initial-frame-alist* (make-parameter '()))
+
+    (define default-frame-scroll-bars 'right)
+    ;; ^ GNU Emacs's `default-frame-scroll-bars` (`frame.c:7557`): "Default
+    ;; position of vertical scroll bars on this window-system." The C's
+    ;; value is `right` for a Gtk build (`:7564`) and nil for a terminal.
+    ;; A terminal frame draws no scroll bar whatever this says -
+    ;; `WINDOW_VERTICAL_SCROLL_BAR_TYPE` consults the frame's enum, which
+    ;; `make_terminal_frame` sets to none - so one value serves both.
+    ;;
+    ;; **A plain variable and not a parameter**: the C DEFVARs it and
+    ;; nothing let-binds it. The self-assignment marks it mutable, or the
+    ;; compiler folds the default into every read and a user's `set!` is
+    ;; invisible (the `menu-bar-final-items` rule).
+    (set! default-frame-scroll-bars default-frame-scroll-bars)
+
+    (define scroll-bar-adjust-thumb-portion #t)
+    ;; ^ GNU Emacs's `scroll-bar-adjust-thumb-portion` (`frame.c:7571`):
+    ;; "Adjust scroll bars for overscrolling for Gtk+, Motif and Haiku."
+    ;; Read by the toolkit thumb setter and by `scroll-bar-drag-1`.
+    ;; A DEFVAR_BOOL, so a plain variable for the same reason as above.
+    (set! scroll-bar-adjust-thumb-portion scroll-bar-adjust-thumb-portion)
     ;; ^ GNU Emacs's `initial-frame-alist` (`frame.el:135`): "Alist of
     ;; frame parameters for the frame that is created at startup" -
     ;; merged over `default-frame-alist` for the first frame only.
@@ -1405,6 +1738,32 @@
       (let ((pair (assq 'tab-bar-lines (frame-parameters-alist frame))))
         (or (and pair (cdr pair)) 0)))
 
+    (define *tool-bar-lines-default-function* (make-parameter #f))
+    ;; ^ The value a frame with no `tool-bar-lines` parameter takes.
+    ;;
+    ;; GNU Emacs's toolkit frame creation stores the parameter from the
+    ;; `tool-bar-mode` variable (`pgtkfns.c:1532`: "NILP (Vtool_bar_mode)
+    ;; ? 0 : 1"). That is `(schemacs editor tool-bar)`'s variable, and
+    ;; that library is above this one, so the mode's answer arrives
+    ;; through this seam - the shape `*record-window-buffer-function*`
+    ;; and `*menu-bar-items-function*` already take. Until something
+    ;; installs it, a frame has no tool bar.
+
+    (define (%frame-tool-bar-lines frame)
+      ;; `FRAME_TOOL_BAR_LINES` (`frame.h`), which `pgtk_set_tool_bar_lines`
+      ;; sets from the `tool-bar-lines` parameter (`pgtkfns.c:552`):
+      ;; "Use VALUE only if an int >= 0", and anything else is 0.
+      ;;--------------------------------------------------------------
+      (let ((pair (assq 'tool-bar-lines (frame-parameters-alist frame))))
+        (if pair
+            (let ((v (cdr pair)))
+              (if (and (integer? v) (>= v 0)) v 0))
+            (let ((f (*tool-bar-lines-default-function*)))
+              (if f
+                  (let ((v (f)))
+                    (if (and (integer? v) (>= v 0)) v 0))
+                  0)))))
+
     (define (frame-inner-width . args)
       ;; GNU Emacs's `frame-inner-width` (`frame.c:...`): "Return the
       ;; width in pixels of FRAME's inner area" - the text area, without
@@ -1418,7 +1777,12 @@
       ;; `tab-bar-format-align-right` is its one reader.
       ;;--------------------------------------------------------------
       (let ((frame (or (and (pair? args) (car args)) (*current-frame*))))
-        (frame-width frame)))
+        ;; "without fringes, scroll bars, margins or borders"
+        ;; (`frame.c`): the bar's columns are the only one of those this
+        ;; tree has, and `FRAME_SCROLL_BAR_AREA_WIDTH` is what the C
+        ;; subtracts - one bar's worth, even when a split gives each
+        ;; window its own.
+        (max 1 (- (frame-width frame) (%frame-scroll-bar-area-cols frame)))))
 
     (define (frame-top-margin frame)
       ;; GNU Emacs's `FRAME_TOP_MARGIN` (`frame.h:1132`): the rows of the
@@ -1454,6 +1818,95 @@
             (+ (%frame-menu-bar-lines frame)
                (%frame-tab-bar-lines frame)))))
 
+    ;;----------------------------------------------------------------
+    ;; The frame's scroll bar configuration - `FRAME_CONFIG_SCROLL_BAR_*`
+    ;;----------------------------------------------------------------
+    ;;
+    ;; GNU Emacs keeps these in `struct frame`: `vertical_scroll_bar_type`
+    ;; (`frame.h:1217`), `config_scroll_bar_width`/`_cols` and
+    ;; `config_scroll_bar_height`/`_lines` (`:1286-1297`). They are set
+    ;; from the frame's parameters (`pgtkfns.c:1456` for
+    ;; `vertical-scroll-bars`, `:6085` for `scroll-bar-width`) and read
+    ;; by every `WINDOW_CONFIG_SCROLL_BAR_*` below.
+
+    (define (%frame-vertical-scroll-bar-type frame)
+      ;; `FRAME_VERTICAL_SCROLL_BAR_TYPE` (`frame.h:1217`): `left` or
+      ;; `right` when the frame shows bars, nil when it does not. The
+      ;; stored parameter wins; with none, a window-system frame gets
+      ;; `default-frame-scroll-bars` - which is the C's
+      ;; `gui_default_parameter (f, parms, Qvertical_scroll_bars, Qright,
+      ;; ...)` (`pgtkfns.c:1456`).
+      ;;--------------------------------------------------------------
+      (let ((pair (assq 'vertical-scroll-bars (frame-parameters-alist frame))))
+        (if pair
+            (let ((value (cdr pair)))
+              (and (memq value '(left right)) value))
+            (let ((display (frame-output frame)))
+              (and display
+                   (window-system-display? display)
+                   default-frame-scroll-bars)))))
+
+    (define (frame-has-vertical-scroll-bars? frame)
+      ;; GNU Emacs's `FRAME_HAS_VERTICAL_SCROLL_BARS (f)` (`frame.h`):
+      ;; "True if frame F has vertical scroll bars" - the frame's type is
+      ;; anything but `vertical_scroll_bar_none`. `gui_draw_vertical_border`
+      ;; tests it to decide that the bars themselves separate side-by-side
+      ;; windows and no border line is drawn between them
+      ;; (`xdisp.c:37932`), and a terminal frame answers nil because it has
+      ;; none.
+      ;;--------------------------------------------------------------
+      (and (%frame-vertical-scroll-bar-type frame) #t))
+
+    (define (%frame-config-scroll-bar-width frame)
+      ;; `FRAME_CONFIG_SCROLL_BAR_WIDTH` (`frame.h:1286`): "Width that a
+      ;; scroll bar in frame F should have, if there is one. Measured in
+      ;; pixels. If scroll bars are turned off, this is still nonzero."
+      ;;--------------------------------------------------------------
+      (let ((pair (assq 'scroll-bar-width (frame-parameters-alist frame))))
+        (if (and pair (integer? (cdr pair)) (> (cdr pair) 0))
+            (cdr pair)
+            (let ((display (frame-output frame)))
+              (if display (display-default-scroll-bar-width display) 0)))))
+
+    (define (%frame-config-scroll-bar-cols frame)
+      ;; `FRAME_CONFIG_SCROLL_BAR_COLS` (`frame.h:1296`): the width in
+      ;; columns, "`(width + unit - 1) / unit`" - rounded *up*, so a 16px
+      ;; bar in a 9px cell is 2 columns.
+      ;;
+      ;; **The rounding is the departure this tree's cell model forces**:
+      ;; Emacs places the bar at a pixel x and lets the columns beside it
+      ;; round down, so an 80-column frame keeps 80 columns of text. Here
+      ;; the bar occupies whole columns, so those two columns come out of
+      ;; the frame's grid. `frame-width` is the grid's width; a frame
+      ;; opened at 80 text columns is 82 grid columns with the bar.
+      ;;--------------------------------------------------------------
+      (let ((unit (max 1 (frame-char-width frame))))
+        (quotient (+ (%frame-config-scroll-bar-width frame) unit -1) unit)))
+
+    (define (%frame-scroll-bar-area-width frame)
+      ;; `FRAME_SCROLL_BAR_AREA_WIDTH` (`frame.h:1335`): 0 when the frame
+      ;; shows no bars, the configured width otherwise.
+      ;;--------------------------------------------------------------
+      (if (%frame-vertical-scroll-bar-type frame)
+          (%frame-config-scroll-bar-width frame)
+          0))
+
+    (define (%frame-scroll-bar-area-cols frame)
+      ;; `FRAME_SCROLL_BAR_COLS` (`frame.h:1348`).
+      ;;--------------------------------------------------------------
+      (if (%frame-vertical-scroll-bar-type frame)
+          (%frame-config-scroll-bar-cols frame)
+          0))
+
+    (define (frame-scroll-bar-width . args)
+      ;; GNU Emacs's `frame-scroll-bar-width` (`frame.c:4761`): "Return
+      ;; the width of vertical scroll bars of FRAME in pixels. This is
+      ;; the width of scroll bars drawn on the right or left side of
+      ;; each window."
+      ;;--------------------------------------------------------------
+      (%frame-scroll-bar-area-width
+       (or (and (pair? args) (car args)) (*current-frame*))))
+
     (define (frame-parameters . args)
       ;; GNU Emacs's `frame-parameters` (`frame.c:4083`): "Return the
       ;; parameters-alist of frame FRAME."
@@ -1484,6 +1937,18 @@
               (set! alist (store-in-alist alist 'menu-bar-lines
                                           (%frame-menu-bar-lines frame)))
               (set! alist (store-in-alist alist 'tab-bar-lines 0))
+              (set! alist (store-in-alist alist 'tool-bar-lines
+                                          (%frame-tool-bar-lines frame)))
+              ;; `FRAME_TOOL_BAR_POSITION` (`pgtkfns.c:1544`,
+              ;; `:3421`): the stored parameter, and `top` when there
+              ;; is none (`tool-bar-position`'s default).
+              (set! alist
+                    (store-in-alist
+                     alist 'tool-bar-position
+                     (or (let ((p (assq 'tool-bar-position
+                                        (frame-parameters-alist frame))))
+                           (and p (cdr p)))
+                         'top)))
               (set! alist (store-in-alist alist 'visibility #t))
               (set! alist (store-in-alist alist 'no-accept-focus #f))
               alist))))
@@ -1502,10 +1967,21 @@
               ((eq? parameter 'name) (frame-name frame))
               (else
                (let ((pair (assq parameter (frame-parameters-alist frame))))
-                 (if pair
-                     (cdr pair)
-                     (let ((all (assq parameter (frame-parameters frame))))
-                       (and all (cdr all)))))))))
+                 (cond
+                  (pair (cdr pair))
+                  ;; Two computed parameters have no stored entry until
+                  ;; something sets them: the C's frame creation stores
+                  ;; `vertical-scroll-bars` from its default
+                  ;; (`pgtkfns.c:1456`) and answers `scroll-bar-width`
+                  ;; from the frame's field (`frame.c:4343`), which is
+                  ;; the theme's width when the parameter is nil.
+                  ((eq? parameter 'vertical-scroll-bars)
+                   (%frame-vertical-scroll-bar-type frame))
+                  ((eq? parameter 'scroll-bar-width)
+                   (%frame-config-scroll-bar-width frame))
+                  (else
+                   (let ((all (assq parameter (frame-parameters frame))))
+                     (and all (cdr all))))))))))
 
     (define (set-frame-parameter frame parameter value)
       ;; GNU Emacs's `set-frame-parameter` (`frame.c`): "Set FRAME's
@@ -1515,10 +1991,31 @@
       ;; decides whether the bar is showing.
       ;;--------------------------------------------------------------
       (let ((frame (or frame (*current-frame*))))
+        ;; The scroll bar columns the frame's windows used *before* the
+        ;; change: turning bars on or off must keep the text width, which
+        ;; is what `gui_set_vertical_scroll_bars`'s
+        ;; `adjust_frame_size (f, -1, -1, 3, ...)` (`frame.c:6051`) does.
+        (let ((old-bars (and (eq? parameter 'vertical-scroll-bars)
+                             (%frame-total-scroll-bar-cols frame))))
         (set!frame-parameters-alist
          frame (store-in-alist (frame-parameters-alist frame) parameter value))
         (when (eq? parameter 'name)
           (set!frame-name frame value))
+        ;; **The grid grows or shrinks by the bars' columns.** This tree's
+        ;; `frame-width` is the whole grid, so keeping the *text* width -
+        ;; what Emacs does by keeping `FRAME_COLS` and changing the pixel
+        ;; width - means moving the grid by the total change in bar
+        ;; columns. A frame with no windows yet has nothing to re-tile and
+        ;; `new-frame`'s own sizing already used the parameter.
+        (when (and (eq? parameter 'vertical-scroll-bars) old-bars
+                   (window-list frame))
+          (let ((delta (- (%frame-total-scroll-bar-cols frame) old-bars)))
+            (unless (zero? delta)
+              (adjust-frame-size!
+               frame
+               (* (+ (frame-width frame) delta) (frame-char-width frame))
+               (* (frame-height frame) (frame-char-height frame))
+               3 #f parameter))))
         ;; **Turning the bar on or off re-tiles the frame.** GNU Emacs's
         ;; `x_set_menu_bar_lines` ends in `adjust_frame_size (f, -1, -1, 4,
         ;; false, Qmenu_bar_lines)`, which is what gives the text area the
@@ -1540,7 +2037,16 @@
           ;; `(menu-bar-mode -1)` left it down, because "hidden" is also
           ;; the state of a bar with no items.
           (set-update-mode-lines! #t))
-        value))
+        ;; **A tool bar change needs a redisplay too.** On Gtk the bar
+        ;; is a toolkit widget whose height is outside the text grid
+        ;; (`pgtk_set_tool_bar_lines` changes the frame's size in
+        ;; pixels), so nothing about the row layout moves here; but the
+        ;; front end only rebuilds or hides the widget when it is
+        ;; redisplaying, and a parameter changed from Lisp has to make
+        ;; that happen.
+        (when (eq? parameter 'tool-bar-lines)
+          (set-update-mode-lines! #t))
+        value)))
 
     (define (modify-frame-parameters frame alist)
       ;; GNU Emacs's `modify-frame-parameters` (`frame.c:4244`): "Modify
@@ -1559,6 +2065,29 @@
                     (set-frame-parameter frame (car entry) (cdr entry)))
                   alist)
         frame))
+
+    (define (modify-all-frames-parameters alist)
+      ;; GNU Emacs's `modify-all-frames-parameters` (`frame.el:787`):
+      ;; "Modify all current and future frames' parameters according to
+      ;; ALIST. This changes `default-frame-alist' ... Furthermore, this
+      ;; function removes all parameters in ALIST from
+      ;; `window-system-default-frame-alist'."
+      ;;
+      ;; **The window-system alist and the `initial-frame-alist` arm are
+      ;; not carried**: this tree has one `default-frame-alist`, no
+      ;; per-window-system one, and `frame-notice-user-settings` - the
+      ;; flag that makes Emacs touch `initial-frame-alist` here - has no
+      ;; counterpart because the first frame is made by the front end
+      ;; before any parameter can be changed through this function.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (frame) (modify-frame-parameters frame alist))
+                (*frame-list*))
+      (for-each
+       (lambda (pair)
+         (*default-frame-alist*
+          (cons pair (assq-delete-all (car pair) (*default-frame-alist*)))))
+       alist)
+      alist)
 
     (define (face-set-after-frame-default frame . optional)
       ;; GNU Emacs's `face-set-after-frame-default' (`faces.el:2274'):
@@ -2556,8 +3085,9 @@
                                  ;; Nothing is queued for later - -1 is
                                  ;; the C's "no size change pending".
                                  -1 -1 #f
-                                 ;; No menu bar or tab bar built yet.
-                                 #f 0 #f 0
+                                 ;; No menu bar, tab bar or tool bar
+                                 ;; built yet.
+                                 #f 0 #f 0 #f 0
                                  ;; `change_stamp` 0, `FRAME_WINDOW_CHANGE`
                                  ;; false, no selection recorded yet and
                                  ;; no live windows counted - a fresh
@@ -3361,7 +3891,7 @@
           (set!window-left window new-left)
           (set!window-width window new-width)
           (set!window-height window new-height))
-         ((windows-stacked? children)
+         ((window-stacked? window)
           ;; every node carries its own rectangle, as Emacs's
           ;; `window_resize_apply' leaves them: a *parent* that kept the
           ;; size it was made with would poison every later geometry
@@ -3422,16 +3952,36 @@
                                  want new-height)
                   (loop (cdr rest) (+ offset want))))))))))
 
-    (define (windows-stacked? children)
-      ;; Whether these sibling windows are arranged one above the other
-      ;; rather than side by side: the axis their parent divided. Two
-      ;; children that begin at the same column and the same width were
-      ;; divided vertically, which is how `split-window-below' makes them.
+    (define (window-combination-axis window)
+      ;; `w->vchild`/`w->hchild` as one field: the axis WINDOW's children
+      ;; are arranged on, `vertical` (one above the other), `horizontal`
+      ;; (side by side) or #f when it has no combination axis.
       ;;--------------------------------------------------------------
-      (and (pair? children)
-           (pair? (cdr children))
-           (= (window-left (car children)) (window-left (cadr children)))
-           (= (window-width (car children)) (window-width (cadr children)))))
+      (vector-ref (%window-slots window) 10))
+
+    (define (set-window-combination-axis! window axis)
+      (vector-set! (%window-slots window) 10 axis)
+      axis)
+
+    (define (window-stacked? window)
+      ;; Whether WINDOW's children are arranged one above the other - the
+      ;; axis it divides them on. **Read from the stored axis**, the way
+      ;; `WINDOW_VERTICAL_COMBINATION_P` reads `w->vchild`: a combination
+      ;; down to one child has no geometry to infer from, and inferring
+      ;; made it look horizontal, which sent a mode-line drag at a
+      ;; frame-wide window and ended in "Failed adjusting window".
+      ;; A window with no stored axis and two or more children (a window
+      ;; state put without one) falls back to the geometry.
+      ;;--------------------------------------------------------------
+      (let ((axis (window-combination-axis window))
+            (children (window-children window)))
+        (cond
+         ((eq? axis 'vertical) #t)
+         ((eq? axis 'horizontal) #f)
+         ((and (pair? children) (pair? (cdr children)))
+          (and (= (window-left (car children)) (window-left (cadr children)))
+               (= (window-width (car children)) (window-width (cadr children)))))
+         (else #f))))
 
     (define-command (suspend-frame)
       ;; GNU Emacs's `suspend-frame' (C-z), which is `frame.el''s - "do
@@ -3762,13 +4312,34 @@
     (define *window-slots* (make-weak-key-hash-table))
     ;; ^ The per-window fields kept beside the record - see the note
     ;; above. `#(dedicated combination-limit new-pixel new-total
-    ;; new-normal margins)`.
+    ;; new-normal margins vertical-scroll-bar-type scroll-bar-width
+    ;; scroll-bars-persistent)`.
+    ;;
+    ;; The last four are `struct window`'s `vertical_scroll_bar_type`
+    ;; (a Lisp value: t means the frame's, nil none, `left`/`right` a
+    ;; side), `scroll_bar_width` (-1 means the frame's),
+    ;; `scroll_bars_persistent`, and `force_start` - the flag
+    ;; `set_window_start` sets so the next redisplay starts where Lisp
+    ;; asked instead of recentring on point (`xdisp.c:20746`).
 
     (define (%window-slots window)
       ;; This window's slot vector, made on first use.
       ;;--------------------------------------------------------------
       (or (hashq-ref *window-slots* window)
-          (let ((slots (vector #f #f 0 #f #f (cons #f #f))))
+          (let ((slots (vector #f #f 0 #f #f (cons #f #f)
+                               #t -1 #f #f
+                               ;; 10: the combination axis of an internal
+                               ;; window - `vertical` when its children are
+                               ;; one above the other, `horizontal` when
+                               ;; they are side by side, #f when it has
+                               ;; none. **Stored, not inferred**: Emacs
+                               ;; keeps `w->vchild`/`w->hchild`, and a
+                               ;; combination down to *one* child has no
+                               ;; geometry to tell the two apart - inferring
+                               ;; it called a one-child vertical
+                               ;; combination horizontal, and a drag then
+                               ;; resized a frame-wide window.
+                               #f)))
             (hashq-set! *window-slots* window slots)
             slots)))
 
@@ -3858,7 +4429,7 @@
       ;; when the children are stacked, nil otherwise.
       ;;--------------------------------------------------------------
       (let ((children (window-children window)))
-        (and (windows-stacked? children) (car children))))
+        (and (window-stacked? window) (car children))))
 
     (define (window-left-child window)
       ;; GNU Emacs's `window-left-child` (`window.c:701`): the first
@@ -3866,7 +4437,7 @@
       ;;--------------------------------------------------------------
       (let ((children (window-children window)))
         (and (pair? children)
-             (not (windows-stacked? children))
+             (not (window-stacked? window))
              (car children))))
 
     (define (window-combination-p . args)
@@ -3892,8 +4463,8 @@
              (parent (window-parent window)))
         (and parent
              (if horizontal
-                 (not (windows-stacked? (window-children parent)))
-                 (windows-stacked? (window-children parent)))
+                 (not (window-stacked? parent))
+                 (window-stacked? parent))
              #t)))
 
     (define (window-total-height . args)
@@ -4049,18 +4620,88 @@
     (define (window-scroll-bars . args)
       ;; GNU Emacs's `window-scroll-bars` (`window.c:8898`): "(WIDTH
       ;; COLUMNS VERTICAL-TYPE HEIGHT LINES HORIZONTAL-TYPE PERSISTENT)".
-      ;; Emacs on a terminal answers `(nil 0 t nil 0 t nil)` - no scroll
-      ;; bar, both types left to the frame's default - and so does this.
+      ;;
+      ;; WIDTH is the window's own width in pixels or nil for the frame's
+      ;; default; COLUMNS is the effective width in columns; VERTICAL-TYPE
+      ;; is the *stored* type (t means the frame's), so a terminal answers
+      ;; `(nil 0 t nil 0 t nil)` - it stores the default and shows
+      ;; nothing, because `WINDOW_VERTICAL_SCROLL_BAR_TYPE` consults a
+      ;; frame whose type is none. Measured on GNU Emacs 31.1 in a Gtk
+      ;; frame: a normal window is `(nil 2 t nil 0 t nil)` and the
+      ;; minibuffer window `(nil 2 t nil 0 nil nil)` - the same two
+      ;; columns, and no horizontal bar type for a minibuffer.
       ;;--------------------------------------------------------------
-      (%decode-live-window (%opt args 0))
-      (list #f 0 #t #f 0 #t #f))
+      (let* ((window (%decode-live-window (%opt args 0)))
+             (slots (%window-slots window))
+             (width (let ((w (vector-ref slots 7)))
+                      (and (integer? w) (>= w 0) w))))
+        (list width
+              (window-scroll-bar-cols window)
+              (let ((type (vector-ref slots 6)))
+                (if (eq? type #f) #f type))
+              #f
+              0
+              (if (window-minibuffer-p window) #f #t)
+              (vector-ref slots 8))))
 
     (define (set-window-scroll-bars window width . args)
-      ;; GNU Emacs's `set-window-scroll-bars` (`window.c`). A terminal
-      ;; draws no scroll bars and stores nothing, so neither does this.
+      ;; GNU Emacs's `set-window-scroll-bars` (`window.c:8857`) over
+      ;; `set_window_scroll_bars` (`:8773`).
+      ;;
+      ;; "Do nothing on a tty" is the C's first line: a frame that is not
+      ;; a window system's has no bar to configure, and the answer is nil.
+      ;; On a window-system frame the width and type are validated, the
+      ;; change is applied only if the window can still hold its minimum
+      ;; text width, and the window is marked for redisplay.
       ;;--------------------------------------------------------------
-      (%decode-live-window window)
-      #f)
+      (let ((window (%decode-live-window window)))
+        (if (not (window-system-display? (frame-output (window-frame window))))
+            #f
+            (let* ((vertical-type (if (pair? args) (car args) #f))
+                   (height (if (and (pair? args) (pair? (cdr args)))
+                               (cadr args) #f))
+                   (horizontal-type (if (and (pair? args) (pair? (cdr args))
+                                             (pair? (cddr args)))
+                                        (caddr args) #f))
+                   (persistent (if (and (pair? args) (pair? (cdr args))
+                                        (pair? (cddr args))
+                                        (pair? (cdddr args)))
+                                   (cadddr args) #f))
+                   (slots (%window-slots window))
+                   (new-width (%extract-dimension width))
+                   (frame (window-frame window))
+                   (unit (max 1 (frame-char-width frame)))
+                   (new-cols (if (= new-width -1)
+                                 (%frame-config-scroll-bar-cols frame)
+                                 (quotient (+ new-width unit -1) unit)))
+                   (failed #f)
+                   (changed #f))
+              (if (= new-width 0)
+                  (set! vertical-type #f)
+                  (unless (or (not vertical-type) (memq vertical-type '(left right #t)))
+                    (error "Invalid type of vertical scroll bar")))
+              ;; "Check dimension of new scroll bar. Make changes only if
+              ;; it fit the window's dimensions." The bar and the border
+              ;; have to leave MIN_SAFE_WINDOW_WIDTH (2) columns of text.
+              (if (>= (- (window-width window) new-cols
+                         (if (window-right-border? window) 1 0))
+                      min-safe-window-width)
+                  (begin
+                    (set! changed (or (not (eq? vertical-type
+                                                (vector-ref slots 6)))
+                                      (not (= new-width (vector-ref slots 7)))))
+                    (vector-set! slots 6 vertical-type)
+                    (vector-set! slots 7 new-width))
+                  (set! failed #t))
+              ;; No horizontal scroll bars are drawn here
+              ;; (`USE_HORIZONTAL_SCROLL_BARS` is false for this tree); the
+              ;; arguments are accepted and ignored, as the C's
+              ;; `#else` branch sets the type nil.
+              (unless failed
+                (vector-set! slots 8 (and persistent #t)))
+              (when changed
+                ((*mark-window-redisplay-function*) window))
+              (and changed #t)))))
 
     (define (window-vscroll . args)
       ;; GNU Emacs's `window-vscroll` (`window.c:8937`): "On a terminal,
@@ -4122,13 +4763,22 @@
       0)
 
     (define (window-scroll-bar-width window)
-      ;; Rows of WINDOW's vertical scroll bar; none are drawn.
+      ;; GNU Emacs's `window-scroll-bar-width` (`window.c:1260`): "Return
+      ;; the width of WINDOW's vertical scrollbar. The result is in
+      ;; pixels." `WINDOW_SCROLL_BAR_AREA_WIDTH` is 0 when no bar is
+      ;; shown.
       ;;--------------------------------------------------------------
-      0)
+      (let ((window (%decode-live-window window)))
+        (* (window-scroll-bar-cols window)
+           (frame-char-width (window-frame window)))))
 
     (define (window-scroll-bar-height window)
-      ;; The horizontal scroll bar's rows; none are drawn.
+      ;; GNU Emacs's `window-scroll-bar-height` (`window.c:1274`): the
+      ;; *horizontal* bar's height in pixels. This tree draws no
+      ;; horizontal scroll bars (`USE_HORIZONTAL_SCROLL_BARS` false), so
+      ;; this is the C's 0.
       ;;--------------------------------------------------------------
+      (%decode-live-window window)
       0)
 
     (define (window-new-pixel . args)
@@ -4185,7 +4835,7 @@
                 (if horizontal
                     (* 2 (frame-char-width (window-frame window)))
                     (frame-char-height (window-frame window))))
-            (let ((stacked (windows-stacked? children)))
+            (let ((stacked (window-stacked? window)))
               (if (eq? stacked (not horizontal))
                   ;; The combination's own axis: the children must sum
                   ;; to it.
@@ -4219,7 +4869,7 @@
         (if horizontal
             (set!window-width window (quotient (window-new-pixel window) unit))
             (set!window-height window (quotient (window-new-pixel window) unit)))
-        (let ((stacked (and (pair? children) (windows-stacked? children)))
+        (let ((stacked (and (pair? children) (window-stacked? window)))
               (edge (if horizontal (window-left window) (window-top window))))
           (let loop ((rest children))
             (when (pair? rest)
@@ -4240,7 +4890,7 @@
       ;; above, but from the total sizes rather than the pixel ones.
       ;;--------------------------------------------------------------
       (let* ((children (window-children window))
-             (stacked (and (pair? children) (windows-stacked? children)))
+             (stacked (and (pair? children) (window-stacked? window)))
              (edge (if horizontal (window-left window) (window-top window))))
         (if horizontal
             (set!window-width window (window-new-total window))

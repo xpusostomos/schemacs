@@ -11,6 +11,8 @@
        buffer-string goto-char insert point point-max point-min)
  (only (schemacs editor textprop)
        get-text-property put-text-property remove-list-of-text-properties)
+ ;; the global value the buffer's copy is made from
+ (only (schemacs editor intervals) *char-property-alias-alist*)
  (only (schemacs editor search) match-beginning match-end re-search-forward)
  (schemacs editor font-lock)
  (schemacs editor font-core))
@@ -225,5 +227,39 @@
       (list on
             (face-at ed 5)
             (memq font-lock-after-change-function (*after-change-functions*))))))
+
+;; ------------------------------------------------------------------
+;; `char-property-alias-alist` - `font-lock-default-function`'s edit
+;; ------------------------------------------------------------------
+;; `font-lock-face` is a *second name* for `face` while the mode is on:
+;; the buffer gets its own `copy-tree` of the alist and `lookup_char_property`
+;; consults it after a direct miss. That is how Occur's `list-matching-
+;; lines-prefix-face` (written with `font-lock-face`, as Emacs writes it)
+;; reaches the renderer, which asks only for `face`.
+;;
+;; Measured on Emacs 31.1 with the same buffer and property:
+;;     (get-text-property 1 'face) with font-lock off => nil
+;;     (get-text-property 1 'face) with font-lock on  => shadow
+
+(test-equal '(#f shadow shadow #f)
+  (let ((ed (fresh "aaa\n")))
+    (put-text-property 1 4 'font-lock-face 'shadow)
+    (let* ((off (get-text-property 1 'face ed)))
+      (font-lock-mode #t)
+      (let ((on (get-text-property 1 'face ed))
+            (direct (get-text-property 1 'font-lock-face ed)))
+        (font-lock-mode -1)
+        (list off on direct (get-text-property 1 'face ed))))))
+
+;; ...and the buffer's list is a *copy*: turning the mode on and off must
+;; not add or remove anything in the global value, or every buffer would
+;; share one edit.
+(test-equal '(#f #f)
+  (let ((ed (fresh "aaa\n")))
+    (font-lock-mode #t)
+    (let ((global (*char-property-alias-alist*)))
+      (font-lock-mode -1)
+      (list (assq 'face global)
+            (assq 'face (*char-property-alias-alist*))))))
 
 (test-end "schemacs_editor_font_lock")

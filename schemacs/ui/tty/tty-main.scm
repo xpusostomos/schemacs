@@ -66,6 +66,16 @@
     ;; as Emacs's own line at the end of `mouse.el' does.
     (only (schemacs editor mouse))
     (only (schemacs editor replace))
+    ;; `tool-bar.el`: the mode and its keymap. A terminal frame draws no
+    ;; tool bar in a build that has a toolkit bar (`display_tool_bar` is
+    ;; compiled out under `HAVE_EXT_TOOL_BAR`, which is why `emacs -nw`
+    ;; shows none either), but the mode, the parameter and the `M-x`
+    ;; command exist, as they do there.
+    (only (schemacs editor tool-bar) tool-bar-setup)
+    ;; `scroll-bar.el` - the toolkit binding and `scroll-bar-mode`. A
+    ;; terminal draws no bars, but Emacs preloads the file in every build
+    ;; and a click from a terminal mouse would reach the same command.
+    (only (schemacs editor scroll-bar))
     ;; The multilingual commands (`C-x RET ...`), which install their own
     ;; keys - `mule-cmds.el`. Not for a name: for the load.
     (only (schemacs editor mule-cmds))
@@ -123,6 +133,11 @@
              ;; command line in the *selected* window, so it has to be
              ;; current before it runs.
              (parameterize ((*current-frame* frame))
+               ;; `startup.el:1626`'s call, at the same place: after the
+               ;; frame and before the init file. Nothing draws the bar
+               ;; on this front end; the keymap and the mode are made
+               ;; because Emacs makes them on a terminal too.
+               (tool-bar-setup)
                (command-line-1 args)
                ;; as `find-file-command' does, so that a file named on the
                ;; command line that cannot be written says so too

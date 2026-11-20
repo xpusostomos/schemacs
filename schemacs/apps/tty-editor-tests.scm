@@ -1,10 +1,11 @@
 (import
- (only (schemacs editor fns) %count-lines)
+ (only (schemacs editor fns) %count-lines *use-dialog-box* use-file-dialog
+       string-equal)
  (scheme base)
  (scheme char)
  (scheme file)
  (only (rnrs io ports) get-bytevector-all put-bytevector)
- (only (guile) chmod mkdir sort)
+ (only (guile) chmod eval mkdir sort)
  ;; `make' is GOOPS's: the test display object is made with it.
  (only (oop goops) make define-class define-method)
  (only (ice-9 exceptions) exception-message)
@@ -38,6 +39,9 @@
  (only (schemacs editor keyboard)
        command-remapping dispatch-key-event dispatch-input-event timer-check!
        *unread-command-events*
+       ;; What kind of event the last one was, and the record the read
+       ;; makes of it - the dialog group's subject.
+       *last-nonmenu-event* record-nonmenu-event!
        ;; `read-key-sequence`'s answer rule and its ESC prefix - see the
        ;; group at the end of this file.
        read-key-sequence read-key-sequence-vector
@@ -58,7 +62,10 @@
        lookup-face realize-face
        ;; The generic the test below extends, so that its method attaches to
        ;; the display's own and not to a fresh generic of that name.
-       read-input-event)
+       read-input-event
+       ;; The file chooser hole and the "is this a window system" test -
+       ;; the dialog group's stub display defines both.
+       x-file-dialog window-system-display?)
  (only (schemacs editor test-display) <test-display> test-display-script
        set!test-display-script test-display-glyphs
        test-display-frames-deleted test-display-cursor)
@@ -66,9 +73,13 @@
  ;; `kbd' - the tree's spelling of a key, and the event a test presses.
  (only (schemacs editor character) kbd)
  (only (schemacs editor dired)
-       dired dired-directory dired-noselect dired-revert)
+       dired dired-directory dired-noselect dired-revert
+       ;; The prompt that asks for a folder chooser when a dialog is
+       ;; used - the dialog group below.
+       dired-read-dir-and-switches)
  (only (schemacs editor marker) marker-position set-marker)
  (only (schemacs editor buffer) buffer-name major-mode
+       local-variable-p buffer-local-value
        with-current-buffer
        ;; `message-overlay-text` reads the overlay `minibuffer-message`
        ;; puts at the end of the prompt's buffer.
@@ -105,6 +116,7 @@
        *buffer-list* *current-buffer* *kill-buffer-query-functions*
        buffer-cursor-in-non-selected-windows buffer-cursor-type
        buffer-list buffer-name bufferp get-buffer get-buffer-create
+       %kill-buffer
        set-buffer-local-value!
        current-buffer set-buffer
        buffer-local-keymap set!buffer-local-keymap set!buffer-default-directory
@@ -124,7 +136,10 @@
        save-buffer buffer-file-coding-system
        kill-buffer
        handle-delete-frame
-       save-answer-char->decision)
+       save-answer-char->decision
+       ;; `read-file-name`'s dialog branch and the predicate that chooses
+       ;; it - the dialog group below.
+       read-file-name read-directory-name next-read-file-uses-dialog-p)
  ;; `try-completion' and `all-completions' are `minibuf.c''s.
  (only (schemacs editor coding) coding-system-name)
  (only (schemacs editor minibuf) all-completions test-completion try-completion)
@@ -148,6 +163,7 @@
        *minibuffer-completion-confirm* minibuffer-confirm-exit-commands
        internal-complete-buffer internal-complete-buffer-except
        buffer-name-history history? history-entries set!history-entries
+       file-name-history
        minibuffer-local-filename-completion-map
        minibuffer-local-must-match-map
        minibuffer-contents minibuffer-contents-no-properties
@@ -184,7 +200,7 @@
        special-mode-map
        *kill-do-not-save-duplicates* *kill-ring* *kill-ring-max*
        *kill-ring-yank-pointer*
-       *last-change-was-undo* *last-command* *pending-undo-list*
+       *last-command* *pending-undo-list* undo--last-change-was-undo-p
        read-only-mode
        current-kill kill-append kill-new kill-region kill-ring-save
        *use-empty-active-region* mark mark-ring push-mark region-active-p
@@ -199,10 +215,11 @@
        *line-move-visual* *goal-column* *track-eol*
        visual-line-mode beginning-of-visual-line end-of-visual-line
        kill-visual-line next-logical-line previous-logical-line
-       set-goal-column)
+       set-goal-column
+       *next-error-highlight*)
  (only (schemacs editor isearch)
        *search-case-fold?* *search-pattern* isearch-find isearch-message
-       isearch-forward)
+       isearch-forward isearch-string isearch-success isearch-other-end)
  ;; `menu-bar-mode` sets a frame parameter on every frame; loading the
  ;; library also puts the standard menus in the global map, which nothing
  ;; in this suite reads.
@@ -301,7 +318,6 @@
                    (*this-command* #f)
                    (*last-command* #f)
                    (*pending-undo-list* #f)
-                   (*last-change-was-undo* #f)
                    (*buffer-list* '())
                    (*current-buffer* #f)
                    (*kill-buffer-query-functions* '()))
@@ -629,8 +645,7 @@
                    (*kill-ring-yank-pointer* '())
                      (*this-command* #f)
                      (*last-command* #f)
-                     (*pending-undo-list* #f)
-                     (*last-change-was-undo* #f))
+                     (*pending-undo-list* #f))
         ;; as `find-file-command' does: the file's buffer is shown in the
         ;; selected window - inside the frame binding, because
         ;; `switch-to-buffer' acts on the selected window, as in Emacs. The
@@ -1088,6 +1103,150 @@
             (list #\x13 #\8 #\8 #\8 'return))
       (isearch-forward)
       (list (frame-message frame) (*unread-command-events*)))))
+
+;; **The tool bar a search puts up** (`isearch.el:807`). A bar click
+;; queues two events - `tool-bar` and the item's key - which the command
+;; loop's modal lookup walks and the search's own read has no lookup
+;; for; `isearch` pairs them itself. Each item's key then answers what
+;; the key it stands for does: "Finish" is RET, "Abort" is C-g,
+;; "Repeat forward"/"Repeat backward" are C-s/C-r, "Undo" is DEL.
+(test-equal '("Mark saved where search started" ())
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*unread-command-events* '())
+                   (*search-pattern* #f) (*search-case-fold?* #t))
+      (with-current-buffer ed (insert "alpha 888 beta\n"))
+      (set-point ed 1)
+      (set! (test-display-script *test-display*)
+            (list #\8 'tool-bar 'isearch-exit))
+      (isearch-forward)
+      (list (frame-message frame) (*unread-command-events*)))))
+
+(test-equal '("Quit" () 1)
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*unread-command-events* '())
+                   (*search-pattern* #f) (*search-case-fold?* #t))
+      (with-current-buffer ed (insert "alpha 888 beta\n"))
+      (set-point ed 1)
+      (set! (test-display-script *test-display*)
+            (list #\8 'tool-bar 'isearch-cancel))
+      (isearch-forward)
+      (list (frame-message frame)
+            (*unread-command-events*)
+            (buffer-pt ed)))))
+
+;; The bar is the *buffer's* `tool-bar-map` while the search runs and
+;; gone again after it: `isearch-mode` saves the local value (if any) and
+;; sets `isearch-tool-bar-map`; `isearch-done` puts it back or removes
+;; the local binding. Observed from outside the search, the buffer has
+;; no local binding before or after.
+(test-equal '(#f #f)
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*unread-command-events* '())
+                   (*search-pattern* #f) (*search-case-fold?* #t))
+      (with-current-buffer ed (insert "alpha 888 beta\n"))
+      (set-point ed 1)
+      (let ((before (local-variable-p 'tool-bar-map ed)))
+        (set! (test-display-script *test-display*)
+              (list #\8 'tool-bar 'isearch-exit))
+        (isearch-forward)
+        (list before (local-variable-p 'tool-bar-map ed))))))
+
+;; The search publishes its state as Emacs's globals do (`isearch.el:860`):
+;; `isearch-string`, `isearch-success` and `isearch-other-end` are what
+;; `isearch-query-replace` reads and what the Finish button's `:visible`
+;; form tests. Emacs leaves them at the last search's values after the
+;; search ends, and so does this; `isearch-other-end` in particular must
+;; survive `isearch-done`, because the Replace button's command runs after
+;; the exit and puts point there.
+(test-equal '("888" #t 7)
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*unread-command-events* '())
+                   (*search-pattern* #f) (*search-case-fold?* #t))
+      (with-current-buffer ed (insert "alpha 888 beta\n"))
+      (set-point ed 1)
+      (set! (test-display-script *test-display*)
+            (list #\8 #\8 #\8 'return))
+      (isearch-forward)
+      (list isearch-string isearch-success isearch-other-end))))
+
+;; The Finish button's `:visible` form is Emacs's own
+;; (`isearch.el:829`): evaluated when the bar is built, in the environment
+;; the item lives in. In the editor that is `(guile-user)` with the
+;; editor's names imported into it - a module whose parent is `(guile)`,
+;; so `not` and `string-equal` (the form's two names beside the variable)
+;; are both bound. A test module that imports `(scheme base)` and
+;; `string-equal` has the same shape; `isearch-string` is the library's
+;; own binding, which is what the item reads.
+(test-equal '(#f #t)
+  (let ((m (current-module)))
+    (set! isearch-string "")
+    (let ((empty? (eval '(not (string-equal isearch-string "")) m)))
+      (set! isearch-string "abc")
+      (list empty? (eval '(not (string-equal isearch-string "")) m)))))
+
+;; The Replace button: `isearch-query-replace` (`isearch.el:2399`), a
+;; replace.el command in this tree (`replace.scm`). The click ends the
+;; search, reads the TO string, and runs `perform-replace`'s loop; `y`
+;; replaces the one occurrence and RET ends the loop. Point is put at the
+;; match's *beginning* first (the `isearch-other-end` step), so the loop
+;; starts at the match rather than past it.
+(test-equal '("alpha XX beta\n" "Replaced 1 occurrence")
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed)))
+    (parameterize ((*current-frame* frame) (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*unread-command-events* '())
+                   (*search-pattern* #f) (*search-case-fold?* #t))
+      (with-current-buffer ed (insert "alpha 888 beta\n"))
+      (set-point ed 1)
+      (set! (test-display-script *test-display*)
+            (list #\8 #\8 #\8 'tool-bar 'isearch-query-replace
+                  #\X #\X 'return     ; the TO prompt
+                  #\y 'return))       ; the query loop
+      (isearch-forward)
+      (list (with-current-buffer ed
+              (buffer-substring-no-properties (point-min) (point-max)))
+            (frame-message frame)))))
+
+;; The Show hits button: `isearch-occur` (`isearch.el:2475`), a
+;; replace.el command here for the same reason the Replace one is.
+;; **It does not exit the search first**: Emacs 31.1's command tests the
+;; `isearch-exit` symbol property, which nothing puts on it (measured:
+;; `(get 'isearch-occur 'isearch-exit)` is nil), so `occur` displays its
+;; buffer while the search runs on and the RET after the click is what
+;; ends it.
+(test-equal '("1 match for \"888\" in buffer: occurs-src\n      1:alpha 888 beta\n"
+              "alpha 888 beta\n")
+  (let* ((ed (get-buffer-create "occurs-src")))
+    (with-current-buffer ed
+      (erase-buffer)
+      (insert "alpha 888 beta\n"))
+    (let ((frame (test-frame ed)))
+      (parameterize ((*current-frame* frame) (*current-buffer* ed)
+                     (*echo-area-buffer* #f)
+                     (*unread-command-events* '())
+                     (*search-pattern* #f) (*search-case-fold?* #t)
+                     (*next-error-highlight* #f))
+        (set-point ed 1)
+        (let ((old (get-buffer "*Occur*")))
+          (when old (%kill-buffer old)))
+        (set! (test-display-script *test-display*)
+              (list #\8 #\8 #\8 'tool-bar 'isearch-occur 'return))
+        (isearch-forward)
+        (list (with-current-buffer (get-buffer "*Occur*") (buffer-string))
+              (with-current-buffer ed (buffer-string)))))))
 
 (test-end "schemacs_ncurses_editor_isearch")
 
@@ -1681,8 +1840,7 @@
                    (*kill-ring-yank-pointer* '())
                  (*this-command* #f)
                  (*last-command* #f)
-                 (*pending-undo-list* #f)
-                 (*last-change-was-undo* #f))
+                 (*pending-undo-list* #f))
     (for-each (lambda (ev) (dispatch-input-event frame ev)) evs)
     frame))
 
@@ -2594,8 +2752,7 @@
                    (*kill-ring-yank-pointer* '())
                    (*this-command* #f)
                    (*last-command* #f)
-                   (*pending-undo-list* #f)
-                   (*last-change-was-undo* #f))
+                   (*pending-undo-list* #f))
      (let ((frame (*current-frame*))
            (buffer (get-buffer-create "*own-keys*")))
       (set-window-buffer! (frame-selected-window frame) buffer)
@@ -3041,8 +3198,7 @@
                    (*kill-ring-yank-pointer* '())
                    (*this-command* #f)
                    (*last-command* #f)
-                   (*pending-undo-list* #f)
-                   (*last-change-was-undo* #f))
+                   (*pending-undo-list* #f))
       ;; What `read-minibuffer-1' does with the current buffer and the
       ;; map: `Fset_buffer (minibuffer)' and `bset_keymap
       ;; (current_buffer, map)' (`minibuf.c:794', `:906'). The map is the
@@ -5148,3 +5304,168 @@
   (read-keys-answer (list #\a) #t))
 
 (test-end "schemacs_tty_editor_read_key_sequence")
+
+;;--------------------------------------------------------------------
+;; `read-file-name`'s dialog branch
+;;
+;; **A menu's or the tool bar's command gets a graphical chooser; a
+;; typed key gets the minibuffer.** That is `read-file-name-default`'s
+;; branch (`minibuffer.el:4112`) through `next-read-file-uses-dialog-p`
+;; (`fileio.c:6574`), whose test is "the last nonmenu event is nil or a
+;; cons" - a menu selection's keys are conses, a typed key is not.
+;;
+;; No terminal has a chooser, so the chooser itself is stubbed here: a
+;; `<dialog-display>` is a `<test-display>` that answers
+;; `window-system-display?` true and whose `x-file-dialog` records its
+;; arguments and answers a fixed name. What is tested is everything
+;; above the chooser - the branch, the `dialog-mustmatch` translation,
+;; the folder flag, the history write - plus the record
+;; `read_key_sequence` makes of what kind of event the last one was.
+;; The Gtk dialog below that is checked live; see DEPARTURES.md.
+;;--------------------------------------------------------------------
+
+(define-class <dialog-display> (<test-display>))
+(define-method (window-system-display? (d <dialog-display>)) #t)
+
+(define %dialog-calls '())
+(define-method (x-file-dialog (d <dialog-display>) prompt dir
+                              default-filename mustmatch only-dir)
+  (set! %dialog-calls
+        (cons (list prompt dir default-filename mustmatch only-dir)
+              %dialog-calls))
+  "/tmp/read-file-name-chose.txt")
+
+(define (with-dialog-stage last-event thunk)
+  ;; Run THUNK in a frame on the stub chooser's display, with LAST-EVENT
+  ;; as the event that "invoked the command", and answer
+  ;; `(THUNK's value recorded-calls)'.
+  ;;--------------------------------------------------------------
+  (let ((d (make <dialog-display>)))
+    (parameterize ((current-display d) (*frame-list* '()) (*current-frame* #f)
+                   (*last-nonmenu-event* last-event))
+      (let ((frame (new-frame (allocate-buffer) 24 80)))
+        (select-frame frame)
+        (set! %dialog-calls '())
+        (let ((answer (thunk)))
+          (list answer %dialog-calls))))))
+
+(test-begin "schemacs_tty_editor_file_dialog")
+
+(test-equal "a menu's Open gets the chooser, with Emacs's five arguments"
+  '("/tmp/read-file-name-chose.txt"
+    (("Find existing file: " "/tmp/" #f #t #f)))
+  (with-dialog-stage
+   (cons 'menu-bar-event 'open-file)
+   (lambda () (read-file-name "Find existing file: " "/tmp/" #f #t))))
+
+(test-equal "confirm means nil to a dialog, so a new file can be made"
+  #f
+  (let ((recorded (cadr (with-dialog-stage
+                         (cons 'menu-bar-event 'open-file)
+                         (lambda () (read-file-name "Find file: " "/tmp/" #f
+                                                    'confirm))))))
+    (list-ref (car recorded) 3)))
+
+(test-equal "confirm-after-completion means nil too"
+  #f
+  (let ((recorded (cadr (with-dialog-stage
+                         (cons 'menu-bar-event 'open-file)
+                         (lambda () (read-file-name "Find file: " "/tmp/" #f
+                                                    'confirm-after-completion))))))
+    (list-ref (car recorded) 3)))
+
+(test-equal "a real mustmatch stays true"
+  #t
+  (let ((recorded (cadr (with-dialog-stage
+                         (cons 'menu-bar-event 'open-file)
+                         (lambda () (read-file-name "Find file: " "/tmp/" #f
+                                                    'lambda))))))
+    (list-ref (car recorded) 3)))
+
+(test-equal "read-directory-name asks for the folder chooser"
+  '("/tmp/" "/tmp/" #f #t)
+  (let ((recorded (cadr (with-dialog-stage
+                         (cons 'menu-bar-event 'diropen)
+                         (lambda () (read-directory-name "Dired (directory): "
+                                                         "/tmp/"))))))
+    (list (list-ref (car recorded) 1)  ; DIR
+          (list-ref (car recorded) 2)  ; DEFAULT-FILENAME
+          (list-ref (car recorded) 3)  ; MUSTMATCH
+          (list-ref (car recorded) 4)))) ; ONLY-DIR - the predicate's flag
+
+(test-equal "the chosen name goes into file-name-history"
+  "/tmp/read-file-name-chose.txt"
+  (begin
+    (with-dialog-stage (cons 'menu-bar-event 'open-file)
+                       (lambda () (read-file-name "Find existing file: "
+                                                  "/tmp/" #f #t)))
+    (car (history-entries file-name-history))))
+
+;; `dired-read-dir-and-switches` takes `read-directory-name`'s arm when a
+;; dialog is about to be used - "so the dialog code knows we want
+;; directories. Some dialogs can only select directories or files when
+;; popped up, not both" (`dired.el:1124`). Its other arm is
+;; `read-file-name`, which a typed `C-x d` keeps, so wildcard completion
+;; still works there.
+(test-equal "dired's prompt asks for the folder chooser when a dialog is used"
+  '("Dired (directory): " #t)
+  (let ((recorded (cadr (with-dialog-stage
+                         (cons 'menu-bar-event 'diropen)
+                         (lambda () (dired-read-dir-and-switches ""))))))
+    (list (list-ref (car recorded) 0)    ; PROMPT
+          (list-ref (car recorded) 4)))) ; ONLY-DIR
+
+;; `next-read-file-uses-dialog-p` itself, all three shapes of the event:
+;; a menu's cons and a mouse event's cons take the dialog, a typed key
+;; does not, and nil - "no event at all" - does, as in Emacs.
+(test-equal "menu, mouse and keyboard events answer the predicate"
+  '(#t #t #f)
+  (list (car (with-dialog-stage (cons 'menu-bar-event 'open-file)
+                                next-read-file-uses-dialog-p))
+        (car (with-dialog-stage '(down-mouse-1 (frame 1 (0 . 0) 0))
+                                next-read-file-uses-dialog-p))
+        (car (with-dialog-stage 6 next-read-file-uses-dialog-p))))
+
+(test-equal "nil means no event yet, which takes the dialog"
+  '(#t)
+  (list (car (with-dialog-stage #f next-read-file-uses-dialog-p))))
+
+(test-equal "use-file-dialog nil turns the chooser off"
+  '(#f #t)
+  (let ((saved use-file-dialog))
+    (set! use-file-dialog #f)
+    (let ((off (car (with-dialog-stage (cons 'menu-bar-event 'open-file)
+                                       next-read-file-uses-dialog-p))))
+      (set! use-file-dialog saved)
+      (list off
+            (car (with-dialog-stage (cons 'menu-bar-event 'open-file)
+                                    next-read-file-uses-dialog-p))))))
+
+(test-equal "use-dialog-box nil turns it off as well"
+  '(#f)
+  (list (parameterize ((*use-dialog-box* #f))
+          (car (with-dialog-stage (cons 'menu-bar-event 'open-file)
+                                  next-read-file-uses-dialog-p)))))
+
+;; The record `read_key_sequence` makes (`keyboard.c:12216`): a menu's
+;; key is a cons and so is a mouse event, while a keyboard key is
+;; itself.
+(test-equal "a menu's key records its cons"
+  '(menu-bar-event . open-file)
+  (parameterize ((*last-nonmenu-event* #f))
+    (record-nonmenu-event! (cons 'menu-bar-event 'open-file) 'open-file)
+    (*last-nonmenu-event*)))
+
+(test-equal "a mouse event records its own posn list"
+  '(down-mouse-1 (frame 1 (0 . 0) 0))
+  (parameterize ((*last-nonmenu-event* #f))
+    (record-nonmenu-event! '(down-mouse-1 (frame 1 (0 . 0) 0)) 'down-mouse-1)
+    (*last-nonmenu-event*)))
+
+(test-equal "a keyboard key records the key itself"
+  6
+  (parameterize ((*last-nonmenu-event* #f))
+    (record-nonmenu-event! 6 6)
+    (*last-nonmenu-event*)))
+
+(test-end "schemacs_tty_editor_file_dialog")

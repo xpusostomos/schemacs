@@ -16,7 +16,7 @@
   ;; takes the space over. What is left of the old flat-list model is
   ;; the *direction* of a combination: it is read off the children's
   ;; rectangles, because this record has no `w->horizontal`
-  ;; (`windows-stacked?`, `frame.scm`). Everything that would be
+  ;; (`window-stacked?`, `frame.scm`). Everything that would be
   ;; ambiguous with one child - the axis of a combination about to lose
   ;; its second-to-last window - is read before the tree is changed, as
   ;; the C reads `WINDOW_HORIZONTAL_COMBINATION_P (p)` before unlinking.
@@ -84,6 +84,7 @@
           window-buffer window-children
           window-edges window-frame window-height window-left window-list
           window-parent
+          window-stacked? set-window-combination-axis!
           window-body-width window-body-height window-top window-width
           window-internal?
           %window-start set!%window-start
@@ -109,7 +110,8 @@
           ;; `window.c` half of the size chapter, which the resize
           ;; engine and the state functions below are built on.
           frame-root-window frame-root-window-p
-          window-live-p window-child window-next-sibling window-prev-sibling
+          window-live-p window-child window-next-sibling window-prev-sibling frame?
+          window-pixel-edges
           window-last-child window-top-child window-left-child
           window-combination-p window-combined-p
           window-total-height window-total-width
@@ -169,7 +171,7 @@
     ;; `assq-delete-all` and `delq` are `subr.el`'s - `record-window-buffer`
     ;; drops an older entry with the first, and the history lists with the
     ;; second.
-    (only (schemacs editor subr) assq-delete-all delq kbd run-hooks
+    (only (schemacs editor subr) assq-delete-all delq kbd run-hooks user-error nth
           with-temp-buffer)
     ;; `temp-buffer-window-show' puts point at the beginning of the
     ;; buffer it is about to show, which `goto-char' is.
@@ -222,7 +224,7 @@
    temp-buffer-window-show
    window-live-p
    with-current-buffer-window
-   with-selected-window
+   with-selected-window save-selected-window
    window-position
    window-hscroll
    set-window-hscroll!
@@ -231,7 +233,8 @@
    ;; The size arithmetic - `window.el`'s half of the size chapter.
    window-safe-min-height window-safe-min-width window-resize-pixelwise
    *window-combination-resize* *window-combination-limit*
-   window-normalize-window window-valid-p frame-char-size
+   window-normalize-window adjust-window-trailing-edge window-at-side-p one-window-p
+   window-resize-pixelwise window-valid-p frame-char-size
    window-safe-min-pixel-height window-min-pixel-height
    window-safe-min-pixel-width window-min-pixel-width
    window-safe-min-size window-min-size window--min-size-ignore-p
@@ -491,6 +494,9 @@
                                     0 0 #f 0 '() '()
                                     #f 0 0 0 0 0 0 0 -1 #f '() #f
                           0 #f 0 0 0 0)))
+              (set-window-combination-axis! p (if horflag
+                                                   'horizontal
+                                                   'vertical))
               ;; "Set up PARENT's positions and sizes": the union of the
               ;; run's rectangles.
               (if horflag
@@ -581,6 +587,12 @@
                       frame window
                       (make-window-parent window new before?
                                           top height left width))))
+              ;; The new combination's axis - `w->vchild`/`w->hchild` in
+              ;; the C, which a split sets with its direction
+              ;; (`window.c:5500`: `wset_hchild`/`wset_vchild`).
+              (set-window-combination-axis! p (if horizontal
+                                                   'horizontal
+                                                   'vertical))
               (when (window-internal? window)
                 ;; **"Get entire space from WINDOW"** (`window.el:5945`):
                 ;; an internal window's children give up the new window's
@@ -597,6 +609,12 @@
                   (%window-resize-apply-1 p horizontal)))
               p)
             (begin
+              ;; The ortho test above guarantees PARENT divides its
+              ;; children on this axis; a combination made before the
+              ;; axis was stored gets it here.
+              (set-window-combination-axis! parent (if horizontal
+                                                        'horizontal
+                                                        'vertical))
               (set!window-parent new parent)
               (set!window-children
                parent
@@ -802,15 +820,39 @@
     ;; existing combination"), so it is gone rather than left to be
     ;; picked up again.
 
-    (define (get-buffer-window buffer)
-      ;; The window showing BUFFER, or false when none does: GNU Emacs's
-      ;; `get-buffer-window', which is `window.c''s - it is where a buffer
-      ;; can be found by looking at the windows.
+    (define (get-buffer-window . args)
+      ;; The window showing BUFFER-OR-NAME, or false when none does: GNU
+      ;; Emacs's `get-buffer-window', which is `window.c''s - it is where
+      ;; a buffer can be found by looking at the windows.
+      ;;
+      ;; BUFFER-OR-NAME is optional, as in Emacs (the current buffer), and
+      ;; ALL-FRAMES chooses the frames to look at - `occur-1' asks with
+      ;; `all-frames', because the *Occur* buffer may be showing on
+      ;; another frame. Emacs's meanings: nil is the selected frame, t is
+      ;; every frame, a frame is that frame; 0 and `visible' are the
+      ;; visible frames, and every frame here is visible, so they are t.
       ;;--------------------------------------------------------------
-      (let loop ((rest (window-list)))
-        (cond ((null? rest) #f)
-              ((eq? (window-buffer (car rest)) buffer) (car rest))
-              (else (loop (cdr rest))))))
+      (let* ((thing (if (pair? args) (car args) (current-buffer)))
+             (buffer (cond ((not thing) (current-buffer))
+                           ((bufferp thing) thing)
+                           (else (get-buffer thing))))
+             (all (and (pair? args) (pair? (cdr args)) (cadr args)))
+             (frames (cond ((or (eq? all #t) (eqv? all 0)
+                                (eq? all 'visible) (eq? all 'all-frames))
+                            (*frame-list*))
+                           ((and all (not (symbol? all)) (not (number? all)))
+                            (list all))
+                           (else (list (*current-frame*)))))
+             (in-frame (lambda (frame)
+                         (let loop ((rest (window-list frame #t)))
+                           (cond ((null? rest) #f)
+                                 ((eq? (window-buffer (car rest)) buffer)
+                                  (car rest))
+                                 (else (loop (cdr rest))))))))
+        (let loop ((rest frames))
+          (cond ((null? rest) #f)
+                ((in-frame (car rest)))
+                (else (loop (cdr rest)))))))
 
     (define (display-buffer--inhibit-same-window? action)
       ;; Whether ACTION refuses the selected window. GNU Emacs's
@@ -2589,6 +2631,25 @@ by this function.  This happens in an interactive call."
              (lambda () body ...)
              (lambda () (select-window saved-window)))))))
 
+    (define-syntax save-selected-window
+      ;; GNU Emacs's `save-selected-window' (window.el): "Execute BODY,
+      ;; then select the previously selected window. The value returned
+      ;; is the value of the last form in BODY."
+      ;;
+      ;; Emacs also saves and restores "the selected window in each
+      ;; frame". `select-window` here does not switch frames - the
+      ;; departure recorded at that function - so a selection made from
+      ;; inside BODY never moves another frame's, and the selected window
+      ;; is the whole of what needs putting back.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((save-selected-window body ...)
+         (let ((saved-window (selected-window)))
+           (dynamic-wind
+             (lambda () #f)
+             (lambda () body ...)
+             (lambda () (select-window saved-window)))))))
+
     (define (quit-restore-window window bury-or-kill)
       ;; GNU Emacs's `quit-restore-window' (window.el): "Deal with
       ;; WINDOW after having displayed it before and now burying or
@@ -2779,6 +2840,14 @@ by this function.  This happens in an interactive call."
       (and (window-type? thing)
            (or (window-live-p thing) (window-internal? thing))
            #t))
+
+    (define window-resize-pixelwise #f)
+    ;; ^ GNU Emacs's `window-resize-pixelwise` (`window.c:9575`): "Non-nil
+    ;; means resize windows pixelwise." A plain variable, as the C's
+    ;; `DEFVAR_BOOL` is - nothing `let`-binds it, and a user `setq`s it.
+    ;; The self-assignment keeps the compiler from folding the read to
+    ;; its load-time value.
+    (set! window-resize-pixelwise window-resize-pixelwise)
 
     (define (frame-char-size window-or-frame . args)
       ;; GNU Emacs's `frame-char-size` (`window.el:405`): the frame's
@@ -3773,6 +3842,220 @@ by this function.  This happens in an interactive call."
             (window-resize window delta horizontal ignore pixelwise)
             #f)))
 
+    (define (adjust-window-trailing-edge window delta . args)
+      ;; GNU Emacs's `adjust-window-trailing-edge` (`window.el:3528`):
+      ;; "Move WINDOW's bottom edge by DELTA lines. Optional argument
+      ;; HORIZONTAL non-nil means move WINDOW's right edge by DELTA
+      ;; columns. ... If the edge can't be moved by DELTA lines or
+      ;; columns, move it as far as possible in the desired direction."
+      ;;
+      ;; This is what a mode-line drag calls (`mouse-drag-line`,
+      ;; `mouse.el:871`). DELTA is in lines/columns unless PIXELWISE;
+      ;; the C turns one into the other with the frame's character size,
+      ;; and here a cell *is* the display's pixel - `frame-char-size` is
+      ;; 1 on a terminal and the frame's cell size on a toolkit display.
+      ;;--------------------------------------------------------------
+      (let ((horizontal (window--opt args 0))
+            (pixelwise (window--opt args 1)))
+        (set! window (window-normalize-window window))
+        (let* ((frame (window-frame window))
+               (minibuffer-window (frame-minibuffer-window frame))
+               (right window)
+               (left #f)
+               (first-left #f)
+               (first-right #f)
+               (this-delta 0)
+               (min-delta 0)
+               (max-delta 0)
+               (ignore #f))
+          (unless pixelwise
+            (set! pixelwise #t)
+            (set! delta (* delta (frame-char-size window horizontal))))
+          ;; Find the edge we want to move: the topmost window in a
+          ;; vertical combination (or the leftmost in a horizontal one)
+          ;; that has a sibling on the far side.
+          ;; **RIGHT can become nil mid-walk**, and `window-parent` is a
+          ;; record accessor: Elisp's `(window-parent nil)` means the
+          ;; *selected* window (`decode_any_window`), ours raises
+          ;; "expecting struct". Emacs's `while` also ends the moment the
+          ;; parent is nil - that is what the walk-up is looking for - so
+          ;; the nil test is the loop's own termination, written out.
+          (let loop ()
+            (when (and right
+                       (or (not (window-combined-p right horizontal))
+                           (not (window-right-sibling right)))
+                       (set! right (window-parent right)))
+              (loop)))
+          (cond
+           ;; "Resize the minibuffer window if it's on the same frame as
+           ;; and immediately below WINDOW and it's either active or
+           ;; `resize-mini-windows' is nil."
+           ((and (not right) (not horizontal)
+                 (eq? (window-frame minibuffer-window) frame)
+                 (= (nth 1 (window-pixel-edges minibuffer-window))
+                    (nth 3 (window-pixel-edges window)))
+                 (or (not *resize-mini-windows*)
+                     (minibuffer-window-active-p minibuffer-window)))
+            (window--resize-mini-window minibuffer-window (- delta)))
+           ;; **`set!` is not `setq`.** Elisp's `(not (setq left right))`
+           ;; is true when RIGHT was nil; a Scheme `set!` answers the
+           ;; *unspecified* value, which is true, so written that way the
+           ;; test was never true and a nil LEFT went on to
+           ;; `window-min-size` - "Wrong type argument ... #f", or from a
+           ;; drag a window with no right sibling raising where Emacs says
+           ;; "No window on the right of this one".
+           ((let ((l right))
+              (set! left l)
+              (or (not l)
+                  (let ((r (window-right-sibling l)))
+                    (set! right r)
+                    (not r))))
+            (if horizontal
+                (user-error "No window on the right of this one")
+                (user-error "No window below this one")))
+           (else
+            ;; "Set LEFT to the first resizable window on the left. This
+            ;; step is needed to handle fixed-size windows."
+            (set! first-left left)
+            (let loop ()
+              (when (and left
+                         (or (window-size-fixed-p left horizontal)
+                             (and (< delta 0)
+                                  (<= (window-size left horizontal #t)
+                                      (window-min-size left horizontal #f #t)))))
+                (set! left
+                      (or (window-left-sibling left)
+                          (begin
+                            (let up ()
+                              (when (and (set! left (window-parent left))
+                                         (not (window-combined-p left horizontal)))
+                                (up)))
+                            (window-left-sibling left))))
+                (loop)))
+            (unless left
+              ;; "We have to resize a size-preserved window. Start again
+              ;; with the window initially on the left."
+              (set! ignore 'preserved)
+              (set! left first-left)
+              (let loop ()
+                (when (and left
+                           (or (window-size-fixed-p left horizontal 'preserved)
+                               (and (< delta 0)
+                                    (<= (window-size left horizontal #t)
+                                        (window-min-size left horizontal 'preserved #t)))))
+                  (set! left
+                        (or (window-left-sibling left)
+                            (begin
+                              (let up ()
+                                (when (and (set! left (window-parent left))
+                                           (not (window-combined-p left horizontal)))
+                                  (up)))
+                              (window-left-sibling left))))
+                  (loop)))
+              (unless left
+                (if horizontal
+                    (user-error "No resizable window on the left of this one")
+                    (user-error "No resizable window above this one"))))
+            ;; "Set RIGHT to the first resizable window on the right."
+            (set! first-right right)
+            (let loop ()
+              (when (and right
+                         (or (window-size-fixed-p right horizontal)
+                             (and (> delta 0)
+                                  (<= (window-size right horizontal #t)
+                                      (window-min-size right horizontal 'preserved #t)))))
+                (set! right
+                      (or (window-right-sibling right)
+                          (begin
+                            (let up ()
+                              (when (and (set! right (window-parent right))
+                                         (not (window-combined-p right horizontal)))
+                                (up)))
+                            (window-right-sibling right))))
+                (loop)))
+            (unless right
+              (set! ignore 'preserved)
+              (set! right first-right)
+              (let loop ()
+                (when (and right
+                           (or (window-size-fixed-p right horizontal 'preserved)
+                               (and (> delta 0)
+                                    (<= (window-size right horizontal #t)
+                                        (window-min-size right horizontal 'preserved #t)))))
+                  (set! right
+                        (or (window-right-sibling right)
+                            (begin
+                              (let up ()
+                                (when (and (set! right (window-parent right))
+                                           (not (window-combined-p right horizontal)))
+                                  (up)))
+                              (window-right-sibling right))))
+                  (loop)))
+              (unless right
+                (if horizontal
+                    (user-error "No resizable window on the right of this one")
+                    (user-error "No resizable window below this one"))))
+            ;; LEFT and RIGHT (which might be both internal windows) are
+            ;; now the two windows we want to resize.
+            (cond
+             ((> delta 0)
+              (set! max-delta
+                    (window--max-delta-1 left 0 horizontal ignore 'after #f pixelwise))
+              (set! min-delta
+                    (window--min-delta-1 right (- delta) horizontal ignore 'before #f pixelwise))
+              (when (or (< max-delta delta) (> min-delta (- delta)))
+                ;; "We can't get the whole DELTA - move as far as possible."
+                (set! delta (min max-delta (- min-delta))))
+              (unless (= delta 0)
+                (window--resize-reset frame horizontal)
+                ;; "Try to enlarge LEFT first."
+                (set! this-delta
+                      (window--resizable left delta horizontal ignore 'after #f #f pixelwise))
+                (unless (= this-delta 0)
+                  (window--resize-this-window
+                   left this-delta horizontal ignore #t 'before
+                   (if horizontal
+                       (+ (window-pixel-left left) (window-pixel-width left))
+                       (+ (window-pixel-top left) (window-pixel-height left)))))
+                ;; "Shrink windows on right of LEFT."
+                (window--resize-siblings
+                 left delta horizontal ignore 'after
+                 (if horizontal
+                     (window-pixel-left right)
+                     (window-pixel-top right)))))
+             ((< delta 0)
+              (set! max-delta
+                    (window--max-delta-1 right 0 horizontal ignore 'before #f pixelwise))
+              (set! min-delta
+                    (window--min-delta-1 left delta horizontal ignore 'after #f pixelwise))
+              (when (or (< max-delta (- delta)) (> min-delta delta))
+                (set! delta (max (- max-delta) min-delta)))
+              (unless (= delta 0)
+                (window--resize-reset frame horizontal)
+                ;; "Try to enlarge RIGHT."
+                (set! this-delta
+                      (window--resizable right (- delta) horizontal ignore 'before #f #f pixelwise))
+                (unless (= this-delta 0)
+                  (window--resize-this-window
+                   right this-delta horizontal ignore #t 'after
+                   (if horizontal
+                       (window-pixel-left right)
+                       (window-pixel-top right))))
+                ;; "Shrink windows on left of RIGHT."
+                (window--resize-siblings
+                 right (- delta) horizontal ignore 'before
+                 (if horizontal
+                     (+ (window-pixel-left left) (window-pixel-width left))
+                     (+ (window-pixel-top left) (window-pixel-height left)))))))
+            (unless (= delta 0)
+              ;; "Don't report an error in the standard case."
+              (when (window--resize-apply-p frame horizontal)
+                (if (window-resize-apply frame horizontal)
+                    (window--pixel-to-total frame horizontal)
+                    ;; "But do report an error if applying the changes
+                    ;; fails."
+                    (error "Failed adjusting window ~a" window)))))))))
+
     (define (window-full-height-p . args)
       ;; GNU Emacs's `window-full-height-p` (`window.el:2104`).
       ;;--------------------------------------------------------------
@@ -3781,6 +4064,49 @@ by this function.  This happens in an interactive call."
             (eq? window (frame-root-window (window-frame window)))
             (= (window-pixel-height window)
                (window-pixel-height (frame-root-window (window-frame window)))))))
+
+    (define (window-at-side-p . args)
+      ;; GNU Emacs's `window-at-side-p` (`window.el:2276`): "Return t if
+      ;; WINDOW is at SIDE of its containing frame. ... SIDE can be any
+      ;; of the symbols `left', `top', `right' or `bottom'. The default
+      ;; value nil is handled like `bottom'."
+      ;;--------------------------------------------------------------
+      (let* ((window (window-normalize-window (window--opt args 0)))
+             (side (window--opt args 1))
+             (edge (cond ((eq? side 'left) 0)
+                         ((eq? side 'top) 1)
+                         ((eq? side 'right) 2)
+                         (else 3))))
+        (= (nth edge (window-pixel-edges window))
+           (nth edge (window-pixel-edges (frame-root-window (window-frame window)))))))
+
+    (define (one-window-p . args)
+      ;; GNU Emacs's `one-window-p` (`window.el:4145`): "Return non-nil
+      ;; if the selected window is the only window. Optional arg NOMINI
+      ;; non-nil means don't count the minibuffer even if it is active.
+      ;; Otherwise, the minibuffer is counted when it is active."
+      ;;
+      ;; **Departure**: Emacs answers by comparing `next-window` with the
+      ;; selected window; `next-window` is not carried (C-x o is
+      ;; `other-window`'s own walk), so this counts the windows the same
+      ;; rules select. ALL-FRAMES's `visible`/0 cases are all live frames
+      ;; here - nothing iconifies.
+      ;;--------------------------------------------------------------
+      (let* ((nomini (window--opt args 0))
+             (all-frames (window--opt args 1))
+             (minibuf (if nomini 'never #f))
+             (frames (cond ((eq? all-frames #t) (*frame-list*))
+                           ((eq? all-frames 'visible) (*frame-list*))
+                           ((eq? all-frames 0) (*frame-list*))
+                           ((frame? all-frames) (list all-frames))
+                           (else (list (*current-frame*)))))
+             (count 0))
+        (for-each
+         (lambda (frame)
+           (when (frame-live-p frame)
+             (set! count (+ count (length (window-list frame minibuf))))))
+         frames)
+        (= count 1)))
 
     (define (window-right-sibling window)
       ;; GNU Emacs's `window-right` (`window.el:308`): "Return WINDOW's

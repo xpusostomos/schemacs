@@ -38,6 +38,14 @@
     (scheme base)
     (scheme char)
     (scheme case-lambda)
+    ;; `isearch-tool-bar-image` is Emacs's `(eval (tool-bar--image-expression ...))`;
+    ;; the helper is `(schemacs editor image)`'s (see the note there -
+    ;; `tool-bar.scm` imports this library, so the import cannot run the
+    ;; other way). Emacs's one-argument `eval` evaluates in the current
+    ;; environment; Guile's one-argument `eval` is `(guile)`'s - not
+    ;; `(scheme eval)`'s, whose `eval` wants an explicit environment.
+    (only (guile) current-module eval)
+    (only (schemacs editor image) tool-bar--image-expression)
     ;; `caddr' and `cadddr' are `(scheme cxr)'s, not `(scheme base)''s.
     ;; Without this the file loads and the failure waits for the first
     ;; search that reads a match: "Unbound variable: caddr" at run time,
@@ -73,7 +81,7 @@
     ;; `define-key' and the global map: the keys C-s and C-r are stated
     ;; here, beside the commands they run.
     (only (schemacs editor keymap)
-         define-key
+         define-key make-sparse-keymap
          *default-keymap*)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
@@ -103,7 +111,9 @@
          ;; is the same condition, spelled the way `push-mark` spells it.
          *echo-area-buffer*
           )
-    (only (schemacs editor command) define-command)
+    (only (schemacs editor command) call-interactively define-command)
+    ;; `isearch-describe-mode` is `(describe-function 'isearch-forward)`.
+    (only (schemacs editor help-fns) describe-function)
     (only (schemacs editor simple)
          current-kill word-char?
          ;; `isearch-done` ends by PUSHING the mark, not setting it -
@@ -115,7 +125,7 @@
     ;; are the range the lazy highlighter covers - the window, which is
     ;; what GNU Emacs's `lazy-highlight-buffer' nil means.
     (only (schemacs editor xdisp)
-         render! window-end window-start)
+         render! window-end window-start force-mode-line-update)
     ;; The highlight is an *overlay* now - `isearch-highlight' makes one
     ;; and puts the `isearch' face on it - which is GNU Emacs's mechanism
     ;; and the reason a font-locked word keeps its colour inside a match:
@@ -127,7 +137,12 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char set-point buffer-pt buffer-beg buffer-z)
+          fetch-char set-point buffer-pt buffer-beg buffer-z
+          ;; The buffer-local swap the tool bar does for a search:
+          ;; `setq-local`, `local-variable-p` and
+          ;; `kill-local-variable` (`isearch.el:1309`, `:1507`).
+          set-buffer-local-value! buffer-local-value
+          local-variable-p kill-local-variable with-current-buffer)
     )
 
   (export
@@ -146,6 +161,16 @@
    isearch-highlight isearch-dehighlight
    isearch-lazy-highlight-match isearch-lazy-highlight-update
    lazy-highlight-cleanup
+   ;; The tool bar the search puts up (`isearch.el:800-855`) and the
+   ;; command its Help button runs.
+   isearch-tool-bar-map isearch-tool-bar-image isearch-tool-bar-old-map
+   isearch-describe-mode
+   ;; The running search's state, as Emacs's globals (`isearch.el:860`):
+   ;; the tool bar's `:visible` form reads `isearch-string`, and
+   ;; `isearch-query-replace` (in `replace.scm`, which imports this
+   ;; library) reads all of it.
+   isearch-string isearch-success isearch-case-fold-search
+   isearch-other-end isearch-regexp isearch-string-propertize
    )
 
   (begin
@@ -601,6 +626,211 @@
       (when (< 0 (string-length pattern))
         (isearch-update-ring pattern case-fold?)))
 
+    ;;----------------------------------------------------------------
+    ;; The search's tool bar - `isearch.el:800-855`, `:1309`, `:1507`
+    ;;
+    ;; **Emacs replaces the whole tool bar for the duration of a
+    ;; search**: `isearch-mode` sets the buffer-local `tool-bar-map` to
+    ;; `isearch-tool-bar-map`, and `isearch-done` puts the buffer's own
+    ;; map back. Here `tool-bar-map` is a buffer-local slot keyed by
+    ;; that symbol, which `tool-bar.scm`'s `%tool-bar-map` reads - so
+    ;; the swap is the same three lines Emacs writes, and `force-mode-
+    ;; line-update` is what makes the bar rebuild them.
+    ;;
+    ;; One of Emacs's eight items is not carried: "Show hits" is
+    ;; `isearch-occur`, which needs `occur` (replace.el's second half,
+    ;; ~1500 lines), and `occur` is not ported. Its icon ships with the
+    ;; others for when it comes.
+    ;;
+    ;; **`:visible` on "Finish" is Emacs's own form**, evaluated when the
+    ;; bar is built: the button exists only once something has been
+    ;; typed, which is why Undo is the fourth button at rest. It reads
+    ;; the module-level `isearch-string`, which the loop publishes every
+    ;; iteration and `force-mode-line-update` makes the bar re-evaluate.
+    ;;
+    ;; The `:filter` on "Abort" (choose `isearch-abort` or
+    ;; `isearch-cancel` by whether the search succeeds) is *not* carried:
+    ;; the filter runs in `menu-item-eval-property`, whose evaluation
+    ;; module is the ambient one and not this library, so it cannot read
+    ;; `isearch-success` except through an exported variable - and its
+    ;; two answers are the two halves of the C-g branch, which the search
+    ;; already picks between, so the button is always "Abort" and does
+    ;; what C-g does.
+    ;;----------------------------------------------------------------
+
+    (define isearch-tool-bar-old-map #f)
+    ;; ^ GNU Emacs's `isearch-tool-bar-old-map` (`isearch.el:800'):
+    ;; "Variable holding the old local value of `tool-bar-map', if any."
+    ;; A plain variable: Emacs only reads and `setq`s it.
+    (set! isearch-tool-bar-old-map isearch-tool-bar-old-map)
+
+    ;;----------------------------------------------------------------
+    ;; The search's state, as Emacs's globals
+    ;;
+    ;; GNU Emacs keeps the running search in `defvar`s - `isearch-string`
+    ;; and the rest - because things outside the search's own code read
+    ;; them while it is running: the tool bar's `:visible` form, and
+    ;; `isearch-query-replace`. The loop below keeps its state in `loop`
+    ;; bindings, so each iteration publishes it here, at the point
+    ;; Emacs's `isearch-update` would have left it.
+    ;;
+    ;; They are plain variables, not parameters: Emacs `defvar`s them and
+    ;; sets them with `setq` (this tree's `set!`), and the one place a
+    ;; `let` binds one of them apart (`isearchb`) is not ported.
+    ;;--------------------------------------------------------------
+
+    (define isearch-string "")
+    ;; ^ GNU Emacs's `isearch-string` (`isearch.el:860`): the search
+    ;; string being typed. The Finish button's `:visible` form reads it.
+    (define isearch-success #t)
+    ;; ^ `isearch-success` (`:861`): whether the last search matched.
+    ;; GNU Emacs's `isearch-forward` variable (`:860`) is *not* carried:
+    ;; it shares its name with the command C-s runs, which a Lisp-1 keeps
+    ;; in one place, and nothing in `isearch-query-replace` reads the
+    ;; direction - its BACKWARD comes from the prefix argument.
+    (define isearch-case-fold-search #t)
+    ;; ^ `isearch-case-fold-search' (`:862`): the current folding.
+    (define isearch-other-end #f)
+    ;; ^ `isearch-other-end' (`:863`): "The end of the last match
+    ;; opposite to point" - so that `isearch-query-replace` can put point
+    ;; at the beginning of what matched.
+    (define isearch-regexp #f)
+    ;; ^ `isearch-regexp' (`:866`). Always nil here: this search is the
+    ;; literal one (`isearch-find` over `search.scm`); Emacs's regexp
+    ;; isearch is not ported.
+    (set! isearch-string isearch-string)
+    (set! isearch-success isearch-success)
+    (set! isearch-case-fold-search isearch-case-fold-search)
+    (set! isearch-other-end isearch-other-end)
+    (set! isearch-regexp isearch-regexp)
+
+    (define (isearch-tool-bar-image image-name)
+      ;; GNU Emacs's `isearch-tool-bar-image` (`isearch.el:803`):
+      ;; "Return an image specification for IMAGE-NAME."
+      ;;
+      ;; Emacs's body is `(eval (tool-bar--image-expression
+      ;; image-name))`. The helper is `(schemacs editor image)`'s here
+      ;; (see the note there), and the one-argument `eval` runs in the
+      ;; module evaluating the item's `:image` form - `tool-bar.scm`'s,
+      ;; where `find-image` and the display predicates are imported,
+      ;; just as Emacs's runs in the one obarray.
+      ;;--------------------------------------------------------------
+      (eval (tool-bar--image-expression image-name) (current-module)))
+
+    (define isearch-tool-bar-map
+      ;; GNU Emacs's `isearch-tool-bar-map` (`isearch.el:807`): the bar
+      ;; a search shows. Defined in Emacs's order, minus the two items
+      ;; the header names; a keymap here prepends, as Emacs's does, so
+      ;; the bar reads the same way round.
+      ;;--------------------------------------------------------------
+      (let ((map (make-sparse-keymap)))
+        (define-key map (vector 'isearch-describe-mode)
+          (list 'menu-item "Help" 'isearch-describe-mode
+                ':help "Get help for Isearch"
+                ':image '(isearch-tool-bar-image "help")))
+        (define-key map (vector 'isearch-occur)
+          (list 'menu-item "Show hits" 'isearch-occur
+                ':help "Show each search hit"
+                ':image '(isearch-tool-bar-image "index")))
+        (define-key map (vector 'isearch-query-replace)
+          (list 'menu-item "Replace" 'isearch-query-replace
+                ':help "Replace search string"
+                ':image '(isearch-tool-bar-image "search-replace")))
+        (define-key map (vector 'isearch-delete-char)
+          (list 'menu-item "Undo" 'isearch-delete-char
+                ':help "Undo last input item"
+                ':image '(isearch-tool-bar-image "undo")))
+        (define-key map (vector 'isearch-exit)
+          (list 'menu-item "Finish" 'isearch-exit
+                ':help "Finish search leaving point where it is"
+                ':image '(isearch-tool-bar-image "exit")
+                ;; Emacs's own `:visible` (`isearch.el:829`): the button
+                ;; is there only once the search string has something in
+                ;; it. `string-equal` is Emacs's and is in the user
+                ;; environment the item is evaluated in.
+                ':visible '(not (string-equal isearch-string ""))))
+        (define-key map (vector 'isearch-cancel)
+          (list 'menu-item "Abort" 'isearch-cancel
+                ':help "Abort search"
+                ':image '(isearch-tool-bar-image "close")))
+        (define-key map (vector 'isearch-repeat-forward)
+          (list 'menu-item "Repeat forward" 'isearch-repeat-forward
+                ':help "Repeat search forward"
+                ':image '(isearch-tool-bar-image "right-arrow")))
+        (define-key map (vector 'isearch-repeat-backward)
+          (list 'menu-item "Repeat backward" 'isearch-repeat-backward
+                ':help "Repeat search backward"
+                ':image '(isearch-tool-bar-image "left-arrow")))
+        map))
+
+    (define-command (isearch-describe-mode)
+      ;; GNU Emacs's `isearch-describe-mode` (`isearch.el:544`):
+      ;; "Display documentation of Isearch mode." Its body is
+      ;; `(describe-function 'isearch-forward)` under
+      ;; `isearch--display-help-action` (a display-buffer action
+      ;; selecting the help window, not carried - the help buffer shows
+      ;; the ordinary way), then `(when isearch-mode (isearch-update))`,
+      ;; which the search loop's next key does here.
+      ;;--------------------------------------------------------------
+      "Display documentation of Isearch mode."
+      (interactive)
+      (describe-function isearch-forward))
+
+    (define (isearch-done ed opoint frame nopush edit)
+      ;; GNU Emacs's `isearch-done` (`isearch.el:1457`): "Exit Isearch
+      ;; mode. Called by all commands that terminate isearch-mode. For
+      ;; successful search, pass no args. For a failing search, NOPUSH is
+      ;; t. For going to the minibuffer to edit the search string, NOPUSH
+      ;; is t and EDIT is t. If NOPUSH is non-nil, we don't push the
+      ;; string on the search ring."
+      ;;
+      ;; **The tool bar is the `dynamic-wind`'s, not this function's.**
+      ;; Emacs restores the buffer's own `tool-bar-map` here; here the
+      ;; wind around the whole search does it on every exit, which is the
+      ;; same moment for every exit but this one - the search's exit runs
+      ;; before the wind's after-thunk and both restore the same map, so
+      ;; an extra restore here would have to know the wind is still to
+      ;; come or it would kill the local the wind is about to restore.
+      ;;
+      ;; Not carried: `isearch-resume-in-command-history`, the hooks
+      ;; (`pre-command-hook`, `isearch-mode-end-hook` and the rest - no
+      ;; isearch-mode is installed as a command hook here), the window
+      ;; configuration restore (`isearch-slow-terminal-mode` is nil),
+      ;; the input method, the intangible-text step, and `edit`'s
+      ;; `exit-recursive-edit` (the search is a loop, not a recursive
+      ;; edit). EDIT itself is read: it is what suppresses the "Mark
+      ;; saved" message, as `(> (minibuffer-depth) 0)` does.
+      ;;--------------------------------------------------------------
+      (unless nopush
+        (isearch-done-ring! isearch-string isearch-case-fold-search))
+      (*search-pattern* #f)
+      (isearch-dehighlight)
+      (lazy-highlight-cleanup #t)
+      (set!frame-message frame "")
+      ;; "If there was movement, mark the starting position. Maybe
+      ;; should test difference between and set mark only if >
+      ;; threshold."
+      ;;
+      ;; **Three departures stood here and are gone.** The mark was *set*
+      ;; rather than pushed, so the mark that was already there went
+      ;; nowhere instead of onto the ring; the `transient-mark-mode` +
+      ;; `mark-active` arm was missing, so an already-active region was
+      ;; moved and announced where Emacs leaves it alone and says
+      ;; nothing; and the message did not ask whether a prompt is up -
+      ;; which is what `(> (minibuffer-depth) 0)` is, here the echo area
+      ;; being in use, or EDIT.
+      ;;
+      ;; **`(not (= ...))` and `begin`, not `(/= ...)` and `progn`.**
+      ;; Neither of those is `(scheme base)`'s - they are Guile core
+      ;; bindings, and a library here imports only what it names.
+      (if (not (= (buffer-pt ed) opoint))
+          (or (and (transient-mark-mode) (mark-active))
+              (begin
+                (push-mark opoint #t)
+                (or edit (*echo-area-buffer*)
+                    (set!frame-message
+                     frame "Mark saved where search started"))))))
+
     (define (isearch forward?)
       ;; The incremental search itself: read a key, act on it, search
       ;; again, and keep going until a key ends the search. Returns
@@ -612,6 +842,27 @@
              ;; the one the search is being watched in
              (window (frame-selected-window frame))
              (opoint (buffer-pt ed)))
+        ;; GNU Emacs's `isearch-mode` (`isearch.el:1309`): "If a local
+        ;; value of `tool-bar-map` exists, save it, then set the
+        ;; buffer-local value to the isearch map." The swap is a
+        ;; buffer-local slot keyed by the symbol, which `tool-bar.scm`'s
+        ;; `%tool-bar-map` reads; `force-mode-line-update` is what makes
+        ;; the bar rebuild with the search's own items.
+        (when (local-variable-p 'tool-bar-map ed)
+          (set! isearch-tool-bar-old-map
+                (buffer-local-value ed 'tool-bar-map)))
+        (set-buffer-local-value! ed 'tool-bar-map isearch-tool-bar-map)
+        (force-mode-line-update)
+        ;; **The restore is a `dynamic-wind`** - Emacs's `unwind-protect`
+        ;; around a read that can raise a quit - so every way out of the
+        ;; search puts the buffer's own bar back.
+        ;; The wind's answer is the loop's: normally nothing, but the
+        ;; Replace button's branch answers a thunk, and a command that
+        ;; runs `perform-replace` must not do it inside this wind.
+        (let ((after
+               (dynamic-wind
+                (lambda () #t)
+                (lambda ()
         ;; Emacs's `isearch-mode` starts a search with the ring's yank
         ;; pointer cleared (`isearch.el:1292`), so `C-s C-s` begins at the
         ;; ring's car however the last search was walked, and with no
@@ -630,6 +881,15 @@
                    (redraw? #t))
           (*search-pattern* (and (< 0 (string-length pattern)) pattern))
           (*search-case-fold?* case-fold?)
+          ;; Publish the state Emacs keeps in globals (`isearch-string`
+          ;; and the rest): the tool bar's `:visible` form reads it when
+          ;; the bar is built, and `isearch-query-replace` reads all of
+          ;; it when the Replace button runs. At this point in the
+          ;; iteration it is what Emacs's `isearch-update` has just
+          ;; left.
+          (set! isearch-string pattern)
+          (set! isearch-success success?)
+          (set! isearch-case-fold-search case-fold?)
           ;; and record what was found as overlays for the display to
           ;; draw - the match point is on with the `isearch' face, the
           ;; others in the window with `lazy-highlight'. This is GNU
@@ -639,6 +899,11 @@
           ;; a screenful of work to do.
           (if success?
               (let ((match (isearch-match-bounds ed pattern direction)))
+                ;; "The end of the last match opposite to point"
+                ;; (`isearch-other-end'): the match's beginning when the
+                ;; search goes forward, its end when it goes back.
+                (set! isearch-other-end
+                      (if (eq? direction 'forward) (car match) (cdr match)))
                 (isearch-highlight (car match) (cdr match)))
               ;; a failing search leaves the last highlight where it was,
               ;; as `isearch-search' leaves the overlay alone when it
@@ -649,6 +914,15 @@
            frame
            (isearch-message pattern direction success? wrapped? case-fold?
                             (buffer-pt ed) opoint))
+          ;; `isearch-update` ends with `(force-mode-line-update)`, which
+          ;; is what makes the tool bar re-read `isearch-string`: the
+          ;; Finish button appears with the first character typed and
+          ;; goes when the last one is deleted. **It is safe per key
+          ;; only because that function sets `update_mode_lines` and not
+          ;; `windows_or_buffers_changed`** - the C's split; with the
+          ;; strong flag the search's own highlight went with the
+          ;; garbaged frame (`pty isearch-multiline`).
+          (force-mode-line-update)
           ;; Draw only when there is something new to draw. The read is
           ;; *timed* whenever the development REPL is open - `read-wait-ms',
           ;; for the reason its note gives - so most iterations of this loop
@@ -674,65 +948,71 @@
           ;; modifiers, and takes neither an exit nor a printing
           ;; character.
           (let* ((key (isearch-read-key))
-                 (code (and (integer? key) key))
+                 ;; **A tool bar click is two events** - `tool-bar` and
+                 ;; the item's key - the pair the command loop's modal
+                 ;; lookup walks and this loop has no lookup for. The
+                 ;; item's key is the command name the bar defined it
+                 ;; with (`pgtk-tool-bar-selection!` queues both).
+                 (key (if (eq? key 'tool-bar) (isearch-read-key) key))
+                 ;; The bar's keys answer the same things the search's
+                 ;; own keys do: repeat forward is C-s, repeat backward
+                 ;; C-r, finish RET, abort C-g (Emacs's `isearch-abort`,
+                 ;; which is what C-g is bound to), undo DEL. `Abort`'s
+                 ;; Emacs `:filter` would pick `isearch-cancel` on a
+                 ;; successful search; its effect is this same C-g
+                 ;; branch's successful arm, so one code serves both.
+                 (code (cond ((integer? key) key)
+                             ((eq? key 'isearch-repeat-forward) 19)
+                             ((eq? key 'isearch-repeat-backward) 18)
+                             ((eq? key 'isearch-exit) 13)
+                             ((eq? key 'isearch-cancel) 7)
+                             ((eq? key 'isearch-delete-char) 127)
+                             (else #f)))
                  (printable (and key (isearch-printing-char key))))
             (cond
+             ;; The Help button is a real command rather than a search
+             ;; action: it shows the documentation and the search goes
+             ;; on (`isearch-describe-mode`'s own body).
+             ((eq? key 'isearch-describe-mode)
+              (isearch-describe-mode)
+              (loop pattern direction states success? wrapped? case-fold? #t))
+             ;; The Replace button runs `isearch-query-replace`, which is
+             ;; a command of replace.el's and has to run *outside* the
+             ;; search: it reads the TO string in the minibuffer and then
+             ;; runs `perform-replace`'s own prompt loop, and the
+             ;; buffer's tool bar must be back before either. So this
+             ;; branch exits the search - the command's own first act is
+             ;; `(isearch-done nil t)` - and answers a thunk that
+             ;; `isearch` runs once the wind has restored the bar.
+             ((eq? key 'isearch-query-replace)
+              (isearch-done ed opoint frame #f #t)
+              (lambda () (call-interactively 'isearch-query-replace)))
+             ;; The Show hits button runs `isearch-occur`, a command of
+             ;; replace.el's (placed there for the import graph's reason
+             ;; `isearch-query-replace` is). **The search does not exit
+             ;; first**: Emacs 31.1's command tests a symbol property
+             ;; (`isearch-exit`) that nothing ever puts on it -
+             ;; `emacs -Q --batch` answers nil - so `occur` displays its
+             ;; buffer with the search still running, and the next key
+             ;; continues the search. This loop does the same.
+             ((eq? key 'isearch-occur)
+              (call-interactively 'isearch-occur)
+              (loop pattern direction states success? wrapped? case-fold? #t))
              ;; ---- keys that end the search ----
              ((eqv? code 13)                                 ; isearch-exit
-              (isearch-done-ring! pattern case-fold?)
-              (*search-pattern* #f)
-              (isearch-dehighlight)
-              (lazy-highlight-cleanup #t)
-              (set!frame-message frame "")
-              ;; GNU Emacs's `isearch-done` (`isearch.el:1534`), which
-              ;; is the tail of the function every normal exit runs:
-              ;;
-              ;;   ;; If there was movement, mark the starting position.
-              ;;   ;; Maybe should test difference between and set mark
-              ;;   ;; only if > threshold.
-              ;;   (if (/= (point) isearch-opoint)
-              ;;       (or (and transient-mark-mode mark-active)
-              ;;           (progn
-              ;;             (push-mark isearch-opoint t)
-              ;;             (or executing-kbd-macro
-              ;;                 (> (minibuffer-depth) 0) edit
-              ;;                 (message "Mark saved where search
-              ;;                           started")))))
-              ;;
-              ;; **Three departures stood here and are gone.** The mark
-              ;; was *set* rather than pushed, so the mark that was
-              ;; already there went nowhere instead of onto the ring; the
-              ;; `transient-mark-mode` + `mark-active` arm was missing, so
-              ;; an already-active region was moved and announced where
-              ;; Emacs leaves it alone and says nothing; and the message
-              ;; did not ask whether a prompt is up - which is what
-              ;; `(> (minibuffer-depth) 0)` is, and this tree's stand-in
-              ;; for it is the echo area being in use.
-              ;;
-              ;; Not carried: `executing-kbd-macro` (no keyboard macros
-              ;; here) and `edit`, which is `isearch-edit-string` - this
-              ;; branch is `isearch-exit`, whose `(isearch-done)` passes
-              ;; no EDIT.
-              ;; **`(not (= ...))` and `begin`, not `(/= ...)` and
-              ;; `progn`.** Neither of those is `(scheme base)`'s - they
-              ;; are Guile core bindings, and a library here imports only
-              ;; what it names, so both would be unbound at run time.
-              (if (not (= (buffer-pt ed) opoint))
-                  (or (and (transient-mark-mode) (mark-active))
-                      (begin
-                        (push-mark opoint #t)
-                        (or (*echo-area-buffer*)
-                            (set!frame-message
-                             frame "Mark saved where search started"))))))
+              (isearch-done ed opoint frame #f #f))
              ;; isearch-abort: give up the search if it found something,
              ;; otherwise take back what was typed until it finds again
              ((eqv? code 7)
               (if success?
+                  ;; `isearch-cancel` (`isearch.el:1770`): `(goto-char
+                  ;; isearch-opoint) (isearch-done t t)` and then the
+                  ;; quit the command loop reports as "Quit" - which is
+                  ;; the echo-area message here, since the search is not
+                  ;; a recursive edit to signal out of.
                   (begin
                     (set-point ed opoint)
-                    (*search-pattern* #f)
-                    (isearch-dehighlight)
-                    (lazy-highlight-cleanup #t)
+                    (isearch-done ed opoint frame #t #t)
                     (set!frame-message frame "Quit"))
                   (let ((popped (isearch-pop-to-success ed states)))
                     (loop (car popped) direction (cdr popped) #t #f
@@ -843,11 +1123,7 @@
              ;; leaving `C-c' as an undefined key. The mark is left alone,
              ;; as it is on this exit.
              ((and code (< code 32))
-              (isearch-done-ring! pattern case-fold?)
-              (*search-pattern* #f)
-              (isearch-dehighlight)
-              (lazy-highlight-cleanup #t)
-              (set!frame-message frame "")
+              (isearch-done ed opoint frame #f #f)
               ;; Give the key back to the command loop to run, which is
               ;; what pushes it onto `unread-command-events' - Emacs's
               ;; `isearch-other-control-char' does the same, the loop's
@@ -873,15 +1149,23 @@
              (else
               (if key
                   (begin
-                    (isearch-done-ring! pattern case-fold?)
-                    (*search-pattern* #f)
-                    (isearch-dehighlight)
-                    (lazy-highlight-cleanup #t)
-                    (set!frame-message frame "")
+                    (isearch-done ed opoint frame #f #f)
                     (*unread-command-events*
                      (cons key (*unread-command-events*))))
                   (loop pattern direction states success? wrapped?
-                        case-fold? #f))))))))
+                        case-fold? #f)))))))
+         (lambda ()
+           ;; GNU Emacs's `isearch-done` (`isearch.el:1507`): if the
+           ;; buffer had its own `tool-bar-map`, put it back; otherwise
+           ;; remove the local binding the search made.
+           (with-current-buffer ed
+             (if isearch-tool-bar-old-map
+                 (begin (set-buffer-local-value! ed 'tool-bar-map
+                                                 isearch-tool-bar-old-map)
+                        (set! isearch-tool-bar-old-map #f))
+                 (kill-local-variable 'tool-bar-map)))
+           (force-mode-line-update)))))
+          (when (procedure? after) (after)))))
 
     (define (isearch-pop-state ed states)
       ;; Take back the last state the search pushed, as DEL does.

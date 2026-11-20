@@ -48,7 +48,7 @@
     (only (schemacs editor buffer)
           *current-buffer* bufferp current-buffer overlay-get overlays-at
           next-overlay-change previous-overlay-change
-          with-current-buffer
+          with-current-buffer buffer-local-value
           *get-text-property-function*)
     ;; `modify_text_properties`'s body is `insdel.c`'s
     ;; `prepare_to_modify_buffer_1` - the half that does not touch the
@@ -1131,5 +1131,29 @@
     ;; nil.
     (*get-text-property-function* get-text-property)
 
+    ;; **`char-property-alias-alist`'s buffer-local reader.** The variable
+    ;; is `intervals.c`'s and the reader there is below the buffer's
+    ;; slots; this library is above both and installs the answer: the
+    ;; current buffer's own list - `font-lock-default-function` makes
+    ;; `font-lock-face` an alias of `face` in a buffer where the mode is
+    ;; on - or the global one. Emacs reads the *current* buffer's value
+    ;; even when the text being read belongs to another buffer
+    ;; (`intervals.c:1733` reads `Vchar_property_alias_alist` in
+    ;; `current_buffer`'s context), and so does this.
+    (iv:*char-property-alias-alist-function*
+     (lambda ()
+       ;; **`(current-buffer)` and not `(*current-buffer*)`**: the
+       ;; parameter is #f whenever no `set-buffer` has pinned a buffer -
+       ;; which is the ordinary case, because the current buffer falls
+       ;; back to the selected window's - and this reader has to see
+       ;; *that* buffer's list, as `lookup_char_property` sees
+       ;; `current_buffer`. Reading the raw parameter answered the global
+       ;; list for every buffer nobody had explicitly pinned, so a
+       ;; `font-lock-face` property never resolved.
+       (let ((buffer (current-buffer)))
+         (if buffer
+             (buffer-local-value buffer 'char-property-alias-alist
+                                 (iv:*char-property-alias-alist*))
+             (iv:*char-property-alias-alist*)))))
 
     ))

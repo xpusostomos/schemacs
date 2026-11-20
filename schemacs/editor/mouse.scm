@@ -60,7 +60,14 @@
           window-edges window-height window-point window-type?
           ;; `mouse-minibuffer-check` asks whether a prompt is up: the
           ;; echo area is this tree's minibuffer window.
-          *echo-area-buffer* minibuffer-window-active-p window-minibuffer-p)
+          *echo-area-buffer* minibuffer-window-active-p window-minibuffer-p
+          ;; the mode-line drag and the clicks beside it (`mouse.el`'s
+          ;; drag and select/delete commands)
+          mouse-position-in-root-frame mouse-absolute-pixel-position
+          window-frame tty-type frame-char-height frame-char-width
+          frame-parameter frame-width window-live-p minibuffer-window
+          *resize-mini-windows* selected-frame select-frame raise-frame
+          set-mouse-position)
     (only (schemacs editor editfns) goto-char point)
     ;; The mark a drag sets, and the region it leaves active:
     ;; `push-mark', `pop-mark', `activate-mark' and `region-active-p' are
@@ -94,35 +101,55 @@
     ;; a sparse keymap to hand to `set-transient-map', which is Emacs's
     ;; `(make-sparse-keymap)' in that same place
     (prefix (schemacs editor keymap) km:)
-    (only (schemacs editor character) kbd)
+    (only (schemacs editor subr) run-hooks)
+    (only (schemacs editor character)
+          kbd event-modifiers event-basic-type event-convert-list)
     ;; A command that reads its own keys waits the way the command loop
     ;; does, and `read-key-event' is the read every key comes through -
     ;; the same two calls `isearch' makes. `sit-for' is that same read
     ;; with a deadline, which is how the edge-of-window scrolling knows
     ;; a drag has moved on.
     (only (schemacs editor keyboard)
-          set-transient-map sit-for
+          set-transient-map sit-for *key-translation-map*
           ;; the display's own event value, which is where a motion
           ;; event's *position* is - `read-key-event' answers only the key
           *last-read-event*)
     (only (schemacs editor command)
           *last-command-event* current-prefix-arg define-command)
+    ;; The two `mouse-1-click-*` options are defcustoms.
+    (only (schemacs editor custom) define-custom)
     ;; The buffer menu: the buffers, their mode names, and the popup that
     ;; shows them (`menu.c`'s `x_popup_menu`).
     (only (schemacs editor buffer)
           buffer-file-name buffer-list buffer-modified-p buffer-name
           buffer-read-only? with-current-buffer)
     (only (schemacs editor files) expand-file-name)
-    (only (schemacs editor window) switch-to-buffer)
+    (only (schemacs editor window) switch-to-buffer
+          window-resize-pixelwise window-left-sibling window-right-sibling
+          adjust-window-trailing-edge window-at-side-p one-window-p
+          delete-window delete-other-windows)
     (only (schemacs editor xdisp) format-mode-line)
     (only (schemacs editor buffer) buffer-local-value major-mode mode-name)
     (only (schemacs editor menu) x-popup-menu)
     ;; `string-match` is `search.c`'s.
     (only (schemacs editor search) string-match)
     (only (guile) sort)
-    (only (schemacs editor subr) nthcdr))
+    (only (schemacs editor subr) nthcdr posn-area posn-string)
+    ;; `mouse-posn-property` reads the `follow-link` and `mouse-face`
+    ;; *text* properties, and `get-char-property` is the overlay-aware
+    ;; reader Emacs's own uses.
+    (only (schemacs editor textprop) get-char-property get-text-property)
+    ;; `key-binding` is the `[follow-link]` arm of `mouse-on-link-p`.
+    (only (schemacs editor keyboard) key-binding)
+    ;; `mouse--last-down` keeps a time, and the one question asked of it
+    ;; is how many seconds ago it was.
+    (only (schemacs editor timefns) current-time float-time))
 
-  (export posn-set-point mouse-set-point mouse-drag-region mouse-drag-track
+  (export *mouse-1-click-follows-link* *mouse-1-click-in-non-selected-windows*
+          mouse-event-areas-with-no-buffer-positions mouse--last-down
+          mouse--down-1-maybe-follows-link mouse--click-1-maybe-follows-link
+          mouse-posn-property mouse-on-link-p
+          posn-set-point mouse-set-point mouse-drag-region mouse-drag-track
           mouse-minibuffer-check
           mouse-set-region mouse-start-end mouse--drag-set-mark-and-point
           mouse-scroll-subr mouse-set-region-1
@@ -269,16 +296,162 @@ point determined by `mouse-select-region-move-to-beginning'."
     (define (mouse-key? key)
       ;; Whether KEY names one of the mouse buttons this front end makes
       ;; events for. GNU Emacs's `mouse-event-p' is the same question
-      ;; (`subr.el'), asked of `event-basic-type'; it answers the same
-      ;; here, because `down-mouse-1''s basic type is itself - this
-      ;; tree's `event-basic-type' does not strip the `down-' the way
-      ;; Emacs's does, which is a departure of its own and one this
-      ;; predicate is written to work under either way.
+      ;; (`subr.el'), asked of `event-basic-type' - which strips the
+      ;; button words (`down-`, `drag-`, the implicit `click`) since the
+      ;; symbolic modifiers were ported, so `down-mouse-1' and
+      ;; `mouse-1' really are one basic type here now.
       ;;--------------------------------------------------------------
       (and (symbol? key)
            (memq key '(mouse-1 mouse-2 mouse-3
                        down-mouse-1 down-mouse-2 down-mouse-3
                        drag-mouse-1 drag-mouse-2 drag-mouse-3))))
+
+    ;;----------------------------------------------------------------
+    ;; Following links with mouse-1 - `mouse.el:67-206'
+    ;;------------------------------------------------------------------
+    ;; Emacs makes a mouse-1 click on text with a non-nil `follow-link`
+    ;; property behave as mouse-2 does - `occur-mode-map` and Dired's
+    ;; file names are the users - by translating the mouse-1 events into
+    ;; mouse-2 events in `key-translation-map`. `mouse-1-click-follows-link`
+    ;; (default 450 ms, `mouse.el:67`) is the switch, and the time is
+    ;; what tells a click from a press-and-hold: a long press keeps the
+    ;; ordinary mouse-1 binding, which sets point.
+
+    (define-custom *mouse-1-click-follows-link* 450
+      "Non-nil means that clicking Mouse-1 on a link follows the link.
+
+With the default setting, an ordinary Mouse-1 click on a link
+performs the same action as Mouse-2 on that link, while a longer
+Mouse-1 click (hold down the Mouse-1 button for more than 450
+milliseconds) performs the original Mouse-1 binding (which
+typically sets point where you click the mouse).
+
+If value is an integer, the time elapsed between pressing and
+releasing the mouse button determines whether to follow the link
+or perform the normal Mouse-1 action (typically set point).
+The absolute numeric value specifies the maximum duration of a
+\"short click\" in milliseconds.  A positive value means that a
+short click follows the link, and a longer click performs the
+normal action.  A negative value gives the opposite behavior.
+
+If value is `double', a double click follows the link.
+
+Otherwise, a single Mouse-1 click unconditionally follows the link.
+
+Note that dragging the mouse never follows the link.
+
+This feature only works in modes that specifically identify
+clickable text as links, so it may not work with some external
+packages.  See `mouse-on-link-p' for details."
+      :type '(choice (const :tag "Disabled" nil)
+                     (const :tag "Double click" double)
+                     (number :tag "Single click time limit" :value 450)
+                     (other :tag "Single click" t))
+      :group 'mouse)
+
+    (define-custom *mouse-1-click-in-non-selected-windows* #t
+      "If non-nil, a Mouse-1 click also follows links in non-selected windows.
+If nil, a Mouse-1 click on a link in a non-selected window performs
+the normal mouse-1 binding, typically selects the window and sets
+point at the click position."
+      :type 'boolean
+      :group 'mouse)
+
+    (define mouse-event-areas-with-no-buffer-positions
+      '(mode-line header-line vertical-line
+                  left-fringe right-fringe
+                  left-margin right-margin
+                  tab-bar menu-bar
+                  tab-line))
+    ;; ^ GNU Emacs's `mouse-event-areas-with-no-buffer-positions'
+    ;; (`mouse.el:1787'): "Event areas not containing buffer positions."
+
+    (define mouse--last-down #f)
+    ;; ^ GNU Emacs's `mouse--last-down' (`mouse.el:149'): "Time of last
+    ;; down-mouse-1 event" as `(EVENT . TIME)`. Emacs keeps a Lisp
+    ;; timestamp; this keeps `float-time`'s seconds, because the one
+    ;; question asked of it is how long ago the press was.
+
+    (define (mouse--down-1-maybe-follows-link event)
+      ;; GNU Emacs's `mouse--down-1-maybe-follows-link' (`mouse.el:151'):
+      ;; the `[down-mouse-1]` hook that remembers the press. A
+      ;; translation-map binding answers a key sequence, and this one
+      ;; answers nil - it translates nothing and only records.
+      ;;--------------------------------------------------------------
+      (when (*mouse-1-click-follows-link*)
+        (set! mouse--last-down
+              (cons (if (pair? event) (car event) event)
+                    (float-time (current-time)))))
+      #f)
+
+    (define (mouse--click-1-maybe-follows-link event)
+      ;; GNU Emacs's `mouse--click-1-maybe-follows-link'
+      ;; (`mouse.el:156'): "Turn `mouse-1' events into `mouse-2' events
+      ;; if follows-link." It is bound to `[mouse-1]` and
+      ;; `[double-mouse-1]` in `key-translation-map`, and answers a
+      ;; one-event key sequence or nil.
+      ;;
+      ;; The down event compared against is built the C's way -
+      ;; `(down MODIFIERS... BASETYPE)' through `event-convert-list' -
+      ;; which is why the symbolic `down`/`click` modifiers had to be
+      ;; ported for it. A click with no position (a key translated from
+      ;; something else) is not on a link and answers nil.
+      ;;--------------------------------------------------------------
+      ;; The C's shape is one `and' whose first term is
+      ;; `mouse--last-down`: the time is only read when there was a
+      ;; press to compare it with.
+      (let ((key (car-safe-of event))
+            (setting (*mouse-1-click-follows-link*)))
+        (and mouse--last-down
+             (cond ((not setting) #f)
+                   ((eq? setting 'double) (eq? key 'double-mouse-1))
+                   (else
+                    (and (eq? key 'mouse-1)
+                         (or (not (number? setting))
+                             (let ((elapsed (- (float-time (current-time))
+                                               (cdr mouse--last-down)))
+                                   (limit (/ (abs setting) 1000.0)))
+                               ;; A negative value is the opposite rule:
+                               ;; only a press *longer* than that follows.
+                               (if (< setting 0)
+                                   (> elapsed limit)
+                                   (< elapsed limit)))))))
+             (eq? (car mouse--last-down)
+                  (event-convert-list
+                   (append (list 'down)
+                           (event-modifiers event)
+                           (list (event-basic-type event)))))
+             (pair? event)
+             (pair? (cdr event))
+             ;; **`(if action ... #f)` and not `(when action ...)`**: a
+             ;; `when` whose test fails answers the *unspecified* value,
+             ;; which is true in Scheme, and this function's answer is
+             ;; read as "the key to translate into" - so an ordinary
+             ;; mouse-1 click off a link came back as
+             ;; `#<unspecified>` and the dispatcher raised "a key is a
+             ;; string or a vector of events".
+             (let ((action (mouse-on-link-p (event-start event))))
+               (if (not action)
+                   #f
+                   ;; "Turn the mouse-1 into a mouse-2 to follow links,
+                   ;; but only if `mouse-on-link-p' hasn't returned a
+                   ;; string or vector." A string/vector ACTION names the
+                   ;; event to translate into - its first element.
+                   (if (or (vector? action) (string? action))
+                       (vector (if (vector? action)
+                                   (vector-ref action 0)
+                                   (string-ref action 0)))
+                       ;; "Modify the event in-place, otherwise we can get
+                       ;; a prefix added again" (`mouse.el:193'): the
+                       ;; answer is the whole event - `(mouse-2 POSN)` -
+                       ;; so the position travels with it, and
+                       ;; `last-input-event` (here `*last-read-event*`) is
+                       ;; now the new event.
+                       (let ((newup (if (eq? setting 'double)
+                                        'double-mouse-2
+                                        'mouse-2)))
+                         (set-car! event newup)
+                         (vector event))))))))
 
 
     (define (car-safe-of object)
@@ -933,8 +1106,343 @@ and selects that window."
                              window))
           (switch-to-buffer buf))))
 
+    (define (mouse-posn-property pos property)
+      ;; GNU Emacs's `mouse-posn-property' (`mouse.el:1799'): "Look for a
+      ;; property at click position. POS may be either a buffer position
+      ;; or a click position like those returned from `event-start'."
+      ;;
+      ;; Emacs asks `get-char-property` of the *window*, so that
+      ;; window-specific overlays count; this tree's text-property reader
+      ;; takes the buffer, which is the same answer for every overlay
+      ;; that is not window-scoped and there are none of those here.
+      ;;--------------------------------------------------------------
+      (if (pair? pos)
+          (let ((w (posn-window pos))
+                (pt (posn-point pos))
+                (str (posn-string pos)))
+            (or (and str
+                     (< (cdr str) (string-length (car str)))
+                     (get-text-property (cdr str) property (car str)))
+                (and pt
+                     (not (memq (posn-area pos)
+                                mouse-event-areas-with-no-buffer-positions))
+                     (get-char-property pt property
+                                        (if (window-type? w)
+                                            (window-buffer w)
+                                            w)))))
+          (get-char-property pos property)))
+
+    (define (mouse-on-link-p pos)
+      ;; GNU Emacs's `mouse-on-link-p' (`mouse.el:1829'): non-nil when
+      ;; POS is on a link, and what kind.
+      ;;
+      ;; The `[follow-link]` key bindings Emacs also consults are looked
+      ;; up without a position here - this tree's `key-binding` has no
+      ;; POS argument, so the position-specific `keymap` text property is
+      ;; not consulted. `follow-link` as a *text property* is, which is
+      ;; what `occur-mode` and Dired set.
+      ;;--------------------------------------------------------------
+      (let* ((area (and (pair? pos) (posn-area pos)))
+             (action
+              (and (or (not (pair? pos))
+                       (*mouse-1-click-in-non-selected-windows*)
+                       (eq? (selected-window) (posn-window pos)))
+                   (or (mouse-posn-property pos 'follow-link)
+                       (and area
+                            (key-binding (vector area 'follow-link) #f))
+                       (key-binding (vector 'follow-link) #f)))))
+        (cond
+         ((eq? action 'mouse-face)
+          ;; Inhibit follow-link when `mouse-1' is clicked on the tab-bar
+          ;; to prevent misdirected clicks in `dired-mode' (bug#49247,
+          ;; bug#81036).
+          (and (not (eq? area 'tab-bar))
+               (mouse-posn-property pos 'mouse-face) #t))
+         ((procedure? action)
+          (if (pair? pos)
+              (with-current-buffer (window-buffer (posn-window pos))
+                (action (posn-point pos)))
+              (action pos)))
+         (else action))))
+
+    ;;----------------------------------------------------------------
+    ;; The mode line, dragged and clicked - `mouse.el:775-800', `:871-1180'
+    ;;----------------------------------------------------------------
+    ;;
+    ;; A mode line is a handle in GNU Emacs: `[mode-line down-mouse-1]'
+    ;; drags the window's bottom edge (`mouse-drag-mode-line` →
+    ;; `mouse-drag-line` → `adjust-window-trailing-edge`), the click
+    ;; selects the window it belongs to, mouse-2 deletes the other windows
+    ;; and mouse-3 deletes that one. The bindings are `mouse.el:3818`.
+
+    (define *mouse-leave-buffer-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `mouse-leave-buffer-hook`: "Function to be run when
+    ;; the mouse leaves a buffer" - `mouse-drag-line` runs it so that
+    ;; temporary modes can turn themselves off. A parameter, as every hook
+    ;; here is.
+
+    (define (mouse-position-for-drag-line tty)
+      ;; GNU Emacs's `mouse-position-for-drag-line` (`mouse.el:864`):
+      ;; "Return the last mouse position observed for the purposes of
+      ;; `mouse-drag-line`. If TTY is non-nil, return the last attested
+      ;; position of the mouse relative to the root frame. Otherwise,
+      ;; return the position of the mouse relative to the selected frame,
+      ;; unless the current drag operation was produced from a touch
+      ;; screen event, in which event, return the position of the active
+      ;; touch-screen tool relative to the same." Touch is not carried.
+      ;;--------------------------------------------------------------
+      (if tty
+          (mouse-position-in-root-frame)
+          (mouse-absolute-pixel-position)))
+
+    (define (mouse-drag-line start-event line)
+      ;; GNU Emacs's `mouse-drag-line` (`mouse.el:871`): "Drag a mode,
+      ;; header, tab or vertical line with the mouse. ... LINE must be one
+      ;; of the symbols `header', `mode`, `tab' or `vertical`."
+      ;;
+      ;; **The sampling is absolute, and that is deliberate**: the start
+      ;; event's `posn-x-y` is relative to the window it names, and while
+      ;; dragging the pointer crosses into other windows - the C's own
+      ;; comment (`:878`) is the history of why. The motion events a
+      ;; transient map answers carry no position the drag may use, so the
+      ;; display is asked where the pointer is each time.
+      ;;
+      ;; **The drag is a transient keymap, as `mouse-drag-track`'s is**:
+      ;; this returns after installing it, the command loop reads the
+      ;; motion events, and the map's own cleanup runs when a key it does
+      ;; not bind arrives - the button coming up.
+      ;;
+      ;; Not carried: `echo-keystrokes` (the echo area has no keystroke
+      ;; echo here), `window-resize-pixelwise`'s cell-vs-pixel distinction
+      ;; (a cell is the display's pixel here, so `charwise` always
+      ;; divides by `frame-char-size` = 1 on a terminal and by the frame's
+      ;; cell on Gtk), and the `scroll-bar-movement` event, which no front
+      ;; end here makes yet.
+      ;;--------------------------------------------------------------
+      (run-hooks (*mouse-leave-buffer-hook*))
+      (let* ((start (event-start start-event))
+             (window (posn-window start))
+             (frame (window-frame window))
+             (tty (tty-type frame))
+             ;; "'charwise' means to drag by character sizes on graphical
+             ;; displays."
+             (charwise (not (or window-resize-pixelwise tty)))
+             (position-x-y (mouse-position-for-drag-line tty))
+             (position (if (eq? line 'vertical)
+                           (car position-x-y)
+                           (cdr position-x-y)))
+             (last-position position)
+             (residue 0)
+             (forward #t)
+             (char-size 0)
+             (growth 0)
+             (dragged #f)
+             (old-track-mouse track-mouse)
+             (exitfun #f))
+        (cond
+         ((memq line '(header tab))
+          ;; "Drag the bottom edge of the window above it."
+          ;; `window-in-direction` is not carried; nothing binds these two
+          ;; line types here either (Emacs 31 binds only `mode-line` and
+          ;; `vertical-line` in `mouse.el`), so this is its shape.
+          (set! window #f)
+          (set! char-size (frame-char-height frame)))
+         ((eq? line 'mode)
+          ;; "LINE is a mode line or a bottom window divider. Drag the
+          ;; bottom edge of its window."
+          (set! char-size (frame-char-height frame)))
+         ((eq? line 'vertical)
+          ;; "LINE is a window divider on the right. Drag the right edge
+          ;; of the window on its left."
+          (let ((divider-width (frame-parameter frame 'right-divider-width)))
+            (when (and (or (not (number? divider-width))
+                           (= divider-width 0))
+                       (eq? (frame-parameter frame 'vertical-scroll-bars) 'left))
+              (set! window (window-left-sibling window))))
+          (set! char-size (frame-char-width frame))))
+        (let ((move
+               (lambda ()
+                 ;; A zero-argument procedure, because that is what the
+                 ;; command loop calls a keymap's binding with here - the
+                 ;; event is `*last-read-event*`, the same call
+                 ;; `mouse-drag-track` makes.
+                 (let ((event (*last-read-event*)))
+                   (cond
+                    ((not (pair? event)) #f)
+                    ((eq? line 'vertical)
+                     (set! position (car (mouse-position-for-drag-line tty)))
+                     (set! growth (- position last-position))
+                     (unless (= growth 0)
+                       (when (and charwise
+                                  (or (not dragged)
+                                      (if forward (< growth 0) (> growth 0))))
+                         (set! forward (> growth 0))
+                         (set! growth
+                               (if (> growth 0)
+                                   (+ growth (quotient char-size 2))
+                                   (- growth (quotient char-size 2)))))
+                       (set! dragged #t)
+                       (when charwise
+                         (set! residue (remainder growth char-size))
+                         (set! growth (quotient growth char-size)))
+                       (unless (= growth 0)
+                         (adjust-window-trailing-edge
+                          window growth #t (not charwise)))
+                       (set! last-position (- position residue))))
+                    (else
+                     (set! position (cdr (mouse-position-for-drag-line tty)))
+                     (set! growth (- position last-position))
+                     (unless (= growth 0)
+                       (when (and charwise
+                                  (or (not dragged)
+                                      (if forward (< growth 0) (> growth 0))))
+                         (set! forward (> growth 0))
+                         (set! growth
+                               (if (> growth 0)
+                                   (+ growth (quotient char-size 2))
+                                   (- growth (quotient char-size 2)))))
+                       (set! dragged #t)
+                       (when charwise
+                         (set! residue (remainder growth char-size))
+                         (set! growth (quotient growth char-size)))
+                       (unless (= growth 0)
+                         (adjust-window-trailing-edge
+                          window growth #f (not charwise)))
+                       (set! last-position (- position residue)))))))))
+          ;; Start tracking. "The special value `dragging` signals the
+          ;; display engine to freeze the mouse pointer shape for as long
+          ;; as we drag" - the shape is not carried; the value is truthy,
+          ;; which is what the front end reads.
+          (set! track-mouse 'dragging)
+          (set! exitfun
+                (set-transient-map
+                 (let ((map (km:keymap '*mouse-drag-line-map*)))
+                   (define-key map (kbd "<switch-frame>") ignore)
+                   (define-key map (kbd "<select-window>") ignore)
+                   (define-key map (kbd "<scroll-bar-movement>") ignore)
+                   (define-key map (kbd "<mouse-movement>") move)
+                   ;; "Swallow drag-mouse-1 events to avoid selecting some
+                   ;; other window."
+                   (define-key map (kbd "<drag-mouse-1>")
+                               (lambda () (exitfun)))
+                   ;; "Some of the events will of course end up looked up
+                   ;; with a mode-line, header-line or vertical-line prefix
+                   ;; ..."
+                   (define-key map (kbd "<mode-line>") map)
+                   (define-key map (kbd "<header-line>") map)
+                   (define-key map (kbd "<tab-line>") map)
+                   (define-key map (kbd "<vertical-line>") map)
+                   ;; "... and some maybe even with a right- or
+                   ;; bottom-divider or left- or right-margin prefix ..."
+                   (define-key map (kbd "<right-divider>") map)
+                   (define-key map (kbd "<bottom-divider>") map)
+                   (define-key map (kbd "<left-margin>") map)
+                   (define-key map (kbd "<right-margin>") map)
+                   map)
+                 #t
+                 (lambda () (set! track-mouse old-track-mouse)))))))
+
+    (define-command (mouse-drag-mode-line start-event)
+      "Change the height of a window by dragging on its mode line.
+START-EVENT is the starting mouse event of the drag action.
+
+If the drag happens in a mode line on the bottom of a frame and
+that frame's `drag-with-mode-line' parameter is non-nil, drag the
+frame instead."
+      (interactive "e")
+      (let* ((start (event-start start-event))
+             (window (posn-window start))
+             (frame (window-frame window)))
+        ;; The `mouse-drag-mode-line-buffer` file-drag arm
+        ;; (`mouse.el:1090-1106`) is not carried: there is no
+        ;; drag-and-drop here.
+        (cond
+         ((not (window-live-p window)) #f)
+         ((or (not (window-at-side-p window 'bottom))
+              ;; "Allow resizing the minibuffer window if it's on the same
+              ;; frame as and immediately below `window', and it's either
+              ;; active or `resize-mini-windows' is nil."
+              (let ((minibuffer-window (minibuffer-window frame)))
+                (and (eq? (window-frame minibuffer-window) frame)
+                     (or (not *resize-mini-windows*)
+                         (minibuffer-window-active-p minibuffer-window)))))
+          (mouse-drag-line start-event 'mode))
+         ;; The `drag-with-mode-line` arm drags the frame
+         ;; (`mouse-drag-frame-move`), which is not carried: there is no
+         ;; frame-position or frame-resize machinery here.
+         (else #f))))
+
+    (define-command (mouse-drag-vertical-line start-event)
+      "Change the width of a window by dragging on a vertical line.
+START-EVENT is the starting mouse event of the drag action."
+      (interactive "e")
+      (mouse-drag-line start-event 'vertical))
+
+    (define-command (mouse-select-window click)
+      "Select the window clicked on; don't move point."
+      (interactive "e")
+      (mouse-minibuffer-check click)
+      (let ((oframe (selected-frame))
+            (frame (window-frame (posn-window (event-start click)))))
+        (select-window (posn-window (event-start click)))
+        (raise-frame frame)
+        (select-frame frame)
+        (or (eq? frame oframe)
+            (set-mouse-position (selected-frame) (- (frame-width (selected-frame)) 1) 0))))
+
+    (define-command (mouse-delete-window click)
+      "Delete the window you click on.
+Do nothing if the frame has just one window.
+This command must be bound to a mouse click."
+      (interactive "e")
+      (unless (one-window-p #t)
+        (mouse-minibuffer-check click)
+        ;; "Only delete the window if the user hasn't moved point out of
+        ;; the mode line before releasing the button."
+        (when (and (eq? (posn-area (event-end click)) 'mode-line)
+                   (eq? (posn-window (event-end click))
+                        (posn-window (event-start click))))
+          (delete-window (posn-window (event-start click))))))
+
+    (define-command (mouse-delete-other-windows click)
+      "Delete all windows except the one you click on."
+      (interactive "e")
+      (when (and (eq? (posn-area (event-end click)) 'mode-line)
+                 (eq? (posn-window (event-start click))
+                      (posn-window (event-end click))))
+        (delete-other-windows (posn-window (event-start click)))))
+
     (define-key *default-keymap* (kbd "<down-mouse-1>") mouse-drag-region)
     (define-key *default-keymap* (kbd "<mouse-1>") mouse-set-point)
     (define-key *default-keymap* (kbd "<drag-mouse-1>") mouse-set-region)
+
+    ;; `mouse.el:3818-3826': the mode line is a drag handle and the click
+    ;; selects its window; the vertical line between side-by-side windows
+    ;; is dragged the same way.
+    (define-key *default-keymap* (kbd "<mode-line> <down-mouse-1>")
+      mouse-drag-mode-line)
+    (define-key *default-keymap* (kbd "<mode-line> <mouse-1>")
+      mouse-select-window)
+    (define-key *default-keymap* (kbd "<mode-line> <mouse-2>")
+      mouse-delete-other-windows)
+    (define-key *default-keymap* (kbd "<mode-line> <mouse-3>")
+      mouse-delete-window)
+    (define-key *default-keymap* (kbd "<vertical-line> <down-mouse-1>")
+      mouse-drag-vertical-line)
+    (define-key *default-keymap* (kbd "<vertical-line> <mouse-1>")
+      mouse-select-window)
+
+    ;; `mouse.el:199-206': the press is remembered, and the release is
+    ;; translated into `mouse-2` when it is a click on a link. Both
+    ;; bindings are procedures, which is what `key-translation-translate`
+    ;; calls.
+    (define-key *key-translation-map* (kbd "<down-mouse-1>")
+      mouse--down-1-maybe-follows-link)
+    (define-key *key-translation-map* (kbd "<double-down-mouse-1>")
+      mouse--down-1-maybe-follows-link)
+    (define-key *key-translation-map* (kbd "<mouse-1>")
+      mouse--click-1-maybe-follows-link)
+    (define-key *key-translation-map* (kbd "<double-mouse-1>")
+      mouse--click-1-maybe-follows-link)
 
     ))

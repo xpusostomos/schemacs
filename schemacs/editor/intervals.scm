@@ -177,6 +177,7 @@
    interval-plist-get
    *text-property-default-nonsticky*
    *char-property-alias-alist*
+   *char-property-alias-alist-function*
    *default-text-properties*
    )
 
@@ -418,9 +419,28 @@
 
     (define *char-property-alias-alist*
       ;; GNU Emacs's `char-property-alias-alist': a property that stands
-      ;; for others when it is absent.
+      ;; for others when it is absent. This is its *global* value; the
+      ;; list is buffer-local in Emacs (`font-lock-default-function`
+      ;; makes `font-lock-face` an alias of `face` in a buffer where the
+      ;; mode is on) and a buffer's value is what the reader below
+      ;; answers.
       ;;--------------------------------------------------------------
       (make-parameter '()))
+
+    (define *char-property-alias-alist-function*
+      ;; The *effective* alias list for a property lookup: the current
+      ;; buffer's own value in Emacs, because `lookup_char_property`
+      ;; (`intervals.c:1733`) reads `Vchar_property_alias_alist`, which
+      ;; is a buffer-local variable read in `current_buffer`'s context.
+      ;;
+      ;; **This library cannot read a buffer's slots** - it is *below*
+      ;; `(schemacs editor buffer)` and imports it for the text - so the
+      ;; reader arrives through this seam, as `*tab-width*` does.
+      ;; `(schemacs editor textprop)` installs the real one at load; the
+      ;; default answers the global value, which is Emacs's value in a
+      ;; buffer with no local binding.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda () (*char-property-alias-alist*))))
 
     (define %symbol-properties (make-hash-table))
     ;; ^ Emacs's symbol properties, keyed by `(SYMBOL . PROPERTY)'.
@@ -518,7 +538,7 @@
           (cond
            (fallback fallback)
            (else
-            (let ((alias (assq prop (*char-property-alias-alist*))))
+            (let ((alias (assq prop ((*char-property-alias-alist-function*)))))
               ;; no alias entry means an empty list of alternatives,
               ;; not a #f to take the cdr of
               (let aliases ((rest (if alias (cdr alias) '())) (found #f))

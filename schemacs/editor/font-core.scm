@@ -20,13 +20,6 @@
   ;;
   ;; Not ported, named rather than faked:
   ;;
-  ;;   * **`char-property-alias-alist`** - `font-lock-default-function`
-  ;;     makes `font-lock-face` an alias of the `face` property around
-  ;;     every fontification, and `textprop.c` holds that alist
-  ;;     (`Vchar_property_alias_alist`). This tree's text-property layer
-  ;;     has no alias list, so the step is left out: a mode that
-  ;;     fontifies with `font-lock-face` rather than `face` would draw
-  ;;     nothing, and nothing here does.
   ;;   * **global Font Lock** - `font-lock-global-modes`,
   ;;     `global-font-lock-mode` and `turn-on-font-lock-if-desired`, the
   ;;     hook that turns the mode on as buffers are made.
@@ -48,8 +41,15 @@
     ;; expression is evaluated in the *defining* library's module.
     (only (schemacs editor command) *inhibit-quit*
           current-prefix-arg uarg->integer)
-    (only (schemacs editor buffer) buffer-name current-buffer major-mode)
+    (only (schemacs editor buffer) buffer-name current-buffer major-mode
+          buffer-local-value set-buffer-local-value!)
     (only (schemacs editor custom) define-custom)
+    ;; `char-property-alias-alist`'s edit is `copy-tree`/`nconc`/`remq`/
+    ;; `delq` (`subr.el`) over `%assq` (`fns.c`), and its global default
+    ;; is `textprop.c`'s variable, which `intervals` holds.
+    (only (schemacs editor subr) copy-tree remq delq)
+    (only (schemacs editor fns) %assq nconc)
+    (only (schemacs editor intervals) *char-property-alias-alist*)
     (only (schemacs editor frame) *current-frame* set!frame-message)
     ;; `font-lock-mode` is a `define-minor-mode` and
     ;; `global-font-lock-mode` a `define-globalized-minor-mode`, both
@@ -82,10 +82,52 @@
       ;; what `font-lock-function''s default does when the mode is
       ;; toggled.
       ;;
-      ;; The C's first act, on each branch, is the
-      ;; `char-property-alias-alist` edit - left out here and named in
-      ;; the library comment.
+      ;; The C's first act is the `char-property-alias-alist` edit, and
+      ;; it is why `font-lock-face` is drawn at all: the buffer gets its
+      ;; own `copy-tree` of the alist - the update below is destructive
+      ;; and the global value must not move - and `font-lock-face` is
+      ;; made a second name for `face`. `lookup-char-property` consults
+      ;; the alist after a direct miss, so every mode that fontifies with
+      ;; `font-lock-face` (dired, and every `font-lock-defaults` mode)
+      ;; now draws those faces.
       ;;--------------------------------------------------------------
+      (when mode
+        (set-buffer-local-value!
+         (current-buffer) 'char-property-alias-alist
+         (copy-tree (buffer-local-value (current-buffer)
+                                        'char-property-alias-alist
+                                        (*char-property-alias-alist*))))
+        ;; Add `font-lock-face' as an alias for the `face' property.
+        (let ((elt (%assq 'face (buffer-local-value
+                                 (current-buffer)
+                                 'char-property-alias-alist))))
+          (if elt
+              (unless (memq 'font-lock-face (cdr elt))
+                (set-cdr! elt (nconc (cdr elt) (list 'font-lock-face))))
+              (set-buffer-local-value!
+               (current-buffer) 'char-property-alias-alist
+               (cons (list 'face 'font-lock-face)
+                     (buffer-local-value (current-buffer)
+                                         'char-property-alias-alist))))))
+      ;; Turn off Font Lock mode: remove `font-lock-face' as an alias.
+      (unless mode
+        (set-buffer-local-value!
+         (current-buffer) 'char-property-alias-alist
+         (copy-tree (buffer-local-value (current-buffer)
+                                        'char-property-alias-alist
+                                        (*char-property-alias-alist*))))
+        (let ((elt (%assq 'face (buffer-local-value
+                                 (current-buffer)
+                                 'char-property-alias-alist))))
+          (when elt
+            (set-cdr! elt (remq 'font-lock-face (cdr elt)))
+            (when (null? (cdr elt))
+              (set-buffer-local-value!
+               (current-buffer) 'char-property-alias-alist
+               (delq elt (buffer-local-value (current-buffer)
+                                             'char-property-alias-alist)))))))
+      ;; Only do hard work if the mode has specified stuff in
+      ;; `font-lock-defaults'.
       (when (font-lock-specified-p mode)
         (font-lock-mode-internal mode)))
 

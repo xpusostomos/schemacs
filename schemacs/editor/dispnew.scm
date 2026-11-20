@@ -57,6 +57,7 @@
    realize-face
    lookup-face
    menu-show
+   x-file-dialog
    screen-size
    column-width
    line-height
@@ -64,6 +65,16 @@
    display-cell-size
    display-set-size!
    display-mouse-position
+   ;; `frame.el`'s `pgtk-mouse-absolute-pixel-position`, `frame.c`'s
+   ;; `set-mouse-pixel-position` hook, and `frame_raise_lower_hook`.
+   display-mouse-absolute-pixel-position
+   display-set-mouse-pixel-position
+   display-raise-frame
+   display-define-frame-cursor
+   display-draw-vertical-border
+   display-default-scroll-bar-width
+   display-set-window-scroll-bar
+   display-redeem-scroll-bars
    *mouse-event-keys*
    display-color-cells
    display-font-families
@@ -378,6 +389,31 @@
         down-mouse-3 mouse-3 drag-mouse-3
         mouse-movement))
 
+    (define-generic display-mouse-absolute-pixel-position)
+    ;; ^ `gdk_device_get_position` (`pgtkfns.c:3518`), which `frame.el`'s
+    ;; `mouse-absolute-pixel-position` answers with. The default is `#f`
+    ;; - a terminal has no pointer to report, and `frame.el`'s fallback
+    ;; for that case is `(cons 0 0)`.
+    (define-generic display-set-mouse-pixel-position)
+    ;; ^ `FRAME_TERMINAL (f)->set_mouse_position_hook` (`frame_set_mouse_pixel_position`,
+    ;; `frame.c:3360`): warp the pointer to (X, Y) in the frame's pixels.
+    (define-generic display-raise-frame)
+    ;; ^ `FRAME_TERMINAL (f)->frame_raise_lower_hook`, called by
+    ;; `raise-frame` (`frame.c:3664`).
+    (define-generic display-define-frame-cursor)
+    ;; ^ GNU Emacs's `FRAME_RIF (f)->define_frame_cursor`
+    ;; (`pgtkterm.c:2853` `pgtk_define_frame_cursor`), which
+    ;; `define_frame_cursor1` (`xdisp.c:36592`) calls with the cursor the
+    ;; area under the pointer asks for. CURSOR is one of the kinds
+    ;; `define-frame-cursor!` names - `text` (`GDK_XTERM`), `nontext`
+    ;; (`GDK_LEFT_PTR`), `hand` (`GDK_HAND2`), `hourglass`
+    ;; (`GDK_WATCH`), `horizontal-drag` (`GDK_SB_H_DOUBLE_ARROW`),
+    ;; `vertical-drag` (`GDK_SB_V_DOUBLE_ARROW`) or `modeline`.
+    ;;
+    ;; **A terminal has no pointer and so no shape to change**: the
+    ;; default does nothing, which is what `term.c`'s
+    ;; `define_frame_cursor` hole being absent means there.
+    ;; `(display-define-frame-cursor display frame cursor)`.
     (define-generic display-mouse-position)
     ;; **`display-mouse-position' and not `mouse-position'**, which is
     ;; `frame.c`'s `Fmouse_position` and is `frame.scm`'s. This is the
@@ -414,6 +450,79 @@
     ;; then gives the selected frame with nil coordinates, as the C's
     ;; docstring describes for "a mouseless terminal".
     (define-method (display-mouse-position (d <display>)) #f)
+
+    ;; The three hooks `frame.c` reaches through the terminal, and the
+    ;; default of each is the terminal's: a display that cannot warp a
+    ;; pointer or raise a window answers `#f' and the caller goes on.
+    (define-method (display-mouse-absolute-pixel-position (d <display>)) #f)
+    (define-method (display-set-mouse-pixel-position (d <display>) frame x y) #f)
+    (define-method (display-raise-frame (d <display>) frame) #f)
+    (define-method (display-define-frame-cursor (d <display>) frame cursor) #f)
+
+    (define-generic display-draw-vertical-border)
+    ;; ^ GNU Emacs's `FRAME_RIF (f)->draw_vertical_window_border (w, x,
+    ;; y0, y1)` (`dispextern.h:3172`), the hook `gui_draw_vertical_border`
+    ;; (`xdisp.c:37917`) calls for a window-system frame that has no
+    ;; vertical scroll bars. Draw a one-pixel line at pixel column X from
+    ;; pixel Y0 to Y1 in the `vertical-border` face - `xfns.c`'s and
+    ;; `pgtkterm.c`'s `*_draw_vertical_window_border` both fill a
+    ;; one-pixel rectangle with that face's foreground.
+    ;;
+    ;; **A terminal does not use this hook**, and that is Emacs's
+    ;; arrangement rather than an omission: its frame matrix gets a `|'
+    ;; glyph in the window's last cell instead
+    ;; (`build_frame_matrix_from_leaf_window`, `dispnew.c:2574-2599`),
+    ;; which is the renderer's glyph row and not a display method. The
+    ;; default here draws nothing for that reason.
+    ;; `(display-draw-vertical-border display window x y0 y1)`.
+    (define-method (display-draw-vertical-border (d <display>)
+                                                 window x y0 y1)
+      #f)
+
+    (define-generic display-default-scroll-bar-width)
+    ;; ^ GNU Emacs's `terminal->set_scroll_bar_default_width_hook`
+    ;; (`termhooks.h`; `x_set_scroll_bar_default_width`,
+    ;; `xfns.c:2392`), which `gui_set_scroll_bar_width` calls when the
+    ;; frame's `scroll-bar-width` parameter is nil: the width the
+    ;; toolkit's own scroll bar wants, in the frame's pixels. Gtk asks
+    ;; its theme's `slider-width` and `trough-border`
+    ;; (`update_theme_scrollbar_width`, `gtkutil.c:4460`). A terminal
+    ;; has no scroll bars, so its answer is 0.
+    ;; `(display-default-scroll-bar-width display)`.
+    (define-method (display-default-scroll-bar-width (d <display>)) 0)
+
+    (define-generic display-set-window-scroll-bar)
+    ;; ^ GNU Emacs's `FRAME_TERMINAL (f)->set_vertical_scroll_bar_hook`
+    ;; (`termhooks.h`), which `set_vertical_scroll_bar` (`xdisp.c:20271`)
+    ;; calls at the end of every window's redisplay. SIDE is `left` or
+    ;; `right` when the window shows a bar, `#f` when it does not (then
+    ;; WIDTH is 0 and the display must take any bar away). X, Y, WIDTH and
+    ;; HEIGHT are the bar's rectangle in the frame's pixels; PORTION,
+    ;; POSITION and WHOLE are the buffer distances the thumb shows, as
+    ;; `set_vertical_scroll_bar` computed them.
+    ;;
+    ;; **`(display-set-window-scroll-bar display window side x y width
+    ;; height portion position whole)`.** A terminal draws no scroll
+    ;; bars, so the default does nothing; its `window-scroll-bars` is
+    ;; still reported, because `window.c`'s functions run on a terminal
+    ;; too and answer the configured values with a zero displayed width.
+    (define-method (display-set-window-scroll-bar (d <display>) window side
+                                                   x y width height
+                                                   portion position whole)
+      #f)
+
+    (define-generic display-redeem-scroll-bars)
+    ;; ^ The second half of Emacs's `redeem_scroll_bar` /
+    ;; `judge_scroll_bars_hook` pair: a scroll bar whose window is gone,
+    ;; or which no redisplay used, is destroyed. Called once per frame at
+    ;; the end of the redisplay with the windows that were drawn;
+    ;; `(display-redeem-scroll-bars display windows)`.
+    ;;
+    ;; **This tree needs a list where the C needs a hook**: Emacs's
+    ;; scroll bar object hangs off the window (`w->vertical_scroll_bar`)
+    ;; and is freed per window; a display here keeps the toolkit widgets
+    ;; and frees the ones whose window is not in the list.
+    (define-method (display-redeem-scroll-bars (d <display>) windows) #f)
 
     (define-generic draw-box!)
     ;; Draw the `:box` face attribute around a run: GNU Emacs's
@@ -615,6 +724,31 @@
     ;; other display builds its menus with a toolkit and answers #f here.
     (define-method (menu-show (d <display>) frame x y flags title)
       #f)
+
+    (define-generic x-file-dialog)
+    ;; Ask the display's own file chooser for a file name: GNU Emacs's
+    ;; `x-file-dialog` (`xfns.c' and, for Gtk, `pgtkfns.c:3625'), whose
+    ;; real docstring is in `xfns.c':
+    ;;
+    ;;   (x-file-dialog PROMPT DIR &optional DEFAULT-FILENAME MUSTMATCH
+    ;;                  ONLY-DIR-P)
+    ;;
+    ;; "Read a file name from the user, using a file dialog" - the
+    ;; graphical chooser a menu or tool bar command gets instead of the
+    ;; minibuffer. `read-file-name' reaches it only when
+    ;; `next-read-file-uses-dialog-p' says so, so a terminal never calls
+    ;; it; the default below is the C's own `check_window_system'
+    ;; (`xfns.c`), which refuses every display that has no window
+    ;; system.
+    ;;
+    ;; The display is the first argument because that is this tree's
+    ;; spelling for a `struct terminal` hook (`menu-show`, above, takes
+    ;; its frame for the same reason). MUSTMATCH and ONLY-DIR-P are
+    ;; Emacs's two booleans: an existing file must be chosen, and only
+    ;; a directory may be chosen.
+    (define-method (x-file-dialog (d <display>) prompt dir default-filename
+                                  mustmatch only-dir)
+      (error "Window system frame should be used"))
 
     (define-generic screen-size)
     ;; The display's size in pixels, as `(WIDTH . HEIGHT)' - Emacs's

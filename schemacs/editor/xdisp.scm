@@ -62,6 +62,16 @@
           cursor-to! set-terminal-cursor!
           window-system-display?
           draw-window-cursor! erase-window-cursor! flush-display!
+          ;; `FRAME_RIF (f)->define_frame_cursor` (`xdisp.c:36644`): the
+          ;; hole that changes the pointer's shape over an area.
+          display-define-frame-cursor
+          ;; `FRAME_RIF (f)->draw_vertical_window_border` (`dispextern.h`),
+          ;; the one-pixel separator a window-system frame draws between
+          ;; side-by-side windows when it has no scroll bars.
+          display-draw-vertical-border
+          ;; The toolkit's scroll bar, which `set-vertical-scroll-bar`
+          ;; creates, moves and sizes once per window per redisplay.
+          display-set-window-scroll-bar display-redeem-scroll-bars
           realize-face
           lookup-face
           ;; how many pixels a cell is, which is what turns a mouse
@@ -121,16 +131,24 @@
          *current-frame* *echo-area-buffer* *minibuffer*
          *window-scroll-function*
          *frame-cursor-type* *frame-focus* frame-height frame-width
-         ;; `string-pixel-width` measures in the frame's cells
-         frame-char-width
+         ;; `string-pixel-width` measures in the frame's cells, and the
+         ;; scroll bar's rectangle is in pixels of both axes
+         frame-char-width frame-char-height
          ;; `FRAME_MENU_BAR_LINES (f)` - whether this frame draws a bar -
          ;; and `f->menu_bar_vector`, where `display_menu_bar` records the
          ;; column it drew each item at.
-         %frame-menu-bar-lines %frame-tab-bar-lines frame-top-margin
+         %frame-menu-bar-lines %frame-tab-bar-lines %frame-tool-bar-lines
+         ;; `FRAME_HAS_VERTICAL_SCROLL_BARS (f)`, which decides whether a
+         ;; separator is drawn between side-by-side windows at all.
+         frame-has-vertical-scroll-bars?
+         frame-top-margin
+         *current-buffer*
          frame-menu-bar-items set!frame-menu-bar-items
          frame-menu-bar-items-used set!frame-menu-bar-items-used
          frame-tab-bar-items set!frame-tab-bar-items
          frame-tab-bar-items-used set!frame-tab-bar-items-used
+         frame-tool-bar-items set!frame-tool-bar-items
+         frame-tool-bar-items-used set!frame-tool-bar-items-used
          ;; `FRAME_GARBAGED_P` / `SET_FRAME_GARBAGED` (`frame.h:1173`),
          ;; consumed by `clear-garbaged-frames!`.
          frame-garbaged-p set-frame-garbaged! frame-minibuffer-window
@@ -154,19 +172,29 @@
          window-tab-line-height window-parameter window-last-tab-line
          set!window-last-tab-line
          window-body-width window-buffer set!window-buffer window-height window-left
+         ;; The text area's first column and the bar's share of the
+         ;; window: `WINDOW_BOX_LEFT_EDGE_X` and the scroll bar macros.
+         window-body-left window-scroll-bar-cols window-left-scroll-bar-cols
+         window-vertical-scroll-bar-type window-config-scroll-bar-width
+         window-config-scroll-bar-cols window-scroll-bar-width window-live-p
+         scroll-bar-adjust-thumb-portion
+         *mark-window-redisplay-function*
          window-list
          ;; `WINDOW_XFRAME (w)': the frame a window is on, which is what
          ;; the drawing of a window asks when the frame being drawn is
          ;; not the selected one
          window-frame
          selected-window *selected-window-override* *old-selected-window*
-         window-point window-right-border?
+         window-point window-right-border? window-leftmost?
          window-top
          window-width
          ;; `w->start' and everything stored beside it: where the window's
          ;; display begins, where its last glyph was, and the line-number
          ;; cache `%l' counts from
          %window-start set-window-start! set-window-point!
+         ;; `w->force_start`: set by `set-window-start!`, honoured and
+         ;; cleared by `scroll-to-cursor!` (`xdisp.c:20746`).
+         window-force-start? set-window-force-start?!
          ;; the redisplay's own write of `w->start` - see frame.scm
          %window-start-set!
          %window-end-pos %window-end-valid?
@@ -193,7 +221,7 @@
          window-last-mark set!window-last-mark
          window-last-mode-line set!window-last-mode-line
          ;; `mark_window_display_accurate`'s walk over the window tree
-         window-internal? window-children)
+         window-internal? window-type? window-children)
     (only (schemacs editor disp-table)
          char-display-cursor-width char-display-width
          char-display-glyph display-text-width)
@@ -233,7 +261,7 @@
     ;; (`realize-face').
     (only (schemacs editor textprop)
           get-text-property next-single-property-change
-          previous-single-property-change)
+          previous-single-property-change text-properties-at)
     (only (schemacs editor buffer)
           *transient-mark-mode*
           ;; `mark_window_display_accurate_1` records what the rows were
@@ -272,7 +300,15 @@
     ;; `buffer-text' is this tree's `struct buffer_text' - and the two
     ;; accessors below are the only readers and writers of it here.
     (only (schemacs editor buffer-text)
-          buffer-text-beg-unchanged set!buffer-text-beg-unchanged)
+          buffer-text-beg-unchanged set!buffer-text-beg-unchanged
+          ;; `BUF_BEG`/`BUF_Z` - the whole text's ends, which is what
+          ;; `note_mouse_highlight` falls back to for a run with no
+          ;; change at either edge.
+          buffer-text-base buffer-text-z)
+    ;; `message_dolog`'s `insert_1_both (..., prepare = false, ...)` runs
+    ;; with no modification hooks (`xdisp.c:12431`'s own reason), which is
+    ;; this parameter's switch - see `prepare-to-modify-buffer-1`.
+    (only (schemacs editor insdel) *inhibit-modification-hooks*)
     ;; The row and its glyphs - `struct glyph`/`struct glyph_row`
     ;; (`dispextern.h`), and the two matrices a window keeps.
     (only (schemacs editor glyph)
@@ -320,7 +356,16 @@
     ;; `window.scm`; `redisplay_internal` calls it (`xdisp.c:17588`), so
     ;; this library calls it in `redisplay-frames!`. `window.scm` reaches
     ;; this one through `simple.scm`, which is a diamond and not a cycle.
-    (only (schemacs editor window) run-window-change-functions)
+    ;;
+    ;; `window-at-side-p` is the question the pointer's shape asks
+    ;; ("can this window's mode line be dragged?"), and `window.scm`
+    ;; holds it for the same reason the mouse commands reach it there.
+    (only (schemacs editor window) run-window-change-functions window-at-side-p)
+    ;; `keymapp` decides whether a mode-line string under the pointer is
+    ;; a clickable item - if it is, the pointer stays an arrow and the
+    ;; mode line is not a resize handle at that glyph
+    ;; (`xdisp.c:36805`).
+    (only (schemacs editor keymap) keymapp)
     ;; `minor-mode-alist' is `bindings.el`'s and lives in `subr.scm`,
     ;; beside `add-minor-mode' - **the one function that writes it**. It
     ;; is imported here rather than declared here, which it was until
@@ -328,6 +373,11 @@
     ;; the mode line read one and `add-minor-mode' wrote the other, so a
     ;; minor mode registered the Emacs way never reached the mode line.
     (only (schemacs editor subr) *minor-mode-alist* run-hooks
+          ;; `note-mouse-highlight` reads a position list the same way the
+          ;; mouse commands do - including the string a click landed on,
+          ;; which is where a mode-line item's `keymap` and `pointer`
+          ;; properties live.
+          posn-window posn-point posn-area posn-string
           ;; The seam `event-start`/`event-end` take their point-position
           ;; fallback through; installed at the end of this file.
           *event--posn-at-point-function*)
@@ -355,7 +405,14 @@
    ;; the items and `display_menu_bar` draws the row.
    *menu-bar-items-function* *inhibit-menubar-update*
    *tab-bar-items-function* *tab-bar-keymap-function*
+   ;; The tool bar's two seams and its item update (`update_tool_bar`).
+   *tool-bar-items-function* *tool-bar-keymap-function* update-tool-bar
+   tool-bar-style tool-bar-get-system-style
+   ;; The seam a front end fills with the desktop's `toolbar-style`
+   ;; setting - Emacs's `current_tool_bar_style`.
+   *tool-bar-system-style-function*
    *global-mode-string*
+   overlay-arrow-position overlay-arrow-string
    ;; `Vinhibit_redisplay`, bound while a menu is up.
    *inhibit-redisplay*
    update-menu-bar display-menu-bar menu-item-width
@@ -374,6 +431,9 @@
    ;; same way `line-end-fill-attribute` is.
    extend-fill-token
    *mode-line-format*
+   ;; `files.el`'s, here for the mode line's `%@`; `read-file-name` uses
+   ;; it too, to stay on the minibuffer for a remote name.
+   file-remote-p
    ;; The window whose mode line is being formatted - the C's rebinding
    ;; of `selected-window' around `display_mode_lines' - and the face
    ;; picker that reads it (`bindings.el:872').
@@ -414,6 +474,11 @@
    window-line-rows
    window-line-slices
    posn-at-x-y buffer-posn-from-coords
+   ;; the mouse face: `note_mouse_highlight`, `mouse-highlight`, and the
+   ;; two the renderer's face walk splits on (`*drawing-window*` is the
+   ;; binding that says which window's rows are being built)
+   note-mouse-highlight clear-mouse-face! mouse-highlight mouse-face-at
+   *drawing-window*
    ;; the glyph the pointer is on, which is what decides whether a motion
    ;; report is a movement at all - see `remember-mouse-glyph'
    remember-mouse-glyph
@@ -531,14 +596,19 @@
             (let loop ((pos pos) (left (- n)))
               (if (or (<= left 0) (= pos (buffer-beg ed)))
                   pos
-                  (let* ((bol (if (= pos (buffer-beg ed))
+                  ;; The line before POS: POS is a line beginning, so its
+                  ;; predecessor's start is the start of the line holding
+                  ;; POS - 1 (the newline that ended it). **Stepping
+                  ;; twice, to POS's line and then to the one before it,
+                  ;; made every backward move two lines for one** - the
+                  ;; scroll path `scroll-down-command`, `M-v` and the
+                  ;; scroll bar all share; measured here as a six-line
+                  ;; page landing twelve lines up.
+                  (let ((prev (if (= pos (buffer-beg ed))
                                   pos
-                                  (text-editor-get-start-of-line ed (- pos 1))))
-                         (prev (if (= bol (buffer-beg ed))
-                                   bol
-                                   (text-editor-get-start-of-line ed (- bol 1)))))
-                    (if (= prev bol)
-                        bol
+                                  (text-editor-get-start-of-line ed (- pos 1)))))
+                    (if (= prev pos)
+                        pos
                         (loop prev (- left (window-line-rows-at window prev)))))))
             (let loop ((pos pos) (left n))
               (if (or (<= left 0) (= pos (buffer-z ed)))
@@ -587,6 +657,60 @@
                                 ;; stall again, one row out.
                                 (last-visible-line-start window new vheight)))))
           'moved))))
+
+    (define (set-vertical-scroll-bar window)
+      ;; GNU Emacs's `set_vertical_scroll_bar` (`xdisp.c:20271`): tell the
+      ;; toolkit what WINDOW's vertical scroll bar should show, creating
+      ;; or moving the widget as the window's rectangle has changed.
+      ;;
+      ;; The C computes the distances first, and its three facts are the
+      ;; buffer's accessible range, the window's start and its end:
+      ;;
+      ;;   whole = ZV - BEGV
+      ;;   start = marker_position (w->start) - BEGV
+      ;;   end   = Z - w->window_end_pos - BEGV
+      ;;
+      ;; `w->window_end_pos` is "Z minus the position of the last glyph",
+      ;; which is exactly this tree's `window-end` - recorded as the rows
+      ;; are built. The mini window with no echo-area text answers zeros,
+      ;; which makes the toolkit draw a full-length thumb.
+      ;;--------------------------------------------------------------
+      (let* ((frame (window-frame window))
+             (side (window-vertical-scroll-bar-type window))
+             (bar-cols (if side (window-config-scroll-bar-cols window) 0))
+             (cw (frame-char-width frame))
+             (ch (frame-char-height frame))
+             (left (if (eq? side 'left)
+                       (window-left window)
+                       (- (+ (window-left window) (window-width window))
+                          bar-cols)))
+             (data
+              (let ((buffer (window-buffer window)))
+                (if (not (and buffer (window-live-p window)))
+                    (list 0 0 0)
+                    (let* ((beg (buffer-beg buffer))
+                           (zv (buffer-z buffer))
+                           (end (- (window-end window) beg))
+                           (start (- (window-start window) beg))
+                           (whole (- zv beg)))
+                      (when (< end start) (set! end start))
+                      (when (< whole (- end start))
+                        (set! whole (- end start)))
+                      (list (- end start) start whole))))))
+        ;; **The bar's box is the text area, not the window's whole
+        ;; rectangle.** `pgtk_set_vertical_scroll_bar` asks
+        ;; `window_box (w, ANY_AREA, 0, &window_y, 0, &window_height)`
+        ;; (`pgtkterm.c:4248`), and `window_box_height` excludes the mode
+        ;; line (and the tab and header lines), while its Y is the window
+        ;; top *plus* those lines (`xdisp.c:1463-1479`). Sizing the bar to
+        ;; the whole window made two stacked windows' bars join across the
+        ;; mode line row, where Emacs draws the mode line out to the frame
+        ;; edge.
+        (display-set-window-scroll-bar
+         (current-display) window side
+         (* left cw) (* (window-body-top window) ch)
+         (* bar-cols cw) (* (window-body-height window) ch)
+         (car data) (cadr data) (caddr data))))
 
     (define (last-visible-line-start window start vheight)
       ;; The start of the last line of WINDOW that begins within its
@@ -653,6 +777,29 @@
              (vheight (window-body-height window))
              (pt (max (buffer-beg ed) (min (window-point window) (buffer-z ed))))
              (start (max (buffer-beg ed) (min (window-start window) (buffer-z ed)))))
+        (if (window-force-start? window)
+            (begin
+              ;; **`w->force_start`: the window starts where Lisp put
+              ;; it.** `set-window-start` sets the flag (`window.c:1968`)
+              ;; and `redisplay_window`'s `force_start:` label
+              ;; (`xdisp.c:20746`) lays out from that start without
+              ;; asking whether point is in view; if it is not, the C
+              ;; moves *point* into the window instead - "Give up and
+              ;; just move to the middle of the window" (`:20823`).
+              ;; Without this the recentring below fought every caller
+              ;; of `set-window-start`: a scroll bar dragged to the
+              ;; middle of a buffer snapped straight back to point's
+              ;; line on the very redisplay the drag's own `sit-for`
+              ;; asked for.
+              (set-window-force-start?! window #f)
+              ;; The end position belongs to the row *after* the last
+              ;; one drawn, which is not visible - the same strict test
+              ;; the fast path below makes.
+              (let ((bottom (window-move-screen-lines window start vheight)))
+                (unless (and (<= start pt) (< pt bottom))
+                  (set-point ed (window-move-screen-lines
+                                 window start (quotient vheight 2)))))
+              #t)
         ;; **The matrix drawn last time already answers it, when it is
         ;; still valid.** GNU Emacs's `try_cursor_movement`
         ;; (`xdisp.c:20700`) is this check: while point stays inside the
@@ -702,7 +849,7 @@
                       (if next
                           (loop next
                                 (+ used (window-line-rows-at window pos)))
-                          #t)))))))))))
+                          #t))))))))))))
 
     (define (hscroll-window! window)
       ;; Auto hscrolling: bring WINDOW's point back into the window's
@@ -1014,6 +1161,22 @@
       ;; by a compiled library is folded to its load-time value.
       ;;--------------------------------------------------------------
       (make-parameter '()))
+
+    (define overlay-arrow-position #f)
+    ;; ^ GNU Emacs's `overlay-arrow-position' (`xdisp.c:38716'): "Marker
+    ;; for where to display an arrow on top of the buffer text. This
+    ;; must be the beginning of a line in order to work."
+    ;;
+    ;; A plain variable, as the C declares it - `occur--set-arrow' sets
+    ;; it and `next-error` would. **The renderer does not draw overlay
+    ;; arrows**: the C's `display_line` prepends `overlay-arrow-string`
+    ;; to a line whose position matches an entry of
+    ;; `overlay-arrow-variable-list`, and that walk is not ported. The
+    ;; variable is carried so the commands that set it mean what they
+    ;; say and a later renderer has something to read.
+
+    (define overlay-arrow-string "=>")
+    ;; ^ GNU Emacs's `overlay-arrow-string' (`xdisp.c:38724').
 
     (define *mode-line-format*
       ;; GNU Emacs's `mode-line-format': the template a window's mode line is
@@ -1420,6 +1583,20 @@
             (mode-line-substring text 0 width)
             (concat text (make-string (- width len) #\space)))))
 
+    (define (inherit-mode-line-properties text str position)
+      ;; TEXT with the text properties the format string STR carries at
+      ;; POSITION - the `%` that produced it. Emacs's `display_mode_element`
+      ;; applies the enclosing string's properties to a copy of the string
+      ;; it is about to expand (`xdisp.c:28520`), which is how a
+      ;; `(propertize "%1*" 'local-map ...)` keeps its keymap on the
+      ;; `-`/`*` the construct expands to.
+      ;;--------------------------------------------------------------
+      (let ((props (and (string? str)
+                        (>= position 0)
+                        (< position (string-length str))
+                        (text-properties-at position str))))
+        (if (null? props) text (apply propertize text props))))
+
     (define (expand-mode-line-string str window)
       ;; STR with its `%'-constructs expanded: GNU Emacs's processing of a
       ;; string in a mode line. A `%' followed by digits is a field width, as
@@ -1464,7 +1641,16 @@
                                          acc)))
                             (cons (mode-line-substring str (- i 1) i) acc))))
                    (else
-                    (let ((text (mode-line-construct c window)))
+                    ;; **The construct's output carries the properties of
+                    ;; the format string it was written in.** Emacs's
+                    ;; `display_mode_element` copies a string and
+                    ;; `set-text-properties`s it before the `%` walk
+                    ;; (`xdisp.c:28520`), and `bindings.el` leans on that:
+                    ;; `(propertize "%1*" 'local-map MAP)` is what makes
+                    ;; the modified flag clickable, and `%` expands to `-`
+                    ;; or `*` here.
+                    (let ((text (inherit-mode-line-properties
+                                 (mode-line-construct c window) str pct)))
                       (loop (+ i 1) #f #f (+ i 1)
                             (let ((acc (if (< start pct)
                                            (cons (mode-line-substring str start pct)
@@ -1476,8 +1662,10 @@
                       (loop (+ i 1) pct (+ (* 10 width)
                                            (- (char->integer c) (char->integer #\0)))
                             start acc)
-                      (let ((text (pad-mode-line-field
-                                   (mode-line-construct c window) width)))
+                      (let ((text (inherit-mode-line-properties
+                                   (pad-mode-line-field
+                                    (mode-line-construct c window) width)
+                                   str pct)))
                         (loop (+ i 1) #f #f (+ i 1)
                               (let ((acc (if (< start pct)
                                              (cons (mode-line-substring str start pct)
@@ -1711,7 +1899,29 @@
                              (else limit))))
                         limit))
                   limit))
-             (next (min by-property by-overlay by-region)))
+             ;; **The mouse face's edges split a run too.** Emacs paints
+             ;; the highlight in a second pass (`show_mouse_face`), so its
+             ;; edges need not be `face`-change points; this renderer
+             ;; resolves the face per run, and a run is only one face if
+             ;; nothing inside it changes. Without this a `mouse-face` run
+             ;; in the middle of a line - Dired's file names are one -
+             ;; took the token of the run it sat inside, and hovering
+             ;; painted nothing there.
+             (by-mouse
+              (if (and mouse-highlight
+                       %mouse-face-window
+                       (eq? (*drawing-window*) %mouse-face-window))
+                  (cond ((and (> %mouse-face-beg position)
+                              (< %mouse-face-beg limit))
+                         %mouse-face-beg)
+                        ((and (>= position %mouse-face-beg)
+                              (< position %mouse-face-end)
+                              (> %mouse-face-end position)
+                              (< %mouse-face-end limit))
+                         %mouse-face-end)
+                        (else limit))
+                  limit))
+             (next (min by-property by-overlay by-region by-mouse)))
         (max (+ position 1) (min next limit))))
 
     (define (line-face-runs ed line-start len)
@@ -1935,6 +2145,45 @@
                     (and (>= position beginning)
                          (< position end)))))))
 
+    ;;----------------------------------------------------------------
+    ;; The mouse face - `note_mouse_highlight` (`xdisp.c:37061`)
+    ;;----------------------------------------------------------------
+    ;;
+    ;; Clickable text - anything with a `mouse-face` property, which is
+    ;; what Occur's lines and Dired's file names have - is highlighted
+    ;; while the pointer is over it. The face is not a face the buffer's
+    ;; glyphs carry: it is painted over them while the mouse is there,
+    ;; which is why the state lives beside the display and not in the
+    ;; text. GNU Emacs keeps it in `Mouse_HLInfo`, one per display; this
+    ;; tree's front end is one display, so there is one set.
+
+    (define mouse-highlight #t)
+    ;; ^ GNU Emacs's `mouse-highlight` (`frame.c:7592`): "If non-nil,
+    ;; clickable text is highlighted when mouse is over it." A plain
+    ;; variable, not a parameter: Emacs `defvar`s it, nothing `let`s it,
+    ;; and a user turns it off with `setq'. The self-assignment is what
+    ;; keeps the compiler from folding it into a constant - a variable a
+    ;; user's init file sets is not one (the `menu-bar.el` rule).
+    (set! mouse-highlight mouse-highlight)
+
+    (define %mouse-face-window #f)
+    (define %mouse-face-beg #f)
+    (define %mouse-face-end #f)
+    (define %mouse-face-attrs #f)
+    ;; ^ `Mouse_HLInfo`'s `mouse_face_window`, `mouse_face_beg_*`/
+    ;; `mouse_face_end_*` and `mouse_face_face_id`: the window whose text
+    ;; is under the pointer, the run to paint, and the face to paint it
+    ;; with. Emacs also records the beg/end *rows and columns*; those are
+    ;; derived here from the positions when the rows are built.
+
+    (define *drawing-window* (make-parameter #f))
+    ;; ^ Dynamic, for the same reason GNU Emacs's `it.w` is: bound around
+    ;; one window's row build (`display-window!`), so the face code can
+    ;; tell whether the row it is building belongs to the window the
+    ;; pointer is over. Emacs's `show_mouse_face` knows because it is
+    ;; handed the window; this renderer resolves faces position by
+    ;; position instead, hence the binding.
+
     (define (attrs-at-buffer-position ed position)
       ;; The *unrealized* face in effect at POSITION in ED: the merged
       ;; attribute vector GNU Emacs's `face_at_buffer_position' computes,
@@ -1964,19 +2213,39 @@
       ;; the display had been told, while every row was measured from the
       ;; unscaled default - so the rows below cut the taller glyphs off.
       ;;--------------------------------------------------------------
-      (let* ((attrs
-              (merge-face-ref (get-text-property position 'face ed)
-                              (merge-face-ref 'default
-                                              (face-attributes-empty))))
-             (attrs
-              (let loop ((ovs (reverse (overlays-at position #t))) (attrs attrs))
-                (if (null? ovs)
-                    attrs
-                    (loop (cdr ovs)
-                          (merge-face-ref (overlay-get (car ovs) 'face) attrs))))))
-        (if (region-face-at-position? ed position)
-            (merge-face-ref 'region attrs)
-            attrs)))
+      (if (and mouse-highlight
+               %mouse-face-window
+               (eq? (*drawing-window*) %mouse-face-window)
+               (>= position %mouse-face-beg)
+               (< position %mouse-face-end))
+          ;; **One face for the whole run, and it is not the glyphs'
+          ;; own.** GNU Emacs computes the mouse face once, at the
+          ;; pointer's position, from the `default' face with the
+          ;; `mouse-face' property merged over it - `face_at_buffer_position'
+          ;; with MOUSE true (`xfaces.c:6955`) reads `Qmouse_face' for the
+          ;; property name and starts from the default - and
+          ;; `show_mouse_face` paints every glyph of the run with that one
+          ;; face. The buffer's own faces under the highlight are not
+          ;; consulted, which is why a search-hit line's colours become
+          ;; the `highlight' face while the pointer is on it.
+          ;;
+          ;; **Departure**: Emacs does this as a second pass over the
+          ;; built rows; this answers it where every other face is
+          ;; decided. Same face, same run, same pixels.
+          %mouse-face-attrs
+          (let* ((attrs
+                  (merge-face-ref (get-text-property position 'face ed)
+                                  (merge-face-ref 'default
+                                                  (face-attributes-empty))))
+                 (attrs
+                  (let loop ((ovs (reverse (overlays-at position #t))) (attrs attrs))
+                    (if (null? ovs)
+                        attrs
+                        (loop (cdr ovs)
+                              (merge-face-ref (overlay-get (car ovs) 'face) attrs))))))
+            (if (region-face-at-position? ed position)
+                (merge-face-ref 'region attrs)
+                attrs))))
 
     (define (face-at-buffer-position ed position)
       ;; The display's token for the face in effect at POSITION in ED:
@@ -2371,7 +2640,7 @@
         ;; always said `#f' here.
         (if (and (>= screen-row 0) (< screen-row vheight))
           (cons (+ screen-row (window-body-top window))
-                (+ (window-left window)
+                (+ (window-body-left window)
                    (if (window-wraps? window)
                        ;; the column within its *row*: a continuation row
                        ;; starts at screen column zero, so the cursor's
@@ -2513,7 +2782,7 @@
                     (vheight (window-body-height window)))
                (and (>= screen-row 0) (< screen-row vheight)
                     (let* ((display-col (current-line-display-column ed column))
-                           (col (+ (window-left window)
+                           (col (+ (window-body-left window)
                                    (if (window-wraps? window)
                                        (min (- display-col
                                                (line-texts-column texts
@@ -3050,6 +3319,10 @@
       ;; of walking the buffer and resolving faces - and leaves them in
       ;; the desired matrix for `update-window!` to compare.
       ;;--------------------------------------------------------------
+      ;; **Which window's rows these are**, so `attrs-at-buffer-position`
+      ;; can paint the mouse face over the run the pointer is on - the
+      ;; equivalent of Emacs handing the window to `show_mouse_face`.
+      (parameterize ((*drawing-window* window))
       ;; **The window's buffer is the current one while its rows are
       ;; built.** GNU Emacs's `redisplay_window` does
       ;; `set_buffer_internal (XBUFFER (w->contents))` for exactly this
@@ -3068,7 +3341,7 @@
              ;; the window's own column, not the frame's - a window to the
              ;; right of a split starts at X0. Passing 0 drew every
              ;; window's text in the leftmost column.
-             (x0 (window-left window))
+             (x0 (window-body-left window))
              (vheight (window-body-height window))
              ;; **The text area's bottom in *pixels***, GNU Emacs's
              ;; `window_text_bottom_y` - the `it.last_visible_y` that
@@ -3257,7 +3530,7 @@
                                                           width metrics))
                                       (blank (+ r 1)
                                              (+ yy (cdr metrics))))
-                                    #t)))))))))))))
+                                    #t))))))))))))))
 
     (define (update-window! window)
       ;; GNU Emacs's `update_window` (`dispnew.c:4400`): draw the rows the
@@ -3301,7 +3574,7 @@
       ;; window's first line once for every empty row.
       (let ((y (row->pixel-y (+ (window-body-top window) index))))
         (fill-line-end-row! (current-display) window index y
-                            (window-left window)
+                            (window-body-left window)
                             (window-body-width window)
                             (face->attribute 'default))))
 
@@ -3376,19 +3649,19 @@
         ;; does for an hscrolled line. `$` overwrites the cell at the
         ;; hscroll column rather than pushing the text right, as
         ;; `draw-line!`'s hscrolled branch did.
-        (when (> x0 (window-left window))
+        (when (> x0 (window-body-left window))
           ;; at the window's *first* cell, which is the cell the text
           ;; gave up - `draw-special-glyph!` writes the last cell, so
           ;; this is its own `write-glyphs!`
           (write-run! (current-display) (list "$") y
-                      (window-left window)
+                      (window-body-left window)
                       (face->attribute 'default)))
         ;; the right marker sits in the window's last cell, so the row's
         ;; own width (one cell short when it made room for the left
         ;; marker) is not what places it - `window-left window` plus the
         ;; window's width is.
         (let ((window-width (window-body-width window))
-              (window-x (window-left window)))
+              (window-x (window-body-left window)))
           (cond ((glyph-row-continued? row)
                  (draw-special-glyph! y window-x window-width "\\"))
                 ((glyph-row-truncated-on-right? row)
@@ -3756,9 +4029,24 @@
       ;; (`frame-garbaged-p`, and `mark-window-display-accurate-1` clears
       ;; the field when it wipes one).
       ;;--------------------------------------------------------------
+      ;; **The mode line runs the window's whole width, the scroll bar
+      ;; area included.** `display_mode_line` builds the row with
+      ;; `full_width_p` set, so its face covers the fringes and the scroll
+      ;; bar area and a toolkit bar does not interrupt it - and
+      ;; `coordinates_in_window` tests `ON_MODE_LINE` before the scroll
+      ;; bar columns (`window.c:1396-1418`), so a click there is a
+      ;; mode-line click. Drawing it only across the body left the bar
+      ;; columns as a gap at the right edge, with the bar of the window
+      ;; below meeting this window's bar through it.
       (let* ((x0 (window-left window))
-             (width (window-body-width window))
-             (border (and (window-right-border? window) (+ x0 width)))
+             (width (window-width window))
+             ;; **The border is the window's last column.** It is *not*
+             ;; `x0 + width`: that span is the mode line's, which now
+             ;; covers the scroll bar area too, while the separator
+             ;; column is the last cell of the window (the one
+             ;; `window-body-width` leaves out of the body).
+             (border (and (window-right-border? window)
+                          (+ (window-left window) (window-width window) -1)))
              (y (row->pixel-y
                  (+ (window-top window) (window-height window) -1)))
              (line (mode-line-pad
@@ -3784,13 +4072,52 @@
                                                  record))
           (draw-mode-line! line face y x0)
           (set!window-last-mode-line window record))
+        ;; **The separator between side-by-side windows.** GNU Emacs
+        ;; draws it one of two ways, and this is the branch:
+        ;;
+        ;; * a window-system frame **with vertical scroll bars draws
+        ;;   nothing** - `gui_draw_vertical_border` (`xdisp.c:37926`):
+        ;;   "Don't do it for frames with vertical scroll bars because
+        ;;   either the right scroll bar of a window, or the left scroll
+        ;;   bar of its neighbor will suffice as a border." The bars are
+        ;;   the separator; a column of `|' glyphs beside them is this
+        ;;   renderer's invention and not Emacs's.
+        ;; * a window-system frame **without** them draws a one-pixel
+        ;;   line in the `vertical-border` face, from the top of the text
+        ;;   area to its bottom - the C's `window_box_edges` + `y1 -= 1`
+        ;;   - so it stops above the mode line (`xdisp.c:37946`).
+        ;; * a terminal draws the `|' glyph in the window's last cell on
+        ;;   every row of the window, mode line included, which is not
+        ;;   this hook at all: `build_frame_matrix_from_leaf_window`
+        ;;   replaces each row's last glyph with `right_border_glyph`
+        ;;   (`dispnew.c:2574-2599`).
+        ;;
+        ;; Both of the C's branches are drawn - the right border of a
+        ;; non-rightmost window and the left border of a non-leftmost one
+        ;; land on the same column in this model, where the column
+        ;; belongs to the window on the left (`window-right-border?`), so
+        ;; one call draws what the two would.
         (when border
-          (let loop ((row (window-top window))
-                     (end (+ (window-top window) (window-height window))))
-            (when (< row end)
-              (write-run! (current-display) (list "|") (row->pixel-y row)
-                          border (face->attribute 'vertical-border))
-              (loop (+ 1 row) end))))))
+          (cond
+           ((window-system-display? (current-display))
+            (unless (frame-has-vertical-scroll-bars? (window-frame window))
+              (let ((cw (frame-char-width (window-frame window)))
+                    (ch (frame-char-height (window-frame window))))
+                (display-draw-vertical-border
+                 (current-display) window
+                 (* border cw)
+                 (* (window-body-top window) ch)
+                 (- (* (+ (window-body-top window)
+                          (window-body-height window))
+                       ch)
+                    1)))))
+           (else
+            (let loop ((row (window-top window))
+                       (end (+ (window-top window) (window-height window))))
+              (when (< row end)
+                (write-run! (current-display) (list "|") (row->pixel-y row)
+                            border (face->attribute 'vertical-border))
+                (loop (+ 1 row) end))))))))
 
     (define (render-window-tab-line! window)
       ;; Draw WINDOW's tab line: the row above its text.
@@ -3814,8 +4141,11 @@
       ;; inherit `tab-line`, which is what gives the row its background).
       ;;--------------------------------------------------------------
       (when (window-wants-tab-line window)
+      ;; The tab line spans the window's whole width for the mode line's
+      ;; reason: the scroll bar starts below it, so this row has no bar
+      ;; columns to leave out.
       (let* ((x0 (window-left window))
-             (width (window-body-width window))
+             (width (window-width window))
              (y (row->pixel-y (window-top window)))
              (format (or (window-parameter window 'tab-line-format)
                          (buffer-local-value (window-buffer window)
@@ -3843,27 +4173,30 @@
           (set!window-last-tab-line window record)))))
 
     (define (force-mode-line-update . args)
-      ;; GNU Emacs's `force-mode-line-update' (`xdisp.c`): mark the mode
-      ;; line, or every mode line with ALL, for redrawing.
+      ;; GNU Emacs's `force-mode-line-update` (`buffer.c:1543`): mark the
+      ;; mode line, or every mode line with ALL, for redrawing. "This
+      ;; function also forces recomputation of the menu bar menus and the
+      ;; frame title."
       ;;
-      ;; **It sets `windows_or_buffers_changed`**, which is what Emacs's
-      ;; does (`xdisp.c`): the redisplay now *skips* a window whose glyph
-      ;; matrix is still good, so a command that has changed a face or the
-      ;; mode line's own contents has to say so or the change waits for
-      ;; the next edit. `face-remap.el` calls this after adjusting
-      ;; `face-remapping-alist` for exactly that reason - "Force redisplay
-      ;; of this buffer".
+      ;; **It sets `update_mode_lines` ONLY** - the C's body is
+      ;; `update_mode_lines = 10` for ALL and `bset_update_mode_line` for
+      ;; the current buffer's windows, and it never touches
+      ;; `windows_or_buffers_changed`. It set both here until
+      ;; 2026-11-20, and that is a *stronger* flag than the C: it makes
+      ;; the redisplay treat the frame as garbaged (clear the surface,
+      ;; throw the matrices away), where the C merely recomputes the mode
+      ;; lines and the bars. The difference is observable: a search calls
+      ;; this on every key (`isearch-update`), and with the strong flag
+      ;; every key garbage-collected the frame - which lost the search's
+      ;; own match highlight, caught by `tools/pty-check.py`'s
+      ;; `isearch-multiline`.
       ;;
-      ;; Emacs distinguishes the ALL case (`windows_or_buffers_changed`)
-      ;; from the one-window case (`w->update_mode_line`); one flag is
-      ;; enough here, and it costs a rebuild of the windows that would
-      ;; otherwise have been skipped.
+      ;; The two flags are distinct here for the same reason they are in
+      ;; the C: `update-mode-lines?` means "the mode lines and the bars
+      ;; have to be re-made", `windows-or-buffers-changed?` means "no
+      ;; glyph matrix can be trusted". A caller that changes what the
+      ;; mode line or the bar *says* wants the first.
       ;;--------------------------------------------------------------
-      (set-windows-or-buffers-changed! #t)
-      ;; "This function also forces recomputation of the menu bar menus
-      ;; and the frame title" (`buffer.c:1543`) - and in the C that half
-      ;; is `update_mode_lines` (`:1549`), which is also the flag the menu
-      ;; bar itself reads.
       (set-update-mode-lines! #t)
       #f)
 
@@ -4223,6 +4556,7 @@
         ;; frame's bar is its toolkit's and both calls return at once.
         (update-menu-bar frame)
         (update-tab-bar frame)
+        (update-tool-bar frame)
         (unless (window-system-display? (current-display))
           (when (> (%frame-menu-bar-lines frame) 0)
             (display-menu-bar frame)))
@@ -4237,6 +4571,25 @@
         ;; commands act on. A window that is not selected keeps the view
         ;; it had, as GNU Emacs leaves a window's start alone until it
         ;; is displayed with its own point.
+        ;; **`w->force_start` is consumed by the redisplay for every
+        ;; window, not only the selected one.** The C clears it in
+        ;; `redisplay_window`'s `force_start:` label (`xdisp.c:20746`)
+        ;; whether or not the window is selected. This renderer runs the
+        ;; start decision for the selected window alone - the force
+        ;; branch of `scroll-to-cursor!` moves the *buffer's* point,
+        ;; which is the displayed point only in the selected window - so
+        ;; for the others the flag is cleared here. The caller's start is
+        ;; already written, which is what the flag asks for, and clearing
+        ;; it keeps it from being honoured stale the next time that
+        ;; window is selected. Without this a TAB in a `*Completions*`
+        ;; window (whose scroll-to-top branch calls `set-window-start!`,
+        ;; as Emacs's `completion--scroll-completions` does) left the
+        ;; flag set until that window's next `M-<down>`.
+        (let ((selected (frame-selected-window frame)))
+          (for-each (lambda (w)
+                      (unless (eq? w selected)
+                        (set-window-force-start?! w #f)))
+                    body))
         (let ((selected (frame-selected-window frame)))
           (when selected (scroll-to-cursor! selected)))
         ;; auto hscrolling, for every window: `hscroll_window_tree'
@@ -4331,8 +4684,29 @@
                             (mark-window-display-accurate-1 w #t))
                           (let ((m (window-current-matrix w)))
                             (when m (clear-glyph-matrix m))))
-                      (update-window! w)))
+                      (update-window! w))
+                    ;; **The scroll bar is updated for every window, fresh
+                    ;; or not.** GNU Emacs's early paths out of
+                    ;; `redisplay_window` jump to `finish_scroll_bars`
+                    ;; (`xdisp.c:20543`, `:20563`), so a window that
+                    ;; needed no rows still has its thumb position
+                    ;; brought up to date; the bar is outside the glyph
+                    ;; matrix and the row diff knows nothing about it.
+                    ;;
+                    ;; **A minibuffer window has no bar**, and the C says
+                    ;; so by leaving `redisplay_window` before that label:
+                    ;; `if (MINI_WINDOW_P (w)) ... goto finish_menu_bars`
+                    ;; (`xdisp.c:20532`) - which is *past*
+                    ;; `finish_scroll_bars` (`:21616`). `window-scroll-bars`
+                    ;; still reports the frame's two columns for it
+                    ;; (measured on Emacs 31.1), but nothing draws one.
+                    (unless (window-minibuffer-p w)
+                      (set-vertical-scroll-bar w)))
                     windows)
+          ;; A bar whose window has gone is destroyed - the C's
+          ;; `judge_scroll_bars_hook`, at the end of the frame's
+          ;; redisplay.
+          (display-redeem-scroll-bars (current-display) windows)
           ;; ...and the minibuffer window's own buffer back, with the
           ;; start and point it had.
           (when saved
@@ -4701,10 +5075,39 @@
                    (top (window-top w))
                    (left (window-left w))
                    (height (window-height w))
-                   (width (window-width w)))
+                   (width (window-width w))
+                   (body-left (window-body-left w))
+                   (bar-cols (window-scroll-bar-cols w))
+                   (bar-left (if (eq? (window-vertical-scroll-bar-type w) 'left)
+                                 left
+                                 (- (+ left width) bar-cols))))
               (if (and (>= row top) (< row (+ top height))
                        (>= column left) (< column (+ left width)))
                   (cond
+                   ;; **`ON_VERTICAL_BORDER`: a line row's grabbable edge.**
+                   ;; `coordinates_in_window` tests the mode, header and
+                   ;; tab line rows *before* the scroll bar columns, and
+                   ;; answers `ON_VERTICAL_BORDER` for the one-column strip
+                   ;; at the window's edge - the part of the line that sits
+                   ;; over a toolkit scroll bar - "to be able to resize
+                   ;; windows horizontally in case we're using toolkit
+                   ;; scroll bars" (`window.c:1405-1418`). `note_mouse_
+                   ;; highlight` answers the horizontal-drag cursor for it
+                   ;; and the help string "drag-mouse-1: resize"
+                   ;; (`xdisp.c:37257`), and `[vertical-line down-mouse-1]`
+                   ;; is `mouse-drag-vertical-line`.
+                   ((and (or (and (= row top)
+                                  (> (window-tab-line-height w) 0))
+                             (and (= row (+ top height -1))
+                                  (not (window-minibuffer-p w))))
+                         (let ((side (window-vertical-scroll-bar-type w)))
+                           (or (and (memq side '(#f right))
+                                    (window-right-border? w)
+                                    (= column (+ left width -1)))
+                               (and (eq? side 'left)
+                                    (not (window-leftmost? w))
+                                    (= column left)))))
+                    (list w 'vertical-line (cons x y) 0))
                    ;; **The tab line.** GNU Emacs's `coordinates_in_window`
                    ;; tests `WINDOW_WANTS_TAB_LINE_P` before the mode line
                    ;; and answers `(WINDOW tab-line (X . Y) TIME OBJECT)`,
@@ -4720,7 +5123,7 @@
                    ((and (= row top) (> (window-tab-line-height w) 0))
                     (let* ((record (window-last-tab-line w))
                            (line (and record (car record)))
-                           (pos (- column left)))
+                           (pos (- column body-left)))
                       (if (and line (string? line)
                                (>= pos 0) (< pos (string-length line)))
                           (list w 'tab-line (cons x y) 0
@@ -4737,12 +5140,309 @@
                            ;; the prompt was selected but point never moved
                            ;; in it.
                            (not (window-minibuffer-p w)))
-                    (list w 'mode-line (cons x y) 0))
+                    ;; **The mode line's string is the event's object**,
+                    ;; which is GNU Emacs's `store_mode_line_string`
+                    ;; (`xdisp.c`): the redisplay records each string it
+                    ;; lays down in the glyph row, so a click's position
+                    ;; carries `(STRING . CHARPOS)` and
+                    ;; `current_active_maps` can read that string's
+                    ;; `keymap`/`local-map` properties. Without it every
+                    ;; mode-line item looked like plain mode line and
+                    ;; nothing in `bindings.el` was clickable.
+                    (let* ((record (window-last-mode-line w))
+                           (line (and record (car record)))
+                           (pos (- column body-left)))
+                      (if (and line (string? line)
+                               (>= pos 0) (< pos (string-length line)))
+                          (list w 'mode-line (cons x y) 0 (cons line pos))
+                          (list w 'mode-line (cons x y) 0))))
+                   ;; **The scroll bar columns answer the bar only below
+                   ;; the lines above.** `coordinates_in_window` tests
+                   ;; the mode line and tab line *first*
+                   ;; (`window.c:1396-1418`) and the scroll bar columns
+                   ;; after them (`:1466`), so a point in the bar columns
+                   ;; on the mode line row is a mode-line point - the
+                   ;; mode line is drawn across the bar area, and clicking
+                   ;; there drags the window edge. The toolkit widget
+                   ;; really is over the body columns, so a real click
+                   ;; never reaches here; a posn asked for from Lisp does.
+                   ((and (> bar-cols 0)
+                         (>= column bar-left)
+                         (< column (+ bar-left bar-cols)))
+                    (list w 'vertical-scroll-bar (cons x y) 0))
+                   ;; **A text row's border column.** With no scroll
+                   ;; bars the vertical border is the window's last
+                   ;; column, and `coordinates_in_window` answers
+                   ;; `ON_VERTICAL_BORDER` for it (`window.c:1448-1453`) -
+                   ;; the horizontal-drag handle.
+                   ((and (not (window-vertical-scroll-bar-type w))
+                         (window-right-border? w)
+                         (= column (+ left width -1)))
+                    (list w 'vertical-line (cons x y) 0))
                    (else
                     (list w (buffer-posn-from-coords
-                             w (- row (window-body-top w)) (- column left))
+                             w (- row (window-body-top w)) (- column body-left))
                           (cons x y) 0)))
                   (loop (cdr rest)))))))))
+
+    ;;----------------------------------------------------------------
+    ;; What the pointer is over - `note_mouse_highlight` (`xdisp.c:37061`)
+    ;;----------------------------------------------------------------
+
+    (define (mouse-face-at window position)
+      ;; The `mouse-face` in effect at POSITION in WINDOW, as
+      ;; `(VALUE BEG END)`, or #f. GNU Emacs's
+      ;; `get_char_property_and_overlay` half of `note_mouse_highlight`
+      ;; (`xdisp.c:37523`): "Find the highest priority overlay with a
+      ;; mouse-face", and when there is none, the text property - with
+      ;; the run its `previous-single-property-change` and
+      ;; `next-single-property-change` answer, bounded by the window's
+      ;; visible text as the C bounds them.
+      ;;--------------------------------------------------------------
+      (let ((buffer (window-buffer window)))
+        (with-current-buffer buffer
+          (let ((overlay
+                 (let loop ((ovs (overlays-at position #t)))
+                   ;; `overlays-at` with SORTED is already in *decreasing*
+                   ;; priority order (`buffer.c`), which is the order the
+                   ;; C's own loop reads backwards.
+                   (cond ((null? ovs) #f)
+                         ((overlay-get (car ovs) 'mouse-face) (car ovs))
+                         (else (loop (cdr ovs)))))))
+            (if overlay
+                (list (overlay-get overlay 'mouse-face)
+                      (overlay-start overlay)
+                      (overlay-end overlay))
+                (let ((value (get-text-property position 'mouse-face)))
+                  (and value
+                       (list value
+                             (or (previous-single-property-change
+                                  (+ position 1) 'mouse-face
+                                  buffer (window-start window))
+                                 (buffer-text-base (text-editor-text buffer)))
+                             (or (next-single-property-change
+                                  position 'mouse-face
+                                  buffer (window-end window))
+                                 (buffer-text-z (text-editor-text buffer)))))))))))
+
+    (define (clear-mouse-face!)
+      ;; GNU Emacs's `clear_mouse_face` (`xdisp.c:35680`): take the
+      ;; highlight off the window that has it, and answer whether there
+      ;; was one to take off.
+      ;;--------------------------------------------------------------
+      (if (not %mouse-face-window)
+          #f
+          (begin
+            (mark-window-display-accurate-1 %mouse-face-window #f)
+            (set! %mouse-face-window #f)
+            (set! %mouse-face-beg #f)
+            (set! %mouse-face-end #f)
+            (set! %mouse-face-attrs #f)
+            #t)))
+
+    ;;----------------------------------------------------------------
+    ;; The pointer's shape - `define_frame_cursor1` (`xdisp.c:36592`)
+    ;;----------------------------------------------------------------
+    ;;
+    ;; `note_mouse_highlight` decides two things: which text wears the
+    ;; mouse face, and what shape the pointer has over the area under it
+    ;; ("Change the mouse pointer according to what is under it",
+    ;; `xdisp.c:36790`, and the `set_cursor:` label at `:37701`). The
+    ;; shape is *not* gated on `mouse-highlight` - that variable only
+    ;; decides whether text lights up - and that is why the cursor is
+    ;; noted before the face machinery below.
+
+    (define (pointer-kind pointer)
+      ;; GNU Emacs's `define_frame_cursor1`'s mapping of a `pointer` text
+      ;; property value to a cursor (`xdisp.c:36600`). An unknown value is
+      ;; the nontext cursor, as there.
+      ;;--------------------------------------------------------------
+      (case pointer
+        ((arrow) 'nontext)
+        ((hand) 'hand)
+        ((text) 'text)
+        ((hdrag) 'horizontal-drag)
+        ((nhdrag) 'vertical-drag)
+        ((vdrag) 'scrollbar)
+        ((hourglass) 'hourglass)
+        ((modeline) 'modeline)
+        (else 'nontext)))
+
+    (define (mode-line-draggable? window area)
+      ;; Whether AREA is a line whose window edge can be dragged - the C's
+      ;; `draggable_window_top_line`/`_bottom_line` (`xdisp.c:36777`):
+      ;;
+      ;;   bottom = ON_MODE_LINE && (!WINDOW_BOTTOMMOST_P (w)
+      ;;                             || minibuf_level
+      ;;                             || NILP (Vresize_mini_windows))
+      ;;   top    = (ON_HEADER_LINE || ON_TAB_LINE) && !WINDOW_TOPMOST_P (w)
+      ;;
+      ;; `minibuf_level` is "a prompt is up", which this tree's
+      ;; `*minibuffer*` answers; a minibuffer window is resized even at
+      ;; the frame's bottom because `mouse-drag-mode-line` allows it for
+      ;; the same two reasons (`mouse.el:1088`).
+      ;;--------------------------------------------------------------
+      (cond
+       ((eq? area 'mode-line)
+        (or (not (window-at-side-p window 'bottom))
+            (*minibuffer*)
+            (not (*resize-mini-windows*))))
+       ((eq? area 'tab-line)
+        (not (window-at-side-p window 'top)))
+       (else #f)))
+
+    (define (string-pointer-at string position)
+      ;; The `pointer` text property of STRING at POSITION, clamped to the
+      ;; string - "CHARPOS can be beyond the last position of STRING due,
+      ;; e.g., to min-width 'display' property" (`xdisp.c:36736`).
+      ;;--------------------------------------------------------------
+      (let ((n (string-length string)))
+        (and (> n 0)
+             (get-text-property (min (max position 0) (- n 1))
+                                'pointer string))))
+
+    (define (string-keymap-at? string position)
+      ;; Whether the string under the pointer is a clickable mode-line
+      ;; item: `get_text_property (pos, Qlocal_map, string)` or `Qkeymap`
+      ;; that is a keymap (`xdisp.c:36802`). Such a glyph keeps the
+      ;; nontext pointer - the mode line is not a resize handle there.
+      ;;--------------------------------------------------------------
+      (let ((n (string-length string)))
+        (and (> n 0)
+             (let ((pos (min (max position 0) (- n 1))))
+               (or (keymapp (get-text-property pos 'local-map string))
+                   (keymapp (get-text-property pos 'keymap string)))))))
+
+    (define (text-pointer-at window position)
+      ;; The `pointer` property under a text position: overlays first, in
+      ;; decreasing priority order, then the buffer's text property
+      ;; (`xdisp.c:37660`).
+      ;;--------------------------------------------------------------
+      (let ((buffer (window-buffer window)))
+        (with-current-buffer buffer
+          (let loop ((overlays (overlays-at position)))
+            (cond ((null? overlays)
+                   (get-text-property position 'pointer buffer))
+                  ((overlay-get (car overlays) 'pointer)
+                   (overlay-get (car overlays) 'pointer))
+                  (else (loop (cdr overlays))))))))
+
+    (define (frame-cursor-for-posn posn run)
+      ;; What the pointer's shape is over POSN - the C's `set_cursor:`
+      ;; decision, in its order: a `pointer` property wins over
+      ;; everything; then the named areas; then the text area, where a
+      ;; `mouse-face` run answers the hand cursor.
+      ;;--------------------------------------------------------------
+      (let* ((area (posn-area posn))
+             (window (posn-window posn))
+             (position (posn-point posn))
+             (string (posn-string posn))
+             (pointer
+              (or (and (pair? string) (string-pointer-at (car string)
+                                                        (cdr string)))
+                  (and (window-type? window)
+                       (integer? position)
+                       (text-pointer-at window position)))))
+        (cond
+         (pointer (pointer-kind pointer))
+         ((memq area '(menu-bar tab-bar)) 'nontext)
+         ;; `ON_VERTICAL_SCROLL_BAR` and `ON_HORIZONTAL_SCROLL_BAR` answer
+         ;; the display's own scroll-bar cursors (`xdisp.c:36617`):
+         ;; `vertical_scroll_bar_cursor` is `GDK_SB_V_DOUBLE_ARROW` and
+         ;; `horizontal_scroll_bar_cursor` `GDK_SB_H_DOUBLE_ARROW`
+         ;; (`pgtkterm.c:7243-7248`).
+         ((eq? area 'vertical-scroll-bar) 'scrollbar)
+         ((eq? area 'horizontal-scroll-bar) 'horizontal-scrollbar)
+         ((eq? area 'vertical-line) 'horizontal-drag)
+         ((memq area '(mode-line tab-line))
+          (if (and (window-type? window)
+                   (mode-line-draggable? window area)
+                   (not (and (pair? string)
+                             (string-keymap-at? (car string) (cdr string)))))
+              'vertical-drag
+              'nontext))
+         (run 'hand)
+         (else 'text))))
+
+    (define (note-frame-cursor frame posn run)
+      ;; Ask the display to show the shape the area under the pointer
+      ;; asks for - `FRAME_RIF (f)->define_frame_cursor`
+      ;; (`xdisp.c:37702`). A display with no pointer (a terminal) does
+      ;; nothing: its method is the default.
+      ;;--------------------------------------------------------------
+      (let ((display (and frame (frame-output frame))))
+        (and display
+             (display-define-frame-cursor display frame
+                                          (frame-cursor-for-posn posn run)))))
+
+    (define (note-mouse-highlight frame x y)
+      ;; GNU Emacs's `note_mouse_highlight` (`xdisp.c:37061`): what the
+      ;; `mouse-face` machinery runs on every pointer movement - "If the
+      ;; mouse moved onto or out of a mouse-face region, start displaying
+      ;; the highlighted text on FRAME". X and Y are in the display's
+      ;; coordinate unit - `posn-at-x-y`'s, which is cells where the C
+      ;; reads pixels - and negative ones mean the pointer has gone,
+      ;; which is the C's `note_mouse_highlight (frame, -1, -1)`.
+      ;;
+      ;; The face is the `default` face with the `mouse-face` value
+      ;; merged over it, computed once at the position under the pointer -
+      ;; `attrs-at-buffer-position` then paints the whole run with it
+      ;; while `*drawing-window*` is the window it belongs to.
+      ;;
+      ;; Answers #t when the highlight changed and the screen has to be
+      ;; redrawn. **Departure**: Emacs paints the run from here
+      ;; (`show_mouse_face` draws into the current output); this marks
+      ;; the window's matrix stale and redraws, because the unit of
+      ;; painting in this renderer is the frame.
+      ;;
+      ;; **Departure**: a position below the last line of text answers
+      ;; the end of that line (`buffer_posn_from_coords` does the same),
+      ;; so a `mouse-face` run ending at `point-max` stays lit while the
+      ;; pointer is on the blank rows under it. Emacs finds no glyph
+      ;; there and clears.
+      ;;--------------------------------------------------------------
+      (let* ((gone? (or (not frame) (< x 0) (< y 0)))
+             (posn (and (not gone?) (posn-at-x-y x y frame)))
+             (window (and posn (posn-window posn)))
+             (position (and posn (posn-point posn)))
+             (run (and mouse-highlight
+                       (window-type? window)
+                       (integer? position)
+                       (mouse-face-at window position))))
+        ;; The pointer's shape, before the face: the C's `set_cursor` is
+        ;; the last thing `note_mouse_highlight` does, but it is the part
+        ;; that has nothing to do with `mouse-highlight`, and a mode line
+        ;; resized by the pointer is exactly this. A negative position is
+        ;; the pointer leaving: the C returns without changing the shape.
+        (unless gone?
+          (note-frame-cursor frame posn run))
+        (let ((changed?
+               (cond
+                ((or gone? (not mouse-highlight)) (clear-mouse-face!))
+                ((or (not (window-type? window)) (not run))
+                 (clear-mouse-face!))
+                (else
+                 (let ((attrs
+                        (merge-face-ref
+                         (car run)
+                         (merge-face-ref 'default (face-attributes-empty)))))
+                   (if (and (eq? window %mouse-face-window)
+                            (= (cadr run) %mouse-face-beg)
+                            (= (caddr run) %mouse-face-end)
+                            (equal? attrs %mouse-face-attrs))
+                       #f
+                       (begin
+                         (unless (eq? window %mouse-face-window)
+                           (clear-mouse-face!))
+                         (set! %mouse-face-window window)
+                         (set! %mouse-face-beg (cadr run))
+                         (set! %mouse-face-end (caddr run))
+                         (set! %mouse-face-attrs attrs)
+                         (mark-window-display-accurate-1 window #f)
+                         #t)))))))
+          (when (and changed? (not (*redisplay-in-progress*)))
+            (redisplay-frames!))
+          changed?)))
 
     ;;----------------------------------------------------------------
     ;; The menu bar's two hooks - `xdisp.c`'s own, not `menu-bar.el`'s
@@ -4886,6 +5586,112 @@
                 (loop (cdr rest) (+ i 6)))))
           (set!frame-tab-bar-items frame vector)
           (set!frame-tab-bar-items-used frame (* 6 (length items))))))
+
+    (define *tool-bar-items-function* (make-parameter #f))
+
+    (define *tool-bar-keymap-function* (make-parameter #f))
+    ;; ^ `tool_bar_items` (`keyboard.c`) and `tool-bar-make-keymap`
+    ;; (`tool-bar.el`), both above this library, so the redisplay asks
+    ;; for them through seams as it does for the other two bars. The
+    ;; keymap is what the C reaches through `[tool-bar]`'s `:filter`
+    ;; (`get_keyelt`'s `menu_item_eval_property` arm), and this tree's
+    ;; keymap lookup does not apply filters - the same departure
+    ;; `*tab-bar-keymap-function*` records.
+
+    (define (update-tool-bar frame)
+      ;; GNU Emacs's `update_tool_bar` (`xdisp.c:15673`): recompute the
+      ;; frame's tool bar items before the frame is drawn.
+      ;;
+      ;; Under `HAVE_EXT_TOOL_BAR` - which a Gtk build is - the only
+      ;; thing this does is fill `f->tool_bar_items`; the toolkit widget
+      ;; is rebuilt from it by the front end (`update_frame_tool_bar`,
+      ;; `gtkutil.c:5843`), and the glyph-drawing half of the C is not
+      ;; compiled at all. A terminal frame in such a build therefore has
+      ;; no tool bar, which is `emacs -nw`'s behaviour: the row-drawing
+      ;; code exists only in builds with no toolkit bar.
+      ;;
+      ;; **Emacs reads the items with the frame selected and its
+      ;; selected window's buffer current** (`set_buffer_internal_1`
+      ;; with `selected_frame`/`selected_window` saved and restored
+      ;; around it), "because the calculation of the tool-bar keymap
+      ;; uses the selected frame" (`xdisp.c:15740`) -
+      ;; `tool-bar-make-keymap` asks
+      ;; `(frame-parameter nil 'tool-bar-position)`. The bindings below
+      ;; are that extent, and they matter because `render!` draws frames
+      ;; other than the selected one too.
+      ;;
+      ;; The guard is the menu bar's (`xdisp.c:15713`): a keystroke that
+      ;; changed nothing does not re-parse a bar.
+      ;;--------------------------------------------------------------
+      (when (and ;; `FRAME_EXTERNAL_TOOL_BAR (f)`: the C's `do_update`
+                 ;; under `HAVE_EXT_TOOL_BAR` (`xdisp.c:15676`). A
+                 ;; terminal frame in a Gtk build never gets it - the
+                 ;; parameter handler that packs the widget is the Gtk
+                 ;; one - so it computes no items at all, which is why
+                 ;; `emacs -nw` has no tool bar rather than an
+                 ;; invisible one.
+                 (window-system-display? (frame-output frame))
+                 (> (%frame-tool-bar-lines frame) 0)
+                 (*tool-bar-items-function*)
+                 (or (windows-or-buffers-changed?)
+                     (update-mode-lines?)
+                     (= 0 (frame-tool-bar-items-used frame))))
+        (let ((window (frame-selected-window frame)))
+          (parameterize ((*current-frame* frame)
+                         (*current-buffer* (and window (window-buffer window)))
+                         (*selected-window-override* window))
+            (let ((vector (list->vector
+                           (apply append ((*tool-bar-items-function*))))))
+              ;; "Redisplay the tool-bar if we changed it."
+              (let ((old (frame-tool-bar-items frame)))
+                (unless (and old
+                             (= (vector-length vector) (vector-length old))
+                             (equal? vector old))
+                  (set!frame-tool-bar-items frame vector)
+                  ;; The slot count, as `frame-menu-bar-items-used`
+                  ;; stores it: twelve per item.
+                  (set!frame-tool-bar-items-used frame
+                                                 (vector-length vector)))))))))
+
+    (define tool-bar-style #f)
+    ;; ^ GNU Emacs's `tool-bar-style` (a DEFVAR in `xdisp.c:39003`):
+    ;; "Tool bar style to use. It can be one of image - show images only;
+    ;; text - show text only; both - show both, text below image;
+    ;; both-horiz - show text to the right of the image; text-image-horiz
+    ;; - show text to the left of the image; any other - use system
+    ;; default or image if no system default." A plain variable - nothing
+    ;; `let`-binds it - with the self-assignment a user's `set!` needs
+    ;; against the compiler's constant folding.
+    (set! tool-bar-style tool-bar-style)
+
+    (define *tool-bar-system-style-function* (make-parameter #f))
+    ;; ^ Emacs's `current_tool_bar_style` (`xsettings.c:71`) is a C
+    ;; variable filled from the desktop's own setting
+    ;; (`org.gnome.desktop.interface`'s `toolbar-style`, `:227`) by the
+    ;; toolkit build. This tree's editor core does not talk to a desktop
+    ;; setting - only a front end can - so the read arrives through this
+    ;; seam, which the Gtk front end installs with the GSettings reader
+    ;; (`pgtk.scm`). `#f` means "no system style known", which is what
+    ;; Emacs answers on a desktop that has no such setting.
+
+    (define (tool-bar-get-system-style)
+      ;; GNU Emacs's `tool-bar-get-system-style` (a DEFUN in
+      ;; `xsettings.c:1348`): "Get the system tool bar style. If no
+      ;; system tool bar style is known, return `tool-bar-style' if set
+      ;; to a known style. Otherwise return image."
+      ;;
+      ;; Emacs's order: an explicitly set `tool-bar-style` wins; else
+      ;; the desktop's setting; else `image`. Its Gtk build reads the
+      ;; setting through GSettings, which on a GNOME-style desktop is
+      ;; usually `both-horiz` - which is why Emacs's tool bar shows a
+      ;; text label beside every icon and this tree's used not to.
+      ;;--------------------------------------------------------------
+      (if (memq tool-bar-style
+                '(image text both both-horiz text-image-horiz))
+          tool-bar-style
+          (or (and (*tool-bar-system-style-function*)
+                   ((*tool-bar-system-style-function*)))
+              'image)))
 
     (define (display-tab-bar frame)
       ;; GNU Emacs's `display_tab_bar` (`xdisp.c:14696`) for a terminal:
@@ -5191,14 +5997,28 @@
         (let* ((name (if (string? (*messages-buffer-name*))
                          (*messages-buffer-name*)
                          "*Messages*"))
-               (new? (not (get-buffer name))))
+               (new? (not (get-buffer name)))
+               ;; The C's `oldbuf' and `old_deactivate_mark' (`xdisp.c:12357'),
+               ;; both read from the *edited* buffer before the switch.
+               (old-buffer (current-buffer))
+               (old-deactivate-mark
+                (buffer-local-value old-buffer 'deactivate-mark #f)))
           ;; **The buffer is read-only and the log writes to it anyway.**
           ;; `messages-buffer-mode' is a `special-mode', which makes the
           ;; buffer read-only, and the C's `insert_1_both (..., prepare =
           ;; false, ...)' is what skips the check - `prepare_to_modify_buffer'
           ;; is the thing that consults `inhibit-read-only', so that is
-          ;; what stands in for it here.
-          (parameterize ((*inhibit-read-only* #t))
+          ;; what stands in for it here. `PREPARE false' skips the *whole*
+          ;; of `prepare_to_modify_buffer', though, and the hooks with it
+          ;; - "we aren't prepared to run modification hooks", the C's own
+          ;; words at `:12431' - so `inhibit-modification-hooks' is bound
+          ;; beside it. The flag that matters here is
+          ;; `deactivate_mark': when the log buffer *is* the edited buffer
+          ;; (`*Messages*' is the one buffer that always is), an
+          ;; unprepared insert would clear the very region `C-SPC ... M-w'
+          ;; is making, which is why Emacs saves and restores it below.
+          (parameterize ((*inhibit-read-only* #t)
+                         (*inhibit-modification-hooks* #t))
           (with-current-buffer (get-buffer-create name)
             ;; "If we created it, set the major-mode."
             (when new? (messages-buffer-mode))
@@ -5252,7 +6072,12 @@
               (if point-at-end?
                   (goto-char (point-max))
                   (goto-char (marker-position old-point)))
-              (set-marker old-point #f))))))))
+              (set-marker old-point #f)))))
+          ;; `Vdeactivate_mark = old_deactivate_mark' (`xdisp.c:12526'),
+          ;; written back after `set_buffer_internal (oldbuf)' - the
+          ;; edited buffer's own flag, exactly as it was found.
+          (set-buffer-local-value! old-buffer 'deactivate-mark
+                                   old-deactivate-mark))))
 
     (define (log-message text)
       ;; GNU Emacs's `log_message' (`xdisp.c:12569'), the half of
@@ -5279,6 +6104,13 @@
     ;; `scroll-up-command` is `simple.el`'s and a screen line is this
     ;; library's, so the command calls through here. Installed at load.
     (*window-scroll-function* window-scroll)
+
+    ;; **The redisplay seam** (`frame.scm`'s
+    ;; `*mark-window-redisplay-function*`): `set-window-scroll-bars` is
+    ;; `window.c`'s and the glyph matrix is this library's, so marking a
+    ;; window for redisplay goes through here. Installed at load.
+    (*mark-window-redisplay-function*
+     (lambda (window) (mark-window-display-accurate-1 window #f)))
 
     ;; **The point-position seam** (`subr.scm`'s
     ;; `*event--posn-at-point-function*`): `event-start` and `event-end`

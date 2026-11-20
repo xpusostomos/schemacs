@@ -81,6 +81,9 @@
           *current-frame* *pre-command-hook* blink-cursor-check
           display-selections-p frame-keymap-state
           frame-quit-cont run-pre-command-hook!
+          ;; a click's window - `current_active_maps` switches to the
+          ;; buffer of the window clicked on before it reads anything
+          window-type? window-buffer
           set!frame-keymap-state set!frame-message
           set!frame-quit-cont
           *echo-area-buffer*)
@@ -109,9 +112,20 @@
           ;; *above* this library (`buffer.scm` imports this one), so the
           ;; read arrives through the seam `buffer.scm` holds for it -
           ;; the same one `barf-if-buffer-read-only` asks through.
-          *get-text-property-function*)
+          *get-text-property-function*
+          ;; `current_active_maps`' buffer-position half: the `local-map`/
+          ;; `keymap` text properties at a click, through `get_local_map`
+          ;; (`editfns.scm`, above this library) - installed there.
+          *get-local-map-function*
+          ;; `current_active_maps` switches to the clicked window's buffer
+          ;; for the lookup; the parameter is this tree's current buffer.
+          *current-buffer*
+          buffer-beg buffer-z)
+    ;; `parse-tool-bar-item` builds a default label with `upcase-initials`
+    ;; (`casefiddle.c:418`); `casefiddle.scm` is below this library.
+    (only (schemacs editor casefiddle) upcase-initials)
     (only (schemacs editor simple)
-          *last-change-was-undo* *last-command* *this-command*
+          *last-command* *this-command*
           *select-active-regions*
           deactivate-mark clear-prefix! delete-char pending-uarg
           place-undo-boundary!
@@ -146,7 +160,8 @@
     ;; terminal's menu bar through - see the note on it in `xdisp.scm`.
     (only (schemacs editor xdisp)
           render! redisplay-frames! *menu-bar-items-function*
-          *tab-bar-items-function* *tab-bar-keymap-function*)
+          *tab-bar-items-function* *tab-bar-keymap-function*
+          *tool-bar-items-function* *tool-bar-keymap-function*)
     ;; The development back door, which the command loop gives its turn
     ;; between keys. A no-op unless `SCHEMACS_REPL' opened it.
     (only (scheme-utils repl server) poll-repl! repl-running? repl-wake)
@@ -178,7 +193,7 @@
           ;; *string* - a tab, a mode line - the string and offset, which
           ;; is where a `keymap` text property is found. `keyboard.c`'s
           ;; `POSN_POSN`/`POSN_STRING`, used below.
-          posn-area posn-string event-start)
+          posn-area posn-window posn-point posn-string event-start)
     (only (schemacs editor character)
           char-meta char-alt char-super char-hyper char-shift char-ctl
           parse-modifiers-uncached event-convert-list)
@@ -195,11 +210,19 @@
    dispatch-key
    dispatch-key-event
    dispatch-input-event *last-read-event*
+   ;; `last-nonmenu-event', and the recording `read_key_sequence' does:
+   ;; both front ends hand keys to the command loop by more than one
+   ;; path, and every path has to say what kind of event it was.
+   *last-nonmenu-event* record-nonmenu-event!
+   ;; "How many pixels the mouse can move between press and release and
+   ;; still be treated as a click" - read by the Gtk front end's button
+   ;; release (`keyboard.c:6668-6682').
+   double-click-fuzz
    ;; GNU Emacs's `command-remapping' - what a `[remap COMMAND]' binding
    ;; in the active maps answers, applied by the loop before a command
    ;; runs (`keyboard.c').
    command-remapping
-   function-key-translate
+   function-key-translate *key-translation-map* key-translation-translate
    event-loop
    ;; The outermost loop for a front end that owns its own: no loop at
    ;; all, just these three - the hook an event is pushed into, and the
@@ -221,6 +244,16 @@
    *menu-bar-final-items* *overriding-local-map-menu-flag*
    menu-bar-items parse-menu-item menu-separator-name?
    tab-bar-items lookup-keymaps
+   ;; `keyboard.c`'s tool-bar half, the same way: `tool_bar_items` and
+   ;; `parse_tool_bar_item` are C-internal in Emacs, and the front end
+   ;; here is Scheme. The slot indices are the C's `TOOL_BAR_ITEM_*`
+   ;; enum (`dispextern.h:3453`), exported for the widget builder.
+   tool-bar-items parse-tool-bar-item tool-bar-max-label-size
+   tool-bar-item-key tool-bar-item-enabled-p tool-bar-item-selected-p
+   tool-bar-item-caption tool-bar-item-images tool-bar-item-binding
+   tool-bar-item-type tool-bar-item-help tool-bar-item-rtl-image
+   tool-bar-item-label tool-bar-item-vert-only tool-bar-item-wrap
+   tool-bar-item-nslots
    ;; `keymap.c`'s, in this library for the reason its header gives:
    ;; its default argument is `current-active-maps`, which is this
    ;; file's `lookup-keymaps`.
@@ -393,15 +426,72 @@
             (cons 'kp-prior 'prior) (cons 'kp-next 'next) (cons 'kp-end 'end)
             (cons 'kp-begin 'begin) (cons 'kp-insert 'insert)))
 
-    (define (function-key-translate key)
-      ;; KEY as `function-key-map' means it, or KEY itself when it has no
-      ;; entry there. `read_key_sequence''s translation step, over one
-      ;; key rather than a sequence - every read here answers one.
+    (define *key-translation-map*
+      ;; GNU Emacs's `key-translation-map` (`keyboard.c:14773`: "Keymap
+      ;; for translating one key sequence into another while reading
+      ;; input." The C applies it after `function-key-map', and a binding
+      ;; may be a *function*: `read_key_sequence` calls it - with no
+      ;; arguments here, where the C's translators take an optional echo
+      ;; prompt - and its answer, a key sequence or nil, is what the key
+      ;; means. `mouse--click-1-maybe-follows-link` (mouse.el:156) is the
+      ;; one user, and it turns a mouse-1 that follows a link into a
+      ;; mouse-2.
       ;;--------------------------------------------------------------
-      (if (symbol? key)
-          (let ((found (assq key *function-key-map*)))
-            (if found (cdr found) key))
-          key))
+      (km:keymap '*key-translation-map*))
+
+    (define (key-translation-translate key)
+      ;; KEY as `key-translation-map' means it, or KEY itself when it has
+      ;; no entry there. A procedure entry is called; its answer's first
+      ;; event replaces KEY, and a nil answer - the mouse translator
+      ;; saying "not a link" - leaves KEY alone.
+      ;;
+      ;; The event passed to the translator is `*last-read-event*` when
+      ;; that is the event KEY came from, which is where a mouse click's
+      ;; *position* is; a key pushed back onto `*unread-command-events*`
+      ;; has no position, so the translator sees `(KEY)` - Emacs's
+      ;; `last-input-event` holds the whole `(mouse-1 POSN)` event.
+      ;;--------------------------------------------------------------
+      (let ((binding (km:keymap-lookup *key-translation-map* key)))
+        (cond
+         ((not binding) key)
+         ((procedure? binding)
+          (let* ((raw (*last-read-event*))
+                 (event (if (and (pair? raw) (eq? (car raw) key))
+                            raw
+                            (list key)))
+                 (answer (binding event)))
+            (cond
+             ((not answer) key)
+             ((and (vector? answer) (> (vector-length answer) 0))
+              (let ((translated (vector-ref answer 0)))
+                ;; A translator may answer a whole *event* - the
+                ;; mouse-1-to-mouse-2 translation answers
+                ;; `(mouse-2 POSITION)` - and the position is the whole
+                ;; point of it: `event-start` of the translated event has
+                ;; to still name the place that was clicked. Emacs mutates
+                ;; `last-input-event` in place (`mouse.el:193`); here the
+                ;; translated event becomes `*last-read-event*` and its
+                ;; `car` is the key the lookup uses.
+                (if (pair? translated)
+                    (begin
+                      (*last-read-event* translated)
+                      (car translated))
+                    translated)))
+             ((pair? answer) (car answer))
+             (else answer))))
+         (else binding))))
+
+    (define (function-key-translate key)
+      ;; KEY as `function-key-map' then `key-translation-map' mean it, or
+      ;; KEY itself when neither has an entry. `read_key_sequence''s
+      ;; translation steps, over one key rather than a sequence - every
+      ;; read here answers one.
+      ;;--------------------------------------------------------------
+      (let ((key (if (symbol? key)
+                     (let ((found (assq key *function-key-map*)))
+                       (if found (cdr found) key))
+                     key)))
+        (key-translation-translate key)))
 
     (define *selection-inhibit-update-commands*
       ;; GNU Emacs's `selection-inhibit-update-commands' (keyboard.c:14371):
@@ -463,9 +553,9 @@
       ;; This is also the command loop's undo work: a boundary goes into
       ;; the buffer's undo list before the command runs, so that the
       ;; command's edits form one change group and one undo undoes one
-      ;; command. The undo commands themselves are the exception to
-      ;; `last-change-was-undo', which is how a redo knows there is
-      ;; something to redo.
+      ;; command. Whether there is something to redo is *derived* from
+      ;; that list, not flagged: `undo--last-change-was-undo-p' asks the
+      ;; table `undo' fills (`simple.scm`), as Emacs's does.
       ;;--------------------------------------------------------------
       (let* ((action (remapped-command action))
              (uarg (pending-uarg))
@@ -483,8 +573,6 @@
         ;; again after the command rather than using ACTION.
         (*this-command* action)
         (place-undo-boundary! action)
-        (unless (or (eq? action undo) (eq? action undo-redo))
-          (*last-change-was-undo* #f))
         (clear-prefix!)
         (*pending-coding-system* #f)
         (set!frame-message frame "")
@@ -744,17 +832,55 @@
       ;; makes a tab a button: the string `tab-line-format` builds
       ;; carries `keymap tab-line-tab-map`, and the command lives there.
       (let* ((position (and (pair? args) (car args)))
+             (click-window (and position (posn-window position)))
+             (click-buffer (and (window-type? click-window)
+                                (window-buffer click-window)))
              (string (and position (posn-string position)))
-             (position-map
+             ;; The string's own `keymap` and `local-map` properties - a
+             ;; tab's map, a mode line item's - read through the seam
+             ;; `textprop.scm` installs.
+             (string-props
               (and string
                    (let ((s (car string)) (pos (cdr string)))
                      (and (integer? pos)
                           (>= pos 0)
                           (< pos (string-length s))
                           (let ((lookup (*get-text-property-function*)))
-                            (and lookup (lookup pos 'keymap s))))))))
+                            (and lookup
+                                 (cons (lookup pos 'keymap s)
+                                       (lookup pos 'local-map s))))))))
+             ;; `click_position' (`keymap.c:1640'): a position that names
+             ;; no buffer location - a mode line, a tab - asks about PT;
+             ;; and one outside the clicked buffer's accessible range is
+             ;; ignored, which is the C's `BEG <= pos && pos <= Z` test.
+             (buffer-pos
+              (and click-buffer
+                   (let ((posn (and position (posn-point position))))
+                     (if (and (integer? posn)
+                              (>= posn (buffer-beg click-buffer))
+                              (<= posn (buffer-z click-buffer)))
+                         posn
+                         (buffer-pt click-buffer))))))
+        ;; "If a mouse click position is given, our variables are based on
+        ;; the buffer clicked on, not the current buffer" - the C's
+        ;; `set_buffer_internal`, which is restored when it is done.
+        (parameterize ((*current-buffer* (or click-buffer (*current-buffer*))))
         (let ((buffer-keys (buffer-local-keymap (current-buffer)))
-              (mode-keys (*current-keymap*)))
+              (mode-keys (*current-keymap*))
+              ;; "first consider the `local-map' and `keymap' properties of
+              ;; that string"; otherwise the clicked buffer position's,
+              ;; where `get_local_map`'s `local-map` arm falls back on the
+              ;; buffer's own map, exactly as the C's does.
+              (position-map
+               (or (and string-props (car string-props))
+                   (and click-buffer
+                        ((*get-local-map-function*)
+                         buffer-pos click-buffer 'keymap))))
+              (local-map
+               (or (and string-props (cdr string-props))
+                   (and click-buffer
+                        ((*get-local-map-function*)
+                         buffer-pos click-buffer 'local-map)))))
         ;; **`overriding-terminal-local-map' first**, which is where
         ;; `keyboard.c:8704' puts it: ahead of the buffer's own map, the
         ;; mode maps and `global-map'. That is the whole of what makes a
@@ -782,15 +908,24 @@
                     (%keymap-and-parents *default-keymap*))
         (append
          (or *overriding-terminal-local-map* '())
+         ;; "Then, if the click was in the buffer, get the local
+         ;; text-property keymap of the place clicked on" - and the
+         ;; `keymap` property goes in front of everything but the
+         ;; overriding map.
          (if position-map (list position-map) '())
          ;; **The enabled minor modes' maps come before the buffer's own**,
          ;; where `current_active_maps' (`keymap.c') puts them: a minor
          ;; mode's key shadows the buffer's, and the buffer's shadows
-         ;; `global-map'.
+         ;; `global-map'. The position's `local-map` property sits between
+         ;; them and the buffer's own map, which is the C's cons order.
          (minor-mode-keymaps)
-         (if buffer-keys (%keymap-and-parents buffer-keys) '())
+         ;; "Finally, fall back on the buffer's local map": the string's
+         ;; `local-map` overrides it when it has one.
+         (if (or local-map buffer-keys)
+             (%keymap-and-parents (or local-map buffer-keys))
+             '())
          (if mode-keys (%keymap-and-parents mode-keys) '())
-         (%keymap-and-parents *default-keymap*))))))
+         (%keymap-and-parents *default-keymap*)))))))
 
     ;;----------------------------------------------------------------
     ;; The modal lookup state - `read_key_sequence''s feel for a chord
@@ -1213,6 +1348,11 @@
               ;; from the key alone. Emacs carries the same thing in
               ;; `last-input-event'.
               (*last-read-event* ev)
+              ;; The same record the read makes: this is the other path
+              ;; an event reaches the command loop by, and
+              ;; `last-nonmenu-event' has to know a click from a key
+              ;; whichever one delivered it.
+              (record-nonmenu-event! ev key)
               (dispatch-key frame key))
             (begin
               (*esc-pending* #f)
@@ -1578,17 +1718,30 @@
                              ;; window and buffer were right and the screen
                              ;; still showed the file).
                              (redisplay-frames!)
-                             (let ((raw (read-input-event
-                                         (current-display)
-                                         (if deadline
-                                             (max 0 (- deadline (%now-ms)))
-                                             timeout))))
+                             (let* ((raw (read-input-event
+                                          (current-display)
+                                          (if deadline
+                                              (max 0 (- deadline (%now-ms)))
+                                              timeout)))
+                                    (key (and raw (key-event->key
+                                                   (current-display) raw))))
                                (*last-read-event* raw)
-                               (and raw (key-event->key (current-display)
-                                                        raw))))
+                               ;; "Normally, last_nonmenu_event gets the
+                               ;; previous key we read" - `read_key_
+                               ;; sequence`'s line for every key it hands
+                               ;; back (`keyboard.c:12216').
+                               (record-nonmenu-event! raw key)
+                               key))
                            (begin
                              (*unread-command-events* (cdr unread))
-                             (car unread)))))
+                             (let ((key (car unread)))
+                               ;; A key put back on `unread-command-
+                               ;; events' is still a key `read_key_
+                               ;; sequence' returns, so it is recorded
+                               ;; too - Emacs's loop does the same for
+                               ;; an event it re-reads.
+                               (record-nonmenu-event! #f key)
+                               key)))))
               ;; **`read_key_sequence` clears `Vquit_flag` after every key
               ;; it reads** (`keyboard.c:11892`). The flag is what the
               ;; terminal's read turned into `quit_char` above
@@ -1930,6 +2083,58 @@
       ;; refuse it with "Position not in text area of window".
       ;;--------------------------------------------------------------
       (make-parameter #f))
+
+    (define *last-nonmenu-event* (make-parameter #f))
+    ;; ^ GNU Emacs's `last-nonmenu-event' (`keyboard.c:14307'): "Last
+    ;; input event in a command, except for mouse menu events. Mouse
+    ;; menus give back keys that don't look like mouse events; this
+    ;; variable holds the actual mouse event that led to the menu, so
+    ;; that you can determine whether the command was run by mouse or
+    ;; not."
+    ;;
+    ;; **`read_key_sequence` sets it to every key it reads**
+    ;; (`keyboard.c:12216': "last_nonmenu_event gets the previous key we
+    ;; read. But when a mouse popup menu is being used, we don't update
+    ;; last_nonmenu_event; it continues to hold the mouse event that
+    ;; preceded the first level of menu"), and a menu's own key events
+    ;; are *conses* rather than plain keys (`keyboard.c:10673' turns
+    ;; each unread menu key into `(KEY . disabled)'). That is what
+    ;; `next-read-file-uses-dialog-p' and `use-dialog-box-p' test:
+    ;; `CONSP' means the command came from a mouse or a menu, a plain
+    ;; key means it came from the keyboard.
+    ;;
+    ;; This tree's front ends tag a menu's keys `(menu-bar-event . KEY)'
+    ;; and `(tool-bar-event . KEY)', and a mouse event's display value
+    ;; is already the list `subr.scm''s `posn-' accessors walk - so the
+    ;; *raw* event is what answers "was this from the mouse", and the
+    ;; key is only what a keymap was looked up by.
+    (define (record-nonmenu-event! raw key)
+      ;; The `last_nonmenu_event = key' of `read_key_sequence'
+      ;; (`keyboard.c:12216'), called by every path that hands a key to
+      ;; the command loop: the read below, `dispatch-input-event', and
+      ;; the Gtk front end's queue drain - which is that front end's
+      ;; stand-in for a read, so it must record the same fact.
+      ;;
+      ;; RAW is the display's own event and KEY what it decodes to (see
+      ;; `*last-read-event*' above for why the two exist).
+      ;;--------------------------------------------------------------
+      (when key
+        (*last-nonmenu-event*
+         (if (pair? raw) raw key))))
+
+    (define double-click-fuzz 3)
+    ;; ^ GNU Emacs's `double-click-fuzz' (`keyboard.c:14449', a
+    ;; DEFVAR_INT, default 3): "How many pixels the mouse can move between
+    ;; press and release and still be treated as a click rather than a
+    ;; drag. Zero means a click must be perfectly still." It is a plain
+    ;; variable, not a parameter, because nothing `let`-binds it in
+    ;; Emacs - it is read where the button release is made
+    ;; (`keyboard.c:6668-6682'), which is the front end's job and is why
+    ;; `pgtk.scm` imports it.
+    ;;
+    ;; The sibling this tree does not need yet is `double-click-time`:
+    ;; double- and triple-click events are not made by either front end
+    ;; (there is no click clock), so nothing here reads a click count.
 
     (define *dispatch-event* (make-parameter #f))
     ;; ^ How a front end that owns its own loop hands an event to the
@@ -3191,6 +3396,301 @@ With argument, insert ARG copies of the character."
                               (keymap-canonicalize def) items)
                              items))))))))
 
+    ;;----------------------------------------------------------------
+    ;; The tool bar - keyboard.c's `tool_bar_items` and its parser
+    ;;----------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's `tool_bar_items` (`keyboard.c:10135`) is a sibling of
+    ;; `menu_bar_items` above: the `[tool-bar]` bindings of the active
+    ;; maps, parsed into items - but at twelve slots per item
+    ;; (`dispextern.h:3453`'s `enum tool_bar_item_idx`) rather than the
+    ;; menu bar's four, and with a parser of its own because a tool bar
+    ;; item carries an *image*, a label and a `:vert-only` flag that a
+    ;; menu item has no notion of. The widget half is the Gtk front
+    ;; end's (`pgtk.scm`, after `gtkutil.c`'s `update_frame_tool_bar`);
+    ;; only a toolkit-less build draws a text bar, and a Gtk build has
+    ;; no tool bar on a terminal at all (`display_tool_bar` is compiled
+    ;; out under `HAVE_EXT_TOOL_BAR`).
+
+    (define tool-bar-item-key 0)
+    (define tool-bar-item-enabled-p 1)
+    (define tool-bar-item-selected-p 2)
+    (define tool-bar-item-caption 3)
+    (define tool-bar-item-images 4)
+    (define tool-bar-item-binding 5)
+    (define tool-bar-item-type 6)
+    (define tool-bar-item-help 7)
+    (define tool-bar-item-rtl-image 8)
+    (define tool-bar-item-label 9)
+    (define tool-bar-item-vert-only 10)
+    (define tool-bar-item-wrap 11)
+    (define tool-bar-item-nslots 12)
+    ;; ^ The C's `TOOL_BAR_ITEM_*` enum and `TOOL_BAR_ITEM_NSLOTS`
+    ;; (`dispextern.h:3453-3495`).
+
+    (define tool-bar-max-label-size 14)
+    ;; ^ `tool_bar_max_label_size` (a DEFVAR_INT in `xdisp.c:39016`, whose
+    ;; initializer is `DEFAULT_TOOL_BAR_LABEL_SIZE`, `dispextern.h:3510`):
+    ;; "Maximum number of characters a label can have to be shown." A
+    ;; plain variable - nothing `let`-binds it - carrying the
+    ;; self-assignment the compiler needs so a user's `set!` is not
+    ;; folded away (the `*enable-disabled-menus-and-buttons*` rule).
+    ;;
+    ;; **It was 10, and that is why the isearch tool bar showed no
+    ;; labels at all.** `parse_tool_bar_item` makes a label out of the
+    ;; item's caption and sets it to the empty string when it is longer
+    ;; than this (`keyboard.c:10555`); "Repeat Forward" is exactly 14
+    ;; characters, so with 10 every isearch item's label was discarded
+    ;; while real Emacs showed "Repeat Forward" (and not "Repeat
+    ;; Backward", which is 15). Measured: `(prin1
+    ;; tool-bar-max-label-size)` in `emacs -Q --batch` answers 14.
+    (set! tool-bar-max-label-size tool-bar-max-label-size)
+
+    (define *tool-bar-item-properties* (make-vector tool-bar-item-nslots #f))
+
+    (define (%tool-bar-default-label caption key)
+      ;; The C's "Try to make one from caption and key"
+      ;; (`keyboard.c:10480`): a label no wider than
+      ;; `tool-bar-max-label-size`, built from the caption when that is
+      ;; short enough and from the key's name otherwise, with `-` read
+      ;; as a space and each word's initial upcased.
+      ;;
+      ;; MAX-LBL-SIZE is the C's `2 * max (0, min
+      ;; (tool_bar_max_label_size, STRING_BYTES_BOUND / 2)) + 1`: a
+      ;; caption at least that long leaves the key's name as the base.
+      ;;--------------------------------------------------------------
+      (let* ((capt (if (string? caption) caption ""))
+             (max-size (+ 1 (* 2 (max 0 tool-bar-max-label-size))))
+             (base
+              (if (and (> (string-length capt) 0)
+                       (< (string-length capt) max-size))
+                  ;; Strip the trailing dots: "Save...".
+                  (let loop ((s capt))
+                    (if (and (> (string-length s) 0)
+                             (char=?
+                              (string-ref s (- (string-length s) 1)) #\.))
+                        (loop (substring s 0 (- (string-length s) 1)))
+                        s))
+                  (if (symbol? key) (symbol->string key) "")))
+             (base
+              (if (and (> (string-length base) 0)
+                       (< (string-length base) max-size))
+                  (list->string
+                   (map (lambda (c) (if (char=? c #\-) #\space c))
+                        (string->list base)))
+                  ""))
+             (up (upcase-initials base)))
+        (if (<= (string-length up) tool-bar-max-label-size) up "")))
+
+    (define (parse-tool-bar-item key item)
+      ;; GNU Emacs's `parse_tool_bar_item` (`keyboard.c:10312`): "Parse
+      ;; a tool bar item specification ITEM for key KEY and return the
+      ;; result in tool_bar_item_properties."
+      ;;
+      ;; **`HAVE_EXT_TOOL_BAR` is this build.** The Gtk front end has a
+      ;; toolkit widget, so the toolkit-less branches are not carried:
+      ;; a separator carries no image expression (the widget is a
+      ;; `GtkSeparatorToolItem`), and `:wrap` answers false - the C's
+      ;; own `return false` under that flag, "Line wrapping isn't
+      ;; supported on builds utilizing external tool bars".
+      ;;--------------------------------------------------------------
+      (and
+       (pair? item)
+       (let/ec return
+         (let ((props *tool-bar-item-properties*))
+           ;; "As an exception, allow old-style menu separators." The
+           ;; C's two branches: a string is made a one-element list and
+           ;; carries on; anything else must be a `menu-item` and is
+           ;; advanced past that symbol.
+           (cond ((string? (car item)) (set! item (list (car item))))
+                 ((not (eq? (car item) 'menu-item)) (return #f))
+                 (else
+                  (set! item (cdr item))
+                  (unless (pair? item) (return #f))))
+           ;; Reset to defaults.
+           (let loop ((i 0))
+             (when (< i tool-bar-item-nslots)
+               (vector-set! props i #f)
+               (loop (+ i 1))))
+           (vector-set! props tool-bar-item-key key)
+           (vector-set! props tool-bar-item-enabled-p #t)
+           ;; The caption is what is first, for a menu item and a
+           ;; normalized separator alike - the C's `caption = XCAR
+           ;; (item)` after its two branches.
+           (let ((caption (car item)))
+             (unless (string? caption)
+               (set! caption (menu-item-eval-property caption)))
+             (unless (string? caption) (return #f))
+             (vector-set! props tool-bar-item-caption caption)
+             (set! item (cdr item))
+             (if (not (pair? item))
+                 ;; "If the rest following the caption is not a list,
+                 ;; the menu item is either a separator, or invalid."
+                 (if (menu-separator-name? caption)
+                     (begin (vector-set! props tool-bar-item-type #t) #t)
+                     #f)
+                 (begin
+                   (vector-set! props tool-bar-item-binding (car item))
+                   (set! item (cdr item))
+                   ;; "Ignore cached key binding, if any."
+                   (when (and (pair? item) (pair? (car item)))
+                     (set! item (cdr item)))
+                   (let ((filter #f) (have-label #f))
+                     (let loop ((rest item))
+                       (when (pair? rest)
+                         (let ((ikey (car rest)))
+                           (set! rest (cdr rest))
+                           (when (pair? rest)
+                             (let ((value (car rest)))
+                               (cond
+                                ((eq? ikey ':enable)
+                                 ;; "`--enable-disabled-menus-and-buttons'
+                                 ;; overrides the :enable property."
+                                 (vector-set!
+                                  props tool-bar-item-enabled-p
+                                  (if *enable-disabled-menus-and-buttons*
+                                      #t value)))
+                                ((eq? ikey ':visible)
+                                 ;; "If got a visible property and that
+                                 ;; evaluates to nil then ignore this item."
+                                 (unless (menu-item-eval-property value)
+                                   (return #f)))
+                                ((eq? ikey ':help)
+                                 (vector-set! props tool-bar-item-help value))
+                                ((eq? ikey ':vert-only)
+                                 (vector-set! props tool-bar-item-vert-only value))
+                                ((eq? ikey ':label)
+                                 (vector-set!
+                                  props tool-bar-item-label
+                                  (if (string? value)
+                                      value
+                                      "!!?GARBLED ITEM?!!"))
+                                 (set! have-label #t))
+                                ((eq? ikey ':filter) (set! filter value))
+                                ((and (eq? ikey ':button) (pair? value))
+                                 (let ((type (car value))
+                                       (selected (cdr value)))
+                                   (when (memq type '(:toggle :radio))
+                                     (vector-set! props
+                                                  tool-bar-item-selected-p
+                                                  selected)
+                                     (vector-set! props tool-bar-item-type
+                                                  type))))
+                                ((and (eq? ikey ':image)
+                                      (or (pair? value)
+                                          (and (vector? value)
+                                               (= (vector-length value) 4))))
+                                 (vector-set! props tool-bar-item-images value))
+                                ((eq? ikey ':rtl)
+                                 (vector-set! props tool-bar-item-rtl-image
+                                              value))
+                                ((eq? ikey ':wrap)
+                                 ;; `HAVE_EXT_TOOL_BAR`.
+                                 (return #f)))
+                               (loop (cdr rest)))))))
+                     (unless have-label
+                       (vector-set!
+                        props tool-bar-item-label
+                        (%tool-bar-default-label
+                         (vector-ref props tool-bar-item-caption)
+                         (vector-ref props tool-bar-item-key))))
+                     ;; "If got a filter apply it on binding."
+                     (when filter
+                       (vector-set!
+                        props tool-bar-item-binding
+                        (menu-item-eval-property
+                         (list filter
+                               (list 'quote
+                                     (vector-ref props
+                                                 tool-bar-item-binding))))))
+                     ;; "See if the binding is a keymap. Give up if it is."
+                     (when (km:keymapp (vector-ref props tool-bar-item-binding))
+                       (return #f))
+                     ;; "If there is a key binding, add it to the help,
+                     ;; which will be displayed as a tooltip for this
+                     ;; entry."
+                     (let* ((binding (vector-ref props tool-bar-item-binding))
+                            (keys (where-is-internal binding #f #t #f #f)))
+                       (when keys
+                         (let ((orig (vector-ref props tool-bar-item-help)))
+                           (unless orig
+                             (set! orig (vector-ref props
+                                                    tool-bar-item-caption)))
+                           (vector-set!
+                            props tool-bar-item-help
+                            (string-append orig "  ("
+                                           (key-description keys) ")")))))
+                     ;; "Enable or disable selection of item."
+                     (let ((enabled (vector-ref props tool-bar-item-enabled-p)))
+                       (unless (eq? enabled #t)
+                         (vector-set!
+                          props tool-bar-item-enabled-p
+                          (menu-item-eval-property enabled))))
+                     ;; "Handle radio buttons or toggle boxes."
+                     (let ((selected (vector-ref props
+                                                 tool-bar-item-selected-p)))
+                       (when selected
+                         (vector-set!
+                          props tool-bar-item-selected-p
+                          (menu-item-eval-property selected))))
+                     #t))))))))
+
+    (define (tool-bar-collect-items keymap items)
+      ;; One map's `[tool-bar]' submap walked into ITEMS - the C's
+      ;; `process_tool_bar_item` with `map_keymap` over it.
+      ;;
+      ;; **Unlike a tab or a menu bar entry, a tool bar item is
+      ;; *appended*, not replaced**: "Accept more than one definition
+      ;; for the same key" (`keyboard.c:10245`) - the local map's item
+      ;; and the global map's both show, the specific one first. An
+      ;; explicit `undefined` removes the earlier item.
+      ;;--------------------------------------------------------------
+      (km:map-keymap
+       (lambda (key item)
+         (cond ((eq? item 'undefined)
+                (set! items
+                      (filter (lambda (quad) (not (eq? (car quad) key))) items)))
+               (else
+                (when (parse-tool-bar-item key item)
+                  (set! items
+                        (append items
+                                (list (vector->list
+                                       *tool-bar-item-properties*))))))))
+       keymap)
+      items)
+
+    (define (tool-bar-items)
+      ;; GNU Emacs's `tool_bar_items` (`keyboard.c:10135`): "Return a
+      ;; vector of tool bar items for keymaps currently in effect."
+      ;; The answer is the list of twelve-element items; the redisplay
+      ;; flattens it into the frame's vector, as it does the tab bar's.
+      ;;
+      ;; **The keymap is rebuilt first**, for the reason `tab-bar-items`
+      ;; gives: the C reaches it through `[tool-bar]`'s `:filter`
+      ;; (`get_keyelt`'s `menu_item_eval_property` arm) and this tree's
+      ;; keymap lookup does not apply filters - `tool-bar-make-keymap`
+      ;; is `tool-bar.el`'s and arrives through the seam.
+      ;;--------------------------------------------------------------
+      (when (*tool-bar-keymap-function*)
+        ((*tool-bar-keymap-function*)))
+      (let ((maps (reverse
+                   (if *overriding-local-map-menu-flag*
+                       (lookup-keymaps)
+                       (filter (lambda (map)
+                                 (not (memq map
+                                            (or *overriding-terminal-local-map*
+                                                '()))))
+                               (lookup-keymaps))))))
+        (let loop ((rest maps) (items '()))
+          (cond ((null? rest) items)
+                (else
+                 (let ((def (km:keymap-lookup (car rest) 'tool-bar)))
+                   (loop (cdr rest)
+                         (if (km:keymap-type? def)
+                             (tool-bar-collect-items
+                              (keymap-canonicalize def) items)
+                             items))))))))
+
     (define-key *default-keymap* (kbd "C-q") quoted-insert)
 
     ;; The redisplay's seam: `menu_bar_items` is this library's
@@ -3198,6 +3698,7 @@ With argument, insert ARG copies of the character."
     ;; *below* here - so the redisplay asks for the items through this.
     (*menu-bar-items-function* menu-bar-items)
     (*tab-bar-items-function* tab-bar-items)
+    (*tool-bar-items-function* tool-bar-items)
 
     
     (*read-char-event-function* read-char-event)

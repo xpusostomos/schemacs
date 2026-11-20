@@ -6,6 +6,16 @@
   ;; one key at a time question, `replace-search', the highlight
   ;; pair, and `query-replace-map', the keymap of answers.
   ;;
+  ;; The other half of the file is Occur - `occur' (M-x, and the `Show
+  ;; hits' tool bar button through `isearch-occur'), `occur-1',
+  ;; `occur-engine' and the mode - and `replace-string-in-region' /
+  ;; `replace-regexp-in-region', which `editfns.c`'s
+  ;; `replace-region-contents' backs. Occur's line numbers are drawn in
+  ;; `list-matching-lines-prefix-face` through the `font-lock-face`
+  ;; alias, its header in `list-matching-lines-buffer-name-face` (the
+  ;; `underline` face), and its lines are `follow-link` text, so a
+  ;; mouse-1 click is translated to mouse-2 and goes to the occurrence.
+  ;;
   ;; The regexp variants run on `(schemacs editor search)' - the
   ;; `string-match' layer standing in for `regex-emacs.c'.
   ;;
@@ -33,17 +43,43 @@
     (only (schemacs editor buffer)
           *case-fold-search* current-buffer
           erase-buffer get-buffer get-buffer-create
-          with-current-buffer buffer-z)
+          with-current-buffer buffer-z
+          ;; `occur` and `occur-1`: the buffer values, the buffer-local
+          ;; slots `occur-revert-arguments` and the source buffer's
+          ;; coding system, the read-only bracket, and the overlays a
+          ;; region search runs over.
+          bufferp buffer-name buffer-live-p major-mode
+          default-directory set!buffer-default-directory
+          *inhibit-read-only* set!buffer-read-only set-buffer-modified-p
+          buffer-local-value set-buffer-local-value! local-variable-p
+          kill-local-variable
+          make-overlay delete-overlay overlay-put overlay-get
+          overlayp overlay-buffer overlay-start overlay-end
+          rename-buffer %kill-buffer
+          *kill-buffer-hook*)
     (only (schemacs editor frame)
           *current-frame* frame-selected-window recenter set!frame-message
-          set-message!)
+          set-message!
+          ;; `occur-1`'s "longer than window-width" test, and the
+          ;; selected window its mode maps select.
+          selected-window select-window window-body-width set-window-point!
+          window-buffer *pre-command-hook*)
     (only (schemacs editor editfns)
           bobp char-after
           eobp goto-char insert message point point-min point-max
           save-excursion
+          ;; `occur-engine` copies the matching lines out with these, and
+          ;; `occur-1` messages with `ngettext`.
+          buffer-substring buffer-substring-no-properties
+          line-beginning-position line-end-position forward-line
+          propertize ngettext bolp eolp *inhibit-field-text-motion*
           ;; `replace-region-contents` and the narrowing the three
           ;; `subr.el` functions below open around their loops.
           replace-region-contents save-restriction narrow-to-region)
+    ;; GNU Emacs's `format` - the `%d`-and-`%s` one `occur-engine` builds
+    ;; its lines with, under a rename so the Guile `format` the rest of
+    ;; this file already uses stays.
+    (rename (only (schemacs editor editfns) format) (format %format))
     ;; `barf-if-buffer-read-only' is `buffer.c`'s and lives in
     ;; `buffer.scm' now - see the note in `keyboard.scm'.
     (only (schemacs editor buffer) barf-if-buffer-read-only)
@@ -51,7 +87,20 @@
     ;; `mark-active'.
     (only (schemacs editor simple)
           deactivate-mark push-mark scroll-up-command
-          scroll-down-command use-region-p word-char?)
+          scroll-down-command use-region-p use-region-beginning
+          use-region-end mark word-char?
+          ;; Occur: the two modes, the region's bounds, the line count,
+          ;; and the highlighting options `occur--highlight-occurrences`
+          ;; reads.
+          special-mode fundamental-mode region-bounds count-lines
+          next-error-found
+          *next-error-highlight* *next-error-highlight-no-select*
+          next-error-highlight-timer next-error-overlay-arrow-position
+          next-error-last-buffer)
+    ;; `transient-mark-mode` and `mark-active` are `buffer.c`'s
+    ;; buffer-locals; `isearch-query-replace`'s point placement reads
+    ;; both.
+    (only (schemacs editor buffer) transient-mark-mode mark-active)
     ;; The search primitives: the searches that find the occurrences
     ;; and the match data and `replace-match' that make the edits.
     (only (schemacs editor search)
@@ -68,7 +117,9 @@
     ;; loop reads next and what `dispatch-input-event' takes.
     (only (schemacs editor keyboard)
           *unread-command-events* read-key-event recursive-edit
-          signal-quit)
+          signal-quit
+          ;; `occur-mode-goto-occurrence`'s interactive argument.
+          *last-nonmenu-event*)
     (only (schemacs editor minibuffer)
           *minibuffer-setup-hook*
           format-prompt history-entries list-ref-or make<history>
@@ -87,6 +138,9 @@
     ;; overlay and hands the other matches to the lazy highlighter.
     (only (schemacs editor isearch)
           *search-upper-case* isearch-no-upper-case-p
+          ;; The search's published state (`isearch-query-replace`).
+          isearch-string isearch-case-fold-search isearch-regexp
+          isearch-other-end isearch-string-propertize
           *lazy-highlight-cleanup*
           isearch-lazy-highlight-update lazy-highlight-cleanup
           minibuffer-lazy-highlight-setup)
@@ -96,13 +150,45 @@
     ;; an isearch match does.
     (only (schemacs editor buffer)
           current-buffer delete-overlay make-overlay move-overlay overlay-put)
-    (only (schemacs editor faces) defface)
+    (only (schemacs editor faces) defface face-differs-from-default-p)
     (only (schemacs editor command)
-          current-prefix-arg define-command)
+          current-prefix-arg define-command define-alias
+          prefix-numeric-value)
+    (only (schemacs editor custom) define-custom)
     (only (schemacs editor keymap) define-key *default-keymap* *current-keymap*)
     (prefix (schemacs editor keymap) km:)
-    (only (schemacs editor window) display-buffer)
-    (only (schemacs editor subr) kbd add-to-history)
+    (only (schemacs editor window)
+          display-buffer pop-to-buffer switch-to-buffer-other-window
+          get-buffer-window save-selected-window)
+    (only (schemacs editor subr)
+          kbd add-to-history nth nthcdr delq string-replace
+          run-hooks add-hook remove-hook
+          user-error event-end posn-window posn-point)
+    ;; The text-property walk `occur-engine` builds its lines with.
+    (only (schemacs editor textprop)
+          add-face-text-property add-text-properties get-text-property
+          next-single-property-change previous-single-property-change
+          remove-list-of-text-properties)
+    (only (schemacs editor marker)
+          make-marker set-marker copy-marker marker-position marker-buffer)
+    ;; `put` is `fns.c`'s symbol property, in the interval library.
+    (only (schemacs editor intervals) put)
+    (only (schemacs editor derived) define-derived-mode)
+    ;; `string-equal` is not needed here, but `concat` and `mapconcat` are:
+    ;; `occur-engine`'s cell strings and `occur-rename-buffer`'s name.
+    (only (schemacs editor fns)
+          concat mapconcat line-number-at-pos)
+    (only (schemacs editor indentc) current-column)
+    ;; `occur-engine-line` asks the fontification engine whether it is on.
+    (only (schemacs editor font-lock) font-lock-ensure font-lock-mode-on?)
+    (only (schemacs editor font-core) turn-on-font-lock)
+    (only (schemacs editor timer) run-at-time cancel-timer timer?)
+    (only (schemacs editor seq) seq-some seq-take)
+    (only (schemacs editor files) rename-uniquely)
+    (only (schemacs editor xdisp)
+          overlay-arrow-position overlay-arrow-string)
+    (only (schemacs editor search)
+          regexp-opt-depth string-match string-match-p)
     (only (guile) cadr caddr cddr cdddr cadddr cddddr format string-contains)
     )
 
@@ -116,6 +202,7 @@
    *query-replace-read-from-default*
    *query-replace-read-from-regexp-default*
    perform-replace
+   isearch-query-replace
    query-replace
    query-replace-descr
    query-replace-read-args
@@ -127,6 +214,34 @@
    ;; `subr.el`'s three, placed here - see the note at their definitions.
    replace-buffer-contents replace-string-in-region
    replace-regexp-in-region
+   ;; Occur - `replace.el`'s second half.
+   regexp-history occur-collect-regexp-history
+   occur-highlight-overlays *read-regexp-defaults-function*
+   read-regexp
+   *list-matching-lines-default-context-lines*
+   *list-matching-lines-face* *list-matching-lines-buffer-name-face*
+   *list-matching-lines-current-line-face*
+   *list-matching-lines-jump-to-current-line*
+   *list-matching-lines-prefix-face* *occur-excluded-properties*
+   occur-read-primary-args occur-rename-buffer occur-revert-arguments
+   *occur--final-pos*
+   occur occur-regexp-descr occur-1 occur-engine
+   occur-engine-line occur-engine-add-prefix occur-accumulate-lines
+   occur-context-lines
+   occur--garbage-collect-revert-args occur-revert-function
+   occur-mode--find-occurrences occur-mode-find-occurrence
+   occur--targets-start occur--set-arrow
+   occur-mode occur-mode-map
+   occur-mode-goto-occurrence occur-mode-mouse-goto
+   occur-mode-goto-occurrence-other-window
+   occur-goto-locus-delete-o occur--highlight-occurrences
+   occur-mode-display-occurrence occur-find-match
+   occur-next occur-prev occur-next-error
+   occur-mode-hook *occur-hook* *occur-mode-find-occurrence-hook*
+   list-matching-lines
+   ;; isearch.el's command, for the same placement reason as
+   ;; `isearch-query-replace` above.
+   isearch-occur
    )
 
   (begin
@@ -1351,6 +1466,72 @@ type \\[help-command] at that time."
       (perform-replace from-string to-string #t #f delimited
                        1 *query-replace-map* start end backward))
 
+    (define-command (isearch-query-replace arg regexp-flag)
+      ;; GNU Emacs's `isearch-query-replace` (`isearch.el:2399`): "Start
+      ;; `query-replace' with string to replace from last search
+      ;; string. The ARG (prefix arg if interactive), if non-nil, means
+      ;; replace only matches surrounded by word boundaries. A negative
+      ;; prefix arg means replace backward."
+      ;;
+      ;; **It is isearch.el's command in replace.el's file**, because
+      ;; `perform-replace` and `query-replace-read-to` are here and
+      ;; `replace.scm` is the library that *imports* `isearch.scm` - the
+      ;; other way round would be a cycle. The search's own loop runs it
+      ;; through the command table once it has exited (`isearch.scm`,
+      ;; the Replace button), and the search's `isearch-done` and
+      ;; highlight cleanup have already run by then, as Emacs's own
+      ;; first act here is `(isearch-done nil t)`.
+      ;;
+      ;; Not carried: the `(if regexp-flag (setq isearch-regexp t))`
+      ;; arm and `isearch-query-replace-regexp`, since this tree's
+      ;; search is literal-only; `search-invisible` and its
+      ;; `isearch-invisible` source (nothing here makes text invisible);
+      ;; `replace-lax-whitespace`/`replace-regexp-lax-whitespace` (lax
+      ;; whitespace is not ported); and `isearch-recursive-edit` - the
+      ;; search is a loop, not a recursive edit, so there is no
+      ;; `exit-recursive-edit` tail.
+      "Start `query-replace' with string to replace from last search string."
+      (interactive (list (current-prefix-arg) #f))
+      (barf-if-buffer-read-only)
+      (let* ((delimited (and arg (not (eq? arg '-))))
+             (backward (and arg (eq? arg '-)))
+             (from (isearch-string-propertize isearch-string
+                                              isearch-case-fold-search)))
+        ;; `(let ((case-fold-search isearch-case-fold-search)
+        ;;        (search-upper-case nil)) ...)': the folding the search
+        ;; was using, and no re-inference of it in the TO prompt's
+        ;; lazy highlight.
+        (parameterize ((*case-fold-search* isearch-case-fold-search)
+                       (*search-upper-case* #f))
+          (if (and isearch-other-end
+                   (if backward
+                       (> isearch-other-end (point))
+                       (< isearch-other-end (point)))
+                   (not (and (transient-mark-mode) (mark-active)
+                             (if backward
+                                 (> (marker-position (mark)) (point))
+                                 (< (marker-position (mark)) (point))))))
+              (goto-char isearch-other-end))
+          ;; `(set query-replace-from-history-variable (cons
+          ;; isearch-string-propertized (symbol-value ...)))' - the
+          ;; FROM string goes onto the history FIRST, so M-p at the TO
+          ;; prompt brings it back.
+          (set!history-entries
+           *query-replace-history*
+           (cons from (history-entries *query-replace-history*)))
+          (perform-replace
+           from
+           (query-replace-read-to
+            from
+            (string-append
+             "Query replace"
+             (if backward " backward" "")
+             (if (use-region-p) " in region" ""))
+            isearch-regexp)
+           #t isearch-regexp delimited
+           1 *query-replace-map*
+           (use-region-beginning) (use-region-end) backward))))
+
     (define-command (query-replace-regexp regexp to-string delimited
                                           start end backward)
       ;; GNU Emacs's `query-replace-regexp' (replace.el:770): the
@@ -1521,5 +1702,1257 @@ This is a generic function; see `replace-regexp'."
                     (set! matches (+ matches 1))
                     (loop)))
                 (and (not (zero? matches)) matches)))))))
+
+    ;;----------------------------------------------------------------
+    ;; Occur - `occur', `occur-mode' and the engine under them
+    ;;
+    ;; GNU Emacs's `replace.el:1085-2736': `regexp-history',
+    ;; `read-regexp', the `match' face and the `list-matching-lines-*'
+    ;; options, `occur-mode' with its map, and `occur' over
+    ;; `occur-1`/`occur-engine` and their helpers.
+    ;;
+    ;; **What is not carried, and what each waits for**: `occur-edit-mode`
+    ;; and `occur-after-change-function` (writing an edited occurrence
+    ;; back into its source buffer); `multi-occur` and
+    ;; `multi-occur-in-matching-buffers`; `occur-word-at-mouse`,
+    ;; `occur-symbol-at-mouse` and `occur-context-menu` (they need
+    ;; `thing-at-mouse` and a context-menu engine); and the
+    ;; `occur-menu-map` `easy-menu-define`, which needs `easy-menu`.
+    ;; `occur-mode-map`'s `n`/`p` (`next-error-no-select`/
+    ;; `previous-error-no-select`), `l` (`recenter-current-error`) and
+    ;; `C-c C-f` (`next-error-follow-minor-mode`) wait on the
+    ;; `next-error` command itself, which is not ported; `c`
+    ;; (`clone-buffer`) waits on `clone-buffer`.
+    ;;----------------------------------------------------------------
+
+    (define regexp-history (make<history> '()))
+    ;; ^ GNU Emacs's `regexp-history' (`replace.el:1085'): "History list
+    ;; for some commands that read regular expressions." A history
+    ;; *record* here, because that is what `read-from-minibuffer' takes.
+
+    (define occur-highlight-overlays '())
+    ;; ^ GNU Emacs's `occur-highlight-overlays' (`replace.el:1090'):
+    ;; "Overlays used to temporarily highlight occur matches."
+
+    (define occur-collect-regexp-history (make<history> '("\\1")))
+    ;; ^ GNU Emacs's `occur-collect-regexp-history' (`replace.el:1094'):
+    ;; "History of regexp for occur's collect operation." Emacs keeps a
+    ;; list and names it to `read-regexp` as a history symbol; here the
+    ;; history is the record.
+
+    (define-custom *read-regexp-defaults-function* #f
+      "Function that provides default regexp(s) for `read-regexp'.
+This function should take no arguments and return one of: nil, a
+regexp, or a list of regexps.  Interactively, `read-regexp' uses
+the return value of this function for its DEFAULT argument."
+      :type 'function
+      :group 'matching)
+
+    (define (read-regexp prompt . args)
+      ;; GNU Emacs's `read-regexp' (`replace.el:1165'): "Read and return
+      ;; a regular expression as a string. ..."
+      ;;
+      ;; **What is not carried**: `read-regexp-map` and its `M-s c`
+      ;; case-folding toggle (so the answer carries no `case-fold'
+      ;; property and `read-regexp-case-fold-search` is not here);
+      ;; `read-regexp-suggestions` and the `M-n` list of standard
+      ;; suggestions, because this tree's `read-from-minibuffer` takes
+      ;; one DEFAULT rather than an Emacs default *list*; and the
+      ;; `history-add-new-input` binding is spelled `parameterize` over
+      ;; the variable it names.
+      ;;--------------------------------------------------------------
+      (let* ((defaults-arg (if (pair? args) (car args) #f))
+             (history (or (and (pair? args) (pair? (cdr args)) (cadr args))
+                          regexp-history))
+             (defaults
+              (if (and defaults-arg (symbol? defaults-arg))
+                  (let ((fn (or (*read-regexp-defaults-function*)
+                                defaults-arg)))
+                    (cond ((eq? fn 'regexp-history-last)
+                           (let ((entries (history-entries history)))
+                             (and (pair? entries) (car entries))))
+                          ((procedure? fn) (fn))
+                          (else #f)))
+                  defaults-arg))
+             (default (if (pair? defaults) (car defaults) defaults))
+             (input
+              (parameterize ((*history-add-new-input* #f))
+                (read-from-minibuffer
+                 (if (string-match-p ":[ \t]*\\'" prompt)
+                     prompt
+                     (format-prompt
+                      prompt
+                      (and (string? default)
+                           (< 0 (string-length default))
+                           (query-replace-descr default))))
+                 #f #f history default)))
+             (result (if (equal? input "") default input)))
+        (when result
+          (set!history-entries
+           history
+           (add-to-history (history-entries history) result)))
+        (or result input)))
+
+    (defface 'match
+      '((((class color) (min-colors 88) (background light))
+         :background "khaki1")
+        (((class color) (min-colors 88) (background dark))
+         :background "RoyalBlue3")
+        (((class color) (min-colors 8) (background light))
+         :background "yellow" :foreground "black")
+        (((class color) (min-colors 8) (background dark))
+         :background "blue" :foreground "white")
+        (((type tty) (class mono))
+         :inverse-video #t)
+        (#t :background "gray"))
+      "Face used to highlight matches permanently.")
+
+    (define-custom *list-matching-lines-default-context-lines* 0
+      "Default number of context lines included around `list-matching-lines' matches.
+A negative number means to include that many lines before the match.
+A positive number means to include that many lines both before and after."
+      :type 'integer
+      :group 'matching)
+
+    (define-custom *list-matching-lines-face* 'match
+      "Face used by \\[list-matching-lines] to show the text that matches.
+If the value is nil, don't highlight the matching portions specially."
+      :type 'face
+      :group 'matching)
+
+    (define-custom *list-matching-lines-buffer-name-face* 'underline
+      "Face used by \\[list-matching-lines] to show the names of buffers.
+If the value is nil, don't highlight the buffer names specially."
+      :type 'face
+      :group 'matching)
+
+    (define-custom *list-matching-lines-current-line-face* 'lazy-highlight
+      "Face used by \\[list-matching-lines] to highlight the current line."
+      :type 'face
+      :group 'matching)
+
+    (define-custom *list-matching-lines-jump-to-current-line* #f
+      "If non-nil, \\[list-matching-lines] shows the current line highlighted.
+The current line for this purpose is the line of the original buffer
+which was current when \\[list-matching-lines] was invoked.
+Point in the `*Occur*' buffer will be set right after such line when
+there are matches after it."
+      :type 'boolean
+      :group 'matching)
+
+    (define-custom *list-matching-lines-prefix-face* 'shadow
+      "Face used by \\[list-matching-lines] to show the prefix column.
+The prefix column is the part of display that precedes the actual
+contents of the line; it normally shows the line number.  \\(For
+multiline matches, the prefix column shows the line number for the
+first line and whitespace for the rest of the lines.\\)
+If this face will display the same as the default face, the prefix
+column will not be highlighted specially."
+      :type 'face
+      :group 'matching)
+
+    (define-custom *occur-excluded-properties*
+      '(read-only invisible intangible field mouse-face help-echo local-map
+                   keymap yank-handler follow-link)
+      "Text properties to discard when copying lines to the *Occur* buffer.
+The value should be a list of text properties to discard or t,
+which means to discard all text properties."
+      :type 'list
+      :group 'matching)
+
+    (define (occur-read-primary-args)
+      ;; GNU Emacs's `occur-read-primary-args' (`replace.el:2026').
+      ;;--------------------------------------------------------------
+      (let* ((perform-collect (pair? (current-prefix-arg)))
+             (regexp (read-regexp (if perform-collect
+                                      "Collect strings matching regexp"
+                                      "List lines matching regexp")
+                                  'regexp-history-last)))
+        (list regexp
+              (if perform-collect
+                  ;; Perform collect operation
+                  (if (zero? (regexp-opt-depth regexp))
+                      ;; No subexpression so collect the entire match.
+                      "\\&"
+                      ;; Get the regexp for collection pattern.
+                      (let ((default (let ((entries (history-entries
+                                                     occur-collect-regexp-history)))
+                                       (and (pair? entries) (car entries)))))
+                        (read-regexp
+                         (format-prompt "Regexp to collect" default)
+                         default occur-collect-regexp-history)))
+                  ;; Otherwise normal occur takes numerical prefix argument.
+                  (let ((arg (current-prefix-arg)))
+                    (if arg (prefix-numeric-value arg) #f))))))
+
+    (define (occur-revert-arguments)
+      ;; GNU Emacs's `occur-revert-arguments' (`replace.el:1636'), a
+      ;; `defvar-local` holding `(REGEXP NLINES BUFS)` - what `g` hands
+      ;; back to `occur-1`. A buffer-local slot here, so it is read and
+      ;; written through the slot functions.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (current-buffer) 'occur-revert-arguments #f))
+
+    (define-command (occur-rename-buffer unique-p interactive-p)
+      ;; GNU Emacs's `occur-rename-buffer' (`replace.el:2061'): "Rename
+      ;; the current *Occur* buffer to *Occur: original-buffer-name*."
+      ;;
+      ;; `occur-revert-arguments` is a `defvar-local` in Emacs; here it is
+      ;; a buffer-local slot, read through `occur-revert-arguments` and
+      ;; destroyed with `kill-local-variable`.
+      ;;--------------------------------------------------------------
+      "Rename the current *Occur* buffer to *Occur: original-buffer-name*.
+Here `original-buffer-name' is the buffer name where Occur was originally run.
+If UNIQUE-P is non-nil (interactively, the prefix argument), or called
+non-interactively with INTERACTIVE-P nil, the renaming will not clobber
+the existing buffer(s) of that name, but will use `generate-new-buffer-name'
+instead.
+You can add this to `occur-hook' if you always want a separate
+*Occur* buffer for each buffer where you invoke `occur'."
+      (interactive "P\np")
+      (with-current-buffer
+          (if (eq? (major-mode) 'occur-mode)
+              (current-buffer)
+              (get-buffer "*Occur*"))
+        (rename-buffer (concat "*Occur: "
+                               (mapconcat
+                                (lambda (boo)
+                                  (buffer-name (if (overlayp boo)
+                                                   (overlay-buffer boo)
+                                                   boo)))
+                                (car (cddr (occur-revert-arguments))) "/")
+                               "*")
+                       (or unique-p (not interactive-p)))))
+
+    (define *occur--final-pos* (make-parameter #f))
+    ;; ^ GNU Emacs's `occur--final-pos' (`replace.el:2076'), a dynamic
+    ;; variable `occur-1` `let`-binds and `occur-engine` sets - a
+    ;; parameter under this tree's convention for that reason.
+
+    (define-command (occur regexp nlines . rest)
+      ;; GNU Emacs's `occur' (`replace.el:2078'): "Show all lines in the
+      ;; current buffer containing a match for REGEXP. ..."
+      ;;
+      ;; REGION is `(START . END)` in a one-element list, as
+      ;; `region-bounds` answers it; Emacs makes an overlay for the
+      ;; search when the command runs on a region, and so does this.
+      ;;--------------------------------------------------------------
+      "Show all lines in the current buffer containing a match for REGEXP.
+If a match spreads across multiple lines, all those lines are shown."
+      (interactive
+       (append (occur-read-primary-args)
+               (if (use-region-p) (list (region-bounds)) '())))
+      ;; REGION is optional in Emacs, and the interactive expression above
+      ;; supplies it only when a region is active - so it arrives in the
+      ;; rest list, as `occur-next-error`'s RESET does.
+      (let* ((region (if (pair? rest) (car rest) #f))
+             (first (and (pair? region) (pair? (car region))
+                         (car (car region))))
+             (start (and first (max first (point-min))))
+             (end (and first (min (cdr (car region)) (point-max))))
+             (in-region (or start end))
+             (bufs (if (not in-region)
+                       (list (current-buffer))
+                       (let ((ol (make-overlay (or start (point-min))
+                                               (or end (point-max)))))
+                         (overlay-put ol 'occur--orig-point (point))
+                         (list ol)))))
+        (occur-1 regexp nlines bufs)))
+
+    (define (occur-regexp-descr regexp)
+      ;; GNU Emacs's `occur-regexp-descr' (`replace.el:2233').
+      ;;--------------------------------------------------------------
+      (%format " for %s\"%s\""
+               (or (get-text-property 0 'isearch-regexp-function-descr regexp)
+                   "")
+               (if (get-text-property 0 'isearch-string regexp)
+                   (propertize
+                    (query-replace-descr
+                     (get-text-property 0 'isearch-string regexp))
+                    'help-echo regexp)
+                   (query-replace-descr regexp))))
+
+    (define (occur-1 regexp nlines bufs . args)
+      ;; GNU Emacs's `occur-1' (`replace.el:2242').
+      ;;
+      ;; BUFS is a list of buffers or overlays. The `buffer-undo-list`
+      ;; binding of Emacs's `let` is not carried - there is no
+      ;; per-buffer undo list *variable* to bind here - and the occur
+      ;; buffer is read-only and regenerated, so its inserts are not
+      ;; meant to be undoable.
+      ;;--------------------------------------------------------------
+      (let ((buf-name (if (pair? args) (car args) #f)))
+        (unless (and regexp (not (equal? regexp "")))
+          (error "Occur doesn't work with the empty regexp"))
+        (unless buf-name (set! buf-name "*Occur*"))
+        (let* ((active-bufs
+                (delq #f (map (lambda (boo)
+                               (if (or (buffer-live-p boo)
+                                       (and (overlayp boo) (overlay-buffer boo)))
+                                   boo
+                                   #f))
+                             bufs)))
+               (source-buffer-default-directory (default-directory)))
+          ;; Handle the case where one of the buffers we're searching is
+          ;; the output buffer.  Just rename it.
+          (when (seq-some (lambda (boo)
+                            (equal? buf-name
+                                    (buffer-name (if (overlayp boo)
+                                                     (overlay-buffer boo)
+                                                     boo))))
+                          active-bufs)
+            (with-current-buffer buf-name
+              (rename-uniquely)))
+          ;; Now find or create the output buffer.
+          (let ((occur-buf (get-buffer-create buf-name)))
+            (with-current-buffer occur-buf
+              ;; Make the default-directory of the *Occur* buffer match
+              ;; that of the buffer where the occurrences come from.
+              (set!buffer-default-directory occur-buf
+                                            source-buffer-default-directory)
+              (set! overlay-arrow-position #f)
+              (if (string? nlines)
+                  (fundamental-mode) ;; This is for collect operation.
+                  (occur-mode))
+              ;; The C's `let` binds these three for the *whole* body
+              ;; (`replace.el:2289`), and `occur--final-pos` must stay
+              ;; bound across the read below - the engine sets it while
+              ;; the list is built and `occur-1` reads it to put the
+              ;; window's point there.
+              (parameterize ((*inhibit-read-only* #t)
+                             (*occur--final-pos* #f))
+                (erase-buffer)
+                (let ((count
+                       (if (string? nlines)
+                           ;; Treat nlines as a regexp to collect.
+                           (let ((count 0))
+                             (for-each
+                              (lambda (boo)
+                                (with-current-buffer
+                                    (if (overlayp boo) (overlay-buffer boo) boo)
+                                  (save-excursion
+                                    (goto-char (if (overlayp boo)
+                                                   (overlay-start boo)
+                                                   (point-min)))
+                                    (let ((end (if (overlayp boo)
+                                                   (overlay-end boo)
+                                                   #f)))
+                                      (let loop ()
+                                        (when (re-search-forward regexp end #t)
+                                          ;; Insert the replacement regexp.
+                                          (let ((str (match-substitute-replacement
+                                                      nlines)))
+                                            (if str
+                                                (with-current-buffer occur-buf
+                                                  (insert str)
+                                                  (set! count (+ count 1))
+                                                  (or (zero? (current-column))
+                                                      (insert "\n")))))
+                                          (loop)))))))
+                              active-bufs)
+                             count)
+                           ;; Perform normal occur.
+                           (occur-engine
+                            regexp active-bufs occur-buf
+                            (or nlines
+                                (*list-matching-lines-default-context-lines*))
+                            (if (and (*case-fold-search*) (*search-upper-case*))
+                                (isearch-no-upper-case-p regexp #t)
+                                (*case-fold-search*))
+                            (*list-matching-lines-buffer-name-face*)
+                            (if (face-differs-from-default-p
+                                 (*list-matching-lines-prefix-face*))
+                                (*list-matching-lines-prefix-face*)
+                                #f)
+                            (*list-matching-lines-face*)
+                            (not (eq? (*occur-excluded-properties*) #t))))))
+                  (let* ((bufcount (length active-bufs))
+                       (diff (- (length bufs) bufcount)))
+                  (message "%s"
+                           (%format "Searched %d %s%s; %s %s%s"
+                                    bufcount
+                                    (ngettext "buffer" "buffers" bufcount)
+                                    (if (zero? diff)
+                                        ""
+                                        (%format " (%d killed)" diff))
+                                    (if (zero? count) "no" (%format "%d" count))
+                                    (ngettext "match" "matches" count)
+                                    ;; Don't display regexp if with remaining
+                                    ;; text it is longer than window-width.
+                                    (if (> (+ (string-length
+                                               (or (get-text-property
+                                                    0 'isearch-string regexp)
+                                                   regexp))
+                                              42)
+                                           (window-body-width (selected-window)))
+                                        ""
+                                        (occur-regexp-descr regexp)))))
+                (unless (eq? bufs (let ((old (occur-revert-arguments)))
+                                    (and old (list-ref-or old 2 #f))))
+                  (occur--garbage-collect-revert-args))
+                (set-buffer-local-value! (current-buffer) 'occur-revert-arguments
+                                         (list regexp nlines bufs))
+                (if (= count 0)
+                    (%kill-buffer occur-buf)
+                    (begin
+                      (display-buffer occur-buf '(nil (category . occur)))
+                      (when (*occur--final-pos*)
+                        (set-window-point!
+                         (get-buffer-window occur-buf 'all-frames)
+                         (*occur--final-pos*)))
+                      (set! next-error-last-buffer occur-buf)
+                      (set!buffer-read-only occur-buf #t)
+                      (with-current-buffer occur-buf
+                        (set-buffer-modified-p #f))
+                      (run-hooks (*occur-hook*)))))))))))
+
+    (define (occur-engine regexp buffers out-buf nlines case-fold
+                          title-face prefix-face match-face keep-props)
+      ;; GNU Emacs's `occur-engine' (`replace.el:2325').
+      ;;
+      ;; `case-fold-search` is a parameter here, so Emacs's second,
+      ;; per-buffer binding of it is the one `parameterize` around the
+      ;; whole walk rather than a `let` inside the `dolist`; there are no
+      ;; buffer-local values of it for the inner binding to matter to.
+      ;; The coding system of the source buffer travels to the output
+      ;; buffer through the buffer-local slot rather than
+      ;; `set-buffer-file-coding-system` (that is `mule-cmds`, a
+      ;; front-end library this one cannot import); the C sets the same
+      ;; slot.
+      ;;--------------------------------------------------------------
+      (with-current-buffer out-buf
+        (let ((global-lines 0)    ;; total count of matching lines
+              (global-matches 0)  ;; total count of matches
+              (coding #f)
+              (multi-occur-p (pair? (cdr buffers))))
+          (parameterize ((*case-fold-search* case-fold))
+            (for-each
+             (lambda (boo)
+               (when (if (overlayp boo) (overlay-buffer boo) (buffer-live-p boo))
+                 (with-current-buffer (if (overlayp boo) (overlay-buffer boo) boo)
+                   (parameterize ((*inhibit-field-text-motion* #t))
+                     (let ((lines 0)               ; count of matching lines
+                           (matches 0)             ; count of matches
+                           (headerpt (with-current-buffer out-buf (point)))
+                           (orig-line (if (not (overlayp boo))
+                                          (line-number-at-pos)
+                                          (line-number-at-pos
+                                           (overlay-get boo 'occur--orig-point)))))
+                       (save-excursion
+                         ;; begin searching in the buffer
+                         (goto-char (if (overlayp boo)
+                                        (overlay-start boo)
+                                        (point-min)))
+                         (forward-line 0)
+                         (let* ((limit (if (overlayp boo)
+                                           (overlay-end boo)
+                                           (point-max)))
+                                (start-line (line-number-at-pos))
+                                (curr-line start-line) ; line count
+                                (orig-line-shown-p #f)
+                                (prev-line #f)         ; line number of prev match endpt
+                                (prev-after-lines #f)  ; context lines of prev match
+                                (matchbeg 0)
+                                (origpt #f)
+                                (begpt #f)
+                                (endpt #f)
+                                (markers '())  ; list of (BEG-MARKER . END-MARKER)
+                                (curstring ""))
+                           (unless (or coding
+                                       (not (local-variable-p
+                                             'buffer-file-coding-system)))
+                             (set! coding
+                                   (buffer-local-value (current-buffer)
+                                                       'buffer-file-coding-system
+                                                       #f)))
+                           (let loop ()
+                             (when (< (point) limit)
+                             (set! origpt (point))
+                             (set! endpt (re-search-forward regexp limit #t))
+                             (when endpt
+                               (set! lines (+ lines 1)) ; increment matching lines count
+                               (set! matchbeg (match-beginning 0))
+                               ;; Get beginning of first match line and end of the last.
+                               (save-excursion
+                                 (goto-char matchbeg)
+                                 (set! begpt (line-beginning-position))
+                                 (goto-char endpt)
+                                 (set! endpt (line-end-position)))
+                               ;; Sum line numbers up to the first match line.
+                               (set! curr-line (+ curr-line
+                                                  (count-lines origpt begpt)))
+                               (set! markers '())
+                               (set! curstring
+                                     (occur-engine-line begpt endpt keep-props))
+                               ;; Highlight the matches
+                               (let ((len (string-length curstring))
+                                     (start 0))
+                                 ;; Count empty lines that don't use next loop.
+                                 (when (zero? len)
+                                   (set! matches (+ matches 1)))
+                                 (when (and (*list-matching-lines-jump-to-current-line*)
+                                            (not multi-occur-p))
+                                   (or orig-line (set! orig-line 1))
+                                   (or nlines (set! nlines
+                                                   (line-number-at-pos (point-max))))
+                                   (when (= curr-line orig-line)
+                                     (add-face-text-property
+                                      0 len
+                                      (*list-matching-lines-current-line-face*)
+                                      #f curstring)
+                                     (add-text-properties
+                                      0 len '(current-line t) curstring))
+                                   (when (and (>= orig-line (- curr-line nlines))
+                                              (<= orig-line (+ curr-line nlines)))
+                                     ;; Shown either here or will be shown
+                                     ;; by occur-context-lines
+                                     (set! orig-line-shown-p #t)))
+                                 (let loop ((start start))
+                                   (when (and (< start len)
+                                              (string-match regexp curstring start))
+                                     (set! markers
+                                           (cons (cons (set-marker
+                                                        (make-marker)
+                                                        (+ begpt (match-beginning 0)))
+                                                       (set-marker
+                                                        (make-marker)
+                                                        (+ begpt (match-end 0))))
+                                                 markers))
+                                     (set! matches (+ matches 1))
+                                     (add-text-properties
+                                      (match-beginning 0) (match-end 0)
+                                      '(occur-match t) curstring)
+                                     (when match-face
+                                       ;; Add `match-face' to faces copied
+                                       ;; from the buffer.
+                                       (add-face-text-property
+                                        (match-beginning 0) (match-end 0)
+                                        match-face #f curstring))
+                                     ;; Avoid infloop.
+                                     (let ((end (match-end 0)))
+                                       (loop (if (= start end)
+                                                 (+ start 1)
+                                                 end))))))
+                               (set! markers (reverse markers))
+                               ;; Generate the string to insert for this match
+                               (let* ((match-prefix
+                                       ;; Using 7 digits aligns tabs properly.
+                                       (apply propertize
+                                              (%format "%7d:" curr-line)
+                                              (append
+                                               (if prefix-face
+                                                   (list 'font-lock-face prefix-face)
+                                                   '())
+                                               (list
+                                                'occur-prefix #t
+                                                ;; Allow insertion of text
+                                                ;; at the end of the prefix
+                                                ;; (for Occur Edit mode).
+                                                'front-sticky #t
+                                                'rear-nonsticky #t
+                                                'read-only #t
+                                                'occur-target markers
+                                                'follow-link #t
+                                                'help-echo "mouse-2: go to this occurrence"))))
+                                      (match-str
+                                       ;; We don't put `mouse-face' on the newline,
+                                       ;; because that loses.  And don't put it
+                                       ;; on context lines to reduce flicker.
+                                       (propertize curstring
+                                                   'occur-target markers
+                                                   'follow-link #t
+                                                   'help-echo
+                                                   "mouse-2: go to this occurrence"))
+                                      (out-line
+                                       ;; Add non-numeric prefix to all non-first
+                                       ;; lines of multi-line matches.
+                                       (concat
+                                        (string-replace
+                                         "\n"
+                                         (if prefix-face
+                                             (propertize
+                                              "\n       :"
+                                              'font-lock-face prefix-face
+                                              'occur-target markers)
+                                             (propertize
+                                              "\n       :"
+                                              'occur-target markers))
+                                         ;; Add mouse face in one section to
+                                         ;; ensure the prefix and the string
+                                         ;; get a contiguous highlight.
+                                         (propertize (concat match-prefix match-str)
+                                                     'mouse-face 'highlight))
+                                        ;; Add markers at eol, but no mouse props.
+                                        (propertize "\n" 'occur-target markers)))
+                                      (ret (and (not (= nlines 0))
+                                                (occur-context-lines
+                                                 out-line nlines keep-props begpt
+                                                 endpt curr-line prev-line
+                                                 prev-after-lines prefix-face
+                                                 orig-line multi-occur-p)))
+                                      (data
+                                       (if (= nlines 0)
+                                           ;; The simple display style
+                                           out-line
+                                           ;; The complex multi-line display style.
+                                           (begin
+                                             ;; Set first elem of the returned list
+                                             ;; to `data', and the second elem to
+                                             ;; `prev-after-lines'.
+                                             (set! prev-after-lines (cadr ret))
+                                             (car ret))))
+                                      (orig-line-str
+                                       (if (and (*list-matching-lines-jump-to-current-line*)
+                                                (not orig-line-shown-p)
+                                                (> curr-line orig-line))
+                                           (begin
+                                             (set! orig-line-shown-p #t)
+                                             (save-excursion
+                                               (goto-char (point-min))
+                                               (forward-line (- orig-line 1))
+                                               (occur-engine-line
+                                                (line-beginning-position)
+                                                (line-end-position)
+                                                keep-props)))
+                                           #f)))
+                                 ;; Actually insert the match display data
+                                 (with-current-buffer out-buf
+                                   (when orig-line-str
+                                     (add-face-text-property
+                                      0 (string-length orig-line-str)
+                                      (*list-matching-lines-current-line-face*)
+                                      #f orig-line-str)
+                                     (add-text-properties
+                                      0 (string-length orig-line-str)
+                                      '(current-line t) orig-line-str)
+                                     (insert (car (occur-engine-add-prefix
+                                                   (list orig-line-str)
+                                                   prefix-face))))
+                                   (insert data)))
+                               (goto-char endpt))
+                             (if endpt
+                                 (begin
+                                   ;; Sum line numbers between first and last
+                                   ;; match lines.
+                                   (set! curr-line
+                                         (+ curr-line
+                                            (count-lines begpt endpt)
+                                            ;; Add 1 for empty last match line
+                                            ;; since count-lines returns one
+                                            ;; line less.
+                                            (if (and (bolp) (eolp)) 1 0)))
+                                   ;; On to the next match...
+                                   (forward-line 1))
+                                 (goto-char (point-max)))
+                             (set! prev-line (- curr-line 1))
+                             (loop)))
+                           ;; Flush remaining context after-lines.
+                           (when prev-after-lines
+                             (with-current-buffer out-buf
+                               (insert (apply concat
+                                              (occur-engine-add-prefix
+                                               prev-after-lines prefix-face)))))
+                           (when (and (*list-matching-lines-jump-to-current-line*)
+                                      (not orig-line-shown-p))
+                             (set! orig-line-shown-p #t)
+                             (let ((orig-line-str
+                                    (save-excursion
+                                      (goto-char (point-min))
+                                      (forward-line (- orig-line 1))
+                                      (occur-engine-line
+                                       (line-beginning-position)
+                                       (line-end-position)
+                                       keep-props))))
+                               (add-face-text-property
+                                0 (string-length orig-line-str)
+                                (*list-matching-lines-current-line-face*)
+                                #f orig-line-str)
+                               (add-text-properties
+                                0 (string-length orig-line-str)
+                                '(current-line t) orig-line-str)
+                               (with-current-buffer out-buf
+                                 (insert
+                                  (car (occur-engine-add-prefix
+                                        (list orig-line-str) prefix-face)))))))
+                       (when (not (zero? lines)) ; is the count zero?
+                         (set! global-lines (+ global-lines lines))
+                         (set! global-matches (+ global-matches matches))
+                         (with-current-buffer out-buf
+                           (goto-char headerpt)
+                           (let ((beg (point))
+                                 (end #f))
+                             (insert
+                              (propertize
+                               (%format "%d %s%s%s in buffer: %s%s\n"
+                                        matches
+                                        (ngettext "match" "matches" matches)
+                                        ;; Don't display the same number of
+                                        ;; lines and matches in case of 1
+                                        ;; match per line.
+                                        (if (= lines matches)
+                                            ""
+                                            (%format " in %d %s"
+                                                     lines
+                                                     (ngettext "line" "lines"
+                                                               lines)))
+                                        ;; Don't display regexp for multi-buffer.
+                                        (if (> (length buffers) 1)
+                                            ""
+                                            (occur-regexp-descr regexp))
+                                        (buffer-name (if (overlayp boo)
+                                                         (overlay-buffer boo)
+                                                         boo))
+                                        (if (overlayp boo)
+                                            (%format " within region: %d-%d"
+                                                     (overlay-start boo)
+                                                     (overlay-end boo))
+                                            ""))
+                               'read-only #t))
+                             (set! end (point))
+                             (when title-face
+                               (add-face-text-property beg end title-face))
+                             (goto-char
+                              (if (and (*list-matching-lines-jump-to-current-line*)
+                                       (not multi-occur-p))
+                                  (begin
+                                    (goto-char (point-max))
+                                    ;; `(setq occur--final-pos (and
+                                    ;; (goto-char (point-max)) (or ...)))'
+                                    ;; - the value the C's `if` answers is
+                                    ;; the position, and this `goto-char`
+                                    ;; reads it, so the setter's own
+                                    ;; answer (unspecified) cannot be it.
+                                    (let ((pos (or (previous-single-property-change
+                                                    (point) 'current-line)
+                                                   (point-max))))
+                                      (*occur--final-pos* pos)
+                                      pos))
+                                  (point-min))))))))))))
+             buffers))
+          ;; Display total match count and regexp for multi-buffer.
+          (when (and (not (zero? global-lines)) (> (length buffers) 1))
+            (goto-char (point-min))
+            (let ((beg (point))
+                  (end #f))
+              (insert (%format "%d %s%s total%s:\n"
+                               global-matches
+                               (ngettext "match" "matches" global-matches)
+                               ;; Don't display the same number of lines and
+                               ;; matches in case of 1 match per line.
+                               (if (= global-lines global-matches)
+                                   ""
+                                   (%format " in %d %s"
+                                            global-lines
+                                            (ngettext "line" "lines"
+                                                      global-lines)))
+                               (occur-regexp-descr regexp)))
+              (set! end (point))
+              (when title-face
+                (add-face-text-property beg end title-face)))
+            (goto-char (point-min)))
+          (if coding
+              ;; CODING is buffer-file-coding-system of the first buffer
+              ;; that locally binds it.  Let's use it also for the output
+              ;; buffer.
+              (set-buffer-local-value! out-buf 'buffer-file-coding-system coding))
+          ;; Return the number of matches
+          global-matches)))
+
+    (define (occur-engine-line beg end . args)
+      ;; GNU Emacs's `occur-engine-line' (`replace.el:2572').
+      ;;--------------------------------------------------------------
+      (let ((keep-props (if (pair? args) (car args) #f)))
+        (if (and keep-props (font-lock-mode-on?))
+            (font-lock-ensure beg end))
+        (if (and keep-props (not (eq? (*occur-excluded-properties*) #t)))
+            (let ((str (buffer-substring beg end)))
+              (remove-list-of-text-properties
+               0 (string-length str) (*occur-excluded-properties*) str)
+              str)
+            (buffer-substring-no-properties beg end))))
+
+    (define (occur-engine-add-prefix lines . args)
+      ;; GNU Emacs's `occur-engine-add-prefix' (`replace.el:2583').
+      ;;--------------------------------------------------------------
+      (let ((prefix-face (if (pair? args) (car args) #f)))
+        (map (lambda (line)
+               (concat (if prefix-face
+                           (propertize "       :" 'font-lock-face prefix-face)
+                           "       :")
+                       line "\n"))
+             lines)))
+
+    (define (occur-accumulate-lines count . args)
+      ;; GNU Emacs's `occur-accumulate-lines' (`replace.el:2595').
+      ;;--------------------------------------------------------------
+      (let ((keep-props (if (pair? args) (car args) #f))
+            (pt (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+        (save-excursion
+          (when pt
+            (goto-char pt))
+          (let ((forwardp (> count 0))
+                (result '())
+                (moved #f))
+            (let loop ()
+              (unless (or (zero? count)
+                          (if forwardp
+                              (eobp)
+                              (and (bobp) (not moved))))
+                (set! count (+ count (if forwardp -1 1)))
+                (let ((beg (line-beginning-position))
+                      (end (line-end-position)))
+                  (set! result
+                        (cons (occur-engine-line beg end keep-props) result)))
+                (set! moved (= 0 (forward-line (if forwardp 1 -1))))
+                (loop)))
+            (reverse result)))))
+
+    (define (occur-context-lines out-line nlines keep-props begpt endpt
+                                 curr-line prev-line prev-after-lines
+                                 . args)
+      ;; GNU Emacs's `occur-context-lines' (`replace.el:2618'): "Generate
+      ;; context display for occur."
+      ;;--------------------------------------------------------------
+      (let ((prefix-face (if (pair? args) (car args) #f))
+            (orig-line (if (and (pair? args) (pair? (cdr args)))
+                           (cadr args) #f))
+            (multi-occur-p (if (and (pair? args) (pair? (cdr args))
+                                    (pair? (cddr args)))
+                               (caddr args) #f)))
+        ;; Find after- and before-context lines of the current match.
+        (let ((before-lines
+               (reverse (cdr (occur-accumulate-lines
+                              (- (+ 1 (abs nlines))) keep-props begpt))))
+              (after-lines
+               (cdr (occur-accumulate-lines
+                     (+ 1 nlines) keep-props endpt)))
+              (separator #f))
+          (when (and (*list-matching-lines-jump-to-current-line*)
+                     (not multi-occur-p))
+            (when (and (>= orig-line (- curr-line nlines))
+                       (< orig-line curr-line))
+              (let ((curstring
+                     (list-ref before-lines
+                               (- (length before-lines)
+                                  (- curr-line orig-line)))))
+                (add-face-text-property
+                 0 (string-length curstring)
+                 (*list-matching-lines-current-line-face*) #f curstring)
+                (add-text-properties 0 (string-length curstring)
+                                     '(current-line t) curstring)))
+            (when (and (<= orig-line (+ curr-line nlines))
+                       (> orig-line curr-line))
+              (let ((curstring
+                     (list-ref after-lines (- orig-line curr-line 1))))
+                (add-face-text-property
+                 0 (string-length curstring)
+                 (*list-matching-lines-current-line-face*) #f curstring)
+                (add-text-properties 0 (string-length curstring)
+                                     '(current-line t) curstring))))
+          ;; Combine after-lines of the previous match
+          ;; with before-lines of the current match.
+          (when prev-after-lines
+            ;; Don't overlap prev after-lines with current before-lines.
+            (if (>= (+ prev-line (length prev-after-lines))
+                    (- curr-line (length before-lines)))
+                (set! prev-after-lines
+                      (seq-take prev-after-lines
+                                (- curr-line prev-line
+                                   (length before-lines) 1)))
+                ;; Separate non-overlapping context lines with a dashed line.
+                (set! separator "-------\n")))
+          (when prev-line
+            ;; Don't overlap current before-lines with previous match line.
+            (if (<= (- curr-line (length before-lines)) prev-line)
+                (set! before-lines
+                      (nthcdr (- (length before-lines)
+                                 (- curr-line prev-line 1))
+                              before-lines))
+                ;; Separate non-overlapping before-context lines.
+                (unless (> nlines 0)
+                  (set! separator "-------\n"))))
+          (list
+           ;; Return a list where the first element is the output line.
+           (apply concat
+                  (append
+                   (if prev-after-lines
+                       (occur-engine-add-prefix prev-after-lines prefix-face)
+                       '())
+                   (if separator
+                       (list (if prefix-face
+                                 (propertize separator
+                                             'font-lock-face prefix-face)
+                                 separator))
+                       '())
+                   (occur-engine-add-prefix before-lines prefix-face)
+                   (list out-line)))
+           ;; And the second element is the list of context after-lines.
+           (if (> nlines 0) after-lines #f)))))
+
+    (define (occur--garbage-collect-revert-args)
+      ;; GNU Emacs's `occur--garbage-collect-revert-args'
+      ;; (`replace.el:1660').
+      ;;--------------------------------------------------------------
+      (let ((args (occur-revert-arguments)))
+        (when (pair? args)
+          (for-each (lambda (boo)
+                      (when (overlayp boo) (delete-overlay boo)))
+                    (list-ref-or args 2 '()))))
+      (kill-local-variable 'occur-revert-arguments))
+
+    (define (occur-revert-function ignore1 ignore2)
+      ;; GNU Emacs's `occur-revert-function' (`replace.el:1712'):
+      ;; "Handle `revert-buffer' for Occur mode buffers."
+      ;;--------------------------------------------------------------
+      (apply occur-1 (append (occur-revert-arguments)
+                             (list (buffer-name)))))
+
+    (define (occur-mode--find-occurrences)
+      ;; GNU Emacs's `occur-mode--find-occurrences' (`replace.el:1723').
+      ;;--------------------------------------------------------------
+      (let* ((targets (get-text-property (point) 'occur-target))
+             (start (occur--targets-start targets)))
+        (unless targets
+          (error "No occurrence on this line"))
+        (unless (buffer-live-p (marker-buffer start))
+          (error "Buffer for this occurrence was killed"))
+        targets))
+
+    (define (occur-mode-find-occurrence)
+      ;; GNU Emacs's `occur-mode-find-occurrence' (`replace.el:1717'):
+      ;; "Return a marker to the first match of the line at point."
+      ;; Retained for compatibility.
+      ;;--------------------------------------------------------------
+      (occur--targets-start (occur-mode--find-occurrences)))
+
+    (define (occur--targets-start targets)
+      ;; GNU Emacs's `occur--targets-start' (`replace.el:1707'): "First
+      ;; marker of the `occur-target' property value TARGETS."
+      ;;--------------------------------------------------------------
+      (if (pair? targets)
+          (car (car targets))
+          ;; Tolerate an `occur-target' value that is a single marker for
+          ;; compatibility.
+          targets))
+
+    (define (occur--set-arrow)
+      ;; GNU Emacs's `occur--set-arrow' (`replace.el:1737'): "Set the
+      ;; overlay arrow at the first line of the occur match at point."
+      ;;
+      ;; The renderer draws no overlay arrows (`xdisp.scm` says so where
+      ;; the variable lives), so what this sets is the marker and its
+      ;; position.
+      ;;--------------------------------------------------------------
+      (save-excursion
+        (let ((target (get-text-property (point) 'occur-target))
+              ;; Find the start of the occur match, in case it's multi-line.
+              (prev (previous-single-property-change (point) 'occur-target)))
+          (when (and prev (eq? (get-text-property prev 'occur-target) target))
+            (goto-char prev))
+          (set! overlay-arrow-position
+                (set-marker (or overlay-arrow-position (make-marker))
+                            (line-beginning-position))))))
+
+    (define-command (occur-mode-goto-occurrence event)
+      ;; GNU Emacs's `occur-mode-goto-occurrence' (`replace.el:1759'):
+      ;; "Go to the occurrence specified by EVENT, a mouse click. If not
+      ;; invoked by a mouse click, go to occurrence on the current line."
+      ;;--------------------------------------------------------------
+      "Go to the occurrence the current line describes."
+      (interactive (list (*last-nonmenu-event*)))
+      (let* ((buffer (if event (current-buffer) #f))
+             (targets
+              (if (not event)
+                  ;; Actually `event-end' works correctly with a nil
+                  ;; argument as well, so we could dispense with this test,
+                  ;; but let's not rely on this undocumented behavior.
+                  (occur-mode--find-occurrences)
+                  (with-current-buffer
+                      (window-buffer (posn-window (event-end event)))
+                    (save-excursion
+                      (goto-char (posn-point (event-end event)))
+                      (occur-mode--find-occurrences)))))
+             (pos (occur--targets-start targets)))
+        (occur--set-arrow)
+        (pop-to-buffer (marker-buffer pos))
+        (goto-char pos)
+        (occur--highlight-occurrences targets)
+        (when buffer (next-error-found buffer (current-buffer)))
+        (run-hooks (*occur-mode-find-occurrence-hook*))))
+
+    (define-alias occur-mode-mouse-goto occur-mode-goto-occurrence)
+
+    (define-command (occur-mode-goto-occurrence-other-window)
+      ;; GNU Emacs's `occur-mode-goto-occurrence-other-window'
+      ;; (`replace.el:1789'): "Go to the occurrence the current line
+      ;; describes, in another window."
+      ;;--------------------------------------------------------------
+      "Go to the occurrence the current line describes, in another window."
+      (interactive)
+      (let ((buffer (current-buffer))
+            (pos (occur--targets-start (occur-mode--find-occurrences))))
+        (occur--set-arrow)
+        (switch-to-buffer-other-window (marker-buffer pos))
+        (goto-char pos)
+        (next-error-found buffer (current-buffer))
+        (run-hooks (*occur-mode-find-occurrence-hook*))))
+
+    (define (occur-goto-locus-delete-o)
+      ;; GNU Emacs's `occur-goto-locus-delete-o' (`replace.el:1800').
+      ;;--------------------------------------------------------------
+      (for-each delete-overlay occur-highlight-overlays)
+      (set! occur-highlight-overlays '())
+      ;; Get rid of timer and hook that would try to do this again.
+      (if (timer? next-error-highlight-timer)
+          (cancel-timer next-error-highlight-timer))
+      (remove-hook *pre-command-hook* occur-goto-locus-delete-o))
+
+    ;; Highlight the current visited occurrence.
+    (define (occur--highlight-occurrences targets)
+      ;; GNU Emacs's `occur--highlight-occurrences' (`replace.el:1810').
+      ;;--------------------------------------------------------------
+      (let ((start-marker (occur--targets-start targets)))
+        (occur-goto-locus-delete-o)
+        (with-current-buffer (marker-buffer start-marker)
+          (when (or (eq? (*next-error-highlight*) #t)
+                    (number? (*next-error-highlight*)))
+            (set! occur-highlight-overlays
+                  (map (lambda (target)
+                         (let ((o (make-overlay (car target) (cdr target))))
+                           (overlay-put o 'face 'next-error)
+                           o))
+                       (if (list? targets)
+                           targets
+                           ;; `occur-target' compatibility: when we only
+                           ;; have a single starting point, highlight the
+                           ;; rest of the line.
+                           (let ((end-pos (save-excursion
+                                            (goto-char start-marker)
+                                            (line-end-position))))
+                             (list (cons start-marker end-pos))))))
+            (add-hook *pre-command-hook* occur-goto-locus-delete-o)
+            (when (number? (*next-error-highlight*))
+              ;; We want highlighting for a limited time: set up a timer
+              ;; to delete it.
+              (set! next-error-highlight-timer
+                    (run-at-time (*next-error-highlight*) #f
+                                 occur-goto-locus-delete-o))))
+          (when (eq? (*next-error-highlight*) 'fringe-arrow)
+            ;; We want a fringe arrow (instead of highlighting).
+            (set! next-error-overlay-arrow-position
+                  (copy-marker (line-beginning-position)))))))
+
+    (define-command (occur-mode-display-occurrence)
+      ;; GNU Emacs's `occur-mode-display-occurrence' (`replace.el:1837').
+      ;;
+      ;; Emacs binds `display-buffer-overriding-action` around the
+      ;; display; this tree's `display-buffer` takes the action as its
+      ;; argument, so it is passed there directly.
+      ;;--------------------------------------------------------------
+      "Display in another window the occurrence the current line describes."
+      (interactive)
+      (let* ((buffer (current-buffer))
+             (targets (occur-mode--find-occurrences))
+             (pos (occur--targets-start targets)))
+        (parameterize ((*next-error-highlight*
+                        (*next-error-highlight-no-select*)))
+          (let ((window (display-buffer
+                         (marker-buffer pos)
+                         '(nil (inhibit-same-window . t)))))
+            (occur--set-arrow)
+            ;; This is the way to set point in the proper window.
+            (save-selected-window
+              (select-window window)
+              (goto-char pos)
+              (occur--highlight-occurrences targets)
+              (next-error-found buffer (current-buffer))
+              (run-hooks (*occur-mode-find-occurrence-hook*)))))))
+
+    (define (occur-find-match n search-command message-string)
+      ;; GNU Emacs's `occur-find-match' (`replace.el:1855').
+      ;;--------------------------------------------------------------
+      (let ((n (or n 1)))
+        (let loop ((n n))
+          (when (> n 0)
+            (let ((r (search-command (point) 'occur-match)))
+              (if (and r (get-text-property r 'occur-match))
+                  (set! r (search-command r 'occur-match)))
+              (if r
+                  (goto-char r)
+                  (user-error message-string))
+              (loop (- n 1)))))))
+
+    (define-command (occur-next n)
+      ;; GNU Emacs's `occur-next' (`replace.el:1867`): "Move to the Nth
+      ;; (default 1) next match in an Occur mode buffer."
+      ;;--------------------------------------------------------------
+      "Move to the Nth (default 1) next match in an Occur mode buffer."
+      (interactive "p")
+      (occur-find-match n next-single-property-change "No more matches"))
+
+    (define-command (occur-prev n)
+      ;; GNU Emacs's `occur-prev' (`replace.el:1873`): "Move to the Nth
+      ;; (default 1) previous match in an Occur mode buffer."
+      ;;--------------------------------------------------------------
+      "Move to the Nth (default 1) previous match in an Occur mode buffer."
+      (interactive "p")
+      (occur-find-match n previous-single-property-change "No earlier matches"))
+
+    (define-command (occur-next-error argp . rest)
+      ;; GNU Emacs's `occur-next-error' (`replace.el:1879`): "Move to the
+      ;; ARGPth (default 1) next match in an Occur mode buffer. RESET
+      ;; non-nil means rewind to the first match."
+      ;;
+      ;; It is the buffer's `next-error-function`; the command
+      ;; `next-error` that would call it is not ported.
+      ;;--------------------------------------------------------------
+      "Move to the ARGPth (default 1) next match in an Occur mode buffer.
+RESET non-nil means rewind to the first match."
+      (interactive "p")
+      (let ((reset (if (pair? rest) (car rest) #f)))
+      (goto-char (cond (reset (point-min))
+                       ((< argp 0) (line-beginning-position))
+                       ((> argp 0) (line-end-position))
+                       (else (point))))
+      (occur-find-match
+       (abs argp)
+       (if (> 0 argp) previous-single-property-change
+           next-single-property-change)
+       "No more matches")
+      ;; In case the *Occur* buffer is visible in a nonselected window.
+      (let ((win (get-buffer-window (current-buffer) #t)))
+        (if win (set-window-point! win (point))))
+      (occur-mode-goto-occurrence #f)))
+
+    (define occur-mode-hook '())
+    ;; ^ GNU Emacs's `occur-mode-hook' (`replace.el:1643'), a defcustom
+    ;; whose default is `(turn-on-font-lock)`. A plain list, like every
+    ;; mode hook here (`special-mode-hook`, `prog-mode-hook`), because
+    ;; `define-derived-mode` hands the hook to `run-mode-hooks` as a
+    ;; value; the defcustom half waits for a mode macro that can take a
+    ;; parameter. Its default is set at the bottom of this section.
+
+    (define-custom *occur-hook* '()
+      "Hook run by Occur when there are any matches."
+      :type 'hook
+      :group 'matching)
+
+    (define-custom *occur-mode-find-occurrence-hook* '()
+      "Hook run by Occur after locating an occurrence.
+This will be called with the cursor position at the occurrence.  An application
+for this is to reveal context in an outline mode when the occurrence is hidden."
+      :type 'hook
+      :group 'matching)
+
+    (define occur-mode-map (km:keymap '*occur-mode-map*))
+
+    ;; `occur-mode` is `define-derived-mode occur-mode special-mode
+    ;; "Occur" occur-mode-map occur-mode-hook` (`replace.el:1666`).
+    ;; **It is defined after the commands its body names**, where Emacs
+    ;; has it before them, for the reason `define-key`s come after their
+    ;; commands: a Scheme binding is looked up when the body runs and a
+    ;; definition later in the library is not there yet for a compiled
+    ;; caller that runs before the load finishes. `(put 'occur-mode
+    ;; 'mode-class 'special)` is Emacs's and is set below.
+    (define-derived-mode (occur-mode special-mode "Occur"
+                                     occur-mode-map occur-mode-hook)
+      "Major mode for output from \\[occur].
+\\<occur-mode-map>Move point to one of the items in this buffer, then use
+\\[occur-mode-goto-occurrence] to go to the occurrence that the item refers to.
+Alternatively, click \\[occur-mode-mouse-goto] on an item to go to it.
+
+\\{occur-mode-map}"
+      (set-buffer-local-value! (current-buffer) 'revert-buffer-function
+                               occur-revert-function)
+      (set-buffer-local-value! (current-buffer) 'next-error-function
+                               occur-next-error))
+
+    (put 'occur-mode 'mode-class 'special)
+
+    (define-alias list-matching-lines occur)
+
+    ;; Emacs's default `occur-mode-hook` runs `turn-on-font-lock`
+    ;; (`replace.el:1643`), which is why the occurrences' faces are
+    ;; there when the buffer is first shown.
+    (set! occur-mode-hook (list turn-on-font-lock))
+
+    ;; The map's bindings, at the end because a binding holds the
+    ;; command's value. What Emacs's map also binds and this does not:
+    ;; `e` (`occur-edit-mode`), `n`/`p` (`next-error-no-select`/
+    ;; `previous-error-no-select`), `l` (`recenter-current-error`),
+    ;; `C-c C-f` (`next-error-follow-minor-mode`), `c` (`clone-buffer`),
+    ;; and the `[menu-bar occur]` entry.
+    (define-key occur-mode-map (vector 'mouse-2) occur-mode-mouse-goto)
+    (define-key occur-mode-map (kbd "C-c C-c") occur-mode-goto-occurrence)
+    (define-key occur-mode-map (kbd "RET") occur-mode-goto-occurrence)
+    (define-key occur-mode-map (kbd "o")
+      occur-mode-goto-occurrence-other-window)
+    (define-key occur-mode-map (kbd "C-o") occur-mode-display-occurrence)
+    (define-key occur-mode-map (kbd "M-n") occur-next)
+    (define-key occur-mode-map (kbd "M-p") occur-prev)
+    (define-key occur-mode-map (kbd "r") occur-rename-buffer)
+
+    ;; `occur-mode`'s `(add-hook 'kill-buffer-hook
+    ;; #'occur--garbage-collect-revert-args nil t)` (`replace.el:1674`).
+    ;; **The LOCAL argument is not carried** (`add-hook` here is one
+    ;; global list, `subr.scm` says why), so the function goes on the
+    ;; global hook and guards itself: `%kill-buffer` runs the hook with
+    ;; the dying buffer current, so `occur-revert-arguments` is that
+    ;; buffer's own, and a buffer that never ran `occur` answers #f.
+    (add-hook *kill-buffer-hook* occur--garbage-collect-revert-args)
+
+    ;;----------------------------------------------------------------
+    ;; `isearch-occur' - isearch.el's command, here for the reason
+    ;; `isearch-query-replace' is: it calls `occur' and `region-bounds',
+    ;; both of this library, and `replace.scm` imports `isearch.scm`, so
+    ;; the other way round would be a cycle. The search's loop runs it
+    ;; through `call-interactively` when the tool bar's "Show hits"
+    ;; button (or `M-s o`) names it.
+    ;;
+    ;; Emacs's `(when (and (symbolp this-command) (get this-command
+    ;; 'isearch-exit)) (isearch-done nil t) (isearch-clean-overlays))`
+    ;; is not carried, because Emacs 31.1 never puts that symbol property
+    ;; on the command (`emacs -Q --batch` answers nil) - so the search is
+    ;; still running when `occur' displays its buffer, and the search's
+    ;; own loop here does the same thing: it does not exit first.
+    ;;----------------------------------------------------------------
+    (define-command (isearch-occur regexp nlines)
+      ;; GNU Emacs's `isearch-occur' (`isearch.el:2475`): "Run `occur'
+      ;; using the last search string as the regexp. ..."
+      ;;
+      ;; The regexp conversion's two `isearch-regexp-function` arms are
+      ;; not carried - this tree's search is literal, and
+      ;; `isearch-regexp-function` does not exist - so the cond's last
+      ;; two arms are what is here. `with-isearch-suspended` around the
+      ;; collect prompt is not carried: the prompt is an ordinary
+      ;; minibuffer read while the search's loop waits.
+      ;;--------------------------------------------------------------
+      "Run `occur' using the last search string as the regexp."
+      (interactive
+       (let* ((perform-collect (pair? (current-prefix-arg)))
+              (regexp (if isearch-regexp
+                          isearch-string
+                          (regexp-quote isearch-string))))
+         (list regexp
+               (if perform-collect
+                   ;; Perform collect operation
+                   (if (zero? (regexp-opt-depth regexp))
+                       ;; No subexpression so collect the entire match.
+                       "\\&"
+                       ;; Get the regexp for collection pattern.
+                       (let ((default (let ((entries (history-entries
+                                                      occur-collect-regexp-history)))
+                                        (and (pair? entries) (car entries)))))
+                         (read-regexp
+                          (format-prompt "Regexp to collect" default)
+                          default occur-collect-regexp-history)))
+                   ;; Otherwise normal occur takes numerical prefix argument.
+                   (let ((arg (current-prefix-arg)))
+                     (if arg (prefix-numeric-value arg) #f))))))
+      (parameterize ((*case-fold-search* isearch-case-fold-search)
+                     ;; Set `search-upper-case' to nil to not call
+                     ;; `isearch-no-upper-case-p' in `occur-1'.
+                     (*search-upper-case* #f))
+        (occur regexp nlines (if (use-region-p) (region-bounds) #f))))
 
     ))

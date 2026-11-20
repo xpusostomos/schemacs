@@ -388,13 +388,20 @@
       (barf-if-buffer-read-only start)
       ;; The C's `if (inhibit_modification_hooks) return;' (`:2167') -
       ;; after the read-only gate, before the hooks and everything that
-      ;; precedes them.
+      ;; precedes them. **The `deactivate_mark' write is one of the things
+      ;; it skips** (`:2189' is after the return), which matters wherever
+      ;; the tree stands in for the C's `prepare = false' with this
+      ;; parameter - `message_dolog` does - and matters most when the
+      ;; buffer being written is also the buffer being edited: *Messages*'
+      ;; own "Mark set" would otherwise deactivate the region it was
+      ;; written for.
       (unless (*inhibit-modification-hooks*)
-        (signal-before-change start end))
-      ;; The C's last line is `Fset (Qdeactivate_mark, Qt)' - "Buffer
-      ;; modifications store t in this variable", and it is a buffer-local
-      ;; one, so it is the *current buffer's* value that is set.
-      (set-buffer-local-value! (current-buffer) 'deactivate-mark #t)
+        (signal-before-change start end)
+        ;; The C's last line is `Fset (Qdeactivate_mark, Qt)' - "Buffer
+        ;; modifications store t in this variable", and it is a
+        ;; buffer-local one, so it is the *current buffer's* value that
+        ;; is set.
+        (set-buffer-local-value! (current-buffer) 'deactivate-mark #t))
       start)
 
     (define (prepare-to-modify-buffer start end)

@@ -29,7 +29,8 @@
     ;; below this one - it imports none of subr - so this is not a
     ;; cycle.
     (only (schemacs editor fns)
-          compare-strings concat copy-sequence plist-get plist-put)
+          compare-strings concat copy-sequence nreverse nconc
+          plist-get plist-put)
     ;; The key event model and `kbd' live in `character.sld', the lowest
     ;; editor library - see its export note. They are re-exported from
     ;; here so that a library importing `(schemacs editor subr) kbd' still
@@ -91,7 +92,7 @@
 
   (export
    user-error
-   assoc-delete-all assq-delete-all delq
+   assoc-delete-all assq-delete-all delq remq copy-tree
    add-to-history add-to-list
    ;; string/list helpers `subr.el`'s, for the external packages and
    ;; anything else written in Emacs's idiom
@@ -139,6 +140,7 @@
    *delayed-after-hook-functions*
    *delayed-mode-hooks*
    *delay-mode-hooks*
+   *use-dialog-box-override*
    delay-mode-hooks
    ignore
    run-hooks
@@ -912,6 +914,12 @@
     ;; mode's `:after-hook' pushed, run at the very end of
     ;; `run-mode-hooks'.
 
+    (define *use-dialog-box-override* (make-parameter #f))
+    ;; ^ GNU Emacs's `use-dialog-box-override' (`subr.el:4118'):
+    ;; "Whether `use-dialog-box-p' should always return t." Emacs
+    ;; `let'-binds it in `server.el' and `nsm.el', so it is a parameter;
+    ;; `files.scm''s `use-dialog-box-p' is its one reader here.
+
     (define (delay-mode-hooks thunk)
       ;; GNU Emacs's `delay-mode-hooks' (`subr.el':2795): "Execute BODY,
       ;; but delay any `run-mode-hooks'. These hooks will be executed by
@@ -1440,6 +1448,62 @@
       ;; with the test `eq'.
       ;;--------------------------------------------------------------
       (assoc-delete-all key alist eq?))
+
+    (define (copy-tree tree . rest)
+      ;; GNU Emacs's `copy-tree' (`subr.el:1002'): "Make a copy of TREE.
+      ;; If TREE is a cons cell, this recursively copies both its car
+      ;; and its cdr. Contrast to `copy-sequence', which copies only
+      ;; along the cdrs. With the second argument VECTORS-AND-RECORDS
+      ;; non-nil, this traverses and copies vectors and records as well
+      ;; as conses."
+      ;;
+      ;; The C's two loops are kept: the spine is walked with `push',
+      ;; reversed and linked with `nconc', and the improper tail is
+      ;; copied only when it is a vector or a record.
+      ;;
+      ;; **The record arm is not carried**: Emacs's `recordp' names its
+      ;; own cl-defstruct records, and this tree's records are Guile's,
+      ;; which `copy-sequence' has no arm for. Nothing here passes
+      ;; VECTORS-AND-RECORDS for a record; a caller that does gets the
+      ;; "Wrong type argument: sequencep" `copy-sequence' raises.
+      ;;--------------------------------------------------------------
+      (let ((vectors-and-records (if (pair? rest) (car rest) #f)))
+        (if (pair? tree)
+            (let loop ((tree tree) (result '()))
+              (if (pair? tree)
+                  (let ((newcar (car tree)))
+                    (if (or (pair? (car tree))
+                            (and vectors-and-records (vector? (car tree))))
+                        (set! newcar (copy-tree (car tree) vectors-and-records)))
+                    (loop (cdr tree) (cons newcar result)))
+                  (nconc (nreverse result)
+                         (if (and vectors-and-records (vector? tree))
+                             (copy-tree tree vectors-and-records)
+                             tree))))
+            (if (and vectors-and-records (vector? tree))
+                (let ((copy (copy-sequence tree)))
+                  (let loop ((i (- (vector-length copy) 1)))
+                    (when (>= i 0)
+                      (vector-set! copy i
+                                   (copy-tree (vector-ref copy i)
+                                              vectors-and-records))
+                      (loop (- i 1))))
+                  copy)
+                tree))))
+
+    (define (remq elt list)
+      ;; GNU Emacs's `remq' (`subr.el:1157'): "Return LIST with all
+      ;; occurrences of ELT removed. The comparison is done with `eq'.
+      ;; Contrary to `delq', this does not use side-effects, and the
+      ;; argument LIST is not modified."
+      ;;--------------------------------------------------------------
+      (let ((list (let skip ((list list))
+                    (if (and (pair? list) (eq? elt (car list)))
+                        (skip (cdr list))
+                        list))))
+        (if (memq elt list)
+            (delq elt (copy-sequence list))
+            list)))
 
     (define (nthcdr n list)
       ;; GNU Emacs's `nthcdr': the tail of LIST after the first N

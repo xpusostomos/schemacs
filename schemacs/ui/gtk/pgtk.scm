@@ -42,7 +42,7 @@
     ;; and `dynamic-func' are core bindings, which an R7RS library
     ;; reaches through `(guile)' - as `frame.sld''s SIGTSTP does.
     (only (system foreign) pointer->procedure string->pointer pointer->string
-          pointer->bytevector null-pointer? make-pointer int void double
+          pointer->bytevector null-pointer? make-pointer pointer-address int void double
           unsigned-int make-c-struct parse-c-struct %null-pointer)
     (only (guile) dynamic-link dynamic-func assq-ref filter
           u32vector->list current-error-port simple-format exit logand)
@@ -83,18 +83,18 @@
           ;; Emacs's four calls in `pgtk_mouse_position' (`pgtkterm.c:3510')
           display:get-default-seat seat:get-pointer
           window:get-device-position window:get-display
+          ;; The mouse pointer's *shape* - `define_frame_cursor`
+          ;; (`pgtkterm.c:2853`) is `gdk_window_set_cursor` over the
+          ;; edit widget, and the cursors themselves are made with
+          ;; `gdk_cursor_new_for_display` (`pgtkfns.c:1573`).
+          display:get-default <GdkCursorType> cursor:new-for-display
+          window:set-cursor
           container:add
           connect set-prgname set-program-class idle-add
           source-remove? timeout-add
           ;; The main loop the read waits in. Gtk drives it; see
           ;; `pgtk-wait!'.
           main-loop:new main-loop:run main-loop:quit
-          ;; `pgtk-wait!' drops a nested loop with it, and this
-          ;; name had been used there *without* being imported
-          ;; since the nested loops were written - the tree's
-          ;; recurring missing-import class, invisible until the
-          ;; branch that releases a nested loop is taken.
-          main-loop:unref
           ;; Running Gtk's own main loop, which is what stage 2 of the
           ;; front-end work is: the loop is Gtk's, not ours.
           main main-quit
@@ -125,6 +125,41 @@
           ;;----------------------------------------------------------------
           <GtkBox> <GtkMenuBar> <GtkMenu> <GtkMenuItem> <GtkCheckMenuItem>
           <GtkRadioMenuItem> <GtkSeparatorMenuItem> <GtkLabel>
+          ;; The overlay that lets a scroll bar sit above the drawing
+          ;; area, and the scroll bar's own widgets - `gtkutil.c`'s
+          ;; `xg_create_scroll_bar`/`xg_finish_scroll_bar_creation`.
+          <GtkOverlay> overlay:add-overlay
+          widget:set-margin-start widget:set-margin-top
+          <GtkScrollbar> <GtkAdjustment> adjustment:new
+          range:set-adjustment range:get-adjustment
+          range:get-value range:set-value
+          adjustment:get-upper adjustment:get-page-size
+          adjustment:get-step-increment adjustment:set-page-size
+          adjustment:set-step-increment adjustment:set-page-increment
+          ;; The file chooser - `gtkutil.c`'s `xg_get_file_with_chooser`
+          ;; and `xg_dialog_run`. `GtkFileChooserDialog` has no
+          ;; constructor function in the typelib (its C constructor is
+          ;; variadic), so it is made with `make` and given its action
+          ;; and buttons afterwards - which is what those functions do.
+          <GtkCheckButton> <GtkFileChooserDialog> <GtkFileChooserAction>
+          check-button:new-with-label toggle-button:set-active
+          toggle-button:get-active? label:new
+          dialog:add-button dialog:response
+          file-chooser:set-action file-chooser:set-local-only
+          file-chooser:set-current-folder? file-chooser:set-filename?
+          file-chooser:set-current-name file-chooser:get-filename
+          file-chooser:set-show-hidden file-chooser:get-show-hidden?
+          file-chooser:set-extra-widget
+          window:set-title window:set-transient-for window:set-modal
+          window:set-destroy-with-parent widget:show
+          ;; GSettings, for the desktop's `toolbar-style`
+          ;; (`xsettings.c:227`, `:1115`): the schema check first, as
+          ;; Emacs's `xg_settings_key_valid_p` does, so a machine without
+          ;; the GNOME schemas never reaches `g_settings_new` (which
+          ;; aborts on a missing schema).
+          settings:new settings:get-string
+          settings-schema-source:get-default settings-schema-source:lookup
+          settings-schema:get-key
           widget:get-style-context style-context:add-class
           style-context:add-provider
           css-provider:new
@@ -136,7 +171,25 @@
           radio-menu-item:join-group
           container:remove container:get-children
           label:set-text widget:set-sensitive widget:set-tooltip-text
-          widget:set-halign widget:set-valign orientable:set-orientation)
+          widget:set-halign widget:set-valign orientable:set-orientation
+          ;;----------------------------------------------------------------
+          ;; The tool bar's widgets - gtkutil.c's `xg_create_tool_bar`
+          ;; (`:5524`) and `xg_make_tool_item` (`:5600`). The bar is
+          ;; GTK's own `GtkToolbar`, as it is in Emacs's Gtk build; the
+          ;; icons are `GtkImage`s loaded from the same XPM files the
+          ;; rest of the port uses.
+          ;;----------------------------------------------------------------
+          <GtkToolbar> <GtkToolItem> <GtkSeparatorToolItem> <GtkImage>
+          <GtkButton> <GtkEventBox> <GtkToolbarStyle> <GtkReliefStyle>
+          ;; `find_icon_from_name` (`gtkutil.c:5962`): the icon-theme
+          ;; names `x-gtk-map-stock` answers, asked of the toolbar's
+          ;; screen's theme.
+          icon-theme:has-icon? icon-theme:get-for-screen widget:get-screen
+          toolbar:get-icon-size image:new-from-icon-name
+          toolbar:insert toolbar:set-style
+          tool-item:set-homogeneous box:reorder-child
+          button:set-relief widget:set-focus-on-click
+          image:set-from-file widget:set-name)
     ;; `symbol->enum`, for the box's orientation; `(gi types)`'
     ;; (pgtk-names holds the typelib itself).
     (only (gi types) symbol->enum)
@@ -154,8 +207,28 @@
           draw-box! draw-window-cursor! erase-window-cursor! flush-display!
           key-event->key
           display-mouse-position get-selection line-height read-input-event
+          ;; **The pointer queries.** `display-mouse-position` is imported
+          ;; right here; these two were *not*, and the `define-method`s
+          ;; below therefore made fresh generics in this module while the
+          ;; ones `frame.scm` calls kept only the default `#f` - so
+          ;; `mouse-absolute-pixel-position` answered `(0 . 0)` for ever
+          ;; and `mouse-drag-line` never resized anything. `define-method`
+          ;; hides the missing-import class: it silently creates the
+          ;; binding, so neither the compiler nor the loader says a word.
+          display-mouse-absolute-pixel-position display-set-mouse-pixel-position
+          ;; `raise-frame`. The same sweep found this one: its method was
+          ;; a private generic too, so `raise-frame` on a Gtk frame was a
+          ;; no-op.
+          display-raise-frame
+          ;; the file chooser the menu's Open and the tool bar's Open
+          ;; button reach through `read-file-name`
+          x-file-dialog
           realize-face resume-display! screen-size
           selection-exists? selection-owner?
+          display-define-frame-cursor
+          display-draw-vertical-border
+          display-default-scroll-bar-width
+          display-set-window-scroll-bar display-redeem-scroll-bars
           set-selection! suspend-display! update-window-begin!
           glyphs->text update-window-end! write-glyphs!
           ;; the terminal hooks and the row the Emacs-shaped
@@ -194,7 +267,11 @@
           frame-selected-window window-buffer
           ;; `menu-bar-mode` turns the bar off by setting this on every
           ;; frame, and `set_frame_menubar` acts on it.
-          frame-parameter)
+          frame-parameter
+          ;; The tool bar's parsed items, which `update_frame_tool_bar`
+          ;; reads - `f->tool_bar_items` and `f->n_tool_bar_items`.
+          frame-tool-bar-items frame-tool-bar-items-used
+          %frame-tool-bar-lines)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
     (only (schemacs editor faces)
@@ -206,6 +283,12 @@
     ;; reading a *window's* buffer, not the current one - see
     ;; `pgtk-ensure-font!`
     (only (schemacs editor buffer) with-current-buffer)
+    ;; The file dialog's own two questions of the file system - "does
+    ;; this name a directory" and "is it absolute" - which the C asks
+    ;; through `Ffile_directory_p` and `Fexpand_file_name`
+    ;; (`gtkutil.c:2712-2722`).
+    (only (schemacs editor fileio)
+          expand-file-name file-directory-p file-name-nondirectory-part)
     ;; the window being edited, which a prompt takes the selection from
     (only (schemacs editor minibuffer) minibuffer-selected-window)
     ;; How many cells a character takes - a CJK ideograph is one character
@@ -220,14 +303,31 @@
           char-super function-key-name make-ctrl-char)
     ;; A mouse event needs the *position* it happened at, which is the
     ;; redisplay's own walk - see `posn-at-x-y'.
+    ;; The Gtk window-system Lisp: which icon-theme name each tool bar
+    ;; image file stands for (`term/pgtk-win.el`, `x-win.el`).
+    (only (schemacs ui gtk pgtk-win) x-gtk-map-stock)
     (only (schemacs editor xdisp) posn-at-x-y remember-mouse-glyph track-mouse
+          note-mouse-highlight
           *redisplay-in-progress* *after-redisplay-hook*
           ;; The two hooks `set_frame_menubar` runs before it recomputes
           ;; the bar.
-          *activate-menubar-hook* *menu-bar-update-hook*)
+          *activate-menubar-hook* *menu-bar-update-hook*
+          ;; `Ftool_bar_get_system_style`, which decides whether a button
+          ;; shows an image, a label or both (`update_frame_tool_bar`),
+          ;; and the seam this front end fills with the desktop's own
+          ;; `toolbar-style` setting (`xsettings.c`'s GSettings read).
+          tool-bar-get-system-style *tool-bar-system-style-function*
+          ;; A desktop setting change is a redisplay: `dynamic-setting.el`
+          ;; answers a `tool-bar-style` change with
+          ;; `(force-mode-line-update t)`.
+          force-mode-line-update)
     ;; `run-hooks` is `subr.el`'s, and a hook is the list of procedures
     ;; it is handed.
     (only (schemacs editor subr) run-hooks)
+    ;; A tool bar item's `:image` is an image object - `(image :type ...
+    ;; :file ...)` - whose plist begins after the leading symbol
+    ;; (`tool-bar-make-keymap-1`).
+    (only (schemacs editor image) image-property)
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
     (only (schemacs editor frame)
@@ -241,6 +341,10 @@
           ;; window work - Emacs's `focus-in-event' ends in
           ;; `select-frame-set-input-focus' (`frame.el:1264').
           *frame-list* select-frame
+          ;; The thumb's portion adjustment reads the window's frame and
+          ;; its line count, as `xg_set_toolkit_scroll_bar_thumb` does
+          ;; (`gtkutil.c:5008`).
+          window-frame window-total-height scroll-bar-adjust-thumb-portion
           ;; The selection read's failure messages ("No selection: %s"),
           ;; which go through the frame the display belongs to.
           set!frame-message)
@@ -257,10 +361,22 @@
           *dispatch-event* *unread-command-events* command-loop-ready?
           ;; a mouse event's own value, for the hand-over path above
           *last-read-event*
+          ;; the click-or-drag threshold, in pixels (`keyboard.c:14449`)
+          double-click-fuzz
+          ;; `read_key_sequence`'s record of what kind of event the last
+          ;; one was: the drain below is this front end's stand-in for a
+          ;; read, so it makes the same record the read makes.
+          record-nonmenu-event!
           ;; What the bar shows: `menu_bar_items`' `[menu-bar]` walk,
           ;; and `menu_separator_name_p`, which the widget builder needs
           ;; to know a `"--"` item from a real one.
-          menu-bar-items menu-separator-name?)
+          menu-bar-items menu-separator-name?
+          ;; The tool bar's item slots - the C's `TOOL_BAR_ITEM_*`
+          ;; enum - which `pgtk-set-frame-toolbar!` reads a vector of.
+          tool-bar-item-key tool-bar-item-enabled-p tool-bar-item-selected-p
+          tool-bar-item-caption tool-bar-item-images tool-bar-item-binding
+          tool-bar-item-type tool-bar-item-help tool-bar-item-rtl-image
+          tool-bar-item-label tool-bar-item-vert-only tool-bar-item-nslots)
     ;; A menu that is cancelled signals quit, exactly as C-g does.
     (only (schemacs editor command) signal-quit)
     ;; `menu-bar-open`'s toolkit branch: `pgtk-menu-bar-open`
@@ -842,7 +958,14 @@
                  (background (colour->rgb (attribute-value attrs ':background)))
                  (inverse (eq? #t (attribute-value attrs ':inverse-video)))
                  (bold (eq? #t (attribute-value attrs ':bold)))
-                 (underline (eq? #t (attribute-value attrs ':underline)))
+                 ;; `:underline` is `t` *or a colour* - a theme may say
+                 ;; `:underline "#3f8f8a"`, which is how omarchy's
+                 ;; themes draw the Occur header - and Emacs's
+                 ;; `s->face->underline` keeps the colour beside the
+                 ;; flag (`underline_defaulted_p` says whether it was
+                 ;; given). The token carries whatever the face says, and
+                 ;; the drawing picks the ink from its type.
+                 (underline (attribute-value attrs ':underline))
                  (fg (if inverse (or background (list 1.0 1.0 1.0))
                          (or foreground (list 0.0 0.0 0.0))))
                  (bg (if inverse (or foreground (list 0.0 0.0 0.0))
@@ -978,6 +1101,13 @@
       ;; area - GNU Emacs's `FRAME_GTK_OUTER_WIDGET` (`wtop') holding the
       ;; edit widget and the menu bar (`gtkutil.c:1670').
       (vbox    #:init-value #f #:accessor pgtk-vbox)
+      ;; The container the drawing area and the scroll bars share - GNU
+      ;; Emacs's `edit_widget` (`FRAME_GTK_WIDGET (f)`), a `GtkFixed`, of
+      ;; which the scroll bar event boxes are `gtk_fixed_put` children.
+      ;; A drawing area cannot have children here, so this is a
+      ;; `GtkOverlay` with the area as its main child and each bar as an
+      ;; overlay child; see `pgtk-open-window`.
+      (overlay #:init-value #f #:accessor pgtk-overlay)
       ;; The menu bar and what it is built from, which is Emacs's
       ;; `f->output_data.pgtk->menubar_widget' beside
       ;; `f->menu_bar_vector' and `f->menu_bar_items_used':
@@ -998,6 +1128,18 @@
       ;; `pgtk-theme-menubar!`.
       (menubar-css   #:init-value #f #:accessor pgtk-menubar-css)
       (menubar-theme #:init-value #f #:accessor pgtk-menubar-theme)
+      ;; The tool bar - `f->output_data.xp->toolbar_widget' and the
+      ;; bookkeeping `update_frame_tool_bar` keeps beside it. The widget
+      ;; is made on the first redisplay that has items, packed after the
+      ;; menu bar (`xg_pack_tool_bar`, `gtkutil.c:5468`), and rebuilt
+      ;; when the item vector changes. `toolbar-held` is the proxies the
+      ;; current buttons were made from (see `pgtk-hold-widget!`), and
+      ;; `toolbar-height` is the allocation the window was last grown by.
+      (toolbar        #:init-value #f #:accessor pgtk-toolbar)
+      (toolbar-held   #:init-value '() #:accessor pgtk-toolbar-held)
+      (toolbar-items  #:init-value #f #:accessor pgtk-toolbar-items)
+      (toolbar-height #:init-value 0 #:accessor pgtk-toolbar-height)
+      (toolbar-hidden #:init-value #f #:accessor pgtk-toolbar-hidden?)
       (surface #:init-value #f #:accessor pgtk-surface)
       ;; ^ The image surface the frame is drawn into, and the size it was
       ;; made at. `ensure-surface!' must not remake it while it is already
@@ -1021,8 +1163,14 @@
       ;; press was, both kept because a release afterwards is a different
       ;; event - `drag-mouse-1' - which carries the press's position
       ;; beside the release's. Emacs keeps the same two things in
-      ;; `f->mouse_moved' and in the drag's start event.
-      (press-cell #:init-value #f #:accessor pgtk-press-cell)
+      ;; `frame_relative_event_pos' and in the drag's start event.
+      ;;
+      ;; **The press's *pixel* coordinate, not its cell**: the click-or-
+      ;; drag test is `double-click-fuzz' pixels of movement
+      ;; (`keyboard.c:6668-6682'), and a cell is 9 by 20 of them - the
+      ;; quantized comparison this replaces called a click a drag
+      ;; whenever the pointer crossed a cell boundary.
+      (press-pixel #:init-value #f #:accessor pgtk-press-pixel)
       (press-posn #:init-value #f #:accessor pgtk-press-posn)
       ;; Input events the signal handler has collected.
       (queue   #:init-value '() #:accessor pgtk-queue)
@@ -1068,7 +1216,52 @@
       ;; The glyph the pointer was last reported on, as `remember-mouse-glyph'
       ;; answers it - GNU Emacs's `dpyinfo->last_mouse_glyph' and
       ;; `last_mouse_glyph_frame'. #f before the first report.
-      (last-mouse-glyph #:init-value #f #:accessor pgtk-last-mouse-glyph))
+      (last-mouse-glyph #:init-value #f #:accessor pgtk-last-mouse-glyph)
+      ;; The GdkDisplay these cursors belong to, and the cursors
+      ;; themselves, as `((KIND . CURSOR) ...)`. GNU Emacs keeps the
+      ;; sixteen in `struct pgtk_output` (`text_cursor`,
+      ;; `nontext_cursor`, ...) and makes them with
+      ;; `gdk_cursor_new_for_display` when the frame is created
+      ;; (`pgtkfns.c:1573-1586`). **The proxies are held here for the
+      ;; display's life**, like every other GObject proxy in this file: a
+      ;; collected proxy would release the cursor Gdk is still using.
+      (gdk-display #:init-value #f #:accessor pgtk-gdk-display)
+      (cursors #:init-value '() #:accessor pgtk-cursors)
+      ;; `f->output_data.pgtk->current_cursor`: what the widget's cursor
+      ;; currently is, so an unchanged shape costs nothing.
+      (current-cursor #:init-value #f #:accessor pgtk-current-cursor)
+      ;; The scroll bars this display has made: `((WINDOW . BAR) ...)`,
+      ;; where a BAR is a vector `#(WINDOW BOX WIDGET ADJUSTMENT
+      ;; DRAGGING)`. GNU Emacs's `struct x_output` has no such table: its
+      ;; scroll bars hang off each `struct window`
+      ;; (`w->vertical_scroll_bar`), which is where they are made and
+      ;; freed by `set_vertical_scroll_bar` and `redeem_scroll_bar`. A
+      ;; window here is not a display object, so the display keeps the
+      ;; table and `display-redeem-scroll-bars` frees the ones no window
+      ;; used this redisplay.
+      (scroll-bars #:init-value '() #:accessor pgtk-scroll-bars)
+      ;; The proxies of every scroll bar widget ever made, for the
+      ;; reason in `pgtk-hold-widget!`.
+      (scrollbar-held #:init-value '() #:accessor pgtk-scrollbar-held)
+      ;; `scroll_bar_width_for_theme` (`gtkutil.c:4460`) and
+      ;; `min-slider-length`, cached because both are style queries and
+      ;; one of them runs on every redisplay.
+      (scrollbar-width #:init-value #f #:accessor pgtk-scrollbar-width)
+      (scrollbar-min-slider #:init-value #f #:accessor pgtk-scrollbar-min-slider)
+      ;; The CSS providers that colour the bars from the `scroll-bar'
+      ;; face - GNU Emacs's `scrollbar_foreground_css_provider` and
+      ;; `scrollbar_background_css_provider` (`pgtkfns.c:1326'), whose
+      ;; rules are `scrollbar slider { background-color: #...; }' and
+      ;; `scrollbar trough { ... }' (`:856', `:888'). Empty CSS means
+      ;; "honour the Gtk theme", which is Emacs's answer when the face
+      ;; names no colour.
+      (scrollbar-fg-provider #:init-value #f #:accessor pgtk-scrollbar-fg-provider)
+      (scrollbar-bg-provider #:init-value #f #:accessor pgtk-scrollbar-bg-provider)
+      (scrollbar-theme #:init-value #f #:accessor pgtk-scrollbar-theme)
+      ;; `window_being_scrolled` (`pgtkterm.c:3946`): the window whose
+      ;; bar was last interacted with, so its `button-release-event`
+      ;; tells `scroll-bar-toolkit-scroll` the interaction ended.
+      (scrolled-window #:init-value #f #:accessor pgtk-scrolled-window))
 
     (define (pgtk-frame-for d)
       ;; The frame drawn on display D, or #f if none is. A window knows its
@@ -1284,6 +1477,7 @@
                  (*unread-command-events* (cdr unread))
                  (let ((ev (car unread)))
                    (*last-read-event* ev)
+                   (record-nonmenu-event! #f ev)
                    (dispatch ev))
                  (when (and (command-loop-ready?) (null? *pgtk-running*))
                    (loop)))
@@ -1294,7 +1488,9 @@
                        (unless (eq? raw *pgtk-skip*)
                          (*last-read-event* raw)
                          (let ((event (and raw (key-event->key d raw))))
-                           (when event (dispatch event)))))
+                           (when event
+                             (record-nonmenu-event! raw event)
+                             (dispatch event)))))
                      (when (and (command-loop-ready?) (null? *pgtk-running*))
                        (loop)))))))))
          (lambda () (set! *draining* #f)))))
@@ -1313,9 +1509,18 @@
       (when (pair? *pgtk-running*)
         (main-loop:quit (car *pgtk-running*))))
 
+    (define pgtk-move-notified '())
+    ;; ^ The displays with a movement *notification* outstanding - the
+    ;; port's stand-in for the C's poll: a glyph change with tracking on
+    ;; queues one marker, and making the event consumes it. A plain list
+    ;; rather than a record slot, so the display record's layout did not
+    ;; have to change for it.
+
     (define (note-mouse-movement d x y)
       ;; GNU Emacs's `note_mouse_movement' (`pgtkterm.c:5892'), for one
-      ;; motion report at frame cell X, Y:
+      ;; motion report at frame cell X, Y - the C reads pixels and this
+      ;; front end's coordinates are cells, as every `posn-at-x-y` call
+      ;; in it is:
       ;;
       ;;   "We have received a mouse movement event ... If the mouse is
       ;;    over a different glyph than it was last time, tell the
@@ -1341,29 +1546,48 @@
       ;; motion signal is delivered to the widget it belongs to, so there
       ;; is no such event here; the comparison below is the whole of it.
       ;;--------------------------------------------------------------
-      (let ((glyph (remember-mouse-glyph (or (pgtk-frame-for d) (*current-frame*))
-                                         x y)))
+      (let* ((frame (or (pgtk-frame-for d) (*current-frame*)))
+             (glyph (remember-mouse-glyph frame x y)))
         (if (equal? glyph (pgtk-last-mouse-glyph d))
             #f
             (begin
               (set! (pgtk-last-mouse-glyph d) glyph)
-              ;; **One marker per movement, not one per report.** The flag
-              ;; is Emacs's `f->mouse_moved' doing its job: it says "the
-              ;; reader has not been told about this movement yet", so the
-              ;; reports that arrive before it is told are already covered
-              ;; and make no further marker. It is cleared where the event
-              ;; is finally made (`pgtk-mouse-movement-event'), which is
-              ;; Emacs's `pgtk_mouse_position' clearing it.
-              (unless (pgtk-mouse-moved d)
-                (set! (pgtk-mouse-moved d) #t)
+              ;; **The mouse face is noted here whether or not anything is
+              ;; being tracked.** GNU Emacs's `note_mouse_movement` calls
+              ;; `note_mouse_highlight` at exactly this point
+              ;; (`pgtkterm.c:5945`), outside any `track_mouse` test - a
+              ;; `mouse-face` run lights up on a plain move, which is why
+              ;; hovering works in an editor that has never turned
+              ;; mouse tracking on. `track_mouse` decides only whether a
+              ;; *Lisp event* is made (`some_mouse_moved`,
+              ;; `keyboard.c:1290`), which is the marker queued below.
+              (note-mouse-highlight frame x y)
+              ;; **`f->mouse_moved` is a level**, set on every report
+              ;; that leaves the glyph whether or not anything is being
+              ;; tracked - `note_mouse_movement` sets it unconditionally
+              ;; (`pgtkterm.c:5910`) and it is `some_mouse_moved`
+              ;; (`keyboard.c:1290`) that ignores it while `track_mouse`
+              ;; is nil.
+              (set! (pgtk-mouse-moved d) #t)
+              (when (and track-mouse (not (memq d pgtk-move-notified)))
+                ;; **One marker per movement, not one per report** - the
+                ;; port's stand-in for the C's poll. A *notification* is
+                ;; what has to be one per movement; the level above stays
+                ;; set across a stretch with tracking off, which is why
+                ;; it cannot be the one-shot. The notification is cleared
+                ;; where the event is finally made
+                ;; (`pgtk-mouse-movement-event'), as `pgtk_mouse_position`
+                ;; clears the C's flag.
+                (set! pgtk-move-notified (cons d pgtk-move-notified))
                 ;; **The marker goes through `pgtk-enqueue!', and that is
-                ;; this front end's departure from Emacs.** Emacs's reader
-                ;; *polls* `some_mouse_moved' (`keyboard.c:4525') each time
-                ;; it wants an event; here Gtk's loop delivers every event
-                ;; instead - an idle editor has no read outstanding at all
-                ;; - so the movement is *posted* the way a key is, and the
-                ;; event is still made when that item is delivered, from
-                ;; the pointer's position at that moment.
+                ;; this front end's departure from Emacs.** Emacs's
+                ;; reader *polls* `some_mouse_moved' (`keyboard.c:4525')
+                ;; each time it wants an event; here Gtk's loop delivers
+                ;; every event instead - an idle editor has no read
+                ;; outstanding at all - so the movement is *posted* the
+                ;; way a key is, and the event is still made when that
+                ;; item is delivered, from the pointer's position at that
+                ;; moment.
                 (pgtk-enqueue! d 'pgtk-mouse-moved))
               #t))))
 
@@ -1429,7 +1653,12 @@
       ;; end has one Gdk display behind all of them.
       ;;--------------------------------------------------------------
       (let ((cell (pgtk-pointer-cell d)))
-        (for-each (lambda (other) (set! (pgtk-mouse-moved other) #f))
+        (for-each (lambda (other)
+                    (set! (pgtk-mouse-moved other) #f)
+                    ;; the notification is consumed by making the event
+                    (set! pgtk-move-notified
+                          (filter (lambda (x) (not (eq? x other)))
+                                  pgtk-move-notified)))
                   (cons d (*pgtk-displays*)))
         (and cell
              (list 'mouse-movement
@@ -1484,13 +1713,9 @@
                             (else ""))
                       "mouse-" (number->string button))))
 
-    (define (pgtk-event-cell e)
-      ;; Where a Gtk button event happened, as the CELL the frame's
-      ;; windows are measured in. A Gdk event carries pixels and every
-      ;; window here is placed in cells, so this is the one conversion -
-      ;; `gdk_event_get_coords' is the accessor, the same shape as
-      ;; `event:get-keyval' above it.
-      ;;--------------------------------------------------------------
+    (define (pgtk-event-pixel e)
+      ;; Where a Gtk button event happened, in the frame's *logical
+      ;; pixels*, rounded to integers.
       ;;
       ;; `gdk_event_get_coords' returns a *boolean* and two out
       ;; parameters, so guile-gi answers three values - the same shape as
@@ -1500,10 +1725,21 @@
       ;; *inside the signal handler*, where Gtk swallows it: the symptom
       ;; was a click that did nothing at all, which is the thing this
       ;; whole path exists to fix.
+      ;;
+      ;; This is the coordinate the click-or-drag comparison uses, as
+      ;; GNU Emacs's `event->x' does (`keyboard.c:6663').
       ;;--------------------------------------------------------------
       (let*-values (((_ok x y) (event:get-coords e)))
-        (cons (quotient (inexact->exact (round x)) *cell-width*)
-              (quotient (inexact->exact (round y)) *cell-height*))))
+        (cons (inexact->exact (round x)) (inexact->exact (round y)))))
+
+    (define (pgtk-event-cell e)
+      ;; The same, as the CELL the frame's windows are measured in - what
+      ;; `posn-at-x-y' and the row walk take. A cell is `*cell-width*' by
+      ;; `*cell-height*' pixels.
+      ;;--------------------------------------------------------------
+      (let ((pixel (pgtk-event-pixel e)))
+        (cons (quotient (car pixel) *cell-width*)
+              (quotient (cdr pixel) *cell-height*))))
 
     (define (pgtk-mouse-event from e symbol)
       ;; A Gtk button event as the *mouse event* GNU Emacs makes of one:
@@ -1552,11 +1788,17 @@
       ;; queue's contents are plain values.)
       ;;
       ;; A modifier key press is `*pgtk-skip*`, as the read path has it.
+      ;;
+      ;; **The tag is `event-item` and the mouse handlers use it too**:
+      ;; what they queue is `(pgtk-mouse-event ...)`, made in the signal
+      ;; handler for exactly the same reason. Emacs keeps no distinction
+      ;; either - `kbd_buffer_store_event` stores every event the same
+      ;; way.
       ;;--------------------------------------------------------------
       (let ((raw (pgtk-item->event d e)))
         (if (eq? raw *pgtk-skip*)
             *pgtk-skip*
-            (cons 'key-event raw))))
+            (cons 'event-item raw))))
 
     (define (pgtk-encode-event e)
       ;; A GTK key press as the single INTEGER the interface carries: the
@@ -1800,29 +2042,6 @@
        ((eq? item 'focus-in) *focus-in-code*)
        ((eq? item 'focus-out) *focus-out-code*)
        ((eq? item 'delete-frame) *delete-frame-code*)
-       ;; A button, tagged by the handler that queued it: its event is
-       ;; a mouse event and not a key, so it must not be asked for a
-       ;; keysym.
-       ((and (pair? item) (eq? (car item) 'button-press))
-        (pgtk-mouse-event from (cdr item)
-                          (pgtk-mouse-button-symbol 'down
-                                                    (pgtk-event-button (cdr item)))))
-       ((and (pair? item) (eq? (car item) 'button-release))
-        (pgtk-mouse-event from (cdr item)
-                          (pgtk-mouse-button-symbol 'click
-                                                    (pgtk-event-button (cdr item)))))
-       ;; **A release *after* the pointer moved is a different event** -
-       ;; GNU Emacs's `drag-mouse-1', which `mouse.el:3783' binds to
-       ;; `mouse-set-region'. It is what re-establishes the region the
-       ;; drag's own cleanup takes down, and so what makes the highlight
-       ;; survive letting the button go. The position list carries the
-       ;; press's position *and* the release's, which is what
-       ;; `event-end' reads the second of.
-       ((and (pair? item) (eq? (car item) 'drag-release))
-        (list (pgtk-mouse-button-symbol 'drag
-                                        (pgtk-event-button (cdr item)))
-              (pgtk-press-posn from)
-              (pgtk-posn-for from (cdr item))))
        ;; The pointer moved and nobody has been told yet: **this is where
        ;; the `mouse-movement' event is made** - GNU Emacs's
        ;; `make_lispy_movement' (`keyboard.c:7309') reaching it from
@@ -1837,11 +2056,18 @@
        ;; stands for (`pgtk-menu-selection!`). It is already a *key*, so
        ;; it is tagged rather than decoded - `key-event->key` answers it
        ;; as it stands, and nothing asks it for a keysym.
-       ((and (pair? item) (eq? (car item) 'menu-bar-event)) item)
-       ;; A key decoded when it *arrived* (see `pgtk-key-item`): the
-       ;; integer is the same one `read-input-event` would have answered,
-       ;; and it is a value that can outlive the Gdk event it came from.
-       ((and (pair? item) (eq? (car item) 'key-event)) (cdr item))
+       ((and (pair? item)
+             (memq (car item) '(menu-bar-event tool-bar-event))) item)
+       ;; **An event decoded when it *arrived*** (see `pgtk-key-item`):
+       ;; a key's integer, or a mouse event's `(SYMBOL POSN)` list. It is
+       ;; a plain value that can outlive the Gdk event it came from - and
+       ;; a queued mouse event *does* outlive it: a click made while a
+       ;; nested read is outstanding is taken from this queue after the
+       ;; signal handler has returned, when Gtk has freed its event.
+       ;; Reading the coordinates then is a use-after-free with a silent
+       ;; wrong position as its symptom; GNU Emacs makes the Lisp event
+       ;; in `kbd_buffer_store_event` for the same reason.
+       ((and (pair? item) (eq? (car item) 'event-item)) (cdr item))
        ((memv (pgtk-event-keysym item) modifier-keysyms) *pgtk-skip*)
        (else
           ;; A key from a window that is not the selected frame's selects
@@ -1921,7 +2147,15 @@
          (lambda () (main-loop:run loop))
          (lambda ()
            (set! *pgtk-running* (cdr *pgtk-running*))
-           (when nested? (main-loop:unref loop))
+           ;; **No `main-loop:unref` for the nested loop** - same rule as
+           ;; the file dialog's: guile-gi owns the reference
+           ;; `g_main_loop_new` returned and releases it when the proxy
+           ;; is collected, so an explicit unref is a second one - the
+           ;; `g_main_loop_unref: ref_count > 0` assertion and, once the
+           ;; freed loop is reused, heap corruption. The unref that used
+           ;; to stand here was this bug's first instance; it is only
+           ;; reached by a read nested inside a command (an isearch's
+           ;; key, a nested prompt), which is why it survived so long.
            (when source (source-remove? source))))))
 
     (define (pgtk-read-event d timeout)
@@ -1992,7 +2226,8 @@
        ;; A menu selection is one key of the sequence the item stands
        ;; for - the C's `MENU_BAR_EVENT`, whose `event->arg` is already
        ;; the key (`keyboard.c:7231`).
-       ((and (pair? ev) (eq? (car ev) 'menu-bar-event))
+       ((and (pair? ev)
+             (memq (car ev) '(menu-bar-event tool-bar-event)))
         (cdr ev))
        ((eqv? ev *resize-code*) 'resize)
        ((eqv? ev *focus-in-code*) 'focus-in)
@@ -2065,6 +2300,160 @@
                                    (window:get-device-position gdkwin device)))
                       (cons (truncate (/ x *cell-width*))
                             (truncate (/ y *cell-height*))))))))))
+
+    ;;----------------------------------------------------------------
+    ;; The pointer functions `frame.c` reaches through its terminal hooks:
+    ;; `mouse-absolute-pixel-position`, `set-mouse-position` and
+    ;; `raise-frame`
+    ;;----------------------------------------------------------------
+    ;;
+    ;; `xg_set_mouse_pixel_position`/`pgtk_mouse_absolute_pixel_position`
+    ;; are `gtkutil.c`/`pgtkfns.c`'s; the Gdk calls are made through
+    ;; `dynamic-func` the way the popup and selection code makes its.
+    (define pgtk-pointer-lib (dynamic-link "libgdk-3.so.0"))
+
+    (define (pgtk-pointer-fn name ret args)
+      (pointer->procedure ret (dynamic-func name pgtk-pointer-lib) args))
+
+    (define gdk-device-warp
+      (pgtk-pointer-fn "gdk_device_warp" void (list '* '* int int)))
+    (define gdk-display-get-default-screen
+      (pgtk-pointer-fn "gdk_display_get_default_screen" '* (list '*)))
+    (define gdk-window-get-origin
+      (pgtk-pointer-fn "gdk_window_get_origin" int (list '* '* '*)))
+
+    (define-method (display-mouse-absolute-pixel-position (d <pgtk-display>))
+      ;; GNU Emacs's `pgtk-mouse-absolute-pixel-position`
+      ;; (`pgtkfns.c:3518`) is `gdk_device_get_position`, in pixels.
+      ;; This asks the position `display-mouse-position` asks - relative
+      ;; to the edit widget - and scales the cells to pixels; a constant
+      ;; offset from the C's answer, and `mouse-drag-line` only ever
+      ;; subtracts two of them.
+      ;;--------------------------------------------------------------
+      (let ((cell (pgtk-pointer-cell d)))
+        (and cell (cons (* (car cell) *cell-width*)
+                        (* (cdr cell) *cell-height*)))))
+
+    (define-method (display-set-mouse-pixel-position (d <pgtk-display>) frame x y)
+      ;; `xg_set_mouse_pixel_position` (`gtkutil.c:5615`): "Warp the
+      ;; mouse pointer to X/Y" - the frame's pixels, so the edit widget's
+      ;; origin is added before Gdk is asked, which takes screen
+      ;; coordinates.
+      ;;--------------------------------------------------------------
+      (let* ((area (pgtk-area d))
+             (gdkwin (and area (widget:get-window area))))
+        (if (not gdkwin)
+            #f
+            (let* ((disp (window:get-display gdkwin))
+                   (seat (display:get-default-seat disp))
+                   (device (seat:get-pointer seat))
+                   (screen (gdk-display-get-default-screen
+                            (pgtk-widget-pointer disp)))
+                   (mem (make-c-struct (list int int) (list 0 0)))
+                   (addr (pointer-address mem)))
+              (gdk-window-get-origin (pgtk-widget-pointer gdkwin)
+                                     (make-pointer addr)
+                                     (make-pointer (+ addr 4)))
+              (let ((origin (parse-c-struct mem (list int int))))
+                (gdk-device-warp (pgtk-widget-pointer device) screen
+                                 (+ (car origin) x)
+                                 (+ (cdr origin) y)))
+              #t))))
+
+    (define gtk-window-present
+      (pointer->procedure void (dynamic-func "gtk_window_present"
+                                             (dynamic-link "libgtk-3.so.0"))
+                          (list '*)))
+
+    (define-method (display-raise-frame (d <pgtk-display>) frame)
+      ;; `xg_raise_frame`/`pgtk`'s raise hook: "Bring the frame's window
+      ;; to the front" - `gtk_window_present`, which also deiconifies.
+      ;;--------------------------------------------------------------
+      (let ((win (pgtk-window d)))
+        (and win (gtk-window-present (pgtk-widget-pointer win)))))
+
+    ;;----------------------------------------------------------------
+    ;; The mouse pointer's shape
+    ;;------------------------------------------------------------------
+    ;; GNU Emacs's `define_frame_cursor` for pgtk (`pgtkterm.c:2853`):
+    ;;
+    ;;   if (!f->pointer_invisible
+    ;;       && FRAME_X_OUTPUT (f)->current_cursor != cursor)
+    ;;     gdk_window_set_cursor (gtk_widget_get_window (FRAME_GTK_WIDGET (f)),
+    ;;                            cursor);
+    ;;   FRAME_X_OUTPUT (f)->current_cursor = cursor;
+    ;;
+    ;; where `FRAME_GTK_WIDGET (f)` is the edit widget - here the drawing
+    ;; area, which is the widget that draws the text, the mode line and
+    ;; the tab line. The sixteen cursors are made per frame in
+    ;; `pgtkfns.c:1573`; only the seven the area logic can choose are
+    ;; made here.
+    (define %pgtk-cursor-types
+      '((text . xterm)
+        (nontext . left-ptr)
+        (hand . hand2)
+        (hourglass . watch)
+        (horizontal-drag . sb-h-double-arrow)
+        (vertical-drag . sb-v-double-arrow)
+        ;; `vertical_scroll_bar_cursor` (`pgtkterm.c:7245`), which is what
+        ;; a `(pointer vdrag)` property asks for - the same glyph as a
+        ;; vertical drag, under its own name.
+        (scrollbar . sb-v-double-arrow)
+        ;; `horizontal_scroll_bar_cursor` (`pgtkterm.c:7247`).
+        (horizontal-scrollbar . sb-h-double-arrow)
+        (modeline . xterm)))
+
+    (define (pgtk-cursor d kind)
+      ;; KIND's GdkCursor, made the first time it is asked for -
+      ;; `INSTALL_CURSOR`'s `gdk_cursor_new_for_display`
+      ;; (`pgtkfns.c:1573`), which Emacs runs when the widget exists.
+      ;;--------------------------------------------------------------
+      (or (assq-ref (pgtk-cursors d) kind)
+          (let* ((type (assq-ref %pgtk-cursor-types kind))
+                 (cursor (and type
+                              (cursor:new-for-display
+                               (or (pgtk-gdk-display d)
+                                   (let ((g (display:get-default)))
+                                     (set! (pgtk-gdk-display d) g)
+                                     g))
+                               (symbol->enum <GdkCursorType> type)))))
+            (when cursor
+              (set! (pgtk-cursors d)
+                    (cons (cons kind cursor) (pgtk-cursors d))))
+            cursor)))
+
+    (define-method (display-draw-vertical-border (d <pgtk-display>)
+                                                window x y0 y1)
+      ;; `pgtk_draw_vertical_window_border` (`pgtkterm.c:3386`): "Draw a
+      ;; vertical window border to the right of window W if W doesn't have
+      ;; vertical scroll bars." One pixel wide, from Y0 to Y1, in the
+      ;; `vertical-border` face's foreground - the C's
+      ;; `cairo_rectangle (cr, x, y0, 1, y1 - y0)` and `cairo_fill`.
+      ;;--------------------------------------------------------------
+      (let ((cr (pgtk-cr d)))
+        (when cr
+          (apply cairo-set-source-rgb
+                 cr (or (colour->rgb
+                         (face-attribute 'vertical-border ':foreground
+                                         (window-frame window)))
+                        (colour->rgb
+                         (face-attribute 'default ':foreground
+                                         (window-frame window)))
+                        (list 0.0 0.0 0.0)))
+          (cairo-rectangle cr x y0 1 (max 1 (- y1 y0)))
+          (cairo-fill cr))))
+
+    (define-method (display-define-frame-cursor (d <pgtk-display>) frame cursor)
+      (let ((area (pgtk-area d)))
+        (when area
+          (unless (eq? cursor (pgtk-current-cursor d))
+            (let ((gdkwin (widget:get-window area)))
+              (when gdkwin
+                (let ((gdk-cursor (pgtk-cursor d cursor)))
+                  (when gdk-cursor
+                    (window:set-cursor gdkwin gdk-cursor))))))
+          (set! (pgtk-current-cursor d) cursor))
+        cursor))
 
     (define-method (column-width (d <pgtk-display>)) 1)
     (define-method (line-height (d <pgtk-display>)) 1)
@@ -2325,7 +2714,51 @@
                 (pgtk-show-text! d (substring text i end)
                                  (cell-x (+ x col))
                                  (+ y *font-ascent*))
-                (loop end (+ col (char-display-width c col)))))))))
+                (loop end (+ col (char-display-width c col)))))))
+          ;; **The underline.** `realize-face-token` interns the face's
+          ;; `:underline`, and until this was drawn nothing acted on it -
+          ;; a `header-line` face with only an underline came out plain.
+          ;; GNU Emacs's `pgtk_draw_glyph_string` (`pgtkterm.c:2662'): a
+          ;; single line of thickness one pixel at
+          ;; `(font->descent + 1) / 2` below the baseline - rounded down,
+          ;; and at least `underline_minimum_offset' (1) - clamped to the
+          ;; row by the C's two sanity checks. The string height is the
+          ;; cell's, so `s->ybase - s->y` is the ascent.
+          ;;
+          ;; The ink is the face's `:underline` when that is a *colour*
+          ;; (a theme's `:underline "#3f8f8a"`) and the foreground when
+          ;; it is `t` - the C's `underline_defaulted_p`/
+          ;; `underline_color`. Not carried: the second line of a double
+          ;; underline, the wave, the `(:style wave ...)` plist spelling,
+          ;; and `x-use-underline-position-properties`' font-provided
+          ;; position - Pango's metrics are not read anywhere else in
+          ;; this renderer.
+          (when (face-token-part token 3)
+            (let* ((baseline (+ y *font-ascent*))
+                   (descent (max 0 (- *cell-height* *font-ascent*)))
+                   (position (max 1 (quotient (+ descent 1) 2)))
+                   (position (if (<= (+ y *cell-height*)
+                                     (+ baseline position))
+                                 (- (- *cell-height* 1) *font-ascent*)
+                                 position))
+                   (thickness (if (< (+ y *cell-height*)
+                                    (+ baseline position 1))
+                                  (- (+ y *cell-height*)
+                                     (+ baseline position))
+                                  1)))
+              (when (> thickness 0)
+                (apply cairo-set-source-rgb
+                       cr (or (and (string? (face-token-part token 3))
+                                   (colour->rgb (face-token-part token 3)))
+                              foreground
+                              (colour->rgb
+                               (face-attribute 'default ':foreground))
+                              (list 0.0 0.0 0.0)))
+                (cairo-rectangle cr (cell-x x)
+                                 (+ baseline position)
+                                 (* *cell-width* (text-cells text))
+                                 thickness)
+                (cairo-fill cr))))))
 
     (define-method (write-glyphs! (d <pgtk-display>) window row area x
                                   glyphs len)
@@ -2725,6 +3158,11 @@
       ;; that changes it runs during the same redisplay.
       ;;--------------------------------------------------------------
       (pgtk-set-frame-menubar d)
+      (pgtk-set-frame-toolbar d)
+      ;; The scroll bars' colours, which a theme change moves, are
+      ;; checked here for the same reason and at the same cost as the
+      ;; menu bar's: two face lookups and an `equal?` when nothing moved.
+      (pgtk-theme-scroll-bars! d)
       (let ((area (pgtk-area d)))
         (when area (gtk-widget-queue-draw (pgtk-widget-pointer area)))))
 
@@ -2882,7 +3320,21 @@
        "menu.schemacs-menu > menuitem:hover,"
        " menu.schemacs-menu > menuitem:selected {"
        " background-color: " fg "; color: " bg "; }\n"
-       "menu.schemacs-menu > separator { background-color: " fg "; }\n"))
+       "menu.schemacs-menu > separator { background-color: " fg "; }\n"
+       ;; **The tool bar**, which is a toolkit widget the redisplay
+       ;; never touches (`pgtk-ensure-toolbar!` adds the class and this
+       ;; provider). Same pair as the mode line, so the bar reads as one
+       ;; band with the menu bar and the mode line; a hover inverts it
+       ;; exactly as a menu item's does.
+       "toolbar.schemacs-toolbar { background-color: " bg ";"
+       " background-image: none; color: " fg "; border: none;"
+       " box-shadow: none; }\n"
+       "toolbar.schemacs-toolbar button { background-color: transparent;"
+       " background-image: none; color: " fg "; border: none;"
+       " box-shadow: none; text-shadow: none; }\n"
+       "toolbar.schemacs-toolbar button:hover { background-color: " fg
+       "; color: " bg "; }\n"
+       "toolbar.schemacs-toolbar separator { background-color: " fg "; }\n"))
 
     (define (pgtk-menubar-provider d)
       ;; The display's CSS provider, made the first time it is needed.
@@ -2951,20 +3403,52 @@
       ;; (f)' titles the window from it (`gtkutil.c:1656-1663') - and this
       ;; arrives at the same place one call later.
       ;;--------------------------------------------------------------
-      (let* ((width (* columns *cell-width*))
-             (height (* rows *cell-height*))
+      (let* ((d-first (make <pgtk-display>))
+             (width 0)
+             (height 0)
              (win (make <GtkWindow>))
              (vbox (make <GtkBox>))
              (bar (make <GtkMenuBar>))
+             ;; **The edit widget's parent is a container the scroll bars
+             ;; can be children of.** GNU Emacs's frame is
+             ;; `GtkWindow > GtkBox > GtkFixed` (`gtkutil.c:1670`), and a
+             ;; scroll bar is `gtk_fixed_put` as a *sibling above* the
+             ;; surface the text is drawn on (`xg_finish_scroll_bar_creation`,
+             ;; `:4596`). A GtkDrawingArea cannot have children, so the
+             ;; container here is a `GtkOverlay`: the drawing area is its
+             ;; main child - allocated the whole widget, which is what the
+             ;; fixed's own GdkWindow is in Emacs - and each scroll bar an
+             ;; overlay child positioned by margins. Same stacking, a
+             ;; different Gtk container (named departure).
+             (overlay (make <GtkOverlay>))
              (area (make <GtkDrawingArea>))
-             (d (make <pgtk-display>)))
+             (d d-first))
         (set! (pgtk-window d) win)
         (set! (pgtk-vbox d) vbox)
+        (set! (pgtk-overlay d) overlay)
         (set! (pgtk-menubar d) bar)
+        ;; The two providers the scroll bars' colours come from
+        ;; (`pgtkfns.c:1326`). They are made once per frame and loaded
+        ;; again when the `scroll-bar` face changes; until then they are
+        ;; empty, which leaves the bars to the Gtk theme.
+        (set! (pgtk-scrollbar-fg-provider d) (css-provider:new))
+        (set! (pgtk-scrollbar-bg-provider d) (css-provider:new))
         ;; The bar's theme is the mode line's colours; this is the class
         ;; its CSS is written against (`pgtk-theme-menubar!` loads it).
         (pgtk-style-menu-widget! d bar #t)
         (set! (pgtk-area d) area)
+        ;; **The window is as wide as the *text* plus the scroll bars**,
+        ;; which is `x_window`'s `FRAME_TEXT_COLS_TO_PIXEL_WIDTH`
+        ;; (`frame.h:1745`): `cols * column_width +
+        ;; FRAME_SCROLL_BAR_AREA_WIDTH`. A frame asked for 80 columns is
+        ;; 82 grid columns with a 2-column bar, so the text stays 80 wide
+        ;; - and the parameter handler takes the 2 columns back if the
+        ;; user's init file turns the bars off. The area must exist
+        ;; before the theme can be asked (see
+        ;; `display-default-scroll-bar-width`).
+        (set! columns (+ columns (pgtk-default-scroll-bar-cols d)))
+        (set! width (* columns *cell-width*))
+        (set! height (* rows *cell-height*))
         (set! (pgtk-columns d) columns)
         (set! (pgtk-rows d) rows)
         ;; **The menu bar is above the drawing area, as Gtk wants it** -
@@ -2978,7 +3462,10 @@
                                    (symbol->enum <GtkOrientation> 'vertical))
         (widget:set-size-request bar 1 -1)
         (box:pack-start vbox bar #f #f 0)
-        (box:pack-start vbox area #t #t 0)
+        ;; The overlay fills the box, and the drawing area is its main
+        ;; child - the equivalent of Emacs's `wfixed` filling the box.
+        (box:pack-start vbox overlay #t #t 0)
+        (container:add overlay area)
         ;; Keys arrive here and go on the queue the read drains. The
         ;; event is queued raw and decoded by the read. A toplevel window
         ;; receives key events without being told to ask for them;
@@ -3030,25 +3517,74 @@
                    ;; The press's own position is kept, not just queued:
                    ;; the release is a *different event* when the pointer
                    ;; has moved, and that event carries both positions.
-                   (set! (pgtk-press-cell d) (pgtk-event-cell e))
+                   ;;
+                   ;; **The event is made here, in the handler, and not
+                   ;; when the queue is drained.** A queued event outlives
+                   ;; the Gdk event it came from - that is `pgtk-key-item`'s
+                   ;; own note - and a mouse item built at drain time would
+                   ;; read coordinates from a freed event.
+                   (set! (pgtk-press-pixel d) (pgtk-event-pixel e))
                    (set! (pgtk-press-posn d) (pgtk-posn-for d e))
-                   (pgtk-enqueue! d (cons 'button-press e))
+                   (pgtk-enqueue! d (cons 'event-item
+                                          (pgtk-mouse-event
+                                           d e
+                                           (pgtk-mouse-button-symbol
+                                            'down (pgtk-event-button e)))))
                    #t))
         (connect area (make <signal> #:name "button-release-event")
                  (lambda (w e)
-                   ;; Emacs's test (`keyboard.c:6638') is whether the
-                   ;; pointer has moved since the press by more than
-                   ;; `double_click_fuzz', a few pixels. Measured in
-                   ;; *cells* here, where a cell is 9 by 18 pixels and
-                   ;; the fuzz is less than one, that is "a different
-                   ;; cell" - named rather than guessed at.
-                   (let ((moved? (not (equal? (pgtk-event-cell e)
-                                              (pgtk-press-cell d)))))
-                     (pgtk-enqueue! d
-                                    (cons (if moved? 'drag-release
-                                              'button-release)
-                                          e)))
-                   #t))
+                   ;; **Click or drag is the C's pixel test** - GNU
+                   ;; Emacs's `keyboard.c:6668-6682': the release is a
+                   ;; click when it is within `double-click-fuzz' pixels
+                   ;; of the press in BOTH axes, strictly, and the fuzz is
+                   ;; positive; otherwise it is a drag. The comparison
+                   ;; here used to be cell equality, which called a click
+                   ;; a drag whenever the pointer crossed a cell boundary
+                   ;; - two pixels of jitter near one - and a drag never
+                   ;; follows a link, so an ordinary mouse-1 click could
+                   ;; do nothing at all.
+                   ;;
+                   ;; A release after the pointer moved is GNU Emacs's
+                   ;; `drag-mouse-1', which `mouse.el:3783' binds to
+                   ;; `mouse-set-region'. The position list carries the
+                   ;; press's position *and* the release's, which is what
+                   ;; `event-end' reads the second of.
+                   ;; **"If we did not see a down before this up, ignore
+                   ;; the up"** (`keyboard.c:6649'), and the stored press
+                   ;; is *consumed* by the event that reads it
+                   ;; (`:6592': `start_pos = *start_pos_ptr;
+                   ;; *start_pos_ptr = Qnil') - a release without a press
+                   ;; is dropped, which is what an up belonging to a menu
+                   ;; selection is.
+                   ;;
+                   ;; One press is kept, not one per button (Emacs's
+                   ;; `button_down_location` is indexed by button);
+                   ;; nothing here holds two buttons down at once.
+                   (let ((press (pgtk-press-pixel d))
+                         (press-posn (pgtk-press-posn d)))
+                     (set! (pgtk-press-pixel d) #f)
+                     (set! (pgtk-press-posn d) #f)
+                     (when press
+                       (let* ((release (pgtk-event-pixel e))
+                              (fuzz double-click-fuzz)
+                              (xdiff (- (car release) (car press)))
+                              (ydiff (- (cdr release) (cdr press)))
+                              (moved? (not (and (> fuzz 0)
+                                                (< (- fuzz) xdiff fuzz)
+                                                (< (- fuzz) ydiff fuzz)))))
+                         (pgtk-enqueue!
+                          d
+                          (cons 'event-item
+                                (if moved?
+                                    (list (pgtk-mouse-button-symbol
+                                           'drag (pgtk-event-button e))
+                                          press-posn
+                                          (pgtk-posn-for d e))
+                                    (pgtk-mouse-event
+                                     d e
+                                     (pgtk-mouse-button-symbol
+                                      'click (pgtk-event-button e))))))))
+                     #t)))
         ;; The pointer moving: GNU Emacs's `motion_notify_event'
         ;; (`pgtkterm.c:5943'). **It does not make a `mouse-movement'
         ;; event.** It asks `note_mouse_movement' whether the pointer has
@@ -3061,17 +3597,24 @@
         ;; stopped: the scroll loop ends on any input at all.
         (connect area (make <signal> #:name "motion-notify-event")
                  (lambda (w e)
-                   ;; **Only while a drag is being tracked.** Emacs's
-                   ;; `track-mouse' decides whether motion is noticed at
-                   ;; all here; the alternative is Emacs's own, a
-                   ;; `[mouse-movement]' binding in the global map that
-                   ;; ignores the event, which this tree does not have and
-                   ;; does not want yet (mouse-face and the help echo are
-                   ;; what read it there).
-                   (if track-mouse
-                       (let ((cell (pgtk-event-cell e)))
-                         (note-mouse-movement d (car cell) (cdr cell)))
-                       #f)
+                   ;; **Every report is noticed.** What is gated on
+                   ;; Emacs's `track-mouse` is the *Lisp event*, not the
+                   ;; noticing: `note_mouse_movement` runs on every motion
+                   ;; (`pgtkterm.c:5892`) and is what lights a
+                   ;; `mouse-face` run under the pointer, while
+                   ;; `some_mouse_moved` (`keyboard.c:1290`) answers
+                   ;; nothing for a `mouse-movement` event unless the
+                   ;; gesture asked for one.
+                   (let ((cell (pgtk-event-cell e)))
+                     (note-mouse-movement d (car cell) (cdr cell)))
+                   #t))
+        ;; The pointer has gone: GNU Emacs's `note_mouse_highlight
+        ;; (frame, -1, -1)` (`pgtkterm.c:5945`), which clears the mouse
+        ;; face of whatever window had it.
+        (connect area (make <signal> #:name "leave-notify-event")
+                 (lambda (w e)
+                   (note-mouse-highlight
+                    (or (pgtk-frame-for d) (*current-frame*)) -1 -1)
                    #t))
         ;; A size is REQUESTED, not set as a default. `set-default-size'
         ;; pins the window: Gtk then never accepts the size a compositor
@@ -3179,6 +3722,11 @@
         (set! (widget:can-focus win) #t)
         (widget:show-all win)
         (widget:grab-focus win)
+        ;; **The edit widget starts with the text cursor**, which is what
+        ;; Emacs's frame records as `current_cursor` when it is made. The
+        ;; first movement over the mode line changes it; without this the
+        ;; pointer is Gtk's stock arrow over text until that happens.
+        (display-define-frame-cursor d #f 'text)
         (*pgtk-displays* (cons d (*pgtk-displays*)))
         d))
 
@@ -3325,6 +3873,416 @@
               (menu-shell:append wmenu w)
               (loop (widget-value-next item) (cdr made))))))))
 
+
+    ;;----------------------------------------------------------------
+    ;; The tool bar - gtkutil.c's `update_frame_tool_bar` (`:5843`)
+    ;;----------------------------------------------------------------
+    ;;
+    ;; GNU Emacs's Gtk build has a real `GtkToolbar` (`xg_create_tool_bar`,
+    ;; `:5524`), and this is the same arrangement: an ordinary widget
+    ;; packed into the frame's box after the menu bar, filled from
+    ;; `f->tool_bar_items` - the vector `update_tool_bar` (`xdisp.c`,
+    ;; `update-tool-bar`) fills from `tool-bar-items` (`keyboard.c`) and
+    ;; `tool-bar-map` (`tool-bar.el`). Nothing of it is drawn by the
+    ;; redisplay; the terminal front end has no tool bar at all, as
+    ;; `emacs -nw` has none in a Gtk build.
+
+    (define (pgtk-hold-toolbar-widget! d w)
+      ;; `pgtk-hold-widget!`'s rule, for the tool bar's proxies: a
+      ;; guile-gi proxy owns its GObject, so a collected proxy destroys
+      ;; the widget even while Gtk's container holds it.
+      ;;--------------------------------------------------------------
+      (set! (pgtk-toolbar-held d) (cons w (pgtk-toolbar-held d)))
+      w)
+
+    (define (pgtk-tool-bar-selection! d key)
+      ;; gtkutil.c's `xg_tool_bar_callback` (`:5344`): the clicked
+      ;; button's item key becomes a key *sequence* - the C's
+      ;; `TOOL_BAR_EVENT`, which `make_lispy_event` turns into
+      ;; `(KEY (FRAME tool-bar))` and `read_key_sequence` expands into
+      ;; the fake prefix `tool-bar` followed by the event. Emacs puts one
+      ;; event in the keyboard buffer; this front end has no
+      ;; `read_key_sequence` of its own here, so the two keys are queued
+      ;; separately, exactly as a fast typist's chord arrives.
+      ;;
+      ;; **The modifiers are not carried**: the C stores the button
+      ;; press's Shift/Control state and applies it to the key. Nothing
+      ;; here reads them.
+      ;;--------------------------------------------------------------
+      (pgtk-enqueue! d (cons 'tool-bar-event 'tool-bar))
+      (pgtk-enqueue! d (cons 'tool-bar-event key)))
+
+    (define (pgtk-toolbar-icon-size tb)
+      ;; `gtk_toolbar_get_icon_size` (`GTK_ICON_SIZE_LARGE_TOOLBAR` by
+      ;; default). guile-gi answers the enum as a wrapper whose `value`
+      ;; slot is the integer the `GtkImage` constructor wants.
+      ;;--------------------------------------------------------------
+      (let ((size (toolbar:get-icon-size tb)))
+        (if (integer? size) size (slot-ref size 'value))))
+
+    (define (pgtk-icon-from-theme d tb names)
+      ;; gtkutil.c's `find_icon_from_name` (`:5962`) over what
+      ;; `x-gtk-map-stock` answers for the file: a name beginning `n:`
+      ;; is a themed icon name, and any other name is tried as one too
+      ;; (Gtk3 has no stock items left, so
+      ;; `gtk_icon_theme_has_icon` is the only test). The first name the
+      ;; theme has is the button's image; `#f` means fall back to the
+      ;; XPM Emacs ships.
+      ;;--------------------------------------------------------------
+      (let* ((theme (icon-theme:get-for-screen (widget:get-screen tb)))
+             (names (if (string? names) (list names) names)))
+        (let loop ((rest names))
+          (cond
+           ((null? rest) #f)
+           ((not (string? (car rest))) (loop (cdr rest)))
+           (else
+            (let* ((raw (car rest))
+                   (named? (and (> (string-length raw) 2)
+                                (char=? (string-ref raw 0) #\n)
+                                (char=? (string-ref raw 1) #\:)))
+                   (icon (if named? (substring raw 2) raw)))
+              (if (icon-theme:has-icon? theme icon)
+                  (pgtk-hold-toolbar-widget!
+                   d (image:new-from-icon-name icon
+                                               (pgtk-toolbar-icon-size tb)))
+                  (loop (cdr rest)))))))))
+
+    (define (pgtk-toolbar-image d tb images enabled selected)
+      ;; The `:image` half of `update_frame_tool_bar`
+      ;; (`gtkutil.c:5985`): IMAGES is one spec or a vector of four for
+      ;; the button states (`enum tool_bar_item_image`,
+      ;; `dispextern.h:3500`: enabled-selected, enabled-deselected,
+      ;; disabled-selected, disabled-deselected). The file is first
+      ;; looked up in `x-gtk-map-stock`, and a name the icon theme has
+      ;; becomes the image - the desktop's own icon, as real Emacs
+      ;; draws it; otherwise the XPM file is handed to `GtkImage`,
+      ;; which asks GdkPixbuf for it (no parser of ours in between).
+      ;;--------------------------------------------------------------
+      (let* ((image (if (and (vector? images)
+                             (>= (vector-length images) 4))
+                        (let ((idx (cond ((and enabled selected) 0)
+                                         (enabled 1)
+                                         (selected 2)
+                                         (else 3))))
+                          (vector-ref images idx))
+                        images))
+             (file (and (pair? image) (image-property image ':file))))
+        (and file
+             ;; **The theme's icon first, the XPM only as the
+             ;; fallback**, which is `update_frame_tool_bar`'s order
+             ;; (`gtkutil.c:5904`): a desktop theme is what real Emacs
+             ;; shows, and the file is what it falls back to when the
+             ;; theme has none of the mapped names.
+             (or (pgtk-icon-from-theme d tb (x-gtk-map-stock file))
+                 (let ((w (pgtk-hold-toolbar-widget! d (make <GtkImage>))))
+                   (guard (e (else #f))
+                     (image:set-from-file w file)
+                     w))))))
+
+    ;;----------------------------------------------------------------
+    ;; The desktop's tool bar style - `xsettings.c`'s GSettings half
+    ;;
+    ;; Emacs's `tool-bar-get-system-style` asks the toolkit build what
+    ;; the desktop's `toolbar-style` is, and that answer is what puts a
+    ;; text label beside the icons: a GNOME-style desktop usually sets
+    ;; `both-horiz`. `xsettings.c` reads it through GSettings, schema
+    ;; `org.gnome.desktop.interface` (`:227`), key `toolbar-style`
+    ;; (`:228`), mapping "both" -> `both`, "both-horiz" -> `both-horiz`,
+    ;; "icons" -> `image`, "text" -> `text` (`map_tool_bar_style`,
+    ;; `:150`).
+    ;;----------------------------------------------------------------
+
+    (define *pgtk-gsettings* #f)
+    ;; ^ Emacs's single `gsettings_client` (`xsettings.c:239`), made on
+    ;; first use and kept. Reading it on every redisplay would cross
+    ;; guile-gi for a setting that changes about never.
+
+    (define (pgtk-settings-schema-has-key? schema-id key)
+      ;; Emacs's `xg_settings_key_valid_p` (`xsettings.c:242`): the
+      ;; schema exists and holds the key. `g_settings_new` *aborts* on a
+      ;; schema that is not installed, so this check is what keeps the
+      ;; read safe on a machine with no GNOME schemas.
+      ;;--------------------------------------------------------------
+      (guard (e (else #f))
+        (let* ((source (settings-schema-source:get-default))
+               (schema (settings-schema-source:lookup source schema-id #t)))
+          (and schema (settings-schema:get-key schema key) #t))))
+
+    (define (%map-tool-bar-style value)
+      ;; `map_tool_bar_style` (`xsettings.c:150`): the desktop's four
+      ;; strings to Emacs's style symbols; anything else is nil, which
+      ;; lets `tool-bar-get-system-style` fall back to `image`.
+      ;;--------------------------------------------------------------
+      (cond ((equal? value "both") 'both)
+            ((equal? value "both-horiz") 'both-horiz)
+            ((equal? value "icons") 'image)
+            ((equal? value "text") 'text)
+            (else #f)))
+
+    (define %pgtk-tool-bar-style #f)
+    ;; ^ Emacs's `current_tool_bar_style` (`xsettings.c:1005`): the
+    ;; desktop's answer, read once and kept.
+    ;;
+    ;; **Cached, because reading it crosses guile-gi** (~3.5 ms on this
+    ;; machine, the cost `pgtk-set-frame-menubar`'s note measured) and
+    ;; the bar is rebuilt on every keystroke that forces the mode line -
+    ;; which a search does on every key. Emacs caches it for the same
+    ;; reason and refreshes it from its settings listener
+    ;; (`store_tool_bar_style_changed`, `xsettings.c:176`), which is
+    ;; what the `changed` handler below is.
+    (define %pgtk-tool-bar-style-known? #f)
+
+    (define (%pgtk-refresh-tool-bar-style!)
+      ;; Read the desktop's `toolbar-style` into the cache. The one
+      ;; place that pays the crossing: the first question, and a desktop
+      ;; that changed its mind.
+      ;;--------------------------------------------------------------
+      (set! %pgtk-tool-bar-style-known? #t)
+      (set! %pgtk-tool-bar-style
+            (and *pgtk-gsettings*
+                 (%map-tool-bar-style
+                  (guard (e (else #f))
+                    (settings:get-string *pgtk-gsettings* "toolbar-style"))))))
+
+    (define (pgtk-tool-bar-system-style)
+      ;; This front end's answer to `tool-bar-get-system-style`: the
+      ;; desktop's `toolbar-style`, or #f when there is no such schema
+      ;; or key (which is Emacs's nil `current_tool_bar_style`).
+      ;;--------------------------------------------------------------
+      (unless %pgtk-tool-bar-style-known?
+        (when (and (not *pgtk-gsettings*)
+                   (pgtk-settings-schema-has-key? "org.gnome.desktop.interface"
+                                                  "toolbar-style"))
+          (set! *pgtk-gsettings*
+                (settings:new "org.gnome.desktop.interface"))
+          ;; `store_tool_bar_style_changed` has consumers: the style
+          ;; changes live, and `dynamic-setting.el:85` answers a
+          ;; `tool-bar-style` change with `(force-mode-line-update t)`.
+          (connect *pgtk-gsettings* (make <signal> #:name "changed")
+                   (lambda (settings key)
+                     (when (equal? key "toolbar-style")
+                       (%pgtk-refresh-tool-bar-style!)
+                       (force-mode-line-update #t))
+                     #f)))
+        (%pgtk-refresh-tool-bar-style!))
+      %pgtk-tool-bar-style)
+
+    (*tool-bar-system-style-function* pgtk-tool-bar-system-style)
+
+    (define (pgtk-make-tool-item d key help image label horiz text-image)
+      ;; gtkutil.c's `xg_make_tool_item` (`:5600`): a `GtkToolItem`
+      ;; holding an event box - "here so we can have tooltips on
+      ;; disabled items" - a relief-less button, and a box with the
+      ;; image and the label. The click's callback carries the item's
+      ;; key, which is the C's `client_data` index answered by the same
+      ;; item in `f->tool_bar_items`.
+      ;;
+      ;; **The box follows the style**: horizontal for `both-horiz` and
+      ;; `text-image-horiz`, vertical otherwise, and `text-image-horiz`
+      ;; puts the image *after* the label (`gtk_box_new (horiz ?
+      ;; HORIZONTAL : VERTICAL, 0)` and the two `wimage` packs). The
+      ;; image and label expand and fill, as the C's
+      ;; `gtk_box_pack_start (..., TRUE, TRUE, 0)` does.
+      ;;--------------------------------------------------------------
+      (let* ((ti (pgtk-hold-toolbar-widget! d (make <GtkToolItem>)))
+             (wevent (pgtk-hold-toolbar-widget! d (make <GtkEventBox>)))
+             (wb (pgtk-hold-toolbar-widget! d (make <GtkButton>)))
+             (vb (pgtk-hold-toolbar-widget! d (make <GtkBox>))))
+        (orientable:set-orientation
+         vb (symbol->enum <GtkOrientation>
+                          (if horiz 'horizontal 'vertical)))
+        (box:set-homogeneous vb #f)
+        (button:set-relief wb (symbol->enum <GtkReliefStyle> 'none))
+        (widget:set-focus-on-click wb #f)
+        (when (and image (not text-image))
+          (box:pack-start vb image #t #t 0))
+        (when (and label (> (string-length label) 0))
+          (let ((wl (pgtk-hold-toolbar-widget! d (make <GtkLabel>))))
+            (label:set-text wl label)
+            (box:pack-start vb wl #t #t 0)))
+        (when (and image text-image)
+          (box:pack-start vb image #t #t 0))
+        (container:add wb vb)
+        (container:add wevent wb)
+        (container:add ti wevent)
+        (tool-item:set-homogeneous ti #f)
+        (when help (widget:set-tooltip-text wevent help))
+        (connect wb (make <signal> #:name "clicked")
+                 (lambda (widget)
+                   (pgtk-tool-bar-selection! d key)
+                   #f))
+        (cons ti wb)))
+
+    (define (pgtk-ensure-toolbar! d)
+      ;; `xg_create_tool_bar` (`gtkutil.c:5524`) and `xg_pack_tool_bar`
+      ;; (`:5468`): make the bar once and pack it where
+      ;; `tool-bar-position` says - after the menu bar for `top`, last
+      ;; for `bottom`.
+      ;;
+      ;; **`left` and `right` are not carried.** Emacs packs them into an
+      ;; inner horizontal box (`x->hbox_widget`) that this front end's
+      ;; window does not have; they fall back to the top, and the
+      ;; departure is named here and in DEPARTURES.md.
+      ;;--------------------------------------------------------------
+      (or (pgtk-toolbar d)
+          (let* ((frame (pgtk-frame-for d))
+                 (pos (or (and frame (frame-parameter frame 'tool-bar-position))
+                          'top))
+                 (tb (pgtk-hold-toolbar-widget! d (make <GtkToolbar>)))
+                 (vbox (pgtk-vbox d)))
+            (widget:set-name tb "emacs-toolbar")
+            (toolbar:set-style tb (symbol->enum <GtkToolbarStyle> 'icons))
+            ;; The class the CSS rules are written against, and the
+            ;; provider that carries them - added to the toolbar's own
+            ;; context as the menus' is (`pgtk-style-menu-widget!`), so a
+            ;; reload of the provider repaints it.
+            (let ((ctx (widget:get-style-context tb)))
+              (style-context:add-class ctx "schemacs-toolbar")
+              (style-context:add-provider ctx (pgtk-menubar-provider d)
+                                          *menubar-css-priority*))
+            (box:pack-start vbox tb #f #f 0)
+            (when (not (eq? pos 'bottom))
+              (box:reorder-child vbox tb 1))
+            ;; gtkutil.c's `tb_size_cb` (`:5508`): "When tool bar is
+            ;; created it has one preferred size. But when size is
+            ;; allocated between widgets, it may get another. So we must
+            ;; update size hints if tool bar size changes." The callback
+            ;; is what keeps `adjust_frame_size` in step; it is also why
+            ;; nothing has to ask the toolbar its height on every
+            ;; redisplay, which measured at ~9.5 ms a call.
+            (connect tb (make <signal> #:name "size-allocate")
+                     (lambda (w rect)
+                       (pgtk-grow-by-toolbar! d)
+                       #t))
+            (set! (pgtk-toolbar d) tb)
+            (set! (pgtk-toolbar-items d) #f)
+            (set! (pgtk-toolbar-hidden? d) #t)
+            tb)))
+
+    (define (pgtk-hide-toolbar! d)
+      ;; `free_frame_tool_bar`'s visible half (`gtkutil.c:6206`): take
+      ;; the bar out of the layout. Emacs destroys and repacks the
+      ;; widget; hiding it does the same to the frame's rows and keeps
+      ;; the object for the next `tool-bar-mode 1`.
+      ;;--------------------------------------------------------------
+      (let ((tb (pgtk-toolbar d)))
+        (when (and tb (not (pgtk-toolbar-hidden? d)))
+          (set! (pgtk-toolbar-hidden? d) #t)
+          (set! (pgtk-toolbar-items d) #f)
+          (set! (pgtk-toolbar-height d) 0)
+          (widget:hide tb))))
+
+    (define (pgtk-fill-toolbar! d tb items)
+      ;; The item loop of `update_frame_tool_bar` (`gtkutil.c:5941`),
+      ;; over the 12-slot vector `update-tool-bar` built. **The buttons
+      ;; are rebuilt rather than patched**: the C keeps a widget per item
+      ;; and replaces only the stale ones, but the whole rebuild happens
+      ;; only when the item vector has changed (`xg_update_tool_bar`'s
+      ;; `last_tool_bar` comparison), which is the same moment the C
+      ;; would be doing per-item work.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (w) (container:remove tb w))
+                (container:get-children tb))
+      (let* ((style (tool-bar-get-system-style))
+             (text-image (eq? style 'text-image-horiz))
+             (horiz (or (eq? style 'both-horiz) text-image))
+             (n (/ (vector-length items) tool-bar-item-nslots)))
+        (let loop ((i 0))
+          (when (< i n)
+            (let* ((base (* i tool-bar-item-nslots))
+                   (ref (lambda (slot) (vector-ref items (+ base slot))))
+                   (type (ref tool-bar-item-type)))
+              (if (eq? type #t)
+                  (toolbar:insert
+                   tb (pgtk-hold-toolbar-widget! d (make <GtkSeparatorToolItem>)) i)
+                  (let* ((enabled (ref tool-bar-item-enabled-p))
+                         (selected (ref tool-bar-item-selected-p))
+                         (vert-only (ref tool-bar-item-vert-only))
+                         ;; "label = (EQ (style, Qimage) || (vert_only &&
+                         ;; horiz)) ? Qnil : PROP (LABEL)".
+                         (label (if (or (eq? style 'image)
+                                        (and vert-only horiz))
+                                    #f
+                                    (ref tool-bar-item-label)))
+                         (image (if (eq? style 'text)
+                                    #f
+                                    (pgtk-toolbar-image
+                                     d tb (ref tool-bar-item-images)
+                                     enabled selected)))
+                         (help (or (ref tool-bar-item-help)
+                                   (ref tool-bar-item-caption)))
+                         (made (pgtk-make-tool-item
+                                d (ref tool-bar-item-key) help image label
+                                horiz text-image)))
+                    (widget:set-sensitive (cdr made) (if enabled #t #f))
+                    (toolbar:insert tb (car made) i))))
+            (loop (+ i 1))))))
+
+    (define (pgtk-grow-by-toolbar! d)
+      ;; `adjust_frame_size (f, -1, -1, 2, false, Qtool_bar_lines)`
+      ;; (`gtkutil.c:6228`): the widget's height is added to the window's
+      ;; so the text grid keeps its rows - once per change of the bar's
+      ;; own height, so the resize it causes cannot ask again.
+      ;;--------------------------------------------------------------
+      (let ((tb (pgtk-toolbar d))
+            (win (pgtk-window d)))
+        (when (and tb win (not (pgtk-toolbar-hidden? d)))
+          (let ((h (widget:get-allocated-height tb)))
+            (when (and h (>= h 0) (not (= h (pgtk-toolbar-height d))))
+              (set! (pgtk-toolbar-height d) h)
+              (let ((alloc (pgtk-allocation d)))
+                (when alloc
+                  (window:resize win (car alloc) (+ (cdr alloc) h)))))))))
+
+    (define (pgtk-set-frame-toolbar d)
+      ;; GNU Emacs's `update_frame_tool_bar` (`gtkutil.c:5843`): make the
+      ;; bar from `f->tool_bar_items`, rebuild it when that vector has
+      ;; changed, take it down when there is nothing to show or
+      ;; `tool-bar-lines` is 0.
+      ;;
+      ;; **`tool-bar-lines` is read before the comparison**, as
+      ;; `pgtk_set_tool_bar_lines` reads it: turning the bar off sets the
+      ;; parameter on every frame, and that does not go through the
+      ;; item vector.
+      ;;--------------------------------------------------------------
+      (let ((frame (pgtk-frame-for d)))
+        (when (and frame (pgtk-vbox d))
+          ;; The bar shares the menu bar's `mode-line` colours - the
+          ;; same provider and the same reload-on-change check, run here
+          ;; too because the menu bar can be off while the tool bar is
+          ;; on (`menu-bar-mode -1`).
+          (pgtk-theme-menubar! d)
+          (let ((lines (%frame-tool-bar-lines frame)))
+            (if (or (= lines 0)
+                    (= 0 (frame-tool-bar-items-used frame)))
+                (pgtk-hide-toolbar! d)
+                (let* ((tb (pgtk-ensure-toolbar! d))
+                       (items (frame-tool-bar-items frame))
+                       (style (tool-bar-get-system-style)))
+                  ;; `tbinfo->last_tool_bar`'s comparison
+                  ;; (`gtkutil.c:5919`): unchanged items, an unchanged
+                  ;; **style** and a visible bar mean no work. "Are we up
+                  ;; to date?" tests `Fequal (tbinfo->style, style)`
+                  ;; beside the item vector, and that is why a desktop
+                  ;; that changes its `toolbar-style` live gets a new
+                  ;; bar: the labels and the box orientation are decided
+                  ;; at fill time, not in the vector. The cached value is
+                  ;; `(STYLE . ITEMS)` so one `equal?` compares both.
+                  (unless (and (pgtk-toolbar-items d)
+                               (not (pgtk-toolbar-hidden? d))
+                               (equal? (cons style items)
+                                       (pgtk-toolbar-items d)))
+                    (pgtk-fill-toolbar! d tb items)
+                    (set! (pgtk-toolbar-items d) (cons style items))
+                    (widget:show-all tb)
+                    (set! (pgtk-toolbar-hidden? d) #f)
+                    ;; The C's `if (xg_update_tool_bar_sizes (f))
+                    ;; adjust_frame_size (...)` at the end of
+                    ;; `update_frame_tool_bar`. It runs here, when the
+                    ;; bar was (re)built or shown - not on every
+                    ;; redisplay; `tb_size_cb` above catches the later
+                    ;; allocation changes.
+                    (pgtk-grow-by-toolbar! d))))))))
 
     ;;----------------------------------------------------------------
     ;; Popup menus - `pgtk_menu_show` (`pgtkmenu.c:588`)
@@ -3688,6 +4646,199 @@
                 (when alloc
                   (window:resize win (car alloc) (+ (cdr alloc) h)))))))))
 
+    ;;----------------------------------------------------------------
+    ;; The file dialogs - `gtkutil.c`'s `xg_get_file_name` (`:2804`)
+    ;; with the two helpers under it, and `pgtkfns.c`'s `x-file-dialog`
+    ;; (`:3625`).
+    ;;
+    ;; **The dialog is a `GtkFileChooserDialog` and the wait around it
+    ;; is a nested Gtk main loop** - Emacs's `xg_dialog_run`
+    ;; (`gtkutil.c:2513`): "We don't use gtk_dialog_run because we want
+    ;; to process emacs timers." The timers here are already Gtk
+    ;; timeout sources (`pgtk-arm-timer!`), so any running Gtk loop
+    ;; runs them; the loop is still made and quit by the dialog's
+    ;; "response" signal, because that is the C's shape.
+    ;;----------------------------------------------------------------
+
+    (define x-gtk-show-hidden-files #f)
+    ;; ^ GNU Emacs's `x-gtk-show-hidden-files` (`pgtkfns.c:3891`): "If
+    ;; non-nil, the GTK file chooser will by default show hidden files.
+    ;; Note that this is just the default, there is a toggle button on
+    ;; the file chooser to show or not show hidden files on a case by
+    ;; case basis." A plain variable: Emacs never `let`-binds it, so it
+    ;; is only read and `setq`-ed, and the self-assignment is the mark
+    ;; the compiler needs to stop folding it - as `keyboard.scm`'s
+    ;; `*enable-disabled-menus-and-buttons*` explains.
+    (set! x-gtk-show-hidden-files x-gtk-show-hidden-files)
+
+    (define x-gtk-file-dialog-help-text #t)
+    ;; ^ GNU Emacs's `x-gtk-file-dialog-help-text` (`pgtkfns.c:3895`):
+    ;; "If non-nil, the GTK file chooser will show additional help text.
+    ;; If more space for files in the file chooser dialog is wanted, set
+    ;; this to nil to turn the additional text off."
+    (set! x-gtk-file-dialog-help-text x-gtk-file-dialog-help-text)
+
+    (define %file-dialog-message
+      ;; The C's message label (`gtkutil.c:2685-2693`). Its "Type C-l to
+      ;; display a file name text entry box" line is added only when
+      ;; `gtk_check_version (2, 10, 0)` is non-NULL - i.e. only on Gtk
+      ;; older than 2.10, which no build here has.
+      "\nIf you don't like this file selector, use the corresponding\nkey binding or customize use-file-dialog to turn it off.")
+
+    (define (pgtk-toggle-dialog-visibility! dlg)
+      ;; `xg_toggle_visibility_cb` (`gtkutil.c:2581`): "Callback called
+      ;; when the \"Show hidden files\" toggle is pressed." The state is
+      ;; read back from the dialog itself and inverted, exactly as the
+      ;; C's `g_object_get`/`g_object_set` pair does.
+      ;;--------------------------------------------------------------
+      (let ((visible (file-chooser:get-show-hidden? dlg)))
+        (file-chooser:set-show-hidden dlg (not visible))))
+
+    (define (pgtk-build-file-dialog d prompt dir default-filename
+                                    mustmatch only-dir)
+      ;; `xg_get_file_with_chooser` (`gtkutil.c:2632`): build the chooser
+      ;; and answer it. The *wait* is `pgtk-get-file-name`'s, as in the
+      ;; C.
+      ;;
+      ;; **The action is what chooses the kind of dialog**: an existing
+      ;; file is OPEN, a directory is SELECT_FOLDER, and anything else -
+      ;; a name that need not exist, which is how a new file is made -
+      ;; is SAVE, with an OK button rather than an Open one.
+      ;;--------------------------------------------------------------
+      (let* ((action (cond (only-dir 'select-folder)
+                           (mustmatch 'open)
+                           (else 'save)))
+             (ok-label (if (or mustmatch only-dir) "Open" "OK"))
+             ;; **Every proxy here is held for the display's life** -
+             ;; `pgtk-hold-widget!`'s rule, and the dialog is where
+             ;; disobeying it crashed: three open/cancel cycles
+             ;; destroyed three dialogs, and when their four widget
+             ;; proxies (dialog, box, toggle, label) were collected the
+             ;; finalizer unref'd objects that no longer existed -
+             ;; `g_object_unref: assertion 'G_IS_OBJECT (object)'
+             ;; failed`, four times at one instant, then a core dump.
+             ;; The menu bar holds its own proxies for the same reason;
+             ;; the cost is that a dialog's four proxies stay in the
+             ;; display's list after it is closed.
+             (dlg (pgtk-hold-widget! d (make <GtkFileChooserDialog>))))
+        (window:set-title dlg prompt)
+        (file-chooser:set-action dlg
+                                 (symbol->enum <GtkFileChooserAction> action))
+        (file-chooser:set-local-only dlg #t)
+        (dialog:add-button dlg "Cancel" -6)      ; GTK_RESPONSE_CANCEL
+        (dialog:add-button dlg ok-label -5)      ; GTK_RESPONSE_OK
+        ;; "Show hidden files." - the extra widget. The C adds the
+        ;; toggle and, when `x-gtk-file-dialog-help-text` is set, the
+        ;; message label under it.
+        (let ((wbox (pgtk-hold-widget! d (make <GtkBox>)))
+              (wtoggle (pgtk-hold-widget!
+                        d (check-button:new-with-label
+                           "Show hidden files."))))
+          (box:set-homogeneous wbox #f)
+          (file-chooser:set-show-hidden dlg x-gtk-show-hidden-files)
+          (toggle-button:set-active wtoggle x-gtk-show-hidden-files)
+          (connect wtoggle (make <signal> #:name "clicked")
+                   (lambda (w)
+                     (pgtk-toggle-dialog-visibility! dlg)
+                     #f))
+          (box:pack-start wbox wtoggle #f #f 0)
+          (when x-gtk-file-dialog-help-text
+            (let ((wmessage (pgtk-hold-widget!
+                             d (label:new %file-dialog-message))))
+              (box:pack-start wbox wmessage #f #f 0)
+              (widget:show wmessage)))
+          (widget:show wtoggle)
+          (widget:show wbox)
+          (file-chooser:set-extra-widget dlg wbox))
+        ;; Where the chooser starts: "File chooser does not understand
+        ;; ~/... in the file name. It must be an absolute name starting
+        ;; with /." - the C's expand - then the folder when the name is
+        ;; one, else the file itself, and for SAVE the name in the name
+        ;; field too.
+        (let* ((cdef (or default-filename dir))
+               (absolute? (and (> (string-length cdef) 0)
+                               (eqv? #\/ (string-ref cdef 0))))
+               (file (if absolute? cdef (expand-file-name cdef))))
+          (if (file-directory-p file)
+              (file-chooser:set-current-folder? dlg file)
+              (begin
+                (file-chooser:set-filename? dlg file)
+                (when (eq? action 'save)
+                  (file-chooser:set-current-name
+                   dlg (file-name-nondirectory-part file))))))
+        ;; `gtk_widget_set_name (w, "emacs-filedialog")` (`:2823`).
+        (widget:set-name dlg "emacs-filedialog")
+        dlg))
+
+    (define (pgtk-get-file-name d prompt dir default-filename mustmatch only-dir)
+      ;; `xg_get_file_name` (`gtkutil.c:2804`) with `xg_dialog_run`
+      ;; (`:2513`) folded in: show the chooser modally over the selected
+      ;; frame and answer the chosen file name, or #f when nothing was
+      ;; chosen.
+      ;;
+      ;; `xg_dialog_run` sets the dialog transient for the frame, makes
+      ;; it modal, connects "delete-event" to `gtk_true` ("Don't destroy
+      ;; the widget if closed by the window manager close button") and
+      ;; runs a loop of its own until the response arrives. The widget
+      ;; is destroyed here afterwards, which is the C's `pop_down_dialog`
+      ;; in `x-file-dialog`'s unwind.
+      ;;--------------------------------------------------------------
+      (let ((dlg (pgtk-build-file-dialog d prompt dir default-filename
+                                        mustmatch only-dir)))
+        (window:set-transient-for dlg (pgtk-window d))
+        (window:set-destroy-with-parent dlg #t)
+        (window:set-modal dlg #t)
+        (let ((loop (main-loop:new #f #f))
+              (response -6))                     ; GTK_RESPONSE_CANCEL
+          (connect dlg (make <signal> #:name "response")
+                   (lambda (widget resp)
+                     (set! response (if (integer? resp)
+                                        resp
+                                        (slot-ref resp 'value)))
+                     (main-loop:quit loop)
+                     #f))
+          (connect dlg (make <signal> #:name "delete-event")
+                   (lambda (w e) #t))
+          (widget:show dlg)
+          (main-loop:run loop)
+          ;; **The loop is not unref'd here.** `g_main_loop_new` hands
+          ;; guile-gi a reference it owns and releases when the proxy is
+          ;; collected; calling `g_main_loop_unref` ourselves dropped
+          ;; that reference early, and the finalizer's own unref then
+          ;; ran on freed memory. Measured on a live editor opening and
+          ;; closing the chooser: `g_main_loop_unref: assertion
+          ;; 'g_atomic_int_get (&loop->ref_count) > 0' failed` on every
+          ;; second dialog, and after a few cycles a SIGSEGV inside
+          ;; `g_malloc` while the *next* dialog's template was being
+          ;; built - the freed loop had corrupted the heap. Emacs's
+          ;; `xg_dialog_run` unrefs its own loop because the C owns it;
+          ;; here the proxy does, so the release is guile-gi's.
+          (let ((picked (and (= response -5)
+                             (file-chooser:get-filename dlg))))
+            (widget:destroy dlg)
+            picked))))
+
+    (define-method (x-file-dialog (d <pgtk-display>) prompt dir
+                                  default-filename mustmatch only-dir)
+      ;; GNU Emacs's `x-file-dialog` for the Gtk backend
+      ;; (`pgtkfns.c:3625`): run the chooser, and "Make \"Cancel\"
+      ;; equivalent to C-g" - the C runs `quit ()` when nothing was
+      ;; chosen, which here is the same quit a C-g raises.
+      ;;
+      ;; Named departures: `pgtk_menu_set_in_use` (the C's guard
+      ;; against using a menu from inside a menu entry; the
+      ;; `popup_activated` check above is the half that matters) and
+      ;; `inhibit_redisplay` (this front end does not redisplay from
+      ;; inside a nested loop) are not carried.
+      ;;--------------------------------------------------------------
+      (when (*pgtk-popup-active*)
+        (error "Trying to use a menu from within a menu-entry"))
+      (let ((picked (pgtk-get-file-name d prompt dir default-filename
+                                        mustmatch only-dir)))
+        (if (not picked)
+            (signal-quit)
+            picked)))
+
     (define (pgtk-menu-bar-open frame)
       ;; GNU Emacs's `pgtk-menu-bar-open` (`term/pgtk-win.el:339`) in its
       ;; "the bar is showing" branch: `(accelerate-menu frame)`, which is
@@ -4019,6 +5170,386 @@
       ;;--------------------------------------------------------------
       (pgtk-close-window! d))
 
+    ;;----------------------------------------------------------------
+    ;; Scroll bars - gtkutil.c's xg_create_scroll_bar and pgtkterm.c's
+    ;; callbacks
+    ;;------------------------------------------------------------------
+    ;;
+    ;; GNU Emacs gives each window a `GtkScrollbar` inside a
+    ;; `GtkEventBox`, `gtk_fixed_put` as a child of the frame's edit
+    ;; widget (`xg_finish_scroll_bar_creation`, `gtkutil.c:4596`), and
+    ;; moves and resizes it per redisplay
+    ;; (`xg_update_scrollbar_pos`, `:4780`, called from
+    ;; `pgtk_set_vertical_scroll_bar`). The bar's own signals -
+    ;; `change-value` and `button-release-event` - send a
+    ;; `VERTICAL_SCROLL_BAR_CLICK_EVENT` (`xg_scroll_callback`,
+    ;; `pgtkterm.c:4028`) that `scroll-bar.el`'s
+    ;; `scroll-bar-toolkit-scroll` handles.
+    ;;
+    ;; Here the container is the display's `GtkOverlay` (see
+    ;; `pgtk-open-window`): an overlay child is stacked above the main
+    ;; child and positioned by margins, which is the fixed's stacking and
+    ;; positioning in Gtk's terms.
+
+    (define %bar-window 0)
+    (define %bar-box 1)
+    (define %bar-widget 2)
+    (define %bar-adjustment 3)
+    (define %bar-dragging 4)
+    ;; ^ `struct scroll_bar`'s `window`, `x_window`'s widget, `top`/
+    ;; `left`/`width`/`height` (kept in the vector's own layout by the
+    ;; overlay's margins) and `dragging` (-1 when not dragging).
+
+    ;; `XG_SB_MIN`, `XG_SB_MAX`, `XG_SB_RANGE` (`gtkutil.h:38-40`).
+    (define %sb-min 1)
+    (define %sb-max 10000000)
+    (define %sb-range (- %sb-max %sb-min))
+
+    (define %gtk-widget-style-get
+      ;; `gtk_widget_style_get (GtkWidget *, const gchar *, ...)`: a
+      ;; variadic C function called with the fixed shape both of this
+      ;; file's uses have - one property name and one out-parameter,
+      ;; then NULL. guile-gi does not bind it; `dynamic-func` does.
+      (pointer->procedure void
+                          (dynamic-func "gtk_widget_style_get"
+                                        (dynamic-link "libgtk-3.so.0"))
+                          (list '* '* '* '*)))
+
+    (define (pgtk-widget-style-int widget name)
+      ;; One integer style property of WIDGET: the
+      ;; `gtk_widget_style_get` call `update_theme_scrollbar_width`
+      ;; makes (`gtkutil.c:4460`).
+      ;;--------------------------------------------------------------
+      (let ((mem (make-c-struct (list int) (list 0))))
+        (%gtk-widget-style-get (pgtk-widget-pointer widget)
+                               (string->pointer name)
+                               (make-pointer (pointer-address mem))
+                               %null-pointer)
+        (car (parse-c-struct mem (list int)))))
+
+    (define (pgtk-hold-scrollbar-widget! d w)
+      ;; The scroll bar proxy rule, in its own list: a guile-gi proxy
+      ;; owns its GObject, and one that is collected while Gtk still
+      ;; holds the widget destroys it. See `pgtk-hold-widget!`.
+      ;;--------------------------------------------------------------
+      (set! (pgtk-scrollbar-held d) (cons w (pgtk-scrollbar-held d)))
+      w)
+
+    (define (pgtk-scrollbar-style-widget d)
+      ;; A detached GtkScrollbar to ask the theme about, exactly as
+      ;; `update_theme_scrollbar_width`/`update_theme_scrollbar_height`
+      ;; make one, read and destroy. Its proxy is held because a
+      ;; destroyed widget's proxy must not be collected either (the
+      ;; dialog lesson).
+      ;;--------------------------------------------------------------
+      (let* ((adj (adjustment:new %sb-min %sb-min %sb-max 0.1 0.1 0.1))
+             (w (make <GtkScrollbar>)))
+        (orientable:set-orientation w
+                                   (symbol->enum <GtkOrientation> 'vertical))
+        (range:set-adjustment w adj)
+        (pgtk-hold-scrollbar-widget! d w)
+        w))
+
+    (define-method (display-default-scroll-bar-width (d <pgtk-display>))
+      ;; `xg_get_default_scrollbar_width` (`gtkutil.c:4504`), which Gtk's
+      ;; `update_theme_scrollbar_width` computes from the theme's
+      ;; `slider-width` and `trough-border`. In the frame's own pixels -
+      ;; logical pixels here, as every coordinate this front end hands
+      ;; Gtk is.
+      ;;--------------------------------------------------------------
+      ;; **A display with no widget has no theme to ask.** The suites
+      ;; build a `<pgtk-display>` with no GtkWindow behind it (the way
+      ;; `<test-display>` stands in for a terminal); creating a
+      ;; GtkScrollbar there is creating a widget with no display at all,
+      ;; which Gtk aborts on. Answer 0 - a zero-width bar - so such a
+      ;; display shows none and its geometry is the plain cell grid.
+      (if (not (pgtk-area d))
+          (if (pgtk-scrollbar-width d) (pgtk-scrollbar-width d) 0)
+          (or (pgtk-scrollbar-width d)
+              (let ((w (pgtk-scrollbar-style-widget d)))
+                (let ((width (+ (pgtk-widget-style-int w "slider-width")
+                                (* 2 (pgtk-widget-style-int w "trough-border")))))
+                  (widget:destroy w)
+                  (set! (pgtk-scrollbar-width d) (max 1 width))
+                  (max 1 width))))))
+
+    (define (pgtk-default-scroll-bar-cols d)
+      ;; `FRAME_CONFIG_SCROLL_BAR_COLS` for a frame being made: the
+      ;; theme's width in columns, rounded up. `x_window` adds it to the
+      ;; text columns when it sizes the window
+      ;; (`FRAME_TEXT_COLS_TO_PIXEL_WIDTH`, `frame.h:1745`).
+      ;;--------------------------------------------------------------
+      (let ((unit (max 1 *cell-width*)))
+        (quotient (+ (display-default-scroll-bar-width d) unit -1) unit)))
+
+    (define (pgtk-theme-min-slider d)
+      ;; GtkScrollbar's `min-slider-length` style property, which
+      ;; `xg_update_scrollbar_pos` uses to hide a bar too short to draw
+      ;; (`gtkutil.c:4810`: "No room. Hide scroll bar as some themes
+      ;; output a warning if the height is less than the min size").
+      ;;--------------------------------------------------------------
+      (or (pgtk-scrollbar-min-slider d)
+          (let ((w (pgtk-scrollbar-style-widget d)))
+            (let ((msl (pgtk-widget-style-int w "min-slider-length")))
+              (widget:destroy w)
+              (set! (pgtk-scrollbar-min-slider d) (max 1 msl))
+              (max 1 msl)))))
+
+    (define (%pgtk-bar-for d window)
+      (let ((pair (assq window (pgtk-scroll-bars d))))
+        (and pair (cdr pair))))
+
+    (define (pgtk-scroll-bar-event d window portion whole part)
+      ;; `pgtk_send_scroll_bar_event` (`pgtkterm.c:3948`): the position
+      ;; list a toolkit scroll bar click makes,
+      ;;
+      ;;   (WINDOW vertical-scroll-bar (PORTION . WHOLE) TIME PART)
+      ;;
+      ;; whose `nth 2` is what `scroll-bar-scale` reads and whose
+      ;; `nth 4` is the part symbol. The head is `mouse-1`, which is
+      ;; what `[vertical-scroll-bar mouse-1]` is bound to.
+      ;;--------------------------------------------------------------
+      (let ((frame (window-frame window)))
+        (when (and frame (not (eq? frame (*current-frame*))))
+          (select-frame frame)))
+      (pgtk-enqueue!
+       d
+       (cons 'event-item
+             (list 'mouse-1
+                   (list window 'vertical-scroll-bar (cons portion whole)
+                         0 part))))
+      (set! (pgtk-scrolled-window d) window))
+
+    (define pgtk-ignore-scrollbar #f)
+    ;; ^ `xg_ignore_gtk_scrollbar` (`gtkutil.c:4420`): set while the
+    ;; thumb setter writes the adjustment, so the write is not read back
+    ;; as a user scroll. A plain variable, as the C's is - a callback can
+    ;; run while this one is bound.
+
+    (define (pgtk-scroll-callback d bar scroll value)
+      ;; Gtk's `change-value` signal - `xg_scroll_callback`
+      ;; (`pgtkterm.c:4028`). SCROLL is a `GtkScrollType`; the four
+      ;; directions and the thumb jump map to the part symbols
+      ;; `scroll-bar-toolkit-scroll` reads.
+      ;;--------------------------------------------------------------
+      (unless pgtk-ignore-scrollbar
+        (let* ((type (if (or (symbol? scroll) (integer? scroll))
+                         scroll
+                         (slot-ref scroll 'value)))
+               (adj (vector-ref bar %bar-adjustment))
+               (whole (inexact->exact
+                       (round (- (adjustment:get-upper adj)
+                                 (adjustment:get-page-size adj)))))
+               (portion (inexact->exact (round value)))
+               (part (case type
+                       ;; GTK_SCROLL_JUMP: the thumb was dragged.
+                       ((1) 'handle)
+                       ;; GTK_SCROLL_STEP_BACKWARD/FORWARD.
+                       ((2) 'up)
+                       ((3) 'down)
+                       ;; GTK_SCROLL_PAGE_BACKWARD/FORWARD.
+                       ((4) 'above-handle)
+                       ((5) 'below-handle)
+                       (else #f))))
+          (when part
+            (if (eq? part 'handle)
+                (begin
+                  (set! portion (min portion whole))
+                  (vector-set! bar %bar-dragging portion))
+                (vector-set! bar %bar-dragging -1))
+            (pgtk-scroll-bar-event d (vector-ref bar %bar-window)
+                                   portion whole part)))))
+
+    (define (pgtk-scroll-end-callback d bar)
+      ;; The bar's `button-release-event` - `xg_end_scroll_callback`
+      ;; (`pgtkterm.c:4095`): the drag is over, and the window being
+      ;; scrolled is told so.
+      ;;--------------------------------------------------------------
+      (vector-set! bar %bar-dragging -1)
+      (let ((window (pgtk-scrolled-window d)))
+        (when window
+          (pgtk-scroll-bar-event d window 0 0 'end-scroll)
+          (set! (pgtk-scrolled-window d) #f))))
+
+    (define (pgtk-theme-scroll-bars! d)
+      ;; Keep the two providers in step with the `scroll-bar' face, as
+      ;; `xg_set_scroll_bar_foreground`/`_background` do when the face's
+      ;; colours change (`xfaces.c:3807`: "Changing the colors of
+      ;; `scroll-bar' sets frame parameters `scroll-bar-foreground' and
+      ;; `scroll-bar-background'"). They are read with the face
+      ;; machinery's answer for the frame, which is the C's parameter
+      ;; path one hop shorter - this tree has no frame parameter for
+      ;; them.
+      ;;--------------------------------------------------------------
+      (let ((frame (pgtk-frame-for d)))
+        (when (and frame (pgtk-scrollbar-fg-provider d))
+          (let ((colours
+                 (cons (colour->css (face-attribute 'scroll-bar ':foreground
+                                                    frame))
+                       (colour->css (face-attribute 'scroll-bar ':background
+                                                    frame)))))
+            (unless (equal? colours (pgtk-scrollbar-theme d))
+              (set! (pgtk-scrollbar-theme d) colours)
+              (css-provider:load-from-data?
+               (pgtk-scrollbar-fg-provider d)
+               (string->utf8
+                (if (car colours)
+                    (string-append "scrollbar slider { background-color: "
+                                   (car colours) "; }\n")
+                    "")))
+              (css-provider:load-from-data?
+               (pgtk-scrollbar-bg-provider d)
+               (string->utf8
+                (if (cdr colours)
+                    (string-append "scrollbar trough { background-color: "
+                                   (cdr colours) "; }\n")
+                    ""))))))))
+
+    (define (pgtk-make-scroll-bar d window)
+      ;; `xg_create_scroll_bar` (`gtkutil.c:4697`) over
+      ;; `xg_finish_scroll_bar_creation` (`:4596`): the adjustment, the
+      ;; scrollbar, the event box that gives it a window of its own, the
+      ;; signals, and the bar's place in the overlay.
+      ;;--------------------------------------------------------------
+      (let* ((adj (adjustment:new %sb-min %sb-min %sb-max 0.1 0.1 0.1))
+             (widget (make <GtkScrollbar>))
+             (box (make <GtkEventBox>))
+             (bar (vector window box widget adj -1))
+             (overlay (pgtk-overlay d)))
+        (widget:set-name widget "verticalScrollBar")
+        (orientable:set-orientation widget
+                                   (symbol->enum <GtkOrientation> 'vertical))
+        (range:set-adjustment widget adj)
+        ;; `xg_finish_scroll_bar_creation` adds the foreground and
+        ;; background providers to the scroll bar's own style context
+        ;; (`gtkutil.c:4669`), so the `scroll-bar` face's colours reach
+        ;; this widget and nothing else.
+        (when (pgtk-scrollbar-fg-provider d)
+          (let ((ctx (widget:get-style-context widget)))
+            (style-context:add-provider ctx (pgtk-scrollbar-fg-provider d)
+                                        *menubar-css-priority*)
+            (style-context:add-provider ctx (pgtk-scrollbar-bg-provider d)
+                                        *menubar-css-priority*)))
+        (container:add box widget)
+        (overlay:add-overlay overlay box)
+        (widget:set-halign box (symbol->enum <GtkAlign> 'start))
+        (widget:set-valign box (symbol->enum <GtkAlign> 'start))
+        (connect widget (make <signal> #:name "change-value")
+                 (lambda (w scroll value)
+                   (pgtk-scroll-callback d bar scroll value)
+                   #f))
+        (connect widget (make <signal> #:name "button-release-event")
+                 (lambda (w e)
+                   (pgtk-scroll-end-callback d bar)
+                   #f))
+        (widget:show-all box)
+        ;; "Set the cursor to an arrow" (`gtkutil.c:4620`).
+        (let ((gdkwin (widget:get-window box)))
+          (when gdkwin
+            (let ((cursor (pgtk-cursor d 'nontext)))
+              (when cursor (window:set-cursor gdkwin cursor)))))
+        (pgtk-hold-scrollbar-widget! d box)
+        (pgtk-hold-scrollbar-widget! d widget)
+        bar))
+
+    (define (pgtk-update-scroll-bar-pos d bar x y width height)
+      ;; `xg_update_scrollbar_pos` (`gtkutil.c:4780`): move and resize the
+      ;; bar, and hide it when there is no room. The overlay positions an
+      ;; overlay child by its margins, so a move is two margin writes.
+      ;;--------------------------------------------------------------
+      (let ((box (vector-ref bar %bar-box))
+            (widget (vector-ref bar %bar-widget)))
+        (if (or (<= width 0) (<= height 0)
+                (< height (pgtk-theme-min-slider d)))
+            (widget:hide box)
+            (begin
+              (widget:set-margin-start box x)
+              (widget:set-margin-top box y)
+              (widget:set-size-request widget width height)
+              (widget:show-all box)
+              ;; Gtk does not redraw until the main loop is re-entered.
+              (let ((area (pgtk-area d)))
+                (when area
+                  (gtk-widget-queue-draw (pgtk-widget-pointer area))))))))
+
+    (define (pgtk-set-scroll-bar-thumb d bar portion position whole)
+      ;; `xg_set_toolkit_scroll_bar_thumb` (`gtkutil.c:4991`): "We are
+      ;; currently displaying PORTION out of a whole WHOLE, and our
+      ;; position POSITION."
+      ;;--------------------------------------------------------------
+      ;; "If wscroll && bar->dragging == -1" (`gtkutil.c:5000`): the thumb
+      ;; follows the pointer while it is being dragged, so the setter
+      ;; stays out of the way then.
+      (when (= (vector-ref bar %bar-dragging) -1)
+        (let* ((widget (vector-ref bar %bar-widget))
+               (adj (vector-ref bar %bar-adjustment))
+               (frame (window-frame (vector-ref bar %bar-window))))
+          (when (and scroll-bar-adjust-thumb-portion frame)
+            ;; "Use 30 chars per line rather than the real portion value
+            ;; ... this makes the thumb less likely to resize."
+            (set! portion (* (window-total-height (vector-ref bar %bar-window))
+                             30))
+            (set! whole (+ whole portion)))
+          (let* ((top (if (<= whole 0) 0.0 (/ position whole)))
+                 (shown (if (<= whole 0) 1.0 (/ portion whole)))
+                 (size (max 1 (min %sb-range (inexact->exact (round (* shown %sb-range))))))
+                 (value (max %sb-min
+                             (min (- %sb-max size)
+                                  (inexact->exact (round (* top %sb-range))))))
+                 (new-step (quotient size (max 1 (if frame (frame-height frame) 24))))
+                 (old-size (inexact->exact (round (adjustment:get-page-size adj))))
+                 (old-step (inexact->exact (round (adjustment:get-step-increment adj))))
+                 (changed #f))
+            (unless (= old-size size)
+              (unless (= old-step new-step)
+                (adjustment:set-page-size adj size)
+                (adjustment:set-step-increment adj new-step)
+                (adjustment:set-page-increment adj (- size (quotient size 20)))
+                (set! changed #t)))
+            (when (or changed
+                      (not (= (inexact->exact (round (range:get-value widget)))
+                              value)))
+              (set! pgtk-ignore-scrollbar #t)
+              (unless (= (inexact->exact (round (range:get-value widget))) value)
+                (range:set-value widget value))
+              (set! pgtk-ignore-scrollbar #f))))))
+
+    (define-method (display-set-window-scroll-bar (d <pgtk-display>) window side
+                                                  x y width height
+                                                  portion position whole)
+      ;; `pgtk_set_vertical_scroll_bar` (`pgtkterm.c:4238`): create the
+      ;; widget if the window has none, move it, and set the thumb.
+      ;;--------------------------------------------------------------
+      (let ((bar (%pgtk-bar-for d window)))
+        (cond
+         ((or (not side) (<= width 0))
+          (when bar
+            (widget:hide (vector-ref bar %bar-box)))
+          #f)
+         (else
+          (unless bar
+            (set! bar (pgtk-make-scroll-bar d window))
+            (set! (pgtk-scroll-bars d)
+                  (cons (cons window bar) (pgtk-scroll-bars d))))
+          (pgtk-update-scroll-bar-pos d bar x y width height)
+          (pgtk-set-scroll-bar-thumb d bar portion position whole)
+          #t))))
+
+    (define-method (display-redeem-scroll-bars (d <pgtk-display>) windows)
+      ;; The C's `redeem_scroll_bar`/`judge_scroll_bars_hook` pair: a bar
+      ;; whose window no longer exists is destroyed.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (pgtk-scroll-bars d)) (keep '()))
+        (cond
+         ((null? rest) (set! (pgtk-scroll-bars d) keep))
+         ((memq (caar rest) windows)
+          (loop (cdr rest) (cons (car rest) keep)))
+         (else
+          (let ((bar (cdar rest)))
+            (when (pgtk-overlay d)
+              (widget:destroy (vector-ref bar %bar-box))))
+          (loop (cdr rest) keep)))))
+
     (define (with-gtk-display thunk)
       ;; Open the editor's GTK window, make it the editor's display, run
       ;; THUNK, and take it down afterwards. The counterpart of
@@ -4168,6 +5699,22 @@
 
     (define gdk-atom-intern
       (selection-foreign-fn gdk-selection-lib "gdk_atom_intern" '* (list '* int)))
+    ;; `gdk_selection_owner_get_for_display' - the owner of a selection,
+    ;; or NULL. **It does not wait**, which is the point: a menu's
+    ;; `:enable` form asks this on every rebuild, and the GtkClipboard
+    ;; question below it (`gtk_clipboard_wait_...`) asks the owner and
+    ;; waits for its answer. Emacs's `pgtk-selection-exists-p`
+    ;; (`pgtkselect.c:1779`) asks GDK exactly this question.
+    (define gdk-selection-owner-get-for-display
+      (selection-foreign-fn gdk-selection-lib
+                            "gdk_selection_owner_get_for_display"
+                            '* (list '* '*)))
+    ;; `gdk_window_get_display' - the display a `GdkWindow *' is on.
+    ;; `gtk_widget_get_window` (this file's FFI one) answers a raw
+    ;; pointer, so the display has to be asked for with C functions too.
+    (define gdk-window-get-display
+      (selection-foreign-fn gdk-selection-lib "gdk_window_get_display"
+                            '* (list '*)))
     ;; GDK's other direction: an atom's *name*, which is the only way to
     ;; tell one from another across the FFI. `gdk_atom_intern' interns by
     ;; name, so the atom `GDK_SELECTION_TYPE_ATOM' *is* the atom for the
@@ -4758,15 +6305,38 @@
            (and (assq selection (pgtk-selections d)) #t)))
 
     (define-method (selection-exists? (d <pgtk-display>) selection)
-      ;; Whether SELECTION has an owner at all, whoever owns it. The C
-      ;; asks GDK (`gdk_selection_owner_get_for_display') after its own
-      ;; bookkeeping; Gtk's clipboard-level question is
-      ;; `gtk_clipboard_wait_is_text_available' - does anyone offer
-      ;; text - which is the one the text-selection layer above asks.
+      ;; Whether SELECTION has an owner at all, whoever owns it - GNU
+      ;; Emacs's `pgtk-selection-exists-p` (`pgtkselect.c:1747`): the
+      ;; process's own record first (`LOCAL_SELECTION`), then GDK's
+      ;; `gdk_selection_owner_get_for_display`.
+      ;;
+      ;; **It must not wait.** Emacs asks this from a menu item's
+      ;; `:enable` form, which is evaluated whenever the menu bar or tool
+      ;; bar is rebuilt - and an ordinary text editor's bar has a Paste
+      ;; button. The GtkClipboard question this replaced
+      ;; (`gtk_clipboard_wait_is_text_available`) asks the owner and
+      ;; blocks for the answer, which puts another program's response
+      ;; time inside this editor's redisplay. GDK's owner query is a
+      ;; property of the display and answers at once.
       ;;--------------------------------------------------------------
       (and (pgtk-window d)
            (or (and (assq selection (pgtk-selections d)) #t)
-               (= 1 (gtk-clipboard-wait-is-text-available?
-                     (selection-clipboard selection))))))
+               (let ((owner (gdk-selection-owner-get-for-display
+                             (pgtk-display-pointer d)
+                             (selection-atom selection))))
+                 (and owner (not (null-pointer? owner)) #t)))))
+
+    (define (pgtk-display-pointer d)
+      ;; The `GdkDisplay *' of D's window, for the C functions the
+      ;; typelib does not surface. `gtk_widget_get_window` and
+      ;; `gdk_window_get_display` are both FFI calls here, so what comes
+      ;; back is a raw pointer the whole way - the GdkWindow the widget
+      ;; holds is not a gi proxy in this tree.
+      ;;--------------------------------------------------------------
+      (let ((gdkwin (gtk-widget-get-window (pgtk-widget-pointer (pgtk-window d)))))
+        (and gdkwin
+             (not (null-pointer? gdkwin))
+             (let ((display (gdk-window-get-display gdkwin)))
+               (and display (not (null-pointer? display)) display)))))
 
     ))

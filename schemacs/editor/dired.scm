@@ -97,7 +97,8 @@
           ;; in `dired-broken-symlink' with nothing saying why. A missing
           ;; import hid behind a handler meant for a *file* error.
           file-truename
-          read-file-name revert-buffer)
+          read-file-name read-directory-name next-read-file-uses-dialog-p
+          revert-buffer)
     ;; `indent-rigidly' is indent.el's, and is what gives a dired buffer
     ;; its two-column indent
     (only (schemacs editor indent) indent-rigidly)
@@ -176,6 +177,7 @@
    *dired-initial-position-hook*
    *dired-subdir-alist*
    dired
+   dired-from-menubar
    dired-advertise
    dired-alist-add-1
    dired-build-subdir-alist
@@ -1618,14 +1620,22 @@ With a prefix arg, mark files on the next ARG lines."
         buffer))
 
     (define (dired-read-dir-and-switches str)
-      ;; GNU Emacs's `dired-read-dir-and-switches' (dired.el:1124): "For
-      ;; use in interactive."
+      ;; GNU Emacs's `dired-read-dir-and-switches' (`dired.el:1124'):
+      ;; "For use in interactive."
       ;;
-      ;; The C calls `read-directory-name' instead of `read-file-name'
-      ;; when a dialog is about to be used, so that a dialog knows to ask
-      ;; for a directory; there is no dialog here, so the arm taken is the
-      ;; other one - which is also the one that lets a file name be
-      ;; completed for a wildcard pattern.
+      ;;   ;; If a dialog is used, call `read-directory-name' so the
+      ;;   ;; dialog code knows we want directories.  Some dialogs
+      ;;   ;; can only select directories or files when popped up,
+      ;;   ;; not both.  If no dialog is used, call `read-file-name'
+      ;;   ;; because the user may want completion of file names for
+      ;;   ;; use in a wildcard pattern.
+      ;;
+      ;; This port used to always take the second arm, with a note
+      ;; saying there was no dialog here. There is: the menu's and the
+      ;; tool bar's Dired Open get `x-file-dialog`, and
+      ;; `next-read-file-uses-dialog-p` is what tells the arms apart.
+      ;; A typed `C-x d` is still the read-file-name arm, so wildcard
+      ;; completion is unchanged.
       ;;--------------------------------------------------------------
       (reverse
        (list
@@ -1633,8 +1643,11 @@ With a prefix arg, mark files on the next ARG lines."
             (read-from-minibuffer "Dired listing switches: "
                                   (*dired-listing-switches*))
             #f)
-        (read-file-name (string-append "Dired " str "(directory): ")
-                        (default-directory) (default-directory) #f))))
+        (if (next-read-file-uses-dialog-p)
+            (read-directory-name (string-append "Dired " str "(directory): ")
+                                 #f (default-directory) #f)
+            (read-file-name (string-append "Dired " str "(directory): ")
+                            #f (default-directory) #f)))))
 
     (define-command (dired dirname switches)
       "\"Edit\" directory DIRNAME--delete, rename, print, etc. some files in it.
@@ -1649,6 +1662,18 @@ for SWITCHES."
         (if buf
             (pop-to-buffer-same-window buf)
             (current-buffer))))
+
+    (define-command (dired-from-menubar dirname switches)
+      ;; GNU Emacs's `dired-from-menubar` (`dired.el:1251`): "Edit an
+      ;; existing directory." "This lets clicks on the menu bar invoke
+      ;; Dired even if some feature remaps the Dired command to another
+      ;; command that does not handle this situation correctly" - the
+      ;; C's own comment - which is why the menu and the tool bar name
+      ;; this command and not `dired`.
+      ;;--------------------------------------------------------------
+      "Edit an existing directory."
+      (interactive (dired-read-dir-and-switches ""))
+      (dired dirname switches))
 
     (define (dired-remember-marks beg end)
       ;; GNU Emacs's `dired-remember-marks' (dired.el:2364): "Return alist

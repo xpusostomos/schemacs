@@ -21,7 +21,8 @@
     (scheme case-lambda)
     ;; `format' fills in `what-cursor-position''s message - Guile's,
     ;; which `(scheme base)' does not have.
-    (only (guile) format logand)
+    (only (guile) format hashq-ref hashq-set! logand
+          make-weak-key-hash-table)
     ;; `eval-region' reads the region with the runtime's reader and runs
     ;; it with the runtime's evaluator, as `eval-expression' does.
     (only (scheme read) read)
@@ -65,6 +66,7 @@
          ;; a screen line is the display's - see `*window-scroll-function*`
          *window-scroll-function*
          window-buffer window-list window-width
+         recenter
          %window-hscroll %window-start set-window-start!)
     ;; The kill ring's window-system half: the cut and paste functions
     ;; are simple.el's `interprogram-*-function' variables' defaults,
@@ -77,12 +79,14 @@
     ;; `make-separator-line`'s `(display-supports-face-attributes-p
     ;; '(:underline t))` - the terminal branch decision, `simple.el`'s
     ;; own call.
-    (only (schemacs editor faces) display-supports-face-attributes-p)
+    (only (schemacs editor faces)
+          display-supports-face-attributes-p defface)
     ;; `toggle-truncate-lines' resets the `hscroll' of every window
     ;; showing the buffer, which is `set-window-hscroll''s
     ;; `quit-window' is what `special-mode-map''s `q' is.
-    (only (schemacs editor window) quit-window set-window-hscroll!)
-    (only (schemacs editor subr) suppress-keymap)
+    (only (schemacs editor window) quit-window set-window-hscroll!
+         get-buffer-window)
+    (only (schemacs editor subr) suppress-keymap ignore)
     (only (schemacs editor command)
          current-prefix-arg uarg->integer
          define-command *last-command-event*
@@ -110,7 +114,10 @@
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
           ;; until 2026-10-13.
-          fetch-char set-point buffer-pt buffer-beg buffer-z buffer-read-only? set!buffer-read-only set!text-editor-undo-list text-editor-undo-list)
+          fetch-char set-point buffer-pt buffer-beg buffer-z buffer-read-only? set!buffer-read-only set!text-editor-undo-list text-editor-undo-list
+          ;; `next-error-message-highlight`'s overlay over the current
+          ;; error line.
+          make-overlay delete-overlay overlay-put)
     (only (schemacs editor command)
           *mark-even-if-inactive*
           ;; The seams the interactive argument codes read; installed at
@@ -227,7 +234,7 @@
    ;; read the region - see the note at their definitions.
    upcase-region downcase-region
    %blank-line? *amalgamating-count% *amalgamating-undo-limit*
-   *last-change-was-undo* *last-command* *this-command* *temporary-goal-column*
+   undo--last-change-was-undo-p undo-equiv-table *last-command* *this-command* *temporary-goal-column*
    *kill-do-not-save-duplicates* *kill-read-only-ok*
    *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
    *interprogram-cut-function* *interprogram-paste-function*
@@ -268,7 +275,8 @@
    beginning-of-visual-line end-of-visual-line kill-visual-line
    next-logical-line previous-logical-line
    set-goal-column
-   scroll-down-command scroll-up-command self-insert-command
+   scroll-down-command scroll-up-command *next-screen-context-lines*
+   self-insert-command
    self-insert-layer self-insert-tab
    overwrite-mode binary-overwrite-mode
    ;; the hooks `define-minor-mode' made for them, under the names it
@@ -282,7 +290,15 @@
    mark mark-ring mark-whole-buffer negative-argument
    pop-mark pop-to-mark-command push-mark push-mark-command
    region-active-p set-mark set-mark-command
-   set!mark-ring use-region-p
+   set!mark-ring use-region-p use-region-beginning use-region-end
+   region-bounds
+   ;; `next-error' - its options and the one function occur calls.
+   *next-error-highlight* *next-error-highlight-no-select*
+   *next-error-recenter* *next-error-message-highlight*
+   *next-error-hook* *next-error-found-function*
+   next-error-found next-error-message-highlight
+   next-error-highlight-timer next-error-overlay-arrow-position
+   next-error-last-buffer
 prefix-argument-description
    count-lines
    what-cursor-position
@@ -1698,7 +1714,33 @@ non-nil."
     (define *last-command* (make-parameter #f))
     (define *amalgamating-count* (make-parameter 0))
     (define *pending-undo-list* (make-parameter #f))
-    (define *last-change-was-undo* (make-parameter #f))
+
+    (define undo-equiv-table (make-weak-key-hash-table 31))
+    ;; ^ GNU Emacs's `undo-equiv-table` (`simple.el:3422'): "Table
+    ;; mapping redo records to the corresponding undo one. A redo record
+    ;; for ordinary undo maps to the following (earlier) undo. A redo
+    ;; record that undoes to the beginning of the undo list maps to t."
+    ;;
+    ;; It is what makes `undo-redo' possible and what the Edit menu's
+    ;; Redo item tests, and it is a *weak* table because a key is the
+    ;; front of a buffer's undo list, which stops being reachable the
+    ;; moment the next edit conses over it. Guile's weak-key table uses
+    ;; `eq?' hashing, as Emacs's does.
+    ;;
+    ;; Plain, not a parameter: Emacs `defconst's it, and nothing
+    ;; `let'-binds it.
+
+    (define (undo--last-change-was-undo-p undo-list)
+      ;; GNU Emacs's `undo--last-change-was-undo-p' (`simple.el:3466'):
+      ;; whether the front of UNDO-LIST is a redo record - the records an
+      ;; `undo' command left behind. The leading undo boundaries are
+      ;; stepped over first, because the command loop places one before
+      ;; every command.
+      ;;--------------------------------------------------------------
+      (let loop ((list undo-list))
+        (if (and (pair? list) (null? (car list)))
+            (loop (cdr list))
+            (hashq-ref undo-equiv-table list))))
 
     (define *amalgamating-undo-limit* (make-parameter 20))
 
@@ -1921,8 +1963,17 @@ non-nil."
       (interactive "p")
       (let* ((frame (*current-frame*))
              (ed (current-buffer))
+             ;; Emacs's "Here we decide whether to break the undo
+             ;; chain": a previous `undo' continues the run - unless the
+             ;; run has ended (`pending-undo-list' is `t') or something
+             ;; else changed the buffer since (its undo list's front is
+             ;; no longer a redo record).
+             (continuing
+              (and (eq? (*last-command*) undo)
+                   (or (eq? (*pending-undo-list*) #t)
+                       (undo--last-change-was-undo-p (text-editor-undo-list ed)))))
              (pending
-              (if (eq? (*last-command*) undo)
+              (if continuing
                   ;; continue the run
                   (*pending-undo-list*)
                   ;; start a new run, from the front of the list
@@ -1930,11 +1981,24 @@ non-nil."
         (if (not (list? pending))
             (set!frame-message frame "No further undo information")
             (let ((rest (primitive-undo count pending)))
-              ;; Emacs sets `pending-undo-list' to t once the run has
-              ;; reached the end; false is that state here, and it is
-              ;; what makes the next undo report that it is finished.
-              (*pending-undo-list* (if (null? rest) #f rest))
-              (*last-change-was-undo* #t)
+              ;; `undo-more`'s tail: "If (null pending-undo-list) (setq
+              ;; pending-undo-list t)" - `t' ends the run, and it is
+              ;; what `listp' in the menu's Undo test reads, and what
+              ;; the next redo's `pending' becomes.
+              (*pending-undo-list* (if (null? rest) #t rest))
+              ;; "Record the fact that the just-generated undo records
+              ;; come from an undo operation--that is, they are redo
+              ;; records." The key is the front of the buffer's undo
+              ;; list with the command loop's leading boundaries shed,
+              ;; as the C does before the `puthash'.
+              (let ((front (strip-undo-boundaries (text-editor-undo-list ed))))
+                (hashq-set! undo-equiv-table front
+                            (if (eq? front (*pending-undo-list*))
+                                ;; "Prevent identity mapping... map to
+                                ;; _something_ so that the next `undo'
+                                ;; recognizes a consecutive undo."
+                                (or (hashq-ref undo-equiv-table front) 'empty)
+                                (*pending-undo-list*))))
               ;; ... and the records the undo just made do not carry a
               ;; position of their own. See the function.
               (undo-drop-recorded-positions! ed)
@@ -1948,18 +2012,25 @@ non-nil."
       "Redo the last undone change, or the last COUNT undone changes."
       (interactive "p")
       (let ((frame (*current-frame*)))
-        (if (not (*last-change-was-undo*))
+        (if (not (undo--last-change-was-undo-p
+                  (text-editor-undo-list (current-buffer))))
             (set!frame-message frame "No undone changes to redo")
             (let* ((ed (current-buffer))
                    (list (strip-undo-boundaries
-                          (text-editor-undo-list ed))))
-              (if (not (pair? list))
-                  (set!frame-message
-                   frame "No undone changes to redo")
-                  (begin
-                    (primitive-undo count list)
-                    (*last-change-was-undo* #t)
-                    (set!frame-message frame "Redo")))))))
+                          (text-editor-undo-list ed)))
+                   (new-ul (primitive-undo count list))
+                   (new-pul (undo--last-change-was-undo-p new-ul)))
+              ;; The C's three assignments: `this-command' becomes
+              ;; `undo' so a following `undo' continues the chain,
+              ;; `pending-undo-list' becomes the undo list the table
+              ;; maps this redo to, and `buffer-undo-list' becomes what
+              ;; `primitive-undo' returned - which drops the records the
+              ;; redo itself pushed, undoing them being what a redo of a
+              ;; redo is.
+              (*this-command* undo)
+              (*pending-undo-list* new-pul)
+              (set!text-editor-undo-list ed new-ul)
+              (set!frame-message frame "Redo")))))
 
     ;;----------------------------------------------------------------
     ;; Prefix arguments
@@ -2292,6 +2363,30 @@ non-nil."
       (and (region-active-p)
            (or (< (region-beginning) (region-end))
                (*use-empty-active-region*))))
+
+    (define (use-region-beginning)
+      ;; GNU Emacs's `use-region-beginning` (`simple.el:7220`): "Return
+      ;; the start of the region if `use-region-p' returns non-nil."
+      ;;--------------------------------------------------------------
+      (and (use-region-p) (region-beginning)))
+
+    (define (use-region-end)
+      ;; GNU Emacs's `use-region-end` (`simple.el:7227`): "Return the
+      ;; end of the region if `use-region-p' returns non-nil."
+      ;;--------------------------------------------------------------
+      (and (use-region-p) (region-end)))
+
+    (define (region-bounds)
+      ;; GNU Emacs's `region-bounds' (`simple.el:7279'): "Return the
+      ;; boundaries of the region. Value is a list of one or more cons
+      ;; cells of the form (START . END)."
+      ;;
+      ;; Emacs asks `region-extract-function' for its `bounds' method,
+      ;; which is how a rectangular region answers several cells. There
+      ;; are no rectangular regions here, so this is the default
+      ;; function's answer - the one pair.
+      ;;--------------------------------------------------------------
+      (list (cons (region-beginning) (region-end))))
 
     (define (check-mark for-region)
       ;; `callint.c:156`'s `check_mark`: the static its `r' and `m' codes
@@ -3777,6 +3872,132 @@ a buffer-local setting."
                      column)))
       #f)
 
+
+    ;;----------------------------------------------------------------
+    ;; `next-error' - its variables, its face, and `next-error-found'
+    ;;
+    ;; `simple.el:96-200' and `:418'. The command `next-error' itself,
+    ;; `next-error-internal', `next-error-no-select' and the search for
+    ;; a `next-error' capable buffer are NOT ported - that is the
+    ;; compilation/grep subsystem. What is here is what `occur' calls:
+    ;; the two highlighting options, the timer and arrow variables,
+    ;; `next-error-found', and the face the locus is highlighted with.
+    ;; `occur-mode-map`'s `n` and `p`, which are
+    ;; `next-error-no-select`/`previous-error-no-select`, wait on the
+    ;; rest.
+    ;;----------------------------------------------------------------
+
+    (defface 'next-error
+      '((t (:inherit region)))
+      "Face used to highlight next error locus.")
+
+    (define-custom *next-error-highlight* 0.5
+      "Highlighting of locations in the selected buffer.
+If a number, highlight the locus in `next-error' face for the given time
+in seconds, or until the next command is executed.
+If t, highlight the locus until the next command is executed, or until
+some other locus replaces it.
+If nil, don't highlight the locus in the source buffer.
+If `fringe-arrow', indicate the locus by the fringe arrow
+indefinitely until some other locus replaces it."
+      :type 'number
+      :group 'next-error)
+
+    (define-custom *next-error-highlight-no-select* 0.5
+      "Highlighting of locations in non-selected source buffers.
+Usually non-selected buffers are displayed by `next-error-no-select'.
+If number, highlight the locus in `next-error' face for given time in seconds.
+If t, highlight the locus indefinitely until some other locus replaces it.
+If nil, don't highlight the locus in the source buffer.
+If `fringe-arrow', indicate the locus by the fringe arrow
+indefinitely until some other locus replaces it."
+      :type 'number
+      :group 'next-error)
+
+    (define-custom *next-error-recenter* #f
+      "Display the line in the visited source file recentered as specified.
+If non-nil, the value is passed directly to `recenter'."
+      :type 'number
+      :group 'next-error)
+
+    (define-custom *next-error-message-highlight* #f
+      "If non-nil, highlight the current error message in the `next-error' buffer.
+If the value is `keep', highlighting is permanent, so all visited error
+messages are highlighted."
+      :type 'boolean
+      :group 'next-error)
+
+    (defface 'next-error-message
+      '((t (:inherit highlight :extend t)))
+      "Face used to highlight the current error message in the `next-error' buffer.")
+
+    (define-custom *next-error-hook* '()
+      "List of hook functions run by `next-error' after visiting source file."
+      :type 'hook
+      :group 'next-error)
+
+    (define-custom *next-error-found-function* ignore
+      "Function called when a next locus is found and displayed.
+Function is called with two arguments: a FROM-BUFFER buffer
+from which `next-error' navigated, and a target buffer TO-BUFFER."
+      :type 'function
+      :group 'next-error)
+
+    (define next-error-highlight-timer #f)
+    ;; ^ GNU Emacs's `next-error-highlight-timer' (`simple.el:174').
+
+    (define next-error-overlay-arrow-position #f)
+    ;; ^ GNU Emacs's (`simple.el:176'). Its `overlay-arrow-string' is
+    ;; "=>" and it is put on `overlay-arrow-variable-list'; the
+    ;; renderer here draws no overlay arrows, which is named where the
+    ;; variable lives (`xdisp.scm`).
+
+    (define next-error-last-buffer #f)
+    ;; ^ GNU Emacs's `next-error-last-buffer' (`simple.el:180'): "The
+    ;; most recent `next-error' buffer."
+
+    (define (next-error-message-highlight error-buffer)
+      ;; GNU Emacs's `next-error-message-highlight' (`simple.el:535'):
+      ;; "Highlight the current error message in the `next-error'
+      ;; buffer."
+      ;;--------------------------------------------------------------
+      (when (*next-error-message-highlight*)
+        (with-current-buffer error-buffer
+          (let ((old (buffer-local-value
+                      (current-buffer)
+                      'next-error--message-highlight-overlay #f)))
+            (when (and old (not (eq? (*next-error-message-highlight*) 'keep)))
+              (delete-overlay old)))
+          (let ((ol (make-overlay (line-beginning-position)
+                                  (+ 1 (line-end-position)))))
+            ;; do not override region highlighting
+            (overlay-put ol 'priority -50)
+            (overlay-put ol 'face 'next-error-message)
+            (overlay-put ol 'window (get-buffer-window (current-buffer)))
+            (set-buffer-local-value!
+             (current-buffer) 'next-error--message-highlight-overlay ol)))))
+
+    (define (next-error-found . args)
+      ;; GNU Emacs's `next-error-found' (`simple.el:418'): "Function to
+      ;; call when the next locus is found and displayed. FROM-BUFFER is
+      ;; a buffer from which `next-error' navigated, and TO-BUFFER is a
+      ;; target buffer."
+      ;;
+      ;; The local `next-error-buffer` is buffer-local in Emacs; here it
+      ;; is the buffer-local slot of that name, set the same way.
+      ;;--------------------------------------------------------------
+      (let ((from-buffer (and (pair? args) (car args)))
+            (to-buffer (and (pair? args) (pair? (cdr args)) (cadr args))))
+        (set! next-error-last-buffer (or from-buffer (current-buffer)))
+        (when to-buffer
+          (with-current-buffer to-buffer
+            (set-buffer-local-value! (current-buffer)
+                                     'next-error-buffer from-buffer)))
+        (when (*next-error-recenter*)
+          (recenter (*next-error-recenter*)))
+        (*next-error-found-function* from-buffer to-buffer)
+        (next-error-message-highlight from-buffer)
+        (run-hooks (*next-error-hook*))))
 
     ;; The seam `indent.scm` reaches `delete-horizontal-space` through -
     ;; see the note at the top of this file's imports.

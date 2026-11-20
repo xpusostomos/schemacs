@@ -1,6 +1,9 @@
 (import
  (only (schemacs editor buffer) allocate-buffer)
  (only (schemacs editor editfns) insert delete-region)
+ ;; `make-overlay`'s ends "may be integers or markers" (`buffer.c:3650`),
+ ;; and the wrong-buffer check is `marker.c`'s.
+ (only (schemacs editor marker) make-marker set-marker)
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
@@ -95,7 +98,7 @@
   (with-buffers
    (lambda ()
      (let ((buffer (get-buffer-create "old")))
-       (rename-buffer buffer "renamed")
+       (with-current-buffer buffer (rename-buffer "renamed"))
        (list (names) (eq? buffer (get-buffer "renamed")) (get-buffer "old"))))))
 
 ;; ... and with the UNIQUE argument it makes the name unique rather than
@@ -104,7 +107,8 @@
   (with-buffers
    (lambda ()
      (get-buffer-create "taken")
-     (rename-buffer (get-buffer-create "other") "taken" #t))))
+     (with-current-buffer (get-buffer-create "other")
+       (rename-buffer "taken" #t)))))
 
 ;; A name already in use is an error, as `rename-buffer' makes it one.
 (test-equal #t
@@ -112,7 +116,8 @@
    (lambda ()
      (get-buffer-create "taken")
      (guard (ex (else #t))
-       (rename-buffer (get-buffer-create "other") "taken")
+       (with-current-buffer (get-buffer-create "other")
+         (rename-buffer "taken"))
        #f))))
 
 ;;--------------------------------------------------------------------
@@ -258,6 +263,40 @@
          (with-current-buffer b (insert "hello world"))
          (let ((o (make-overlay 1 6)))
            (list (overlay-start o) (overlay-end o))))))))
+
+;; "BEG and END may be integers or markers" (`buffer.c:3650`), and the
+;; absence of that coercion was a real failure: `occur--highlight-
+;; occurrences` makes an overlay from the two markers of an
+;; `occur-target`, and with markers reaching `min` a click on an Occur
+;; line raised "Wrong type argument in position 1: #<marker>".
+(test-equal "make-overlay takes markers"
+  '(1 6)
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt")))
+       (parameterize ((*current-buffer* b))
+         (with-current-buffer b (insert "hello world"))
+         (let ((m1 (make-marker))
+               (m2 (make-marker)))
+           (set-marker m1 1 b)
+           (set-marker m2 6 b)
+           (let ((o (make-overlay m1 m2)))
+             (list (overlay-start o) (overlay-end o)))))))))
+
+;; ...and a marker in *another* buffer is the C's "Marker points into
+;; wrong buffer" (`buffer.c:3672`), not a silently wrong range.
+(test-equal "make-overlay refuses a marker in another buffer"
+  'signals
+  (with-buffers
+   (lambda ()
+     (let ((b (get-buffer-create "ov.txt"))
+           (other (get-buffer-create "other.txt")))
+       (parameterize ((*current-buffer* b))
+         (let ((m (make-marker)))
+           (set-marker m 1 other)
+           (guard (e (#t 'signals))
+             (make-overlay m 2)
+             'no-error)))))))
 
 ;; It follows the text: inserting at its *start*, with `front-advance'
 ;; nil, puts the new text inside it - the start stays and the end moves.

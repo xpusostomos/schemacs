@@ -59,7 +59,8 @@
           buffer-begv buffer-zv
           *make-marker-function* *build-marker-function*
           *marker-position-function* *set-marker-function*
-          *set-marker-insertion-type-function*)
+          *set-marker-insertion-type-function*
+          *check-fixnum-coerce-marker-function*)
     )
 
   (export
@@ -368,5 +369,17 @@
     (*marker-position-function* marker-position)
     (*set-marker-function* set-marker)
     (*set-marker-insertion-type-function* set-marker-insertion-type)
+    (*check-fixnum-coerce-marker-function*
+     (lambda (value buffer)
+       ;; `CHECK_FIXNUM_COERCE_MARKER` (`buffer.h`): "If X is a marker
+       ;; whose buffer is B, replace it with its charpos" - and the C's
+       ;; two tests above the coercion in `Fmake_overlay` refuse a marker
+       ;; that is in some other buffer, or in none.
+       (if (markerp value)
+           (begin
+             (unless (eq? (marker-buffer value) buffer)
+               (error "Marker points into wrong buffer: ~a" value))
+             (marker-position value))
+           value)))
 
     ))

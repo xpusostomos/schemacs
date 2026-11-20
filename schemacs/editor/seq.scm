@@ -18,9 +18,9 @@
           ;; sort itself is the runtime's.
           (only (guile) sort))
 
-  (export seq-filter seq-remove seq-find seq-uniq seq-difference seq-sort
-          seq-sort-by seq-position seq-keep seq-subseq seq-take seq-drop
-          seq-group-by seq-do-indexed seq-copy seq-length)
+  (export seq-filter seq-remove seq-find seq-some seq-uniq seq-difference
+          seq-sort seq-sort-by seq-position seq-keep seq-subseq seq-take
+          seq-drop seq-group-by seq-do-indexed seq-copy seq-length)
 
   (begin
 
@@ -52,6 +52,18 @@
           (cond ((null? rest) default)
                 ((pred (car rest)) (car rest))
                 (else (loop (cdr rest)))))))
+
+    (define (seq-some pred sequence)
+      ;; GNU Emacs's `seq-some` (seq.el): "Return the first non-nil value
+      ;; returned by PRED when applied to an element of SEQUENCE, or nil
+      ;; if no element fulfills the predicate." `occur-1` asks it whether
+      ;; any buffer it is about to search *is* the output buffer, which
+      ;; is why it answers the predicate's value rather than a boolean.
+      ;;--------------------------------------------------------------
+      (let loop ((rest sequence))
+        (cond ((null? rest) #f)
+              ((pred (car rest)) => (lambda (value) value))
+              (else (loop (cdr rest))))))
 
     ;;--------------------------------------------------------------
     ;; The rest of what the tab line asks for. Emacs's are

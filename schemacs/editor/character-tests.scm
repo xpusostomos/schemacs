@@ -123,4 +123,36 @@
         (c:characterp (c:byte8-to-char #xFF))
         (c:characterp (+ 1 c:*max-char*))))
 
+;;------------------------------------------------------------------
+;; The symbolic event modifiers - `termhooks.h' and `keyboard.c'
+;;------------------------------------------------------------------
+;; `parse_modifiers' (`keyboard.c:6827') reads the `down', `drag' and
+;; `click' words out of an event symbol, and `make_lispy_event' adds
+;; `click' to `mouse-N' implicitly (`keyboard.c:6760'): "mouse-N" is a
+;; *release* and its modifiers are (click), while down-mouse-N is (down).
+;; Every expectation below is `emacs -Q --batch`'s own answer.
+
+(test-equal '((click) (down) (control down) (click up) (drag)
+              (click) () (double))
+  (map c:event-modifiers
+       '(mouse-1 down-mouse-1 C-down-mouse-1 up-mouse-1 drag-mouse-2
+         wheel-up mouse-movement double-mouse-1)))
+
+(test-equal '(mouse-1 mouse-1 mouse-1 mouse-1 mouse-2 wheel-up
+              mouse-movement mouse-1)
+  (map c:event-basic-type
+       '(mouse-1 down-mouse-1 C-down-mouse-1 up-mouse-1 drag-mouse-2
+         wheel-up mouse-movement double-mouse-1)))
+
+;; And the way back - `event-convert-list' - writes `click' never: it is
+;; implicit in `mouse-N'. Measured in Emacs 31.1:
+;;     (event-convert-list '(control down click mouse-1)) => C-down-mouse-1
+;;     (event-convert-list '(up click mouse-1))          => up-mouse-1
+(test-equal '(C-down-mouse-1 down-mouse-1 mouse-1 up-mouse-1
+              double-mouse-1 drag-mouse-3)
+  (map c:event-convert-list
+       '((control down click mouse-1) (down click mouse-1)
+         (click mouse-1) (up click mouse-1) (double click mouse-1)
+         (drag mouse-3))))
+
 (test-end "schemacs_editor_character")

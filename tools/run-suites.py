@@ -56,6 +56,7 @@ SUITES = [
     'schemacs/editor/prog-mode-tests.scm',
     'schemacs/editor/lisp-tests.scm',
     'schemacs/editor/scheme-tests.scm',
+    'schemacs/editor/scroll-bar-tests.scm',
     'schemacs/editor/cl-indent-tests.scm',
     'schemacs/editor/marker-tests.scm',
     'schemacs/editor/editfns-tests.scm',
@@ -94,6 +95,7 @@ SUITES = [
     # `tab-line.el`'s Lisp half: the format the redisplay reads, the
     # commands that act on it, and the globalized mode that installs it.
     'schemacs/editor/tab-line-tests.scm',
+    'schemacs/editor/tool-bar-tests.scm',
     'schemacs/editor/casefiddle-tests.scm',
     'schemacs/editor/mouse-tests.scm',
     'schemacs/repl-client-tests.scm',
@@ -105,6 +107,8 @@ SUITES = [
     'schemacs/editor/timefns-tests.scm',
     'schemacs/editor/search-tests.scm',
     'schemacs/editor/replace-tests.scm',
+    # `replace.el`'s Occur - the engine, the mode, and `isearch-occur`.
+    'schemacs/editor/occur-tests.scm',
     'schemacs/editor/faces-tests.scm',
     # The omarchy port's own suite - the font-height logic upstream added
     # with its daemon font-size fix. It lives beside the library, under
@@ -120,6 +124,7 @@ SUITES = [
     'schemacs/editor/minibuffer-tests.scm',
     'schemacs/editor/minibuf-tests.scm',
     'schemacs/ui/gtk/pgtk-tests.scm',
+    'schemacs/ui/gtk/pgtk-win-tests.scm',
     'schemacs/editor/timer-tests.scm',
     'schemacs/editor/seq-tests.scm',
     'schemacs/editor/select-tests.scm',

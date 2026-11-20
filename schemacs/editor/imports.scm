@@ -45,6 +45,7 @@
     (schemacs editor menu)
     (except (schemacs editor xdisp)  *truncate-partial-width-windows* line-display-rows window-line-rows window-line-slices window-start window-truncates-lines? vertical-motion)
     (schemacs editor minibuffer)
+    (schemacs editor mouse)
     (schemacs editor pages)
     (except (schemacs editor paragraphs)  *page-delimiter*)
     (schemacs editor itree)
@@ -88,6 +89,7 @@
     (schemacs editor elisp-mode)
     (schemacs editor env)
     (except (schemacs editor fileio)  directory-name-p expand-file-name file-exists-p file-name-directory-part file-name-nondirectory-part file-writable-p *buffer-visited-file-modtime-function*)
+    (schemacs editor image)
     (schemacs editor font)
     (schemacs editor face-remap)
     (schemacs editor glyph)
@@ -102,15 +104,15 @@
     (schemacs editor diffseq)
     (schemacs editor data)
     (except (schemacs editor menu-bar)  *tty-menu-open-use-tmm*)
-    (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char *inhibit-auto-fill* *page-delimiter* *use-hard-newlines* back-to-indentation self-insert-command self-insert-tab)
+    (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char *inhibit-auto-fill* *page-delimiter* *use-hard-newlines* back-to-indentation self-insert-command self-insert-tab mark)
     (schemacs editor mule-cmds)
     (schemacs editor buffer-text)
     (schemacs editor region-cache)
-    (except (schemacs editor mouse)  mark)
     (schemacs editor prog-mode)
     (schemacs editor rmc)
     (except (schemacs editor undo)  text-editor-undo-list set!text-editor-undo-list)
     (schemacs editor scheme)
+    (schemacs editor scroll-bar)
     (schemacs editor select)
     (schemacs editor seq)
     (schemacs editor help)
@@ -119,6 +121,7 @@
     (schemacs editor tab-line)
     (schemacs editor tabulated-list)
     (schemacs editor text-mode)
+    (schemacs editor tool-bar)
     (schemacs editor mule-util)
     (schemacs editor tty-colors)
     (except (schemacs editor subr)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd)
@@ -135,10 +138,18 @@
     %comstart-first?
     %comstart-second?
     %count-lines
+    %extract-dimension
     %filevercmp
     %for-each-marker
+    %frame-config-scroll-bar-cols
+    %frame-config-scroll-bar-width
     %frame-menu-bar-lines
+    %frame-scroll-bar-area-cols
+    %frame-scroll-bar-area-width
     %frame-tab-bar-lines
+    %frame-tool-bar-lines
+    %frame-total-scroll-bar-cols
+    %frame-vertical-scroll-bar-type
     %help-arg
     %kill-buffer
     %lisp-el-special-forms-and-macros
@@ -231,9 +242,11 @@
     *change-major-mode-after-body-hook*
     *change-major-mode-hook*
     *char-property-alias-alist*
+    *char-property-alias-alist-function*
     *char-unify-table*
     *charset-map-path*
     *charset-table*
+    *check-fixnum-coerce-marker-function*
     *check-mark-function*
     *clear-message-function*
     *coding-categories-bound*
@@ -332,6 +345,7 @@
     *display-color-cells*
     *display-type*
     *down-list-function*
+    *drawing-window*
     *echo-area-buffer*
     *echo-buffers*
     *emacs-startup-hook*
@@ -402,6 +416,7 @@
     *frame-list*
     *gap-bytes-dfl*
     *gap-bytes-min*
+    *get-local-map-function*
     *get-scratch-buffer-create-function*
     *get-text-property-function*
     *global-minor-modes*
@@ -421,6 +436,7 @@
     *history-delete-duplicates*
     *history-length*
     *icon-preference*
+    *image-load-path*
     *indent-tabs-mode*
     *inhibit-auto-fill*
     *inhibit-field-text-motion*
@@ -462,6 +478,8 @@
     *jit-lock-defer-time*
     *jit-lock-end*
     *jit-lock-start*
+    *key-translation-map*
+    *kill-buffer-hook*
     *kill-buffer-query-functions*
     *kill-do-not-save-duplicates*
     *kill-read-only-ok*
@@ -470,10 +488,10 @@
     *kill-ring-yank-pointer*
     *kill-whole-line*
     *labeled-restrictions-remove-function*
-    *last-change-was-undo*
     *last-coding-system-used*
     *last-command*
     *last-command-event*
+    *last-nonmenu-event*
     *last-read-event*
     *last-thing-searched*
     *lazy-highlight-cleanup*
@@ -493,6 +511,12 @@
     *lisp-tag-body-indentation*
     *lisp-tag-indentation*
     *lispy-function-keys*
+    *list-matching-lines-buffer-name-face*
+    *list-matching-lines-current-line-face*
+    *list-matching-lines-default-context-lines*
+    *list-matching-lines-face*
+    *list-matching-lines-jump-to-current-line*
+    *list-matching-lines-prefix-face*
     *local-enable-local-variables*
     *ls-lisp-block-width*
     *ls-lisp-dirs-first*
@@ -515,6 +539,7 @@
     *mark-even-if-inactive*
     *mark-marker-function*
     *mark-ring-max*
+    *mark-window-redisplay-function*
     *marker-position-function*
     *max-5-byte-char*
     *max-char*
@@ -552,13 +577,26 @@
     *mode-line-format*
     *mode-line-window*
     *mode-require-final-newline*
+    *mouse-1-click-follows-link*
+    *mouse-1-click-in-non-selected-windows*
     *mouse-buffer-menu-maxlen*
     *mouse-buffer-menu-mode-groups*
     *mouse-buffer-menu-mode-mult*
     *mouse-event-keys*
     *mouse-scroll-delay*
     *mouse-scroll-min-lines*
+    *next-error-found-function*
+    *next-error-highlight*
+    *next-error-highlight-no-select*
+    *next-error-hook*
+    *next-error-message-highlight*
+    *next-error-recenter*
+    *next-screen-context-lines*
     *next-selection-coding-system*
+    *occur--final-pos*
+    *occur-excluded-properties*
+    *occur-hook*
+    *occur-mode-find-occurrence-hook*
     *old-selected-window*
     *open-paren-in-column-0-is-defun-start*
     *overriding-local-map*
@@ -604,6 +642,7 @@
     *read-minibuffer-function*
     *read-non-nil-coding-system-function*
     *read-number-function*
+    *read-regexp-defaults-function*
     *read-string-function*
     *read-variable-function*
     *record-window-buffer-function*
@@ -619,6 +658,7 @@
     *saved-region-selection*
     *scheme-mit-dialect*
     *scratch-buffer-name*
+    *scroll-bar-mode*
     *search-case-fold?*
     *search-highlight*
     *search-pattern*
@@ -720,6 +760,12 @@
     *timer-idle-list*
     *timer-list*
     *timer-wake*
+    *tool-bar-always-show-default*
+    *tool-bar-items-function*
+    *tool-bar-keymap-function*
+    *tool-bar-lines-default-function*
+    *tool-bar-position*
+    *tool-bar-system-style-function*
     *track-eol*
     *transient-mark-mode*
     *transpose-sexps-function*
@@ -737,6 +783,8 @@
     *unread-command-events*
     *up-list-function*
     *update-search-regs-function*
+    *use-dialog-box*
+    *use-dialog-box-override*
     *use-empty-active-region*
     *use-hard-newlines*
     *use-region-p-function*
@@ -807,6 +855,7 @@
     adjust-overlays-for-delete
     adjust-overlays-for-insert
     adjust-point
+    adjust-window-trailing-edge
     all-completions
     allocate-buffer
     amalgamating-command?
@@ -1017,6 +1066,7 @@
     clear-glyph-matrix
     clear-glyph-matrix-row
     clear-minibuffer-message
+    clear-mouse-face!
     clear-prefix!
     clear-to-end!
     code-point->char
@@ -1151,8 +1201,10 @@
     copy-region-as-kill
     copy-sequence
     copy-syntax-table
+    copy-tree
     count-lines
     create-file-buffer
+    create-image
     create-root-interval
     ctl-x-4-map
     current-buffer
@@ -1225,6 +1277,7 @@
     default-boundp
     default-buffer-file-coding-system
     default-directory
+    default-frame-scroll-bars
     default-indent-new-line
     default-to-grave-quoting-style
     default-value
@@ -1331,6 +1384,7 @@
     dired-flag-file-deletion
     dired-flagged-face
     dired-font-lock-keywords
+    dired-from-menubar
     dired-fun-in-all-buffers
     dired-get-file-for-visit
     dired-get-filename
@@ -1398,17 +1452,27 @@
     display-buffer-below-selected
     display-cell-size
     display-color-cells
+    display-color-p
     display-completion-list
+    display-default-scroll-bar-width
+    display-define-frame-cursor
+    display-draw-vertical-border
     display-font-families
     display-graphic-p
+    display-images-p
     display-menu-bar
+    display-mouse-absolute-pixel-position
     display-mouse-position
     display-pixel-height
     display-pixel-width
     display-popup-menus-p
+    display-raise-frame
+    display-redeem-scroll-bars
     display-selections-p
     display-selections-supported?
+    display-set-mouse-pixel-position
     display-set-size!
+    display-set-window-scroll-bar
     display-startup-screen
     display-supports-face-attributes-p
     display-text-width
@@ -1418,6 +1482,7 @@
     do-pending-window-change
     documentation
     documentation-property
+    double-click-fuzz
     down-list
     down-list-default-function
     downcase
@@ -1497,6 +1562,7 @@
     face-attributes-empty
     face-attrs-more-relative-p
     face-defface-spec
+    face-differs-from-default-p
     face-documentation
     face-list
     face-metrics
@@ -1551,6 +1617,7 @@
     file-readable-p
     file-regular-p
     file-relative-name
+    file-remote-p
     file-size-human-readable
     file-size-human-readable-iec
     file-symlink-p
@@ -1599,10 +1666,14 @@
     find-buffer-visiting
     find-coding-system
     find-file
+    find-file-existing
     find-file-name-handler
     find-file-noselect
     find-file-other-window
+    find-file-read-args
     find-file-read-only
+    find-image
+    find-image--cache
     find-interval
     find-newline
     find-operation-coding-system
@@ -1690,6 +1761,7 @@
     frame-deletable-p
     frame-editor
     frame-garbaged-p
+    frame-has-vertical-scroll-bars?
     frame-height
     frame-inhibit-resize?
     frame-inner-width
@@ -1713,10 +1785,13 @@
     frame-quit-cont
     frame-root-window
     frame-root-window-p
+    frame-scroll-bar-width
     frame-selected-window
     frame-set-background-mode
     frame-tab-bar-items
     frame-tab-bar-items-used
+    frame-tool-bar-items
+    frame-tool-bar-items-used
     frame-top-margin
     frame-type?
     frame-visible-p
@@ -1856,6 +1931,11 @@
     icons--register
     icons--spec
     ignore
+    image-mask-p
+    image-property
+    image-search-load-path
+    image-type
+    image-type-available-p
     imports-path
     indent-according-to-mode
     indent-for-comment
@@ -1945,7 +2025,9 @@
     invalidate-region-cache
     isearch
     isearch-backward
+    isearch-case-fold-search
     isearch-dehighlight
+    isearch-describe-mode
     isearch-error
     isearch-find
     isearch-forward
@@ -1954,11 +2036,21 @@
     isearch-lazy-highlight-update
     isearch-message
     isearch-no-upper-case-p
+    isearch-occur
+    isearch-other-end
     isearch-pop-state
     isearch-pop-to-success
+    isearch-query-replace
+    isearch-regexp
     isearch-repeat
     isearch-ring-adjust1
     isearch-search!
+    isearch-string
+    isearch-string-propertize
+    isearch-success
+    isearch-tool-bar-image
+    isearch-tool-bar-map
+    isearch-tool-bar-old-map
     isearch-update-ring
     isearch-word-at-point
     iso-charset-table
@@ -2028,6 +2120,7 @@
     key-binding
     key-description
     key-event->key
+    key-translation-translate
     key-valid-p
     keyboard-coding-system
     keyboard-quit
@@ -2142,6 +2235,7 @@
     list-buffers
     list-buffers--refresh
     list-buffers-noselect
+    list-matching-lines
     list-of-items
     list-of-panes
     list-ref-or
@@ -2149,6 +2243,7 @@
     list-without
     load-init
     load-theme
+    local-variable-p
     locate-file
     locate-file-internal
     looking-at
@@ -2253,6 +2348,7 @@
     menu-bar-replace-menu
     menu-bar-separator
     menu-bar-update-buffers
+    menu-find-file-existing
     menu-item-width
     menu-items
     menu-items-item-definition
@@ -2321,6 +2417,7 @@
     minibuffer-restore-windows
     minibuffer-selected-window
     minibuffer-set-contents!
+    minibuffer-window
     minibuffer-window-active-p
     minibuffer-with-setup-hook
     minibufferp
@@ -2334,20 +2431,31 @@
     mode-line-string
     mode-line-window-selected-p
     mode-name
+    modify-all-frames-parameters
     modify-frame-parameters
     modify-syntax-entry
     modify-text
     modify-text-properties
+    mouse--click-1-maybe-follows-link
+    mouse--down-1-maybe-follows-link
     mouse--drag-set-mark-and-point
+    mouse--last-down
+    mouse-absolute-pixel-position
     mouse-buffer-menu
     mouse-buffer-menu-alist
     mouse-buffer-menu-map
     mouse-buffer-menu-split
     mouse-drag-region
     mouse-drag-track
+    mouse-event-areas-with-no-buffer-positions
+    mouse-face-at
+    mouse-highlight
     mouse-key?
     mouse-minibuffer-check
+    mouse-on-link-p
     mouse-position
+    mouse-position-in-root-frame
+    mouse-posn-property
     mouse-scroll-subr
     mouse-set-point
     mouse-set-region
@@ -2363,6 +2471,7 @@
     narrow-to-defun-include-comments
     narrow-to-page
     narrow-to-region
+    nconc
     negative-argument
     new-buffer-text
     new-command
@@ -2374,6 +2483,11 @@
     newline-and-indent
     next-buffer
     next-char-property-change
+    next-error-found
+    next-error-highlight-timer
+    next-error-last-buffer
+    next-error-message-highlight
+    next-error-overlay-arrow-position
     next-frame
     next-history-element
     next-interval
@@ -2382,13 +2496,17 @@
     next-logical-line
     next-overlay-change
     next-property-change
+    next-read-file-uses-dialog-p
     next-single-char-property-change
     next-single-property-change
+    ngettext
     normal-auto-fill-function
     normal-mode
     normal-splash-screen
     not-modified
     note-file-read-only!
+    note-mouse-highlight
+    nreverse
     nth
     nthcdr
     object-beg-position
@@ -2396,7 +2514,40 @@
     object-intervals
     object-last-position
     object-length
+    occur
+    occur--garbage-collect-revert-args
+    occur--highlight-occurrences
+    occur--set-arrow
+    occur--targets-start
+    occur-1
+    occur-accumulate-lines
+    occur-collect-regexp-history
+    occur-context-lines
+    occur-engine
+    occur-engine-add-prefix
+    occur-engine-line
+    occur-find-match
+    occur-goto-locus-delete-o
+    occur-highlight-overlays
+    occur-mode
+    occur-mode--find-occurrences
+    occur-mode-display-occurrence
+    occur-mode-find-occurrence
+    occur-mode-goto-occurrence
+    occur-mode-goto-occurrence-other-window
+    occur-mode-hook
+    occur-mode-map
+    occur-mode-mouse-goto
+    occur-next
+    occur-next-error
+    occur-prev
+    occur-read-primary-args
+    occur-regexp-descr
+    occur-rename-buffer
+    occur-revert-arguments
+    occur-revert-function
     offset-intervals
+    one-window-p
     open-editor-namespace!
     open-line
     open-line-command
@@ -2405,6 +2556,8 @@
     other-buffer
     other-frame
     other-window
+    overlay-arrow-position
+    overlay-arrow-string
     overlay-buffer
     overlay-end
     overlay-front-advance
@@ -2429,6 +2582,7 @@
     parse-partial-sexp
     parse-single-submenu
     parse-solitary-modifier
+    parse-tool-bar-item
     pending-uarg
     perform-replace
     place-undo-boundary!
@@ -2436,6 +2590,7 @@
     plist-member
     plist-put
     point
+    point-before-scroll
     point-marker
     point-max
     point-max-marker
@@ -2475,6 +2630,7 @@
     previous-logical-line
     previous-overlay-change
     previous-property-change
+    previous-scroll-bar-mode
     previous-single-char-property-change
     previous-single-property-change
     primitive-undo
@@ -2512,6 +2668,7 @@
     quit-restore-window
     quit-window
     quoted-insert
+    raise-frame
     rarely-quit
     raw-cursor-to!
     re-search-backward
@@ -2544,6 +2701,7 @@
     read-number-history
     read-only-mode
     read-quoted-char
+    read-regexp
     read-string
     read-variable
     read-wait-ms
@@ -2555,14 +2713,17 @@
     record-delete
     record-first-change
     record-insert
+    record-nonmenu-event!
     record-window-buffer
     recursive-edit
     redisplay-frames!
+    regexp-history
     regexp-opt-depth
     regexp-quote
     regexp-unmatchable
     region-active-p
     region-beginning
+    region-bounds
     region-cache-backward
     region-cache-boundaries
     region-cache-forward
@@ -2573,8 +2734,10 @@
     remove-hook
     remove-list-of-text-properties
     remove-text-properties
+    remq
     rename-buffer
     rename-file
+    rename-uniquely
     render!
     replace-buffer-contents
     replace-match
@@ -2625,6 +2788,7 @@
     save-excursion
     save-match-data
     save-restriction
+    save-selected-window
     save-some-buffers
     scan-error-end
     scan-error-message
@@ -2653,10 +2817,26 @@
     scomment
     scomment-fence
     screen-size
+    scroll-bar-adjust-thumb-portion
+    scroll-bar-columns
+    scroll-bar-drag
+    scroll-bar-drag-1
+    scroll-bar-drag-position
+    scroll-bar-event-ratio
+    scroll-bar-lines
+    scroll-bar-maybe-set-window-start
+    scroll-bar-mode
+    scroll-bar-scale
+    scroll-bar-scroll-down
+    scroll-bar-scroll-up
+    scroll-bar-set-window-start
+    scroll-bar-toolkit-scroll
+    scroll-down
     scroll-down-command
     scroll-left
     scroll-right
     scroll-to-cursor!
+    scroll-up
     scroll-up-command
     search-backward
     search-forward
@@ -2687,6 +2867,7 @@
     seq-length
     seq-position
     seq-remove
+    seq-some
     seq-sort
     seq-sort-by
     seq-subseq
@@ -2764,6 +2945,8 @@
     set!frame-selected-window
     set!frame-tab-bar-items
     set!frame-tab-bar-items-used
+    set!frame-tool-bar-items
+    set!frame-tool-bar-items-used
     set!frame-width
     set!frame-window-change
     set!frame-windows
@@ -2808,6 +2991,7 @@
     set!text-editor-undo-list
     set!text-scale-mode-variable!
     set!timer-due-at
+    set!tool-bar-mode-variable!
     set!widget-value-button-type
     set!widget-value-call-data
     set!widget-value-contents
@@ -2911,8 +3095,11 @@
     set-match-data
     set-message!
     set-minibuffer-message
+    set-mouse-pixel-position
+    set-mouse-position
     set-object-intervals
     set-point
+    set-scroll-bar-mode
     set-selection!
     set-syntax-table
     set-terminal-cursor!
@@ -2929,6 +3116,7 @@
     set-window-current-matrix!
     set-window-dedicated-p
     set-window-desired-matrix!
+    set-window-force-start?!
     set-window-fringes
     set-window-hscroll!
     set-window-margins
@@ -2992,6 +3180,7 @@
     string->texts
     string-collate-lessp
     string-empty-p
+    string-equal
     string-intervals
     string-lessp
     string-match
@@ -3321,6 +3510,38 @@
     timer-ripe?
     timer?
     toggle-frame-tab-bar
+    toggle-scroll-bar
+    toggle-tool-bar-mode-from-frame
+    tool-bar--image-expression
+    tool-bar-add-item
+    tool-bar-add-item-from-menu
+    tool-bar-get-system-style
+    tool-bar-item-binding
+    tool-bar-item-caption
+    tool-bar-item-enabled-p
+    tool-bar-item-help
+    tool-bar-item-images
+    tool-bar-item-key
+    tool-bar-item-label
+    tool-bar-item-nslots
+    tool-bar-item-rtl-image
+    tool-bar-item-selected-p
+    tool-bar-item-type
+    tool-bar-item-vert-only
+    tool-bar-item-wrap
+    tool-bar-items
+    tool-bar-keymap-cache
+    tool-bar-local-item
+    tool-bar-local-item-from-menu
+    tool-bar-make-keymap
+    tool-bar-make-keymap-1
+    tool-bar-map
+    tool-bar-max-label-size
+    tool-bar-mode
+    tool-bar-mode-variable
+    tool-bar-separator-image-expression
+    tool-bar-setup
+    tool-bar-style
     track-mouse
     transient-mark-mode
     transpose-chars
@@ -3350,6 +3571,7 @@
     tty-register-default-colors
     tty-slant-number
     tty-standard-colors
+    tty-type
     tty-weight-number
     turn-off-auto-fill
     turn-on-auto-fill
@@ -3363,7 +3585,9 @@
     uncomment-region-default-1
     undefined
     undo
+    undo--last-change-was-undo-p
     undo-deletion-entry?
+    undo-equiv-table
     undo-insertion-entry?
     undo-modified-entry?
     undo-redo
@@ -3388,9 +3612,13 @@
     update-mode-lines?
     update-prefix!
     update-submenu-strings
+    update-tool-bar
     update-window-begin!
     update-window-end!
+    use-file-dialog
     use-local-map
+    use-region-beginning
+    use-region-end
     use-region-p
     user-error
     validate-interval-range
@@ -3450,9 +3678,11 @@
     window--state-put-1
     window--state-put-2
     window--state-ref
+    window-at-side-p
     window-base-line-number
     window-base-line-pos
     window-body-height
+    window-body-left
     window-body-size
     window-body-top
     window-body-width
@@ -3465,6 +3695,8 @@
     window-combination-limit
     window-combination-p
     window-combined-p
+    window-config-scroll-bar-cols
+    window-config-scroll-bar-width
     window-configuration-frame
     window-configuration-p
     window-current-matrix
@@ -3474,6 +3706,7 @@
     window-desired-matrix
     window-edges
     window-end
+    window-force-start?
     window-frame
     window-fringes
     window-full-height-p
@@ -3498,7 +3731,9 @@
     window-left
     window-left-child
     window-left-column
+    window-left-scroll-bar-cols
     window-left-sibling
+    window-leftmost?
     window-line-rows
     window-line-rows-at
     window-line-slices
@@ -3535,6 +3770,7 @@
     window-parameter
     window-parameters
     window-parent
+    window-pixel-edges
     window-pixel-height
     window-pixel-left
     window-pixel-top
@@ -3553,6 +3789,7 @@
     window-resize-pixelwise
     window-right-border?
     window-right-divider-width
+    window-right-scroll-bar-cols
     window-right-sibling
     window-safe-min-height
     window-safe-min-pixel-height
@@ -3560,6 +3797,7 @@
     window-safe-min-size
     window-safe-min-width
     window-scroll
+    window-scroll-bar-cols
     window-scroll-bar-height
     window-scroll-bar-width
     window-scroll-bars
@@ -3586,6 +3824,7 @@
     window-truncates-lines?
     window-type?
     window-valid-p
+    window-vertical-scroll-bar-type
     window-vscroll
     window-wants-mode-line
     window-wants-tab-line
@@ -3610,6 +3849,7 @@
     write-file
     write-file-code-points
     write-glyphs!
+    x-file-dialog
     x-get-clipboard
     x-popup-menu
     x-popup-menu-1

@@ -547,6 +547,19 @@
     ;; seam `*tab-width*' gets in `character.sld'.
     ;;------------------------------------------------------------------
 
+    (define char-up     #x01)
+    (define char-down   #x02)
+    (define char-drag   #x04)
+    (define char-click  #x08)
+    (define char-double #x10)
+    (define char-triple #x20)
+    ;; ^ `up_modifier', `down_modifier', `drag_modifier',
+    ;; `click_modifier', `double_modifier', `triple_modifier'
+    ;; (`termhooks.h:437-443'). These are *symbolic* modifiers: they never
+    ;; appear in an integer key event, only in an event symbol's name -
+    ;; and `click' is not even written (`mouse-1' means it). The values
+    ;; are the C's own, below every `CHAR_*' bit.
+
     (define char-alt   #x0400000)
     (define char-super #x0800000)
     (define char-hyper #x1000000)
@@ -559,12 +572,18 @@
     ;; bit survives only for a code that cannot be folded.
 
     (define %modifier-bits
-      ;; the six, as `(NAME . BIT)', in the order `event-modifiers' lists
-      ;; them - `alt', `super', `hyper', `shift', `control', `meta' -
-      ;; because the C pushes them onto the front of one list in the
-      ;; opposite order (`subr.el':1846-1858).
+      ;; The C's `modifier_names' (`keyboard.c':7556), `(NAME . BIT)`,
+      ;; in *ascending bit* order - the order `lispy_modifier_list'
+      ;; walks; it conses each onto the front, so the list
+      ;; `event-modifiers' answers is the descending one, which is why
+      ;; the reader below reverses this list. `up' to `triple' are the
+      ;; symbolic mouse modifiers (`termhooks.h:437-443'); `click' is
+      ;; only ever inferred.
       ;;--------------------------------------------------------------
-      (list (cons 'alt char-alt) (cons 'super char-super)
+      (list (cons 'up char-up) (cons 'down char-down)
+            (cons 'drag char-drag) (cons 'click char-click)
+            (cons 'double char-double) (cons 'triple char-triple)
+            (cons 'alt char-alt) (cons 'super char-super)
             (cons 'hyper char-hyper) (cons 'shift char-shift)
             (cons 'control char-ctl) (cons 'meta char-meta)))
 
@@ -663,6 +682,12 @@
               ((string=? name "shift") char-shift)
               ((string=? name "s") char-super)
               ((string=? name "super") char-super)
+              ((string=? name "click") char-click)
+              ((string=? name "drag") char-drag)
+              ((string=? name "down") char-down)
+              ((string=? name "double") char-double)
+              ((string=? name "triple") char-triple)
+              ((string=? name "up") char-up)
               (else #f)))))
 
     (define (make-ctrl-char c)
@@ -714,8 +739,13 @@
                      (single char-super)))
           ((#\a) (multi "alt" char-alt))
           ((#\c) (or (multi "ctrl" char-ctl) (multi "control" char-ctl)))
+          ((#\d) (or (multi "drag" char-drag)
+                     (multi "down" char-down)
+                     (multi "double" char-double)))
           ((#\h) (multi "hyper" char-hyper))
           ((#\m) (multi "meta" char-meta))
+          ((#\t) (multi "triple" char-triple))
+          ((#\u) (multi "up" char-up))
           (else #f))))
 
     (define (parse-modifiers-uncached symbol)
@@ -727,15 +757,38 @@
       ;;--------------------------------------------------------------
       (let* ((name (symbol->string symbol))
              (len (string-length name)))
+        (define (finish i bits)
+          ;; The base starts at I. The C's two closing rules
+          ;; (`keyboard.c:7463-7478'): a mouse button's up event is a
+          ;; click unless it is a down, drag, double or triple, and
+          ;; `wheel-N' is a click unless it is a double/triple wheel.
+          ;; NEITHER is written in the name - `mouse-1' *is* the click -
+          ;; which is why `event-convert-list' never writes "click-".
+          ;;------------------------------------------------------------
+          (let* ((bits (if (and (zero? (logand bits (logior char-down char-drag
+                                                              char-double
+                                                              char-triple)))
+                                (= (+ i 7) len)
+                                (string=? (substring name i (+ i 6)) "mouse-")
+                                (char-numeric? (string-ref name (+ i 6))))
+                           (logior bits char-click)
+                           bits))
+                 (bits (if (and (zero? (logand bits (logior char-double
+                                                             char-triple)))
+                                (< (+ i 6) len)
+                                (string=? (substring name i (+ i 6)) "wheel-"))
+                           (logior bits char-click)
+                           bits)))
+            (cons bits (substring name i len))))
         (let loop ((i 0) (bits 0))
           (if (>= i (- len 1))
-              (cons bits (substring name i len))
+              (finish i bits)
               (let ((found (modifier-word name i)))
                 (if (and found
                          (< (car found) len)
                          (char=? (string-ref name (car found)) #\-))
                     (loop (+ (car found) 1) (logior bits (cdr found)))
-                    (cons bits (substring name i len))))))))
+                    (finish i bits)))))))
 
     (define (event-symbol-elements symbol)
       ;; GNU Emacs's `event-symbol-elements': the parsed event type of a
@@ -763,6 +816,9 @@
       ;; code below 32, because a terminal sends `C-a' as the byte 1 and
       ;; there is no bit to find.
       ;;--------------------------------------------------------------
+      ;; Emacs's body takes a *list* event from its `car' first:
+      ;; `(event-modifiers '(mouse-1 POSN))' is `(click)'.
+      (when (pair? event) (set! event (car event)))
       (if (symbol? event)
           (cdr (event-symbol-elements event))
           (let* ((mask (lognot (logior char-alt char-super char-hyper
@@ -823,7 +879,15 @@
                         (if (not (zero? (logand modifiers char-hyper))) "H-" "")
                         (if (not (zero? (logand modifiers char-meta))) "M-" "")
                         (if (not (zero? (logand modifiers char-shift))) "S-" "")
-                        (if (not (zero? (logand modifiers char-super))) "s-" ""))))
+                        (if (not (zero? (logand modifiers char-super))) "s-" "")
+                        ;; The symbolic ones, in the C's written order
+                        ;; (`keyboard.c:7530'): double-, triple-, up-,
+                        ;; down-, drag-. `click' is never written.
+                        (if (not (zero? (logand modifiers char-double))) "double-" "")
+                        (if (not (zero? (logand modifiers char-triple))) "triple-" "")
+                        (if (not (zero? (logand modifiers char-up))) "up-" "")
+                        (if (not (zero? (logand modifiers char-down))) "down-" "")
+                        (if (not (zero? (logand modifiers char-drag))) "drag-" ""))))
         (string->symbol (string-append prefixes name))))
 
     (define (event-convert-list event-desc)

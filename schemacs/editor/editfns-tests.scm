@@ -6,6 +6,7 @@
        *current-buffer* *inhibit-read-only* allocate-buffer buffer-name
        buffer-read-only? current-buffer erase-buffer get-buffer
        get-buffer-create major-mode set-buffer set-point with-current-buffer
+       set-buffer-local-value! buffer-local-value
        *case-fold-search*)
  (only (schemacs editor frame) *current-frame* new-frame)
  (only (schemacs editor editfns)
@@ -27,7 +28,7 @@
        text-editor-undo-recording?)
  (only (schemacs editor marker) make-marker marker-position set-marker)
  (only (schemacs editor xdisp) *message-log-max*)
- (only (schemacs editor simple) messages-buffer)
+ (only (schemacs editor simple) messages-buffer messages-buffer-mode)
  (only (schemacs editor textprop) get-char-property get-text-property put-text-property)
  (only (ice-9 exceptions) exception-message))
 
@@ -885,5 +886,29 @@
         (list before (marker-position m))))))
 
 (test-end "schemacs_editor_editfns_subst")
+
+;;--------------------------------------------------------------------
+;; The log's own buffer: a message must not deactivate its mark
+;;--------------------------------------------------------------------
+;; `message_dolog` inserts with PREPARE false (`xdisp.c:12406`) and
+;; saves/restores `Vdeactivate_mark` around the work (`:12359`, `:12526`).
+;; Without both, a message logged *into the buffer being edited* -
+;; `*Messages*` is the one buffer that always is - set that buffer's
+;; `deactivate-mark`, and the command loop deactivated the region `C-SPC`
+;; had just made: "mark and copy has no effect in the Messages buffer".
+(test-begin "schemacs_editor_editfns_message_mark")
+(test-equal "logging into the current buffer does not set deactivate-mark"
+  '(#f #t)
+  (with-text "x"
+    (lambda ()
+      (let ((m (get-buffer-create "*Messages*")))
+        (with-current-buffer m
+          (messages-buffer-mode)
+          (set-buffer-local-value! m 'deactivate-mark #f)
+          (set-buffer-local-value! m 'mark-active #t)
+          (message "logged")
+          (list (buffer-local-value m 'deactivate-mark #f)
+                (buffer-local-value m 'mark-active #f)))))))
+(test-end "schemacs_editor_editfns_message_mark")
 
 (test-end "schemacs_editor_editfns")

@@ -60,6 +60,17 @@
     (only (schemacs editor mule-cmds))
     ;; `dired.el': C-x d binds at load, the same reason again.
     (only (schemacs editor dired))
+    ;; `tool-bar.el`: `tool-bar-mode`, the `[tool-bar]` binding and the
+    ;; default items. `tool-bar-setup` is called from `main-gtk` where
+    ;; Emacs's `command-line` calls it, after the frame exists - the item
+    ;; keymap's expressions ask the frame's display which image files it
+    ;; can use.
+    (only (schemacs editor tool-bar) tool-bar-setup)
+    ;; `scroll-bar.el`: the `[vertical-scroll-bar mouse-1]` binding and
+    ;; `scroll-bar-mode`, made when the library loads. Both front ends
+    ;; load it, as Emacs preloads `scroll-bar.el` in every build - a
+    ;; terminal simply never sends the event.
+    (only (schemacs editor scroll-bar))
     ;; `tab-bar.el`: `C-x t ...` and the `[tab-bar]` binding are made
     ;; when it is loaded, the same reason as every line above.
     (only (schemacs editor tab-bar))
@@ -163,6 +174,10 @@
              ;; commands run under.
              (parameterize ((*current-frame* frame)
                             (*frame-creation-function* gtk-create-frame))
+               ;; "Set up the tool-bar (even in tty frames, since Emacs
+               ;; might open a graphical frame later)" - `startup.el:1626`,
+               ;; run after the frame is made and before the init file.
+               (tool-bar-setup)
                (command-line-1 args)
                (note-file-read-only! frame)
                ;; `event-loop-on' hands control to `gtk_main' and does not

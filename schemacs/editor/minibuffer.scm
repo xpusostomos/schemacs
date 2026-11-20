@@ -1148,7 +1148,22 @@ previous element of the minibuffer history in the minibuffer."
                  (set! minibuffer-scroll-window window2)
                  (with-current-buffer filled
                    (goto-char (point-min)))
-                 (set-window-start! window2 (point-min))
+                 ;; **The start is not written here.** `temp-buffer-window-show`
+                 ;; (`window.el:138`) does `(goto-char (point-min))` in the
+                 ;; buffer and then `display-buffer`; `set_window_buffer`
+                 ;; gives the window that point and leaves its start to the
+                 ;; redisplay. This port displays the buffer *before* filling
+                 ;; it - the layout needs the window's width - so it puts the
+                 ;; point back afterwards as Emacs's `goto-char` does. It used
+                 ;; to call `set-window-start!` as well, which Emacs does not:
+                 ;; that sets `w->force_start` (`window.c:1968`), and since
+                 ;; only the *selected* window's start decision runs in this
+                 ;; renderer the flag survived until the completions window's
+                 ;; first `M-<down>`. The redisplay then kept the start and
+                 ;; moved point into the middle of the list instead of
+                 ;; scrolling to the selected candidate - measured: `M-<down>`
+                 ;; landed on the help line, and the wrap never happened
+                 ;; (`tools/pty-check.py`'s `completion-scroll`).
                  (set-window-point! window2 (point-min))
                  (record-buffer! filled)))))))
 

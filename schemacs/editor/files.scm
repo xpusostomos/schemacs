@@ -46,10 +46,31 @@
     (only (schemacs editor frame)
           *current-frame* delete-frame
           frame-editor frame-list frame-quit-cont
+          ;; `next-read-file-uses-dialog-p` asks the selected frame's
+          ;; display whether it is a window system, which is the C's
+          ;; `window_system_available (SELECTED_FRAME ())`.
+          frame-output selected-frame
           set!frame-message)
+    ;; **`last-nonmenu-event` is `keyboard.c`'s and set by the read** -
+    ;; it is how `next-read-file-uses-dialog-p` tells a menu's or the
+    ;; tool bar's command from a typed key. `last-input-event` (the
+    ;; raw event of the read) is this tree's `*last-read-event*`.
+    (only (schemacs editor keyboard)
+          *last-nonmenu-event* *last-read-event*)
+    ;; `use-dialog-box` and `use-file-dialog` are `fns.c`'s switches;
+    ;; `use-dialog-box-override` is `subr.el`'s.
+    (only (schemacs editor fns) *use-dialog-box* use-file-dialog)
+    ;; The display hole the graphical chooser is reached through; its
+    ;; Gtk method is `(schemacs ui gtk pgtk)`'s.
+    (only (schemacs editor dispnew) x-file-dialog window-system-display?)
+    ;; `file-remote-p` is `files.el`'s and lives in `(schemacs editor
+    ;; xdisp)` for the mode line's `%@`; a graphical chooser cannot read
+    ;; a remote name, which is why `read-file-name` falls back to the
+    ;; minibuffer for one.
+    (only (schemacs editor xdisp) file-remote-p force-mode-line-update)
     ;; The commands here install their own keys, as files.el does.
     (only (schemacs editor command)
-          current-prefix-arg define-command
+          current-prefix-arg define-command called-interactively?
           *interactive-read-file-name-function*
           *interactive-read-directory-name-function*
           ;; a mode named in an alist is a *symbol*, and the command table
@@ -92,6 +113,11 @@
           *change-major-mode-after-body-hook* *after-change-major-mode-hook*
           ;; `with-temp-file` below is built on the temp-buffer macro.
           with-temp-buffer
+          *use-dialog-box-override*
+          ;; The dialog branch of `read-file-name` adds the chosen name
+          ;; to `file-name-history` with it, as Emacs's
+          ;; `(add-to-history 'file-name-history ...)` does.
+          add-to-history
           string-prefix-p split-string ctl-x-4-map
           ;; The window-system event's own accessors, which
           ;; `handle-delete-frame` reads the frame out of
@@ -160,7 +186,8 @@
     ;; `abbreviate-file-name`'s regexp and its `match-beginning 1' need.
     (only (schemacs editor search)
           match-beginning match-end match-string regexp-quote string-match
-          string-match-p search-forward re-search-forward looking-at)
+          string-match-p search-forward re-search-forward looking-at
+          save-match-data)
     ;; `get' and `put' are `fns.c`'s - symbol properties, which is where
     ;; `abbreviate-file-name`'s cache records the home directory it was
     ;; built for. They live in `intervals.sld` for now (see the note
@@ -195,6 +222,7 @@
                   kill-all-local-variables
                   major-mode
                   generate-new-buffer
+                  generate-new-buffer-name
                   get-buffer-create
                   %kill-buffer
                   record-buffer!
@@ -214,6 +242,10 @@
           completing-read
           confirm-nonexistent-file-or-buffer
           file-name-history
+          ;; The history record the dialog branch adds to with
+          ;; `add-to-history`, where `completing-read` adds to it for
+          ;; the minibuffer branch.
+          history-entries set!history-entries
           list-ref-or
           read-char-from-minibuffer
           yes-or-no-p)
@@ -269,6 +301,7 @@
    find-alternate-file
    find-file-other-window
    find-file-read-only
+   find-file-read-args find-file-existing
    insert-file
    ;; `fileio.c''s primitive that `insert-file' and `revert-buffer' rest
    ;; on, and what the startup screen reads its text with - a file that is
@@ -332,6 +365,10 @@ directory-name-p
    note-file-read-only!
    read-directory-name
    read-file-name
+   ;; `fileio.c`'s DEFUN, placed here because the variable and the two
+   ;; switches it reads are all *above* `(schemacs editor fileio)` -
+   ;; see the definition's note.
+   next-read-file-uses-dialog-p
    ;; `cd' (files.el:920), with `cd-absolute', `cd-path', the
    ;; `parse-colon-path' that fills it, and the `locate-file' the
    ;; command resolves through
@@ -344,6 +381,7 @@ directory-name-p
 save-buffer
    set-visited-file-name
    write-file
+   rename-uniquely
    save-buffers-kill-terminal
    handle-delete-frame
    save-some-buffers
@@ -617,6 +655,15 @@ save-buffer
     ;; Emacs's simple.el, and is imported below.
     ;;------------------------------------------------------------------
 
+    (define (find-file-read-args prompt mustmatch)
+      ;; GNU Emacs's `find-file-read-args` (`files.el:2016`): "Return a
+      ;; list of the filename and whether it did not exist." The second
+      ;; element is the literal `t` - it is what `find-file`'s own
+      ;; interactive spec ignores and what `find-file-existing`'s
+      ;; `nbutlast` drops.
+      ;;--------------------------------------------------------------
+      (list (read-file-name prompt #f (default-directory) mustmatch) #t))
+
     (define-command (find-file path)
       ;; GNU Emacs's `find-file' (files.el), the command C-x C-f runs:
       ;; prompt for a file name and visit it, switching to the buffer,
@@ -660,6 +707,25 @@ save-buffer
     ;; `editor/minibuffer.sld'. Everything else that used to sit under
     ;; the `Windows' banner is in `(schemacs editor window)' now.
     ;;------------------------------------------------------------------
+
+    (define-command (find-file-existing filename)
+      ;; GNU Emacs's `find-file-existing` (`files.el:2130`): "Edit the
+      ;; existing file FILENAME. Like \\[find-file], but allow only a
+      ;; file that exists, and do not allow file names with wildcards."
+      ;;
+      ;; The `called-interactively-p` test is load-bearing: the prompt
+      ;; already refuses a name that does not exist, so this error is
+      ;; for a *programmatic* call - and Emacs's message is the one
+      ;; `find-file-noselect` would then give for it.
+      ;;--------------------------------------------------------------
+      "Edit the existing file FILENAME.
+Like \\[find-file], but allow only a file that exists, and do not allow
+file names with wildcards."
+      (interactive (list (car (find-file-read-args "Find existing file: " #t))))
+      (if (and (not (called-interactively? find-file-existing))
+               (not (file-exists-p filename)))
+          (error "~a does not exist" filename)
+          (find-file filename)))
 
     (define-command (handle-delete-frame event)
       ;; GNU Emacs's `handle-delete-frame' (`frame.el:265'): the window
@@ -740,15 +806,34 @@ save-buffer
 
 
     (define (use-dialog-box-p)
-      ;; GNU Emacs's `use-dialog-box-p' (`subr.el:4118'): whether the
-      ;; command being run should ask through a GUI dialog box. Emacs
-      ;; asks `x-popup-dialog' when `use-dialog-box' is set, the command
-      ;; came from the mouse, and the display can pop up menus. There are
-      ;; no popup menus in this tree, so the answer is always false -
-      ;; which is also what a keyboard command on a terminal gets in
-      ;; Emacs, and the answer `kill-buffer--possibly-save' needs.
+      ;; GNU Emacs's `use-dialog-box-p' (`subr.el:4121'): "Return non-nil
+      ;; if the current command should prompt the user via a dialog box."
+      ;;
+      ;;   (or use-dialog-box-override
+      ;;       (and last-input-event                 ; not during startup
+      ;;            (or (consp last-nonmenu-event)   ; invoked by a mouse event
+      ;;                (and (null last-nonmenu-event)
+      ;;                     (consp last-input-event))
+      ;;                (and (featurep 'android) ...
+      ;;                from--tty-menu-p)            ; invoked via TTY menu
+      ;;            use-dialog-box))
+      ;;
+      ;; This used to answer `#f` unconditionally, on the note that there
+      ;; were no popup menus here - true when it was written and false
+      ;; since the menu bar and the tool bar landed. Each piece is now
+      ;; real: `last-input-event` is `*last-read-event*` (the display's
+      ;; own value for the last read), `last-nonmenu-event` is a cons for
+      ;; a mouse or menu event (see `record-nonmenu-event!`), and the
+      ;; Android arm does not exist. `from--tty-menu-p` is not carried
+      ;; (a terminal menu's command is indistinguishable here; a terminal
+      ;; has no dialogs to show anyway).
       ;;--------------------------------------------------------------
-      #f)
+      (or (*use-dialog-box-override*)
+          (and (*last-read-event*)
+               (or (pair? (*last-nonmenu-event*))
+                   (and (not (*last-nonmenu-event*))
+                        (pair? (*last-read-event*))))
+               (*use-dialog-box*))))
 
     (define (kill-buffer--possibly-save buffer)
       ;; GNU Emacs's `kill-buffer--possibly-save' (`simple.el:11568'):
@@ -1457,29 +1542,92 @@ save-buffer
                          (expand-file-name (or specdir (default-directory)))))
                ;; `file-name-all-completions name realdir': the entries
                ;; NAME is a prefix of, as names, a slash on the directories
-               (names (let loop ((entries (directory-entries realdir name)) (acc '()))
-                        (if (null? entries)
-                            (reverse acc)
-                            (let ((entry (car entries)))
-                              (loop (cdr entries)
-                                    (cons (string-append
-                                           entry
-                                           (if (directory-path? (string-append realdir entry))
-                                               "/" ""))
-                                          acc)))))))
+               ;; **PREDICATE filters the candidates, and Emacs's
+               ;; `completion-file-name-table` filters them itself**
+               ;; (`minibuffer.el:3730-3760`) - the C's
+               ;; `file_name_completion` applies it to each candidate
+               ;; expanded against the directory, and the Lisp side does
+               ;; the same for `all-completions` with
+               ;; `default-directory` bound to the directory. Each
+               ;; candidate is therefore tested as an *absolute* name;
+               ;; testing the bare entry would resolve it against the
+               ;; wrong directory. The `file-directory-p` case takes
+               ;; Emacs's fast path - only a directory's candidate ends
+               ;; in a slash - and `file-exists-p`/nil need no test at
+               ;; all.
+               (names
+                (let loop ((entries (directory-entries realdir name)) (acc '()))
+                  (if (null? entries)
+                      (reverse acc)
+                      (let* ((entry (car entries))
+                             (tem (string-append
+                                   entry
+                                   (if (directory-path? (string-append realdir entry))
+                                       "/" "")))
+                             (keep
+                              (or (not predicate)
+                                  (eq? predicate file-exists-p)
+                                  (if (eq? predicate file-directory-p)
+                                      (eqv? #\/ (string-ref tem (- (string-length tem) 1)))
+                                      (predicate (expand-file-name tem realdir))))))
+                        (loop (cdr entries)
+                              (if keep (cons tem acc) acc)))))))
           (cond
            ((eq? action #f)
             ;; `file-name-completion name realdir pred', and the directory
-            ;; put back in front of what it found
-            (let ((comp (try-completion name names predicate)))
+            ;; put back in front of what it found. The predicate has
+            ;; already been applied above, which is where the C applies
+            ;; it too.
+            (let ((comp (try-completion name names #f)))
               (if (string? comp)
                   (string-append specdir comp)
                   comp)))
            (else
-            ;; ACTION is #t for the list, or a function for the
-            ;; candidates PREDICATE accepts - and `all-completions'
-            ;; answers both, with the names as Emacs answers them.
-            (all-completions name names predicate)))))))
+            ;; ACTION is #t for the list of candidates - already
+            ;; filtered by PREDICATE above - and `all-completions`
+            ;; answers it, with the names as Emacs answers them.
+            (all-completions name names #f)))))))
+
+    (define (next-read-file-uses-dialog-p)
+      ;; GNU Emacs's `next-read-file-uses-dialog-p' (`fileio.c:6574'):
+      ;; "Return t if a call to `read-file-name' will use a dialog. The
+      ;; return value is only relevant for a call to `read-file-name'
+      ;; that happens before any other event (mouse or keypress) is
+      ;; handled."
+      ;;
+      ;;   if ((NILP (last_nonmenu_event) || CONSP (last_nonmenu_event))
+      ;;       && use_dialog_box
+      ;;       && use_file_dialog
+      ;;       && window_system_available (SELECTED_FRAME ()))
+      ;;     return Qt;
+      ;;
+      ;; **`CONSP (last_nonmenu_event)` is the whole trick**: a command
+      ;; a keyboard chord invoked has the chord's key there (a plain
+      ;; event, not a cons), and a command a mouse click or a menu
+      ;; selection invoked has a cons - so a menu's File/Open gets the
+      ;; graphical chooser while `C-x C-f` gets the minibuffer, which is
+      ;; exactly what Emacs does. `nil` means "no event at all" (a call
+      ;; from Lisp), which Emacs treats like a mouse event.
+      ;;
+      ;; `window_system_available` is `frame.h:1495`'s
+      ;; `(f && FRAME_WINDOW_P (f))`, which is this tree's
+      ;; `window-system-display?` of the selected frame's output.
+      ;;
+      ;; **Placement departure**: this is `fileio.c`'s DEFUN, but
+      ;; `(schemacs editor fileio)` is below `keyboard.scm` (the
+      ;; keyboard imports `simple`, which imports `fileio`) and below
+      ;; `fns.scm` and `frame.scm`, so the variable and switches it
+      ;; reads cannot be reached from there. It lives beside its only
+      ;; caller, `read-file-name`, as `locate-file-internal` lives in
+      ;; `fileio.scm` for the mirror of that reason.
+      ;;--------------------------------------------------------------
+      (and (or (not (*last-nonmenu-event*))
+               (null? (*last-nonmenu-event*))
+               (pair? (*last-nonmenu-event*)))
+           (*use-dialog-box*)
+           use-file-dialog
+           (let ((frame (selected-frame)))
+             (and frame (window-system-display? (frame-output frame))))))
 
     (define (read-file-name prompt . rest)
       ;; Read a file name in the minibuffer, completing as TAB is typed:
@@ -1504,8 +1652,25 @@ save-buffer
       ;; puts point at the start of its *name*, which is Emacs's
       ;; behaviour and the whole reason INITIAL exists here.
       ;;
-      ;; PREDICATE is not taken - the completion table here has the one
-      ;; predicate, `file-name-completion-table'.
+      ;; PREDICATE filters what may be completed and chosen: the
+      ;; completion table applies it to each candidate (as
+      ;; `completion-file-name-table` does), and `read-directory-name`
+      ;; passes `file-directory-p` here. **It is also what tells the
+      ;; dialog which chooser to show** - only a directory when it is
+      ;; that function - which is Emacs's `(eq predicate
+      ;; 'file-directory-p)` test, spelled with the procedure itself in
+      ;; this Lisp-1.
+      ;;
+      ;; **A menu or tool bar command gets a graphical chooser; a typed
+      ;; key gets the minibuffer.** That is `read-file-name-default`'s
+      ;; branch (`minibuffer.el:4112`): the dialog is used when
+      ;; `next-read-file-uses-dialog-p` says so, and not for a remote
+      ;; name ("Graphical file dialogs can't handle remote files",
+      ;; Bug#99). The dialog branch is Emacs's line for line, including
+      ;; the `dialog-mustmatch` translation - `confirm' and
+      ;; `confirm-after-completion` mean nil to a dialog, "otherwise it
+      ;; is impossible to create new files using dialogs with the
+      ;; default settings".
       ;;--------------------------------------------------------------
       ;; `completing-read', not `read-from-minibuffer': that is the point
       ;; of this function in Emacs - it is `completing-read' with a file
@@ -1539,6 +1704,7 @@ save-buffer
              (named-default (list-ref-or rest 1 #f))
              (mustmatch (list-ref-or rest 2 #f))
              (initial (list-ref-or rest 3 #f))
+             (predicate (list-ref-or rest 4 #f))
              (default-filename
               (or named-default
                   (cond ((not initial) (buffer-file-name (current-buffer)))
@@ -1564,25 +1730,80 @@ save-buffer
                          dir))
                     (initial (cons initial 0))
                     (else #f))))
-        (expand-file-name
-         ;; The answer goes through `substitute-in-file-name' *before* it
-         ;; is expanded, which is what `read-file-name-default' does at
-         ;; its exit (minibuffer.el:4192). That call is where a typed name
-         ;; is re-rooted: `substitute-in-file-name' discards everything up
-         ;; to a `//' (or a `/~', or a `$VAR' that expands to an absolute
-         ;; name), so `C-x C-f /tmp//x' visits `/x' - and `/tmp//x' is
-         ;; `/tmp/x' only to `expand-file-name', which is what this used
-         ;; to give it to. Emacs runs the two in this order for the whole
-         ;; file-name-reading path; leaving the first out made every
-         ;; `//' in a typed name mean "a doubled separator" instead of
-         ;; "the root".
-         (substitute-in-file-name
-          (parameterize ((*minibuffer-completing-file-name* #t))
-            (completing-read prompt file-name-completion-table #f mustmatch
-                             insdef
-                             file-name-history
-                             default-filename)))
-         dir)))
+        (let ((val
+               (if (or (not (next-read-file-uses-dialog-p))
+                       ;; "Graphical file dialogs can't handle remote
+                       ;; files (Bug#99)."
+                       (file-remote-p dir))
+                   (parameterize ((*minibuffer-completing-file-name* #t))
+                     (completing-read prompt file-name-completion-table
+                                      (or predicate file-exists-p)
+                                      mustmatch
+                                      insdef
+                                      file-name-history
+                                      default-filename))
+                   ;; `read-file-name-default`'s dialog branch
+                   ;; (`minibuffer.el:4148-4172`), line for line.
+                   (let ((file (file-name-nondirectory-part dir))
+                         (dialog-mustmatch
+                          ;; "When using a dialog, revert to nil and
+                          ;; non-nil interpretation of mustmatch. confirm
+                          ;; options need to be interpreted as nil,
+                          ;; otherwise it is impossible to create new
+                          ;; files using dialogs with the default
+                          ;; settings."
+                          (not (memq mustmatch
+                                     (list #f 'confirm
+                                           'confirm-after-completion)))))
+                     ;; "If DEFAULT-FILENAME not supplied and DIR
+                     ;; contains a file name, split it."
+                     (when (and (not default-filename)
+                                (not (= 0 (string-length file))))
+                       (set! default-filename file)
+                       (set! dir (file-name-directory-part dir)))
+                     (when default-filename
+                       (set! default-filename
+                             (expand-file-name
+                              (if (pair? default-filename)
+                                  (car default-filename)
+                                  default-filename)
+                              dir)))
+                     (let ((picked
+                            (x-file-dialog
+                             (frame-output (selected-frame))
+                             prompt dir default-filename
+                             dialog-mustmatch
+                             (eq? predicate file-directory-p))))
+                       ;; `(setq add-to-history t)` in Emacs is the
+                       ;; history write `completing-read` does for the
+                       ;; other branch. `minibuffer-maybe-quote-filename`
+                       ;; is not ported, so the name is filed as the
+                       ;; chooser answered it (a departure noted in
+                       ;; DEPARTURES.md).
+                       (when picked
+                         (set!history-entries
+                          file-name-history
+                          (add-to-history
+                           (history-entries file-name-history)
+                           picked)))
+                       picked)))))
+          ;; "(unless val (error "No file name specified"))" - which
+          ;; cannot happen in the dialog branch, because a cancelled
+          ;; dialog signals quit inside `x-file-dialog` as the C's
+          ;; `quit ()` does.
+          (unless val (error "No file name specified"))
+          ;; The answer goes through `substitute-in-file-name' *before*
+          ;; it is expanded, which is what `read-file-name-default' does
+          ;; at its exit (minibuffer.el:4192). That call is where a
+          ;; typed name is re-rooted: `substitute-in-file-name' discards
+          ;; everything up to a `//' (or a `/~', or a `$VAR' that
+          ;; expands to an absolute name), so `C-x C-f /tmp//x' visits
+          ;; `/x' - and `/tmp//x' is `/tmp/x' only to `expand-file-name',
+          ;; which is what this used to give it to. Emacs runs the two in
+          ;; this order for the whole file-name-reading path; leaving the
+          ;; first out made every `//' in a typed name mean "a doubled
+          ;; separator" instead of "the root".
+          (expand-file-name (substitute-in-file-name val) dir))))
 
     ;;----------------------------------------------------------------
     ;; Final newlines
@@ -1684,9 +1905,9 @@ save-buffer
       ;; yourself."
       ;;
       ;; "It is `read-file-name' with `file-directory-p' as the completion
-      ;; predicate and with DIR as the default"; PREDICATE, the sixth
-      ;; argument, is not taken here for the reason `read-file-name' above
-      ;; gives - the completion table carries the one predicate.
+      ;; predicate and with DIR as the default" - the predicate is the
+      ;; sixth argument, `read-file-name`'s (Emacs passes `#'file-directory-p`,
+      ;; which is this tree's procedure of that name).
       ;;--------------------------------------------------------------
       (let* ((dir (or (list-ref-or rest 0 #f) (default-directory)))
              (default-dirname (list-ref-or rest 1 #f))
@@ -1697,7 +1918,7 @@ save-buffer
                             (if initial
                                 (expand-file-name initial dir)
                                 dir))
-                        mustmatch initial)))
+                        mustmatch initial file-directory-p)))
 
     (define *require-final-newline*
       (make-parameter #f))
@@ -2220,7 +2441,7 @@ If the current buffer now contains an empty file that you just visited
         ;; ported (no hooks yet)
         (when (get-buffer-create " **lose**")
           (%kill-buffer " **lose**"))
-        (rename-buffer obuf " **lose**")
+        (rename-buffer " **lose**")
         (set!buffer-file-name obuf #f)
         (let ((newbuf
                (dynamic-wind
@@ -2478,7 +2699,7 @@ at point instead."
               ;; If new-name == old-name, renaming would add a spurious
               ;; <2> and it's considered as a feature in rename-buffer.
               (unless (string=? new-name (buffer-name (current-buffer)))
-                (rename-buffer (current-buffer) new-name #t))))
+                (rename-buffer new-name #t))))
           ;; `(or along-with-file (clear-visited-file-modtime))' - the
           ;; buffer is visiting some *other* file now, so what it recorded
           ;; about the old one says nothing about this one and is thrown
@@ -3824,6 +4045,33 @@ The path separator is colon in GNU and GNU-like systems."
               ((%mode-function function))
               #t))))
 
+    (define-command (rename-uniquely)
+      ;; GNU Emacs's `rename-uniquely' (`files.el:6747'): "Rename current
+      ;; buffer to a similar name not already taken. This function is
+      ;; useful for creating multiple shell process buffers or multiple
+      ;; mail buffers, etc."
+      ;;
+      ;; It is here, files.el's file, and it reads the current buffer
+      ;; because that is what `rename-buffer' acts on.
+      ;;--------------------------------------------------------------
+      "Rename current buffer to a similar name not already taken.
+This function is useful for creating multiple shell process buffers
+or multiple mail buffers, etc."
+      (interactive)
+      (save-match-data
+        (let ((base-name (buffer-name)))
+          (and (string-match "<[0-9]+>\\'" base-name)
+               (not (and (buffer-file-name)
+                         (string=? base-name
+                                   (file-name-nondirectory-part
+                                    (buffer-file-name)))))
+               ;; If the existing buffer name has a <NNN>,
+               ;; which isn't part of the file name (if any),
+               ;; then get rid of that.
+               (set! base-name (substring base-name 0 (match-beginning 0))))
+          (rename-buffer (generate-new-buffer-name base-name))
+          (force-mode-line-update))))
+
     (*set-buffer-major-mode-function* set-buffer-major-mode)
     ;; ^ The caller `buffer.c' has and this tree did not:
     ;; `window-normalize-buffer-to-switch-to' creates a buffer for a name
@@ -3847,13 +4095,12 @@ The path separator is colon in GNU and GNU-like systems."
        ;; `D' (`callint.c:509'): `read_file_name (BVAR (current_buffer,
        ;; directory), Qlambda, Qnil, Qfile_directory_p)'. Both the DEFAULT
        ;; and the PREDICATE are this library's, which is why the whole
-       ;; call is the seam.
-       ;;
-       ;; **Departure**: PREDICATE is not carried - `read-file-name` here
-       ;; does not take one ("the completion table here has the one
-       ;; predicate, `file-name-completion-table'"), so a `D' prompt will
-       ;; complete files as well as directories and RET on a file name is
-       ;; accepted where Emacs refuses it.
-       (read-file-name prompt #f (default-directory) 'lambda #f)))
+       ;; call is the seam. The sixth argument is the predicate - the
+       ;; former departure here ("PREDICATE is not carried") is closed;
+       ;; a `D' prompt now completes directories only and refuses a file
+       ;; name as Emacs does, and asks for a folder chooser rather than
+       ;; a file chooser when it comes from a menu.
+       (read-file-name prompt #f (default-directory) 'lambda #f
+                       file-directory-p)))
 
     ))

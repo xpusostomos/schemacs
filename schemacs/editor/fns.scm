@@ -73,14 +73,19 @@
           concat
           vconcat
           copy-sequence
+          nreverse
+          nconc
           %assq
           %count-lines
           install-fns-textprop!
           line-number-at-pos
           plist-get plist-put
           string-collate-lessp
+          string-equal
           string-lessp
           string-version-lessp
+          ;; `fns.c`'s two dialog-box switches.
+          *use-dialog-box* use-file-dialog
           )
 
   (begin
@@ -536,6 +541,99 @@
        ((vector? arg) (vector-copy arg))
        (else (error "Wrong type argument: sequencep" arg))))
 
+    (define (nreverse seq)
+      ;; GNU Emacs's `nreverse' (`fns.c:2269'): "Reverse order of items
+      ;; in a list, vector or string SEQ. If SEQ is a list, it should be
+      ;; nil-terminated. This function may destructively modify SEQ to
+      ;; produce the value."
+      ;;
+      ;; The string arm is `Freverse', whose string case returns a new
+      ;; string - Guile's `string-reverse' - because `(scheme base)' owns
+      ;; the name `reverse' and a library cannot shadow a core binding.
+      ;; The C's bool-vector arm has no counterpart here: `bool-vector'
+      ;; is a pseudovector type this tree does not carry.
+      ;;--------------------------------------------------------------
+      (cond
+       ((null? seq) seq)
+       ((pair? seq)
+        (let loop ((prev '()) (tail seq))
+          (if (pair? tail)
+              (let ((next (cdr tail)))
+                ;; "If SEQ contains a cycle, attempting to reverse it
+                ;; in-place will inevitably come back to SEQ."
+                (when (eq? next seq) (error "Circular list"))
+                (set-cdr! tail prev)
+                (loop tail next))
+              (begin
+                (unless (null? tail)
+                  (error "Wrong type argument: listp" seq))
+                prev))))
+       ((vector? seq)
+        (let ((size (vector-length seq)))
+          (let loop ((i 0))
+            (when (< i (quotient size 2))
+              (let ((tem (vector-ref seq i)))
+                (vector-set! seq i (vector-ref seq (- size i 1)))
+                (vector-set! seq (- size i 1) tem))
+              (loop (+ i 1))))
+          seq))
+       ;; `Freverse`'s string arm. Guile has no core `string-reverse`
+       ;; ((srfi srfi-13)'s is not imported here), so it is the list
+       ;; reversal spelled out.
+       ((string? seq) (list->string (reverse (string->list seq))))
+       (else (error "Wrong type argument: arrayp" seq))))
+
+    (define (nconc . lists)
+      ;; GNU Emacs's `nconc' (`fns.c:3390'): "Concatenate any number of
+      ;; lists by altering them. Only the last argument is not altered,
+      ;; and need not be a list."
+      ;;
+      ;; The C's `args' array is written back as it walks - when an
+      ;; argument is nil the *next* argument is rebound to the tail just
+      ;; linked, so the nil disappears into the chain - and that is why
+      ;; the arguments are a vector here rather than the rest list.
+      ;;--------------------------------------------------------------
+      (let* ((nargs (length lists))
+             (args (list->vector lists)))
+        (let ((val '()))
+          (let loop ((argnum 0))
+            (if (>= argnum nargs)
+                val
+                (let ((tem (vector-ref args argnum)))
+                  (if (null? tem)
+                      (loop (+ argnum 1))
+                      (begin
+                        (when (null? val) (set! val tem))
+                        (if (= (+ argnum 1) nargs)
+                            val
+                            (begin
+                              (unless (pair? tem)
+                                (error "Wrong type argument: listp" tem))
+                              ;; FOR_EACH_TAIL: the last pair of TEM.
+                              (let ((tail (let last ((tail tem))
+                                            (let ((next (cdr tail)))
+                                              (if (pair? next)
+                                                  (last next)
+                                                  tail)))))
+                                (let ((next (vector-ref args (+ argnum 1))))
+                                  (set-cdr! tail next)
+                                  (when (null? next)
+                                    (vector-set! args (+ argnum 1) tail)))
+                                (loop (+ argnum 1)))))))))))))
+
+    (define (string-equal s1 s2)
+      ;; GNU Emacs's `string-equal` (`fns.c:339`): "Return t if two
+      ;; strings have identical contents. Case is significant, but text
+      ;; properties are ignored. Symbols are also allowed; their print
+      ;; names are used instead."
+      ;;
+      ;; `string=?' here compares characters and knows nothing of text
+      ;; properties, which is what "properties are ignored" means; the
+      ;; symbol arm is the C's first two lines.
+      ;;--------------------------------------------------------------
+      (string=? (if (symbol? s1) (symbol->string s1) s1)
+                (if (symbol? s2) (symbol->string s2) s2)))
+
     (define (string-lessp s1 s2)
       ;; GNU Emacs's `string-lessp' (fns.c): "Return t if first arg
       ;; string is less than second in lexicographic order. Case is
@@ -711,5 +809,35 @@
     ;; here would be the tree's duplicate-binding bug (`loadup-tests'
     ;; fails on two definitions of one name). Its walk is the same
     ;; two-cons step these use.
+
+    ;;----------------------------------------------------------------
+    ;; The dialog-box switches - `fns.c:6850'
+    ;;
+    ;; **The pair is deliberately not the same kind of variable.**
+    ;; `use-dialog-box' is `let'-bound by Emacs's own Lisp
+    ;; (`bookmark.el':1371, `simple.el':4311), so it is a parameter, as
+    ;; this tree's convention makes every dynamically bound variable.
+    ;; `use-file-dialog' is only ever read and `setq'-ed, so it is a
+    ;; plain variable - and like every plain variable a user is meant to
+    ;; `setq', it carries the self-assignment that stops the compiler
+    ;; folding its reads (see `*enable-disabled-menus-and-buttons*' in
+    ;; `(schemacs editor keyboard)').
+    ;;----------------------------------------------------------------
+
+    (define *use-dialog-box* (make-parameter #t))
+    ;; ^ GNU Emacs's `use-dialog-box' (`fns.c:6850'): "Non-nil means
+    ;; mouse commands use dialog boxes to ask questions. This applies to
+    ;; `y-or-n-p' and `yes-or-no-p' questions asked by commands invoked
+    ;; by mouse clicks and mouse menu items. On some platforms, file
+    ;; selection dialogs are also enabled if this is non-nil."
+
+    (define use-file-dialog #t)
+    ;; ^ GNU Emacs's `use-file-dialog' (`fns.c:6859'): "Non-nil means
+    ;; mouse commands use a file dialog to ask for files. This applies
+    ;; to commands from menus and tool bar buttons even when they are
+    ;; initiated from the keyboard. If `use-dialog-box' is nil, that
+    ;; disables the use of a file dialog, regardless of the value of
+    ;; this variable."
+    (set! use-file-dialog use-file-dialog)
 
     ))

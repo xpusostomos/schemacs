@@ -33,6 +33,11 @@
 (typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "Gdk" "3.0")
 (typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "GLib" "2.0")
 (typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "GdkPixbuf" "2.0")
+;; Gio, for GSettings: the tool bar style is a *desktop* setting
+;; (`org.gnome.desktop.interface`'s `toolbar-style`), which Emacs reads
+;; through GSettings (`xsettings.c`) and which Gtk's own typelib surface
+;; does not expose.
+(typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "Gio" "2.0")
 (typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "PangoCairo" "1.0")
 (typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "Pango" "1.0")
 (typelib->module (resolve-module '(schemacs ui gtk pgtk-names)) "cairo" "1.0")

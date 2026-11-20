@@ -50,6 +50,9 @@
           ;; the seam `erase-buffer` drops a dead restriction's stack
           ;; through; installed at the bottom of this file.
           *labeled-restrictions-remove-function*
+          ;; the seam `keyboard.scm` reads a click's `keymap`/`local-map`
+          ;; text properties through; installed at the bottom of this file
+          *get-local-map-function*
           ;; `get-pos-property` asks the overlays whether one would cover
           ;; a character inserted at POSITION.
           overlay-front-advance overlay-get overlay-rear-advance
@@ -266,6 +269,7 @@ point-marker
    current-message
    format
    format-message
+   ngettext
    message
    message-clear
    text-quoting-style
@@ -2074,6 +2078,19 @@ argument.  To gain access to other portions of the buffer, use
                 saved-buffer (marker-position marker))
                (set-marker marker #f)))))))
 
+    (define (ngettext msgid msgid-plural n)
+      ;; GNU Emacs's `ngettext' (`editfns.c:3180'): "Return the
+      ;; translation of MSGID (plural MSGID-PLURAL) depending on N. ...
+      ;; If no message catalog is found, MSGID is returned if N is equal
+      ;; to 1, otherwise MSGID-PLURAL."
+      ;;
+      ;; "Placeholder implementation until we get our act together" is
+      ;; the C's own comment on its body, and it is the whole answer:
+      ;; there are no message catalogs here either. `occur-1' reads it
+      ;; for "match"/"matches" and "buffer"/"buffers".
+      ;;--------------------------------------------------------------
+      (if (= n 1) msgid msgid-plural))
+
     ;;----------------------------------------------------------------
     ;; `format', `format-message' and `message'
     ;;
@@ -2635,5 +2652,10 @@ argument.  To gain access to other portions of the buffer, use
     ;; stack is; a library's own function is installed after its
     ;; definition, the same rule a `define-key` follows.
     (*labeled-restrictions-remove-function* %labeled-restrictions-remove)
+
+    ;; The seam `keyboard.scm`'s `current_active_maps` reads a click's
+    ;; buffer text properties through (`keymap.c:1771`): the C's
+    ;; `get_local_map` is this library's, and `keyboard.scm` is below it.
+    (*get-local-map-function* get-local-map)
 
     ))

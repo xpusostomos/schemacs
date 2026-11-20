@@ -114,7 +114,11 @@
    *marker-position-function*
    *set-marker-function*
    *set-marker-insertion-type-function*
+   ;; `CHECK_FIXNUM_COERCE_MARKER` - a position argument that may be a
+   ;; marker, and the wrong-buffer check that goes with it
+   *check-fixnum-coerce-marker-function*
    *get-text-property-function*
+   *get-local-map-function*
    *labeled-restrictions-remove-function*
    *run-hooks-function*
    *make-marker-function*
@@ -168,6 +172,7 @@
    validate-region
    %text-editor-incr-modiff!
    *kill-buffer-query-functions*
+   *kill-buffer-hook*
    ;; **The mechanism, under a name of this tree's own.** GNU Emacs's
    ;; `kill-buffer` (`buffer.c:1890') is one function: the command, with
    ;; the interactive spec, and it asks `kill-buffer--possibly-save`
@@ -274,7 +279,7 @@
    save-current-buffer
    set-buffer
    set-buffer-local-value!
-   kill-local-variable
+   kill-local-variable local-variable-p
    set-buffer-modified-p
    restore-buffer-modified-p
    set!buffer-default-directory
@@ -323,6 +328,19 @@
       ;; arguments asked before a buffer is killed, in order. A false
       ;; answer from any of them cancels the kill. This is where "Buffer
       ;; modified; kill anyway?" belongs.
+      ;;--------------------------------------------------------------
+      (make-parameter '()))
+    (define *kill-buffer-hook*
+      ;; GNU Emacs's `kill-buffer-hook' (`buffer.c:4953'): "Hook to be
+      ;; run before a buffer is killed."
+      ;;
+      ;; `run_hook (Qkill_buffer_hook)` is `buffer.c:1999' - after the
+      ;; query functions, before the buffer leaves the windows. The
+      ;; *buffer-local* half of the hook is not carried (`add-hook`'s
+      ;; LOCAL argument needs a hook to be a buffer-local variable), so
+      ;; there is one global list, and a function that wants to act on
+      ;; one buffer's state guards itself - which is what
+      ;; `occur--garbage-collect-revert-args`'s entry does.
       ;;--------------------------------------------------------------
       (make-parameter '()))
     (define *scratch-buffer-name* "*scratch*")
@@ -424,6 +442,14 @@
     (define *make-marker-function*      (make-parameter (lambda args #f)))
     (define *build-marker-function*     (make-parameter (lambda args #f)))
     (define *marker-position-function*  (make-parameter (lambda (marker) #f)))
+    (define *check-fixnum-coerce-marker-function*
+      ;; `CHECK_FIXNUM_COERCE_MARKER` (`buffer.h`): a position argument
+      ;; that may be a marker. MARKER's position is the answer, and a
+      ;; marker in the wrong buffer - or in no buffer at all - is the
+      ;; C's `signal_error ("Marker points into wrong buffer", m)`.
+      ;; Installed by `marker.scm`; the default passes the value through,
+      ;; which is right for every non-marker.
+      (make-parameter (lambda (value buffer) value)))
     (define *set-marker-function*       (make-parameter (lambda args #f)))
     (define *set-marker-insertion-type-function*
       (make-parameter (lambda args #f)))
@@ -436,6 +462,16 @@
       ;; *and* `inhibit-read-only' is nil. `textprop.scm` installs it.
       ;;--------------------------------------------------------------
       (make-parameter #f))
+    (define *get-local-map-function*
+      ;; GNU Emacs's `get_local_map` (`intervals.c:2176`), which
+      ;; `current_active_maps` (`keymap.c`) calls to read a buffer's
+      ;; `local-map`/`keymap` *text properties* at a click's position.
+      ;; The function is `editfns.scm`'s, one library above this one, so
+      ;; the call arrives through a seam; a click with no buffer position
+      ;; (a mode line, a tab) never reaches it, and a key pressed at the
+      ;; keyboard does not either. `editfns.scm` installs it.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda (position buffer type) #f)))
     (define *labeled-restrictions-remove-function*
       ;; GNU Emacs's `labeled_restrictions_remove_in_current_buffer`
       ;; (`editfns.c:2808'), which `Ferase_buffer` calls before it
@@ -883,12 +919,20 @@
               (if (get-buffer candidate)
                   (loop (+ 1 n))
                   candidate)))))))
-    (define (rename-buffer buffer newname . args)
-      ;; Give BUFFER the name NEWNAME: GNU Emacs's `rename-buffer'. With a
-      ;; second argument the name is made unique rather than raising an
-      ;; error when it is taken - Emacs's UNIQUE.
+    (define (rename-buffer newname . args)
+      ;; Give the *current buffer* the name NEWNAME: GNU Emacs's
+      ;; `rename-buffer'. With a second argument the name is made unique
+      ;; rather than raising an error when it is taken - Emacs's UNIQUE.
+      ;;
+      ;; **The current buffer, not a BUFFER argument.** The C acts on
+      ;; `current_buffer', and this took a buffer first until
+      ;; `occur-rename-buffer' and `rename-uniquely' needed the DEFUN as
+      ;; Emacs has it. The interactive spec (read a name; prefix arg for
+      ;; UNIQUE) is not carried: it reads with `read-string', which is
+      ;; the minibuffer's, and that library is above this one.
       ;;--------------------------------------------------------------
-      (let* ((unique (if (pair? args) (car args) #f))
+      (let* ((buffer (current-buffer))
+             (unique (if (pair? args) (car args) #f))
              (name (if unique
                        (generate-new-buffer-name newname (buffer-name buffer))
                        newname)))
@@ -1053,6 +1097,17 @@
                                (else (loop (cdr rest)))))))
           (if refused
               #f
+              (begin
+              ;; "Then run the hooks" (`buffer.c:1999'): the C runs
+              ;; `kill-buffer-hook` here, after the query functions and
+              ;; before `replace_buffer_in_windows`. "Run hooks with the
+              ;; buffer to be killed as the current buffer"
+              ;; (`buffer.c:1946', `set_buffer_internal') - so the hook
+              ;; reads the dying buffer's own buffer-locals, which is
+              ;; what `occur--garbage-collect-revert-args` needs.
+              (parameterize ((*current-buffer* buffer))
+                (for-each (lambda (function) (function))
+                          (*kill-buffer-hook*)))
               ;; "Make this buffer not be current. Exit if it is the sole
               ;; visible buffer." - the C's
               ;;
@@ -1106,7 +1161,7 @@
                 ;; `last-name' half is `buffer-last-name', not ported.
                 (set!buffer-name buffer #f)
                 (run-buffer-list-update-hook!)
-                name)))))))
+                name))))))))
     ;;----------------------------------------------------------------
     ;; The slots a buffer has besides its text
     ;;
@@ -1439,9 +1494,12 @@
       ;; on a buffer whose first position is 1 made an overlay that began
       ;; outside the text - a departure Emacs does not have.
       ;;
-      ;; Not carried: a MARKER as BEG or END ("Marker points into wrong
-      ;; buffer"). Every caller here passes an integer; the coercion is
-      ;; the `CHECK_FIXNUM_COERCE_MARKER' pair above the clip.
+      ;; **"BEG and END may be integers or markers."** The C's two
+      ;; `MARKERP`-then-buffer tests and the `CHECK_FIXNUM_COERCE_MARKER`
+      ;; pair are one call each through the marker seam - the first
+      ;; caller to pass markers was `occur--highlight-occurrences`, whose
+      ;; `make-overlay` got the two markers of an `occur-target` and died
+      ;; in `min` with "Wrong type argument in position 1: #<marker>".
       ;;--------------------------------------------------------------
       (let* ((buffer (if (pair? rest) (or (car rest) (current-buffer))
                          (current-buffer)))
@@ -1453,8 +1511,12 @@
         ;; "the name is non-nil", not "it is in the buffer list".
         (unless (buffer-name buffer)
           (error "Attempt to create overlay in a dead buffer"))
-        ;; "if BEG is greater than END, swap them"
-        (let* ((b (min beg end))
+        ;; "BEG and END may be integers or markers", and a marker in the
+        ;; wrong buffer is refused before either is compared.
+        (let* ((beg ((*check-fixnum-coerce-marker-function*) beg buffer))
+               (end ((*check-fixnum-coerce-marker-function*) end buffer))
+               ;; "if BEG is greater than END, swap them"
+               (b (min beg end))
                (e (max beg end))
                (obeg (min (max b (buffer-beg buffer)) (buffer-z buffer)))
                (oend (min (max e obeg) (buffer-z buffer)))
@@ -1835,6 +1897,25 @@
                               ((eq? (caar rest) symbol) (loop (cdr rest)))
                               (else (cons (car rest) (loop (cdr rest))))))))
         #f))
+    (define (local-variable-p variable . args)
+      ;; GNU Emacs's `local-variable-p' (`data.c:2416'): "Non-nil if
+      ;; VARIABLE has a local binding in buffer BUFFER. BUFFER defaults
+      ;; to the current buffer."
+      ;;
+      ;; `data.c`'s, but it belongs beside the store: it is the query
+      ;; `kill-local-variable` (and `buffer-local-boundp`) are the
+      ;; other halves of, and **`isearch-mode` is its first caller** -
+      ;; "if a local value of `tool-bar-map` exists, save it, then set
+      ;; the buffer-local value to the isearch map" (`isearch.el:1309`).
+      ;; Without it a search could not tell its own local map from one
+      ;; the buffer already had, and would leave a local binding behind
+      ;; after every search.
+      ;;--------------------------------------------------------------
+      (let ((buffer (or (and (pair? args) (car args)) (current-buffer))))
+        (and buffer
+             (pair? (assq variable (hashq-ref buffer-slots-table buffer '())))
+             #t)))
+
     (define (use-local-map keymap)
       ;; GNU Emacs's `use-local-map' (keymap.c:1900): "Select KEYMAP as
       ;; the current local keymap. If KEYMAP is nil, that means no local

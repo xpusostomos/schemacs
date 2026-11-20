@@ -1209,6 +1209,63 @@ def check_isearch_line_end():
             % out[-300:]]
 
 
+def check_occur():
+    """M-x occur lists the lines matching a regexp, and RET goes to one.
+
+    `occur` - `replace.el`'s, `list-matching-lines` - is the engine the
+    tool bar's Show hits button runs. A terminal has no tool bar, so the
+    command is driven from M-x; it splits the frame, numbers the matching
+    lines and says how many matched. `RET` on a line goes to that
+    occurrence in its source buffer - the mode line's column says the
+    point is on the match.
+
+    The assertions read the screen with the escape sequences *stripped*:
+    the prefix column is drawn in `list-matching-lines-prefix-face` and
+    the matches in `match`, so a face run can sit between `1:` and the
+    line's text, which is why a raw `WAIT` on the whole line timed out
+    with the line plainly on the screen.
+    """
+    path = "/tmp/pty-check-occur.txt"
+    open(path, "w").write("alpha 888 beta\nsecond line\nthird 888 line\n")
+    C_n = b"\x0e"
+    M_x = b"\x1b" + b"x"
+
+    def plain(text):
+        text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+        return re.sub(r"\x1b[()][A-Z0-9]", "", text)
+
+    out = drive([M_x, b"occur", RET, WAIT(b"List lines matching regexp"),
+                 b"888", RET, WAIT(b"*Occur*"), ("sleep", 0.5)], path)
+    if "gave up waiting" in out:
+        return ["M-x occur did not open an *Occur* window (screen %r)"
+                % out[-300:]]
+    text = plain(out)
+    problems = []
+    if '2 matches for "888"' not in text:
+        problems.append("the header did not say `2 matches for \"888\"'")
+    if "1:alpha 888 beta" not in text:
+        problems.append("the first matching line was not drawn")
+    if "2:second line" in text:
+        problems.append("a non-matching line was listed")
+    if "3:third 888 line" not in text:
+        problems.append("the second matching line was not listed")
+    # C-x o into the *Occur* window, down to the first match line, RET:
+    # point goes to the `888' in the source buffer - current-column 6,
+    # which is what Emacs's `%c' shows.
+    out = drive([M_x, b"occur", RET, WAIT(b"List lines matching regexp"),
+                 b"888", RET, WAIT(b"*Occur*"), C_x + b"o", C_n, RET,
+                 ("sleep", 0.3)], path)
+    if "gave up waiting" in out:
+        problems.append("the second become-occur drive did not draw " + \
+                        "the list (screen %r)" % out[-300:])
+    elif "C6" not in plain(out):
+        problems.append("RET on an occurrence did not go to it: the " + \
+                        "source buffer's mode line never read C6 (the " + \
+                        "zero-based column of the match) " + \
+                        "(screen %r)" % out[-300:])
+    return problems
+
+
 def check_isearch_multiline():
     """A match with a line break in it is highlighted.
 
@@ -5795,6 +5852,7 @@ CHECKS = {
     "font-lock-scheme": check_font_lock_scheme,
     "prompt-after-delete-other-windows": check_prompt_after_delete_other_windows,
     "isearch-line-end": check_isearch_line_end,
+    "occur": check_occur,
     "isearch-multiline": check_isearch_multiline,
     "isearch-scroll": check_isearch_scroll,
     "isearch-highlight-row": check_isearch_highlight_row,

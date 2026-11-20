@@ -159,6 +159,9 @@ if emacs has an interesting macro or syntax-rules we should implement it,
 so as to keep the same shape as emacs code. make a schemacs/syntax.scm 
 for syntax.
 
+If you implement a feature that emacs has attached to a menu or menu bar,
+or mode line, make sure you also attach it to the menu, bar or modeline.
+
 
 - `tools/syntax-check.scm` — after ANY scripted edit to a machinery
   `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs
@@ -12573,3 +12576,1266 @@ Record change: `<pgtk-display>` has a `scale` slot - clear
 widget (a test's) is scale 1, so the pixel tests are unchanged. A/B
 verified from a `grim` screen capture: crisp next to the old code's
 soft text.
+
+# The tool bar — Gtk's own widget, Emacs's items (2026-11-19)
+
+Chris: *"implement the tool bar. Do it the same way as emacs. Use the
+same icons."* Then, when the first recon said Emacs's Gtk build had no
+tool-bar widget: *"Really it's not a native widget? Does gtk not have a
+suitable widget?"* **That recon was wrong**, and the correction is the
+whole shape of this pass: `gtkutil.c:5524` `xg_create_tool_bar` creates
+a real `GtkToolbar` ("emacs-toolbar", `GTK_TOOLBAR_ICONS`, oriented by
+`tool-bar-position`, `size-allocate` -> `tb_size_cb`). The glyph tool
+bar in `xdisp.c` is `#ifndef HAVE_EXT_TOOL_BAR`. So the port is the
+same split as the menu bar: `keyboard.c`'s items, `tool-bar.el`'s
+Lisp, and GTK's widget in `pgtk.scm`. A terminal has no tool bar in a
+Gtk build - `emacs -nw` has none either - and neither does ours.
+
+## Where it is
+
+- `schemacs/editor/tool-bar.scm` - `tool-bar.el`: `tool-bar-mode`
+  (`define-minor-mode`, `:global t`, `:init-value t`), `tool-bar-map`,
+  the cache-built keymap, `tool-bar-add-item`/`-from-menu` and their
+  local variants, `tool-bar-setup`, `tool-bar-position` (a
+  `define-custom` whose `:set` calls `modify-all-frames-parameters`),
+  `tool-bar-always-show-default`, `toggle-tool-bar-mode-from-frame`.
+- `schemacs/editor/image.scm` - `find-image`, `image-search-load-path`,
+  `image-property`, `create-image`, `image-type(-available-p)`,
+  `image-mask-p`, `display-images-p`, `*image-load-path*`. No
+  `image.c`: the toolkit loads the file, so the answer is the spec, not
+  an image struct.
+- `schemacs/editor/keyboard.scm` - `tool-bar-items`,
+  `parse-tool-bar-item`, the twelve `TOOL_BAR_ITEM_*` slot constants,
+  `tool-bar-max-label-size`.
+- `schemacs/editor/xdisp.scm` - `update-tool-bar`, the two seams
+  (`*tool-bar-items-function*`, `*tool-bar-keymap-function*`),
+  `tool-bar-style` and `tool-bar-get-system-style`.
+- `schemacs/editor/frame.scm` - `f->tool_bar_items` /
+  `f->n_tool_bar_items` (the frame's vector and its slot count),
+  `%frame-tool-bar-lines`, `*tool-bar-lines-default-function*` (the
+  frame-creation default `pgtkfns.c:1532` reads from the mode
+  variable), `modify-all-frames-parameters`.
+- `schemacs/ui/gtk/pgtk.scm` - the tool bar section: `pgtk-toolbar`
+  and its slots, `pgtk-set-frame-toolbar` (called from
+  `flush-display!`, after the menu bar), `pgtk-ensure-toolbar!`
+  (`xg_create_tool_bar` + `xg_pack_tool_bar`), `pgtk-fill-toolbar!`
+  (`update_frame_tool_bar`'s loop), `pgtk-make-tool-item`
+  (`xg_make_tool_item`), `pgtk-tool-bar-selection!`
+  (`xg_tool_bar_callback`), `pgtk-grow-by-toolbar!` (`tb_size_cb`),
+  `pgtk-icon-from-theme` (`find_icon_from_name`).
+- `schemacs/ui/gtk/pgtk-win.scm` (new) - `term/pgtk-win.el`/`x-win.el`'s
+  tool bar icon map: `x-gtk-stock-map` (all of `x-win.el:1377`),
+  `icon-map-list`, `x-gtk-stock-cache` and `x-gtk-map-stock`.
+- `schemacs/ui/gtk/pgtk-win-tests.scm` (10) is in
+  `tools/run-suites.py`.
+- `schemacs/editor/files.scm` / `menu-bar.scm` / `dired.scm` -
+  `find-file-read-args`, `find-file-existing`, `menu-find-file-existing`
+  and `dired-from-menubar`, so the File menu and the Open/Directory
+  buttons name the commands Emacs names.
+- `schemacs/etc/images/` - Emacs's own XPMs for the twelve items,
+  copied from its `etc/images`. GdkPixbuf reads XPM natively (measured);
+  `find-image` resolves them through `image-load-path`, whose default is
+  found on the load path exactly as `splash.txt` is.
+- `schemacs/editor/tool-bar-tests.scm` (31) is in `tools/run-suites.py`.
+
+## The icons are the theme's, not the XPMs
+
+This was the user's first question about the finished bar: *"why are the
+icons different to real emacs?"* The answer is in `gtkutil.c:5904` -
+`update_frame_tool_bar` maps each image's file name through
+`x-gtk-map-stock` and draws `gtk_image_new_from_icon_name` when the
+theme has the mapped name; the bundled XPM is only the fallback. So
+real Emacs's bar shows the desktop's `document-new`, `document-open`,
+`edit-undo`, and ours showed the Gtk2-era bitmaps. Ported in
+`pgtk-win.scm`, used by `pgtk-icon-from-theme`; verified live that the
+first button's image answers `(image:get-icon-name ...)` =
+`"document-new"`.
+
+Two guile-gi facts it cost: `gtk_image_set_from_icon_name` is generated
+as a generic that *cannot* dispatch the enum wrapper
+`(toolbar:get-icon-size tb)` returns (symbol->enum or the wrapper both
+fail with "No applicable method"), while the constructor
+`image:new-from-icon-name` takes the enum's **integer**
+(`(slot-ref wrapper 'value)`, `GTK_ICON_SIZE_LARGE_TOOLBAR` = 3) and
+works. And `icon-theme:has-icon` is spelled `icon-theme:has-icon?`.
+
+**The bar is coloured with the mode line's colours**, like the menu
+bar: `pgtk-ensure-toolbar!` adds the `schemacs-toolbar` class and the
+menu bar's CSS provider to its style context, and
+`pgtk-menubar-css-text` carries rules for it (background, buttons, a
+hover that inverts, separators). `pgtk-set-frame-toolbar` runs
+`pgtk-theme-menubar!` itself so the colours follow a theme change even
+with `menu-bar-mode` off. This is a deliberate departure from Emacs
+(whose toolbar is theme-coloured), asked for.
+
+## How a click runs
+
+A `GtkButton` "clicked" calls `pgtk-tool-bar-selection!`, which queues
+two keys - the symbol `tool-bar` and the item's key - tagged
+`tool-bar-event` (handled beside `menu-bar-event` in the queue decode).
+The command loop's modal lookup finds `[tool-bar]` (whose binding
+`tool-bar-make-keymap` keeps set to the *built* map) and then the item's
+key in it. This is Emacs's two-step: the C's `TOOL_BAR_EVENT` is
+`(KEY (FRAME tool-bar))` and `read_key_sequence` expands it into the
+same fake prefix. Verified live by emitting a probe item's `clicked`
+and reading `"TB-CLICK-OK"` from the echo area.
+
+## Two bugs that each looked like something else
+
+1. **A 99%-CPU "Gtk hang" was a Scheme loop.** `pgtk-fill-toolbar!`'s
+   recursive call sat *outside* the `when`, so it spun after the last
+   item. Debug prints looked absent because `current-error-port` was
+   block-buffered: `(setvbuf (current-error-port) 'none)` must come
+   first in any front-end trace. A `container:get-children` probe from
+   the *user* module raised "Too few in arguments" - guile-gi's
+   generics resolve per module, so a REPL probe of a Gtk generic does
+   not tell you what `pgtk.scm` can call.
+2. **9.5 ms per redisplay** was `widget:get-allocated-height` on the
+   toolbar, asked every redisplay to decide whether to grow the
+   window. Emacs's `tb_size_cb` is the mechanism: the toolbar's own
+   `size-allocate` calls `pgtk-grow-by-toolbar!`, and the explicit call
+   runs only when the bar was built or shown. Idle CPU went from ~25%
+   (one blink per 0.5 s) back to 0.
+
+## Gotchas worth carrying
+
+- **`image-property`, not `plist-get`, on an image object.** An image
+  spec is `(image :type ... :file ...)`; `(plist-get image :type)`
+  treats the leading `image` symbol as a key and reads every later
+  property one slot off (it cost an afternoon of "find-image works but
+  find-image returns #f").
+- **`define-custom`'s `:initialize` takes the procedure, not its
+  name** - `:initialize custom-initialize-default`, as `tab-line.scm`
+  writes it. Written quoted it is applied and raises "Wrong type to
+  apply".
+- **Guile's `hashq` is `(hashq obj size)`** and size must be >= 1; use
+  `object-address` for identity.
+- **`ps -o pcpu` is a lifetime average** and read 99% for an editor
+  that was actually idle; sample `time` twice.
+- **A multi-line debug print removed by line-filter leaves its
+  continuation lines behind**, which is how a paren imbalance and a
+  stray `(pgtk-allocation d))` appeared here. Splice whole forms,
+  verified by the reader, and re-check with the file-wide compile after
+  such a cleanup.
+- `emacs -nw` on a Gtk build has no tool bar; calling `tool-bar-setup`
+  on the terminal front end is what Emacs does and draws nothing.
+
+# The graphical file dialog (2026-11-19)
+
+Chris: *"can you change it so open from the menu or toolbar has a
+graphical open dialog, like real emacs"*. Menu File→Open and the tool
+bar's Open button now raise Gtk's own `GtkFileChooserDialog`;
+`C-x C-f` and the other typed commands still use the minibuffer,
+exactly as in Emacs.
+
+## What decides it
+
+`read-file-name` calls `next-read-file-uses-dialog-p` (`fileio.c:6574`),
+which is true when **the last nonmenu event is nil or a cons** and
+`use-dialog-box`/`use-file-dialog` are on and the frame is a window
+system's. A typed key is recorded as itself (not a cons); a mouse event
+or a menu selection is recorded as a cons. That is the whole "menu
+commands get dialogs" rule - there is no flag that says "came from a
+menu".
+
+To make it work here, three things landed that the tree did not have:
+
+- **`last-nonmenu-event`** (`keyboard.scm`'s `*last-nonmenu-event*`,
+  with `record-nonmenu-event!`). **Every path that hands a key to the
+  command loop must record**: `read-key-event`, `dispatch-input-event`,
+  and the Gtk front end's `pgtk-drain-queue!` - the last is easy to
+  forget because that front end's outermost loop does not read.
+- **`use-dialog-box` / `use-file-dialog`** in `fns.scm` - note the pair
+  is deliberately a parameter and a plain variable (Emacs `let`-binds
+  only the first).
+- **`x-file-dialog`**, a `dispnew.scm` generic whose Gtk method is
+  `pgtk.scm`'s. It builds the chooser (`pgtk-build-file-dialog`), runs
+  it in a nested Gtk main loop (`pgtk-get-file-name`), and signals quit
+  on Cancel as the C does.
+
+## Things to know before touching it
+
+* **The chooser's action is chosen by the caller's booleans**: an
+  existing file (`mustmatch`) is `open`, a directory (`only-dir`, which
+  is `(eq? predicate file-directory-p)`) is `select-folder`, anything
+  else is `save`. `read-directory-name` now passes `file-directory-p`
+  as `read-file-name`'s sixth argument, which closed the old "PREDICATE
+  is not carried" departure of the `D` interactive code.
+* **`dialog-mustmatch` is nil for `confirm` and
+  `confirm-after-completion`** - so a File→Visit New File… dialog can
+  create a file; a literal `t` is the only "must exist" for a dialog.
+* **The file completion table now applies its predicate to each
+  candidate expanded against the directory** (as
+  `completion-file-name-table` does), which is what makes
+  `read-directory-name` complete only directories.
+* **`(make <GtkFileChooserDialog>)` is the constructor**: the typelib
+  has no `file-chooser-dialog-new` because the C one is variadic. Set
+  action and buttons afterwards. `file-chooser:get-show-hidden?` and
+  `toggle-button:get-active?` carry the `?` suffix - the tree's
+  predicate-naming rule, not a typo.
+* **The wrapper properties are the C functions' names with a `?`** in
+  this guile-gi: `file-chooser:set-filename?`, `set-current-folder?`;
+  `set-action`, `set-current-name`, `set-local-only`,
+  `set-extra-widget`, `dialog:add-button` and `dialog:response` are
+  plain.
+* Emacs timers run during the dialog without any extra machinery: the
+  tree arms them as Gtk timeout sources (`pgtk-arm-timer!`), and a
+  nested Gtk loop dispatches them. That is the reason `xg_dialog_run`
+  exists rather than `gtk_dialog_run`, ported as it stands.
+* **Verification that matters**: unit tests use a stub chooser on a
+  `<test-display>` (`tty-editor-tests.scm`'s `file_dialog` group);
+  the Gtk widget itself needs a display, so the live check was done on
+  a broadway editor - the dialog opened, took a name, answered OK, and
+  `read-file-name` returned it; and the real menu path was driven by
+  enqueuing `(menu-bar-event . menu-bar)`, `(file)`, `(open-file)`.
+  The last one is also the regression test for
+  `record-nonmenu-event!` in the drain: without it the menu command
+  would have taken the minibuffer and blocked instead of opening the
+  dialog.
+
+## The dialog's crash: two guile-gi ownership bugs (2026-11-19)
+
+Chris clicked tool bar Open/Cancel a few times and the Gtk editor core
+dumped. Two separate ownership mistakes, both now fixed and both in
+DEPARTURES.md with the measured evidence:
+
+1. **A dialog's widget proxies must be held for the display's life**
+   (`pgtk-hold-widget!`), like the menu bar's and the tool bar's: the
+   dialog is destroyed after each use, and collecting a proxy of a
+   destroyed widget makes guile-gi release its toggle reference and
+   then unref the object it just released - the
+   `g_object_unref: G_IS_OBJECT` criticals.
+2. **Never call `main-loop:unref` on a loop guile-gi created.** The
+   proxy owns that reference and releases it when collected; the extra
+   unref in the dialog (and in `pgtk-wait!`'s nested-loop path, its
+   first instance) freed the loop early and the finalizer then
+   unref'd freed memory - `g_main_loop_unref: ref_count > 0` criticals
+   and eventually a SIGSEGV inside `g_malloc` while the next dialog's
+   template was built. Measured: five open/OK and three open/Cancel
+   cycles, each followed by `(gc)`, now run with zero criticals and the
+   editor alive.
+
+The `gtk_tree_drag_source_drag_data_delete` assertion the same session
+printed is GTK3's own file-chooser internals (a drag source on its tree
+view) and is a critical line, not a crash - do not chase it as ours.
+
+Also in this pass: `dired-read-dir-and-switches` now takes the C's two
+arms (`read-directory-name` when a dialog is used, `read-file-name` for
+a typed `C-x d` so wildcard completion still works), and the dialog
+group in `tty-editor-tests.scm` pins it with the stub chooser.
+
+## The isearch tool bar, and the buffer-local `tool-bar-map` (2026-11-19)
+
+Chris: *"hitting search in real emacs brings up a sub toolbar"*. It is
+`isearch-mode`'s `(setq-local tool-bar-map isearch-tool-bar-map)`, and
+the blocker was that this tree read only the *global* `tool-bar-map`.
+Now:
+
+- **`%tool-bar-map` is buffer-local-aware** (`local-variable-p` +
+  `buffer-local-value`, new in `buffer.scm` from `data.c:2416`), so a
+  buffer's own map wins. The isearch loop sets it on entry and
+  restores/removes it in a `dynamic-wind` after-thunk, as
+  `isearch-done` does.
+- **`isearch-tool-bar-map`** lives in `isearch.scm`: Repeat backward,
+  Repeat forward, Abort, Finish, Undo, Help. Omitted: Show hits
+  (`occur` not ported) and Replace (`isearch-query-replace` not
+  ported). `:visible`/`:filter` are not carried - the menu evaluator
+  runs in the current module, not isearch's.
+- **A click is `tool-bar` plus the item's key**, and the search's own
+  read pairs them (it has no modal lookup); each key maps to the code
+  of the key it stands for. This is pinned by the tty isearch tests
+  with a scripted `tool-bar` event.
+- **`tool-bar--image-expression` moved to `image.scm`** to break the
+  cycle (`tool-bar.scm` imports isearch for `isearch-forward`).
+  **Do not remove the `face-attribute`/`display-color-p`/
+  `*display-color-cells*` import from `tool-bar.scm`** - its own code
+  no longer uses them, but the image *forms* do, and without them every
+  icon silently disappears (the evaluator's guard answers nil). That
+  happened; `tool-bar-tests.scm` now pins it.
+- **A stale editor will not show any of this.** Several `se` instances
+  from a test session can hold the same `schemacs` socket; a probe that
+  connects to one of *those* runs old code and reports nonsense. Use
+  `SCHEMACS_INSTANCE=name` for probes and kill test editors afterwards.
+
+# The tool bar's labels, its greying, and the Replace button (2026-11-20)
+
+Chris's four questions about the Gtk tool bar - *6 icons where Emacs has
+7, the 4th wrong, why Emacs's have labels and ours never do, and why
+Emacs greys Save/Undo when they do not apply* - and what each turned out
+to be. DEPARTURES.md has the C for every rule; this is what the next
+session needs.
+
+## The labels: the desktop's `toolbar-style`, read through GSettings
+
+`tool-bar-get-system-style` had no front-end method, so ours always fell
+back to `image`. It has Emacs's rule now (`tool-bar-style` if set, else
+`*tool-bar-system-style-function*`, else `image`), Gtk answers from
+GSettings `org.gnome.desktop.interface`/`toolbar-style` (`xsettings.c`)
+- this desktop says `both-horiz` - and `xg_make_tool_item` is ported
+whole: horizontal box for `both-horiz`, image before or after the label
+per `text-image-horiz`, the label suppressed for `:vert-only` items when
+horizontal. `:label`/caption derivation was already right in
+`parse-tool-bar-item`; nothing to change there.
+
+**Gio's typelib is loaded in `pgtk-names.scm`** - Gtk's surface does not
+export GSettings. The schema key is checked before `settings:new`,
+because `g_settings_new` *aborts* on an uninstalled schema, and the
+`changed` signal does what `dynamic-setting.el` does
+(`force-mode-line-update t`). The style is **cached** (Emacs's
+`current_tool_bar_style`): the read is a ~3.5 ms guile-gi crossing and
+the bar is rebuilt on every keystroke that forces the mode line, which
+a search does on every key; the `changed` handler refreshes the cache,
+and the bar's up-to-date test compares the style beside the items
+(`gtkutil.c:5919`), so a live `toolbar-style` change refills the bar -
+the cached value is `(STYLE . ITEMS)`.
+
+## The 4th button: publish the search's state
+
+`:visible` was already honoured by both parsers; what was missing was
+the state and the form. `isearch-tool-bar-map` now has Emacs's
+`':visible '(not (string-equal isearch-string ""))` on Finish, and the
+search loop publishes `isearch-string`, `isearch-success`,
+`isearch-case-fold-search`, `isearch-other-end`, `isearch-regexp` each
+iteration and calls `force-mode-line-update` (Emacs's `isearch-update`
+line - what makes the bar re-parse). `string-equal` is `fns.c`'s and is
+ported.
+
+**`isearch-forward` the *variable* is deliberately not carried**: it
+collides with the command of that name in a Lisp-1, and nothing in the
+query-replace path reads it. (The `comment-add`/`tab-bar-separator`
+collision class.)
+
+Live, on Gtk: `("888" typed)` yields
+`(repeat-backward repeat-forward Abort Finish Undo Replace Help)` and
+deleting it yields `(... Abort Undo Replace Help)` - Emacs's layout.
+
+## The greying: the *menu items'* forms, because the bar copies them
+
+`tool-bar-add-item-from-menu` appends the menu item's properties, so
+Save/Undo/Paste grey out because their `menu-bar-edit-menu` entries do.
+Undo and Redo now carry Emacs 31's own tests, over
+**`undo-equiv-table`/`undo--last-change-was-undo-p`** - ported, filled
+where Emacs fills it - `*pending-undo-list*` uses the `t` sentinel at
+exhaustion, and `undo-redo` has the C's three assignments. **The
+`*last-change-was-undo*` flag is deleted**; it was the stand-in for the
+table and the command loop no longer clears it. Paste tests
+`(pair? (*kill-ring*))` beside the clipboard.
+
+**`selection-exists?` on Gtk is non-blocking now** - GDK's owner query
+through FFI, as `pgtkselect.c:1779` - which also removed a wait on
+another program's response time from the redisplay path. Measured: a
+real Emacs 31.1 on this desktop answers nil for CLIPBOARD even with
+`wl-copy` owning it (GDK Wayland does not report owners), so Paste is
+enabled by the kill ring alone there too.
+
+## The Replace button: `isearch-query-replace`, and where it had to live
+
+Emacs's command is `isearch.el`'s and lives in **`replace.scm`** here: it
+needs `perform-replace`/`query-replace-read-to`, and `replace.scm`
+imports `isearch.scm` - the mirror order is a cycle. The search's loop
+calls it *after* its `dynamic-wind`: the button's branch exits through
+`isearch-done` (factored out of the RET branch - same code, named) and
+answers a thunk; `isearch` runs the thunk once the wind has put the
+buffer's own bar back. `isearch-done` must not clear
+`isearch-other-end` - Emacs's does not and the command reads it.
+
+**The 7th button is `isearch-occur`, which needs `occur`** - ~1500 lines
+of replace.el (`occur-engine`, `occur-mode`, `occur-edit-mode`, the
+target text properties) - and is not ported. That is the whole of the
+6-vs-7 difference now.
+
+## `force-mode-line-update` was setting the strong flag
+
+The search calls it per key (Emacs's `isearch-update` line) and the pty
+check `isearch-multiline` went red: the match highlight vanished. Its
+body set *both* `windows-or-buffers-changed?` and `update-mode-lines?`,
+where `buffer.c:1543` sets only `update_mode_lines`; here the strong
+flag is read by `render!` as "the frame is garbaged", so every search
+key threw the frame away mid-highlight. Fixed in the function (the
+weak flag only). Nothing had called it during a redisplay-heavy command
+before, which is why it took a pty check to see.
+
+## Traps this pass paid for
+
+- **The item forms are evaluated in the ambient module** (guile-user,
+  given the editor's names by `open-user-environment!`). A test module
+  has to import `string-equal`/`isearch-string` for them to resolve, or
+  `menu-item-eval-property`'s guard answers nil and the item silently
+  disappears. A user `imports.scm` that omits the editor does the same
+  to their menus - named in DEPARTURES.md, not fixed.
+- **A property-plist walk starts after the command, one element at a
+  time.** `(cddr item)` is `(CMD :enable FORM ...)`: stepping TWO skips
+  past `:enable`. My first test helper returned #f and every "the
+  greying is broken" conclusion that followed was the helper.
+- **`set!` on an imported variable works and is seen by `eval`** - the
+  probe that proved it is three lines - but the *first* failure was
+  `string-equal` unbound, not the set!.
+- **You cannot inject a key into a running Gtk editor through the REPL
+  as an integer**: the queue holds `(key-event . RAW)` items the signal
+  handlers build, `pgtk-enqueue!` expects a GdkEvent, and pushing raw
+  integers into `pgtk-queue` plus `(pgtk-wake!)` worked for the isearch
+  read (888, tool-bar clicks) but not for the minibuffer read that
+  followed - the state to use is the *unit tests* and the real keyboard.
+  The valuable half: `(frame-tool-bar-items f)` read from the session is
+  how the bar's items were verified live, and `pgtk-enqueue!` with
+  `(cons 'tool-bar-event key)` is how a button click can be simulated.
+- **A running editor keeps its code**: every fix here needs a restart
+  before Chris can see it.
+
+## Tests
+
+- `tool-bar-tests.scm` 34 -> 35: the search bar's keys (now 7), Finish
+  present/absent around `isearch-string`, seven icons.
+- `menu-bar-menus-tests.scm` +2 (11): the Undo/Redo states and Paste's
+  ring arm, forms read from the live menu item and evaluated in the
+  test module.
+- `tty-editor-tests.scm` +3 (347): the published state after a search,
+  the `:visible` form with both answers, and the Replace button
+  end-to-end (search 888, click Replace, type XX, RET, y, RET ->
+  "alpha XX beta" and "Replaced 1 occurrence").
+- All suites pass; `tools/pty-check.py` to be run on the settled tree.
+
+# Occur, and the Show hits button (2026-11-20)
+
+Chris: *"Why doesn't your Replace toolbar item have a icon like emacs? And
+why don't we have the 'Show Hits' toolbar item?"* - and then, while the
+work was going on, *"and why does real emacs have the text 'Repeat
+Forward' in the toolbar?"*
+
+## The Replace icon
+
+`isearch-tool-bar-map`'s Replace item asks for `"search-replace"` and
+`isearch-tool-bar-image` turns that into `(find-image ...)` over
+`schemacs/etc/images/`. **The file was never copied into this tree**:
+Emacs's `etc/images/search-replace.xpm` and `.pbm` were, and now so are
+`index.xpm` and `index.pbm` (the Show hits icon). `pgtk-win.scm` already
+mapped both names ("etc/images/search-replace" to "edit-find-replace",
+"etc/images/index" to ("gtk-search" "gtk-index")), so the theme icon
+path works as soon as the file exists. Verified live: the item's image
+slot is `(image :type xpm :file ".../etc/images/index.xpm" :mask
+heuristic)`.
+
+## Why real Emacs shows "Repeat forward" as text - and we did not
+
+Two conditions have to hold before that text is drawn, and **the second
+is where we were wrong**.
+
+1. This desktop's GSettings says `org.gnome.desktop.interface
+   toolbar-style` is **both-horiz** (`tool-bar-get-system-style`), and
+   `xg_make_tool_item`'s label rule (`gtkutil.c:5594`) is
+
+       label = (style == image || (vert_only && horiz)) ? nil : TOOL_BAR_ITEM_LABEL
+
+   **The main bar's items are all `:vert-only t`** (`tool-bar.el:330-348`),
+   so their labels are suppressed on a horizontal bar; **the isearch
+   bar's items are not `:vert-only`** (`isearch.el:807-844`), so under
+   both-horiz each draws its label.
+
+2. The label has to survive `parse_tool_bar_item`'s size cut: a label
+   longer than `tool-bar-max-label-size` is set to the empty string
+   (`keyboard.c:10555`). **Emacs's default is 14**
+   (`DEFAULT_TOOL_BAR_LABEL_SIZE`, `dispextern.h:3510`); this tree had
+   **10**, transcribed wrong. `upcase-initials` of the caption "Repeat
+   forward" is "Repeat Forward" - exactly 14 characters - so Emacs shows
+   it and we discarded it. That is also why the user saw *Forward* and
+   not *Backward*: "Repeat Backward" is 15 and real Emacs shows no label
+   for it either.
+
+With the default corrected, our search bar draws "Repeat Forward",
+"Abort", "Finish", "Undo", "Replace", "Show Hits" and "Help", and no
+label for "Repeat Backward" - Emacs 31.1's own answer. The main bar
+stays icons-only because of condition 1, which is Emacs's answer for it
+too. `tool-bar-tests.scm` pins both lists, and the "Open Directory"
+label (14 characters as well) changed from "" to its Emacs value.
+
+## What landed
+
+`occur` (replace.el's second half) and `isearch-occur` (isearch.el's
+command, placed in `replace.scm` for the same import-graph reason
+`isearch-query-replace` is), plus the "Show hits" item in
+`isearch-tool-bar-map` with `:image '(isearch-tool-bar-image "index")`.
+`isearch-tool-bar-map`'s item list is now Emacs's eight, and the search
+loop runs the command when the tool bar's key arrives.
+
+**The search does not exit first.** Emacs 31.1's `isearch-occur` tests
+the symbol property `isearch-exit` to decide whether to call
+`isearch-done` first, and **nothing puts that property on it** -
+measured, `(get 'isearch-occur 'isearch-exit)` is nil in
+`emacs -Q -batch`, and no file in `lisp/` does the `put`. So the search
+keeps running while `occur` displays its buffer, and the next key
+continues the search; this tree's loop does the same (the command is
+called through `call-interactively` and the loop goes on), where the
+Replace button exits because *its* command's own first act is
+`(isearch-done nil t)`.
+
+## The primitives this needed, and what each changed
+
+- **`rename-buffer` had the wrong shape**: it took a BUFFER argument
+  where the Emacs DEFUN acts on `current_buffer`
+  (`(rename-buffer NEWNAME &optional UNIQUE)`). `occur-1` and
+  `rename-uniquely` are the callers that needed it as Emacs has it; the
+  two call sites in `files.scm` and the three tests are updated. It is
+  not a command here yet - the interactive spec reads a string, and
+  `read-string` is above `buffer.scm`.
+- **`rename-uniquely`** (`files.el:6747`) ported, and
+  **`ngettext`** (`editfns.c:3180`) - the C's whole body is the
+  placeholder `(if (= n 1) msgid msgid-plural)`.
+- **`kill-buffer-hook`** (`buffer.c:4953`) added as a parameter and run
+  by `%kill-buffer` exactly where the C runs it (`:1999`, after the
+  query functions), **with the dying buffer current**
+  (`set_buffer_internal`, `:1946`) - that is what makes occur's
+  garbage-collect entry see the right buffer-locals. Emacs's
+  `(add-hook ... nil t)` LOCAL half is not carried (`add-hook` here is
+  one global list), so occur's entry is global and guards itself: a
+  buffer that never ran occur answers #f and nothing is deleted.
+- **`get-buffer-window`** grew Emacs's optional BUFFER-OR-NAME and
+  ALL-FRAMES - `occur-1` asks with `all-frames` because the *Occur*
+  buffer may be on another frame.
+- **`save-selected-window`** ported as a macro over `dynamic-wind`;
+  `select-window` here does not switch frames, so the per-frame half of
+  Emacs's save/restore has nothing to put back and is named there.
+- **`region-bounds`** (`simple.el:7279`) - the default function's single
+  `(START . END)` pair; `region-extract-function` and rectangular
+  regions are not carried.
+- **`next-error`'s variables only**: `next-error-highlight`,
+  `-highlight-no-select`, `-recenter`, `-message-highlight`, the hook,
+  `next-error-found-function`, the `next-error`/`next-error-message`
+  faces, `next-error-highlight-timer`,
+  `next-error-overlay-arrow-position`, `next-error-last-buffer` and
+  `next-error-found`. The command `next-error` itself is the
+  compilation/grep subsystem and is not ported, so `occur-mode-map`'s
+  `n`/`p` (`next-error-no-select`/`previous-error-no-select`), `l`
+  (`recenter-current-error`) and `C-c C-f` are not bound; `c`
+  (`clone-buffer`) and `e` (`occur-edit-mode`) are not either. Each is
+  named in `replace.scm`'s header with what it waits for.
+- **`face-differs-from-default-p`** (`faces.el:304`) ported;
+  `occur-1` asks it of `list-matching-lines-prefix-face`.
+- **`overlay-arrow-position`/`overlay-arrow-string`** carried in
+  `xdisp.scm`; the renderer draws no overlay arrows, named there.
+
+## What is not carried, and why (the honest list)
+
+`occur-edit-mode` and `occur-after-change-function` (writing an edited
+occurrence back to its source); `multi-occur` and
+`multi-occur-in-matching-buffers`; `occur-word-at-mouse`,
+`occur-symbol-at-mouse` and `occur-context-menu` (need
+`thing-at-mouse`); the `occur-menu-map` `easy-menu-define` (no
+easy-menu); `read-regexp`'s `M-s c` case-fold toggle and its `M-n`
+suggestions list (this tree's `read-from-minibuffer` takes one DEFAULT,
+not a list); and `set-buffer-file-coding-system` for the occur buffer's
+coding system - `occur-engine` writes the same buffer-local slot
+directly because `mule-cmds` is a front-end library `replace.scm` does
+not import. `buffer-undo-list` is not a variable here to bind around
+the initial erase.
+
+## Two failures worth reading
+
+**A parameter passed as a value.** `occur-1` handed
+`*list-matching-lines-face*` - the parameter itself - to the engine,
+and thirteen tests failed with `Invalid face` whose irritant printed as
+`#<<parameter> ...>`. Every `*list-matching-lines-*` and
+`*occur-excluded-properties*` read in the occur section is now called:
+the file's oldest rule, and this is the third pass it has cost.
+
+**The pty screen has faces in the middle of its text.** The new
+`occur` check waited for `1:alpha 888 beta`, timed out with the line
+plainly on the screen, and the reason is that the prefix column is drawn
+in `list-matching-lines-prefix-face` and the matches in `match` - so a
+face run sits between `1:` and `alpha` and the bytes are not contiguous.
+The check strips escape sequences before asserting (`plain()`), and
+waits for `*Occur*` rather than for the line. Its `RET` assertion expects
+**C6**: `%c` is `current-column`, which is zero-based, and the `8` of
+`888` after `alpha ` is column 6.
+
+## Method notes
+
+- **Write the block to a file, reader-check, splice - then compile.** The
+  reader passed a form whose `if` binding list was one paren short; the
+  *compiler* named it ("let: bad let"), and the shape of Guile's
+  complaint is the tell: a form printed as `((define (occur-engine ...`
+  means the *previous* top-level form is unclosed and swallowed it.
+  Guile's `let` takes no bare bindings (`(let ((beg (point)) end)` is an
+  error), `set!` takes one pair, and `while` is not Scheme - three
+  mechanical rewrites of Emacs's code, each found by the compiler.
+- **A `define-command` whose interactive form supplies fewer arguments
+  than the procedure takes is an arity error at the key.** `occur`'s
+  Emacs spec supplies REGION only when a region is active, so the
+  procedure takes a rest argument; `occur-next-error`'s `"p"` supplies
+  one argument for an optional RESET, so it does too. M-x occur failed
+  with "Wrong number of arguments to #<procedure occur (regexp nlines
+  region)>" until it did.
+- **The pty check was seen failing before it passed** - twice, on the
+  arity bug and on the face-run WAIT - which is what makes the green run
+  evidence.
+
+## Verified
+
+- `occur-tests.scm` (new, 14): the listed lines and the seven-wide
+  number field, occur-mode and read-only, the `occur-target` marker
+  pairs, `occur-match` and the `match` face, context lines, collect
+  mode, the no-match kill, the region header, `occur-next`'s positions
+  and its "No more matches", RET to the occurrence, the revert
+  arguments, rename, and `isearch-occur` quoting a literal and carrying
+  the search's case folding. Every expectation measured on Emacs 31.1
+  first.
+- `tty-editor-tests.scm` +1 (348): the Show hits button clicked through
+  a scripted `tool-bar` event - the *Occur* buffer holds the line, and
+  the search is still running (the RET after the click ends it).
+- `tool-bar-tests.scm`: the search bar is Emacs's eight items, and with
+  nothing typed seven.
+- `tools/pty-check.py` +1 (`occur`): M-x occur draws the numbered
+  matching lines and says how many, a non-matching line is not listed,
+  and C-x o, C-n, RET goes to the occurrence (mode line C6).
+- All suites pass (76), the tree compiles with no new warnings, and a
+  live Gtk editor under broadway ran `(occur "888" ...)` and drew the
+  list; its isearch bar listed `isearch-occur` with its label and the
+  `index.xpm` image.
+
+## The jump-to-current-line bug the test found (same day)
+
+`list-matching-lines-jump-to-current-line` was not exercised by the first
+tests, and asking Emacs for it - the current line is inserted between the
+matches carrying `current-line`, and the *window's* point is put just
+after it - turned up two real defects in the port, both fixed and pinned
+by `occur-tests.scm`'s new group:
+
+1. **The `occur--final-pos` binding had too narrow an extent.** Emacs's
+   `let` binds it around the erase, the engine *and* the read that puts
+   the window's point there (`replace.el:2289-2316`). This port had a
+   `parameterize` around only the engine call's init expression, so the
+   read happened after the binding was gone and always answered #f. The
+   `parameterize` now wraps the whole body, as the `let` does.
+2. **The C's `if` answers the position, and a parameter's setter does
+   not.** `(goto-char (if jump (setq occur--final-pos ...) (point-min)))`
+   reads the position the `setq` returned; here `(*occur--final-pos*
+   pos)` answers the unspecified value, and `goto-char` died with
+   `(max #f 1)`. The branch computes the position in a `let`, sets the
+   parameter and answers the position.
+
+Both were found by *measuring Emacs first*, and the second only by
+running the new test - the first's extent was invisible without the
+read. `occur-tests.scm` is 16 now.
+
+## The battery under the user's own load (same day)
+
+The first full run on this tree gave **72/100** with 28 scattered
+failures, every one of them a screen showing only the terminal startup
+queries (`\e]11;?` and no content) - and the three that were rerun alone
+(`truecolor`, `set-fill-column`, `scroll`) passed 3/3 on the same tree.
+The machine was at load average 4.2-4.6 from the user's IntelliJ/Grails
+processes, and that is the documented startup-race class: the checks
+send keys before the editor's first draw, and `drive`'s quiet-and-drawn
+startup wait is a guess at how long startup takes. **A scattered red
+battery on a loaded machine is not a regression** - rerun the failures
+alone, and rerun the battery when the machine is quiet.
+
+# Occur's mouse, its colours, and the underline (2026-11-20)
+
+Chris: *"in real emacs the show hits *occur* window is clickable with
+the mouse to take you to the occurance. Also the 'xxx matches' line is
+shown underlined and the linenumbers are shown in a different color."*
+All three are in, and each needed a primitive the tree did not have.
+DEPARTURES.md has the C for every rule; this is what the next session
+needs before touching it.
+
+## What landed
+
+- **The symbolic mouse modifiers** (`character.scm`): `click`, `down`,
+  `drag`, `double`, `triple`, `up` as `termhooks.h`'s bits, read out of
+  event symbols by `parse-modifiers-uncached`/`event-modifiers` and
+  written back by `event-convert-list`/`apply-modifiers`. The
+  **implicit `click`** is `make_lispy_event`'s (`keyboard.c:6760`):
+  `mouse-1` is `(click)` and `down-mouse-1` is `(down)`, and
+  `event-convert-list` never writes `click` because the name carries it.
+- **`*key-translation-map*`** and `key-translation-translate`
+  (`keyboard.scm`), applied by `function-key-translate` after
+  `function-key-map`. A translator's answer is a key sequence and only
+  its first event is used; when that event is a **cons** - the mouse
+  translation answers `(mouse-2 POSN)` - it becomes `*last-read-event*`
+  and its car is the key. That is Emacs's `(setf (car last-input-event)
+  newup)` (`mouse.el:193`), and it is what keeps the click's position.
+- **`mouse.el:67-206` whole** (`mouse.scm`): `mouse-1-click-follows-link`
+  (450 ms, and the negative/double/nil cases), `mouse-1-click-in-non-
+  selected-windows`, `mouse--last-down`, the two translators,
+  `mouse-posn-property`, `mouse-on-link-p`, and the four
+  `key-translation-map` bindings.
+- **`char-property-alias-alist`** (`intervals.scm` + `textprop.scm` +
+  `font-core.scm`), which is what makes `font-lock-face` visible to a
+  renderer that asks for `face` - Occur writes its line numbers that
+  way. New primitives: `copy-tree` and `remq` (`subr.el`) in
+  `subr.scm`; `nreverse` and `nconc` (`fns.c`) in `fns.scm`.
+- **The Gtk underline** (`pgtk.scm`), `pgtk_draw_glyph_string`'s line:
+  one pixel at `(descent + 1) / 2` below the baseline, minimum 1,
+  clamped to the row - and **`:underline` is `t` or a colour**, which
+  omarchy's themes use. `realize-face-token` keeps the value now; it
+  tested `(eq? #t ...)` before, so a themed editor drew nothing.
+
+## The three bugs this pass found, and the shape of each
+
+1. **A parameter read raw in a seam.** `lookup-char-property`'s alias
+   reader was installed with `(*current-buffer*)`, and that parameter is
+   #f whenever no `set-buffer` has pinned a buffer - the ordinary case.
+   So the reader answered the *global* list for every such buffer and
+   `font-lock-face` never resolved live, while a unit test that passed a
+   buffer explicitly passed. It reads `(current-buffer)` now.
+2. **`when` as a value.** `(when action ...)` at the end of the click
+   translator answers the *unspecified* value when ACTION is #f, which
+   is true in Scheme, so every ordinary click off a link came back as
+   `#<unspecified>` and the dispatcher raised "a key is a string or a
+   vector of events". `(if action ... #f)`.
+3. **A translated event lost its position.** The translator answered
+   `(vector 'mouse-2)` - the key alone - where Emacs mutates the event in
+   place, so the command ran with no posn and acted on point instead of
+   the clicked line. The answer is the whole event cons, and
+   `key-translation-translate` installs it.
+
+## Verified live (Gtk under broadway :5, `SCHEMACS_INSTANCE` named)
+
+- The *Occur* buffer's prefix carries `(font-lock-face shadow)`,
+  `follow-link t`, `help-echo "mouse-2: go to this occurrence"`, and
+  `(get-text-property 49 'face)` answers `shadow` through the alias.
+- A press+release driven through `dispatch-key` on the occurrence line
+  landed in `occur-vis.txt` at point 7 (the match) with
+  `*last-read-event*`'s car `mouse-2`.
+- A `pgtk-write-screenshot!` scanned for the theme's underline colour
+  (`#3f8f8a`): two solid runs under the two wrapped header rows, and on
+  the occurrence rows only the prefix glyphs - body text in the default
+  foreground. **A screenshot is a workable oracle for a face** when the
+  colour is known; scan for long runs of the exact RGB rather than
+  eyeballing it.
+
+## Tests
+
+- `character-tests.scm` +2: the modifier table and the convert table,
+  every row `emacs -Q --batch`'s answer.
+- `mouse-tests.scm` +6 (51): `mouse-on-link-p` at a posn and at a
+  buffer position, the translator's answer carrying its posn,
+  `key-translation-translate` setting `*last-read-event*`, the off-link
+  case, and the two time rules (a 0 ms limit and a negative one).
+- `font-lock-tests.scm` +2 (15): the alias resolving through
+  `get-text-property` with the mode on and off, and the global list
+  never moving.
+- `pgtk-tests.scm` new `schemacs_pgtk_underline` group: a pixel in a
+  **space** cell is inked only when the face is on - the control render
+  is what makes it a test of the underline rather than of a glyph.
+
+## Still named, not carried
+
+- Click counting (`double-`/`triple-mouse-N`): neither front end makes
+  the events, and the `'double` branch of the translator can never see
+  one until a click clock exists.
+- The terminal has no mouse reporting, so an Occur line is not clickable
+  on a tty (`term.scm` names it).
+- `mouse-1-double-click-prefer-symbols` and `mouse-skip-word`.
+- `[follow-link]` key bindings are consulted without a position
+  (`key-binding` takes none here).
+
+# Where else Emacs has a tool bar (survey, 2026-11-20)
+
+Asked while the isearch bar was being finished. Every mode below
+installs a **buffer-local `tool-bar-map`**, which this tree already
+honours (`%tool-bar-map` reads the buffer-local first); what each needs
+is the map and the commands it names.
+
+| library | tool bar | in this tree? |
+|---|---|---|
+| `isearch.el` | `isearch-tool-bar-map` (8 items) | **yes, done** |
+| `help-mode.el` | `help-mode-tool-bar-map` (quit, search, back/forward) | library exists; map not ported |
+| `dired.el` | only `dired-click-to-select-mode` sets one | library exists |
+| `menu-bar.el` | the main bar's `tool-bar-map` | yes |
+| `window-tool-bar.el` | `window-tool-bar-mode` - a per-window bar drawn in the tab-line area, for every buffer | **not ported**; a redisplay feature of its own |
+| `info.el`, `doc-view.el`, `compile.el`, `grep.el`, `gud.el`/`gdb-ui`, `vc-dir.el`, `log-edit.el`, `eww.el`, `dictionary.el`, `package.el` (`package-menu-mode`), `mpc.el`, `artist.el`, `xwidget.el`, `rmail.el`/`rmailedit.el`, `gnus/*` (group, summary, article, message), `mh-e/*`, `newsticker.el`, `cus-edit.el` | each its own map | libraries not ported |
+
+So the pattern is one map per mode, not a subsystem: a mode's
+`define-derived-mode` body sets `(setq-local tool-bar-map ...)`. The two
+worth adding next are `help-mode`'s - but only half of it: its back and
+forward items name `help-go-back`/`help-go-forward`, which are the xref
+stack this tree does not carry (`help-mode.scm`'s header says so), while
+`quit-window` and `isearch-forward` exist - and the `window-tool-bar`
+mode, which is the only one that is a *redisplay* feature rather than a
+map.
+
+## The click that still did nothing: `double-click-fuzz`, and events
+## decoded at arrival (2026-11-20, later the same day)
+
+Chris, after the pass above: *"clicking in the occur buffer still does
+nothing, unlike emacs."* The translation machinery was right - the bug
+was in **how the Gtk front end decided that a release was a click at
+all**, and in **when it built the mouse event**.
+
+### The drag test was quantized to cells
+
+`mouse-1`'s follow-link translation has a time rule *and* the release
+must be a click: GNU Emacs decides that at the button release
+(`keyboard.c:6668-6682`) with
+
+    - double_click_fuzz < release_x - press_x < double_click_fuzz
+    - double_click_fuzz < release_y - press_y < double_click_fuzz
+    and double_click_fuzz > 0
+
+in **pixels**, `double-click-fuzz` defaulting to 3 (`:14449`). This
+tree compared `(pgtk-event-cell release)` with `(pgtk-event-cell
+press)` - cells are 9 by 20 pixels - so **one pixel of jitter across a
+cell boundary became a `drag-mouse-1`**, and `mouse-set-region` ran
+instead of the click. `drag-mouse-1` is deliberately not in
+`key-translation-map` ("dragging never follows the link"), so the click
+did nothing. Near a boundary that is a coin flip, which is why it
+looked like "nothing ever works" from a mouse that moves a pixel or
+two when you click.
+
+Ported: `double-click-fuzz` (`keyboard.scm`, a plain variable, default
+3), `pgtk-event-pixel` (the rounded Gdk coordinates), and the release
+handler's comparison as the C writes it; `<pgtk-display>`'s
+`press-cell` is `press-pixel`.
+
+Measured live on Gtk under broadway, with synthetic Gdk button events
+posted through `gdk_display_put_event` (see below):
+
+| press -> release | before | now |
+|---|---|---|
+| same cell | mouse-1 -> occur-mode-goto-occurrence | same |
+| **2 px apart across a cell boundary** | `drag-mouse-1` -> `mouse-set-region` | **click -> occur-mode-goto-occurrence** |
+| 10 px apart | `drag-mouse-1` -> `mouse-set-region`, region left active | same |
+
+The press is also **consumed** by the release that reads it, and a
+release with no press before it is dropped - the C's "If we did not see
+a down before this up, ignore the up" (`keyboard.c:6649`, `:6592`). A
+release belonging to a menu selection is exactly that case.
+
+### Mouse events are now made in the signal handler
+
+`pgtk-item->event` used to hold the *GdkEvent proxy* in the queue and
+read its coordinates when the queue was drained - the one thing
+`pgtk-key-item`'s own comment warns against ("**a queued event outlives
+the signal emission**... what is queued is the integer the decode
+produced, not the platform event"). For a click made while a nested
+read is outstanding (a prompt, an isearch) the drain happens after the
+signal handler returns, i.e. after Gtk has freed the event: a
+use-after-free whose symptom is a silently wrong position, and so a
+click on no link. The press handler and the release handler now build
+`(pgtk-mouse-event ...)` (and, for a drag, both positions) in the
+handler and queue it tagged `event-item` - the tag `pgtk-key-item` uses
+for a key, since Emacs draws no distinction: `kbd_buffer_store_event`
+stores every event the same way.
+
+### How the live clicks were driven
+
+`gdk_test_simulate_button` is X11-only (it returns FALSE on
+broadway/Wayland), but `gdk_display_put_event` takes any
+`GdkEventButton` the caller builds, copies it, and Gtk dispatches it to
+the widget - the whole real path, signal handlers included. The struct
+is written into a bytevector at the x86-64 offsets (type 0, window 8,
+send_event 16, **time 20**, x 24, y 32, axes 40, state 48, button 52,
+device 56, x_root 64, y_root 72); getting `time`'s offset wrong shifted
+every later field, and the event was dropped. **This is the way to
+click a running editor without a hand on the mouse** - the compositor
+method this file forbids is not involved.
+
+Two traps in using it: a posted event is delivered only when the
+editor's main thread returns to `gtk_main`, so the *state queries* that
+follow a click must be a separate REPL call; and a REPL round trip can
+take longer than `mouse-1-click-follows-link`'s 450 ms, so a debugging
+session that sees "the translator said no" should check `mouse--last-down`
+against the wall clock before believing it.
+
+# The mark in *Messages*, and the mouse face (2026-11-20)
+
+Two things Chris reported while using the editor, and what each turned
+out to be. DEPARTURES.md's 2026-11-20 section has the C every rule was
+taken from.
+
+## `C-SPC` and `M-w` in `*Messages*`
+
+"Mark and copy has no effect in that buffer." It is the one buffer that
+is both edited and logged into: `set-mark-command` messages "Mark set",
+`message_dolog` inserts that into the current buffer, and the insert set
+that buffer's `deactivate-mark`, so the command loop deactivated the
+region at once. Two C facts fixed it and one was a primitive that was
+wrong everywhere:
+
+- `message_dolog` inserts with `prepare = false` (`xdisp.c:12406`) and
+  saves/restores `Vdeactivate_mark` (`:12359`, `:12526`). The port binds
+  `*inhibit-modification-hooks*` beside `*inhibit-read-only*` now, and
+  restores the flag after the switch back.
+- `prepare_to_modify_buffer_1`'s `deactivate_mark` write sits **after**
+  `if (inhibit_modification_hooks) return;` (`insdel.c:2167` vs
+  `:2189`); the port had it outside the gate.
+
+**The way to see a bug of this shape**: a flag that a *primitive* sets
+during a *command the user ran in the buffer the primitive writes to*.
+`*Messages*` is the only such buffer, which is why only it was broken.
+Reproduce at a pty (C-x b *Messages*, C-SPC, C-n, M-w) or headlessly
+(`message` with `*Messages*` current, then read its `deactivate-mark`).
+
+## The Occur click error: `make-overlay` takes markers
+
+`Wrong type argument in position 1: #<marker … charpos 153>` came from
+`occur--highlight-occurrences` → `(make-overlay (car target) (cdr
+target))`, where an `occur-target` is two **markers**. `Fmake_overlay`
+(`buffer.c:3650`) coerces markers and refuses one in another buffer;
+ours handed them to `min`. Ported through
+`*check-fixnum-coerce-marker-function*` (declared in `buffer.scm`,
+installed by `marker.scm` - the coercion is `marker.c`'s and
+`marker.scm` is above `buffer.scm`). Tested in `buffer-tests.scm`.
+
+**`CHECK_FIXNUM_COERCE_MARKER` is a family**: any C position argument
+that says "a number or marker" needs it. `goto-char` had it;
+`make-overlay` did not. The next one that does not will show up as "`min`
+/ `max` got a marker", because that is where the coercion is skipped.
+
+## The mouse face (hover highlighting)
+
+Occur lines and Dired names carry `mouse-face`, and Emacs highlights the
+run under the pointer. That is `note_mouse_highlight` (`xdisp.c:37061`),
+run from the toolkit's motion handler on **every** movement
+(`pgtkterm.c:5945`) - *not* gated on `track-mouse`; `track-mouse` gates
+only whether a `mouse-movement` *event* is made (`some_mouse_moved`,
+`keyboard.c:1290`).
+
+What is here: the state in `xdisp.scm`
+(`%mouse-face-window`/`-beg`/`-end`/`-attrs`, `mouse-highlight` as the
+plain defvar), `note-mouse-highlight`/`mouse-face-at`/
+`clear-mouse-face!`, the painting through `attrs-at-buffer-position`
+under `*drawing-window*` (bound by `display-window!`), the run split in
+`face-change-limit`, and in `pgtk.scm` the per-report call plus a
+`leave-notify-event` clear. `mouse-tests.scm`'s
+`schemacs_editor_mouse_face` pins the primitive and the painted row.
+
+### Traps this cost
+
+- **`track-mouse` is a plain variable here, not a parameter.** Written
+  `(when (track-mouse) …)` it applies `#f` - "Wrong type to apply: #f"
+  from inside a Gtk signal handler, which is fatal and reads as a crash
+  in something else. Read it as `track-mouse`.
+- **`posn-at-x-y`'s unit is the *display's*, which for Gtk is cells.**
+- `pgtk-event-pixel` returns Gdk pixels; the handler converts with
+  `pgtk-event-cell` before anything that takes a posn.
+- `(window-top w)` in a live Gtk frame answered pixels where the
+  window record's `top` was cells - do not mix them when computing a
+  posn by hand. `posn-at-x-y` is the arbiter.
+- **Reading the flag through the REPL is only meaningful when the
+  window really shows the buffer you think.** An early probe read
+  `*Messages*`' own `deactivate-mark` and looked like a live bug in the
+  file buffer; always print `(buffer-name (current-buffer))` beside it.
+- **A `mouse-face` run in the middle of a face run needs the run split
+  at its edges** (Occur's runs start at the line beginning, so Occur
+  alone never showed this; Dired's shape does).
+- The pty battery's screen is per-row cells: to read pixels, screenshot
+  the frame (`pgtk-write-screenshot!`) and histogram the PNG - with a
+  HiDPI frame every row is two device pixels per cell row, so sample
+  with the scale factor in hand (row N is at `N × row-height × scale`).
+
+# The mode line as a mouse handle, and the scroll-bar plan (2026-11-20)
+
+## Done and tested
+
+The mode line is a drag handle and a click target exactly as in
+`mouse.el:3818-3826`: `down-mouse-1` drags the window's bottom edge
+(`mouse-drag-mode-line` → `mouse-drag-line` → `adjust-window-trailing-edge`),
+`mouse-1` selects the clicked window, mouse-2 deletes the other windows,
+mouse-3 deletes that one; `[vertical-line ...]` is the same pair.
+DEPARTURES.md has the whole list of primitives that had to land with it
+(`adjust-window-trailing-edge`, `window-at-side-p`, `one-window-p`,
+`window-resize-pixelwise`, `mouse-absolute-pixel-position`,
+`set-mouse-position`, `raise-frame`, `tty-type`, `minibuffer-window`,
+`mouse-position-in-root-frame`, the three display generics with their
+pgtk methods, and the mode-line posn's string). Two pipeline pieces were
+real departures and are fixed: `posn-at-x-y` now answers the drawn mode
+line string as `(STRING . CHARPOS)` (Emacs's `store_mode_line_string`),
+and `lookup-keymaps` is now `current_active_maps (Qt, position)` - the
+click's window buffer is made current, the string's `keymap` property
+goes above the minor modes and its `local-map` below them, and the
+buffer position's properties are read through `get_local_map`
+(`*get-local-map-function*`, installed by `editfns.scm`).
+
+`mouse-tests.scm`'s `schemacs_editor_mouse_mode_line` covers it; suites
+76/76 and mouse-tests 73.
+
+**Traps paid for**: `*last-read-event*` is a *parameter* - writing
+`(let ((event *last-read-event*)) ...)` gives you the parameter object
+and a drag that does nothing (the echo said nothing because the error
+was swallowed by the command loop's guard; `frame-message` is where it
+shows). `message` and `set!frame-message` are not imported in
+`mouse.scm`; a debug line with either raises *inside* the move lambda
+and reads exactly like "the drag does nothing". Name debug output with a
+scratch variable or check the compiler.
+
+## The mode line's item keymaps - what is left
+
+`%`-construct output now inherits the format string's text properties
+(`inherit-mode-line-properties`, mirroring `display_mode_element`'s
+`set-text-properties` at `xdisp.c:28520`), which is the mechanism
+`bindings.el` uses - `(propertize "%1*" 'local-map MAP)` is what makes
+the flag clickable. What is still missing:
+
+1. The `local-map`s and commands: `make-mode-line-mouse-map`,
+   `mode-line-toggle-read-only`, `mode-line-toggle-modified`,
+   `mode-line-widen`, `mode-line-change-eol`, and the propertized
+   constructs in `*mode-line-format*` (modified, remote, `%z`/eol,
+   `%n`, buffer id, position).
+2. The menus: `mode-line-mode-menu` (minor modes, built from
+   `minor-mode-list`), `mode-line-major-mode-keymap`'s
+   `mouse-menu-major-mode-map`, and `popup-menu` at the click position.
+   `popup-menu`/`x-popup-menu` and the menu-item machinery already exist
+   (menu-bar work).
+3. `help-echo` display on hover (the echo area or a tooltip) and the
+   mode-line `mouse-face` (`mode-line-highlight`) paint. The latter
+   needs `draw-mode-line!` to honour the mouse-face state for a run of
+   the mode-line *string*, the string analogue of what
+   `attrs-at-buffer-position` does for buffer text; `note-mouse-highlight`
+   currently handles buffer text only (`posn-area` `'mode-line` clears).
+
+Placement: those commands are `bindings.el`'s, so a `bindings.scm` (or
+`xdisp.scm`'s mode-line section) is their home; the coding-system and
+eol ones need `mule-cmds.scm` (`set-buffer-file-coding-system`,
+`describe-coding-system`) which is above `xdisp.scm` - a seam, as usual.
+
+## Scroll bars - recon, not written
+
+Read `gtkutil.c`. Emacs's Gtk frame is `GtkWindow → GtkBox → GtkFixed`
+(`FRAME_GTK_WIDGET (f) = wfixed`, `gtkutil.c:1670`), Emacs draws the text
+on the fixed, and each scroll bar is a `GtkScrollbar` inside a
+`GtkEventBox`, `gtk_fixed_put` as a child of that fixed
+(`xg_finish_scroll_bar_creation`, `:4596`), moved and resized per window
+by `xg_update_scrollbar_instance_status_and_geometry` (`:4780`, called
+from `display_vertical_scroll_bar`). The widget's `change-value` and
+`button-release-event` callbacks store a `VERTICAL_SCROLL_BAR_CLICK_EVENT`
+handled by `scroll-bar.el`'s `scroll-bar-toolkit-scroll`.
+
+For this tree: the frame is `GtkWindow → GtkBox → GtkDrawingArea`, and a
+GtkDrawingArea cannot have children, so the first structural step is a
+`GtkFixed` between the box and the drawing area (drawing area at 0,0,
+scroll-bar event boxes as siblings above it) - the renderer does not
+move. The geometry is cell-quantised where Emacs is pixel-native: the
+bar's width is `ceiling(bar_px / cell_width)` columns, `window-body-width`
+subtracts them, and the widget's `set_size_request` is `columns ×
+cell_width` so it lands on the grid (a named departure, the only visible
+one). Then: real `window-scroll-bars`/`set-window-scroll-bars`
+(`frame.scm` answers a terminal's answers today), `scroll-bar-mode`
+(`scroll-bar.el`), the `vertical-scroll-bar` frame parameter, a per-window
+display hook in the redisplay pass, the `(vertical-scroll-bar PART POSN)`
+event kind through the front-end queue, `scroll-bar-toolkit-scroll`, and
+the CSS from the `scroll-bar` face. The guile-gi ownership rule applies
+(hold the widget proxies for the display's life - the menu/tool bar
+taught that).
+
+# The scroll bars, the pointer's shape, and the frame's separators
+# (2026-11-20)
+
+Chris asked for two things - "the mouse cursor should change when you
+hover the mode line" and "port the scroll bars first because that changes
+the whole layout" - and then, from using it, four departures in what had
+landed: the bars of stacked windows met across the mode line, the mode
+line did not reach the frame's edge, a column of `|` glyphs was drawn
+beside the bars in Gtk, and the pointer did not change for a horizontal
+drag. All four are fixed; DEPARTURES.md's 2026-11-20 section has the C
+each rule was taken from.
+
+## What landed
+
+* **The pointer's shape** - `note_mouse_highlight`'s cursor half in
+  `xdisp.scm` (`pointer-kind`, `mode-line-draggable?`, `string-pointer-at`,
+  `string-keymap-at?`, `text-pointer-at`, `frame-cursor-for-posn`,
+  `note-frame-cursor`) and `pgtk.scm`'s `display-define-frame-cursor`
+  method, with the seven per-frame Gdk cursors held for the display's
+  life. `note-mouse-highlight` now asks for the shape *before* the face
+  work and regardless of `mouse-highlight`, which is what makes a
+  draggable mode line show the vertical-drag cursor.
+* **`ON_VERTICAL_BORDER`** - `posn-at-x-y` answers a `vertical-line` area
+  for the one-column strip at a line row's edge (the part over a toolkit
+  scroll bar) and for the border column of a no-scroll-bar frame's text
+  rows; `frame-cursor-for-posn` maps it to the horizontal-drag cursor.
+  `[vertical-line down-mouse-1]` was already bound to
+  `mouse-drag-vertical-line`.
+* **`w->force_start`** - `set-window-start!` sets it; `scroll-to-cursor!`
+  honours it for the selected window; `set-window-buffer!` writes the
+  start *without* it, as `set_window_buffer` does; the renderer clears it
+  on every non-selected window it draws.
+* **The bars** - `display-set-window-scroll-bar` is fed the text area's
+  box (`window-body-top` / `window-body-height`), the mode and tab lines
+  are drawn across the window's whole width, and the minibuffer window
+  gets no bar.
+* **The separator** - `display-draw-vertical-border`, the C's
+  `draw_vertical_window_border` hook: a one-pixel `vertical-border` line
+  over the text area. With scroll bars the frame draws no separator at
+  all; a terminal keeps the `|` glyph column.
+* `window-move-screen-lines`'s backward direction stepped **two** lines
+  per iteration; `(window-scroll w -6)` moved twelve. One line now.
+
+## The three regressions this shook out, and their shapes
+
+1. **`set-window-buffer!` set `force_start`** because it wrote the start
+   with the DEFUN. The flag then survived on the minibuffer window, whose
+   buffer the composite redisplay swaps in and out, and the next
+   redisplay moved the prompt's point into the read-only prompt field:
+   every typed key signalled "Text is read-only" and the answer came back
+   as the default. Symptom: `(read-from-minibuffer "Q 888 with: " ...)`
+   with X X RET answered `"888"`. If a prompt ever swallows typing again,
+   check the window's force flag first.
+2. **The completion display called `set-window-start!`** where Emacs's
+   `temp-buffer-window-show` does not. The first `M-<down>` in the
+   completions window then kept the start and moved point into the middle
+   of the list: the selection landed on the help line and the wrap never
+   happened (`pty-check.py`'s `completion-scroll`, deterministic alone).
+3. **`window-move-screen-lines`'s backward branch** (above) - a
+   pre-existing bug that only the page-scroll tests would have noticed,
+   and did not because they asserted the rule from the current geometry.
+
+## How to look at a Gtk frame when developing
+
+* **`pgtk-write-screenshot!` writes the cairo surface, not the window.**
+  Toolkit widgets - the menu bar, the tool bar, the scroll bars - are not
+  in it. Bar *geometry* is queried from the widget records
+  (`pgtk-scroll-bars` is an alist of `(window . bar-vector)`;
+  `widget:get-allocated-width/height`, `widget:get-margin-start/top` live
+  in `(schemacs ui gtk pgtk-names)`, not in `pgtk`); the mode line's
+  width and the separator's presence *are* in the surface, so scan its
+  pixels (`magick file -depth 8 rgb:-` and index it).
+* **Broadway has no pointer.** `gdk_window_get_device_position` answers
+  (0,0), so a drag's motion sampling is always zero there; the drag
+  *start* is still testable.
+* **Posting a real Gdk button press from the REPL works**, and is the way
+  to click without a hand on the mouse: build an 88-byte
+  `GdkEventButton` (type 4 = press, 7 = release; window pointer at 8,
+  time at 20, x/y doubles at 24/32, state 48, button 52, device 56,
+  x_root/y_root 64/72), then `gdk_display_put_event` through
+  `dynamic-func`. A press in the text area moves point, so the delivery
+  can be checked before trusting anything else. The event is dispatched
+  when the main thread next runs the Gtk loop, so read the resulting
+  state in a *separate* REPL call.
+* **A mode line can only be dragged when its window is not the frame's
+  bottom one** (`mouse-drag-mode-line`'s `window-at-side-p` guard,
+  `mouse.el:1088`): the bottom one resizes the minibuffer, and only when
+  the minibuffer is active or `resize-mini-windows` is nil. A press on
+  the bottom mode line doing nothing is Emacs's behaviour, not a bug.
+* **A guile-gi subclass slot named like the stub's is a trap**: the test
+  display already has a `cursor` slot recording the *drawn* cursor
+  `(ROW COLUMN TYPE)`, and a subclass slot with the same name/accessor
+  silently broke the stub's own setter ("No applicable method for
+  `set!test-display-cursor`"). The cursor tests' slot is `frame-cursor`.
+* `window-tab-line-height` is `frame.scm`'s, not `xdisp.scm`'s - a test
+  importing it from xdisp fails at load, which the runner reports as
+  "DID NOT RUN".
+
+## Tests
+
+* `scroll-bar-tests.scm` 68 (was 58): the bar is the text area's box - a
+  one-row-short height, a tab line pushing it down a row - and the
+  separator: no border line at all with scroll bars, exactly one over the
+  text area without them.
+* `mouse-tests.scm` 84 (was 73): the pointer's shape - text, hand over a
+  `mouse-face` run, the scroll-bar cursor for a `vdrag` pointer property,
+  nontext on the frame's bottom mode line, vertical-drag on a non-bottom
+  one, nontext when the mode-line string carries a keymap, and
+  horizontal-drag on a side-by-side window's edge - on its mode line and
+  on a text row.
+* `tools/pty-check.py`'s `completion-scroll` is the regression check for
+  the `force_start` completion bug; it failed deterministically before
+  the fix.
+* `pgtk-tests.scm` 117: the pointer queries and `raise-frame` are methods
+  of the *display interface's* generics, asked with
+  `compute-applicable-methods`. A sweep of all 48 `define-method`s in
+  `pgtk.scm` against its dispnew import list found exactly three dead
+  ones - the two pointer queries and `display-raise-frame` - and all
+  three are imported now. Run that sweep after touching an import list:
+
+      python3 - <<'PY'
+      import re
+      src=open('schemacs/ui/gtk/pgtk.scm').read()
+      methods=set(re.findall(r'\(define-method \(([^\s()]+)', src))
+      start=src.index('(only (schemacs editor dispnew)')
+      depth=0; i=start
+      while i < len(src):
+          c=src[i]
+          if c=='(': depth+=1
+          elif c==')':
+              depth-=1
+              if depth==0: break
+          i+=1
+      names=set(re.findall(r"[^\s()]+", src[start:i+1]))
+      print(sorted(m for m in methods if m not in names))
+      PY
+
+
+## The separator was one column right, and the pty `resize` check said so
+
+Changing the mode line to span `window-width` left the separator's
+column computed from the same `x0`/`width` bindings (`x0 + width`), which
+used to be the body's right edge and is now one past the window's last
+cell. Result: on a 60-column terminal `C-x 3` put `|` in column 30
+instead of 29, and `tools/pty-check.py`'s `resize` failed at all three
+widths, deterministically (`100 -> 50, 60 -> 30, 80 -> 40`). It is
+`window-left + window-width - 1` now. **A binding reused for a new span
+is the trap**: the mode line's width and the border's column are two
+different spans that coincided while both were the body's.
+
+## Verified
+
+* All 77 suites pass (`scroll-bar-tests` 68, `mouse-tests` 84,
+  `tty-editor-tests` 348, `pgtk-tests` 117).
+* `tools/pty-check.py` **100/100**, exit 0, on the tree as committed -
+  the first full green battery after the pointer-query fix.
+* `imports.scm` regenerated for the three new exports
+  (`display-draw-vertical-border`, `frame-has-vertical-scroll-bars?`,
+  `window-leftmost?`).
+* **A running editor keeps the code it started with**: the layout and
+  cursor fixes need a restart before Chris can see them.
+
+## Dragging the mode line never resized anything - a dead generic
+
+The whole drag path was fine: the press reached `mouse-drag-mode-line`,
+the transient map caught the motion events, `track-mouse` became
+`dragging`. What was dead was **the pointer query**:
+`pgtk.scm`'s `define-method` for `display-mouse-absolute-pixel-position`
+(and `display-set-mouse-pixel-position`) was written without importing
+the name from `(schemacs editor dispnew)`, so it made a *private generic*
+in `pgtk.scm`. The real generic kept only its default `#f` and
+`mouse-absolute-pixel-position` answered `(0 . 0)`: every drag sample was
+zero, so `growth` stayed zero and no window moved. The cursor worked
+because that generic *is* imported.
+
+Measured: `(mouse-absolute-pixel-position)` → `(0 . 0)` while
+`(pgtk-pointer-cell d)` answered a real cell. The fix is two names in the
+import list. `pgtk-tests.scm` now asserts that the real generics have two
+applicable methods for a `<pgtk-display>`, using
+`compute-applicable-methods` - a test that merely *calls* the function
+cannot tell a registered method from the default `#f`. (Applicability is
+decided for the arguments given: ask the four-argument setter with four.)
+
+**This is the missing-import class with a new hiding place**: `define-key`
+and `define-method` both create their binding, so neither the compiler
+nor the loader complains. If a display seam "does nothing", check that
+its name is imported before checking anything else.
+
+## "Failed adjusting window" - the combination axis, and a `set!` that is true
+
+Two bugs behind Chris's horizontal-drag error, both in `window.scm` /
+`frame.scm`:
+
+1. **The combination axis was inferred from the children's rectangles**;
+   Emacs stores `w->vchild`/`w->hchild`. A combination down to *one* child
+   has no geometry to infer from, so a one-child vertical combination was
+   taken for a horizontal one: the drag's walk stopped at it instead of
+   climbing to the real horizontal combination, tried to widen a
+   frame-wide window, and `window-resize-apply` refused - "Failed
+   adjusting window". The axis is a stored slot now
+   (`window-combination-axis` / `set-window-combination-axis!`), set by
+   the splits and by `combine-windows`; `window-stacked?` takes the parent
+   window and reads it; `window-combined-p`, `window-top-child`,
+   `window-left-child`, `%window-resize-check`, `%window-resize-apply-1`
+   and `scale-window!` pass the parent. A window with no stored axis and
+   two or more children falls back to geometry.
+2. **`(not (set! left right))` is always false**: `setq` answers the
+   value it set, `set!` answers the unspecified value, which is *true*.
+   The "No window on the right/below this one" guard never fired and a
+   nil window reached `window-min-size`. Same class as the `when`-in-
+   value-position notes; grep for `(not (set!`, `(or (set!`, `(and
+   (set!` in ports of Elisp that use `setq` as an expression.
+
+`tools/window-resize-fuzz.scm` is the check that found it and proves the
+fix: 300 random trees, every window, both directions, ±1/±2.
+**1508 failures before, 0 after.** It exits 1 on any failure - run it
+after touching `window--resize-*`, `split-window` or the window record.
+
+`window-tests.scm` 18 pins the stored axis and the nested horizontal drag
+(the pair resizes, the frame-wide window keeps its width).

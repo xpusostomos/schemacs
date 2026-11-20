@@ -81,6 +81,10 @@
     ;; The Edit menu's commands.
     (only (schemacs editor simple)
           kill-region kill-ring-save yank undo undo-redo mark-whole-buffer
+          ;; The undo state its `:enable` expressions read: Emacs's
+          ;; `undo--last-change-was-undo-p`, `last-command` and the kill
+          ;; ring's `or` arm.
+          undo--last-change-was-undo-p *last-command* *kill-ring*
           ;; The commands `tty-menu-navigation-map` substitutes for: the
           ;; map takes *their* keys and re-binds them to the `tty-menu-*`
           ;; symbols `term.c` interprets.
@@ -96,7 +100,8 @@
     ;; The File menu's commands. `kill-buffer` is the *command* (the
     ;; mechanism is `%kill-buffer`), which is what a menu item runs.
     (only (schemacs editor files)
-          find-file insert-file save-buffer write-file revert-buffer
+          find-file find-file-read-args find-file-existing
+          insert-file save-buffer write-file revert-buffer
           kill-buffer save-buffers-kill-terminal)
     (only (schemacs editor window)
           split-window-below split-window-right delete-other-windows
@@ -118,7 +123,7 @@
     (only (schemacs editor buffer) buffer-local-keymap)
     ;; The menu itself - `x-popup-menu` (`menu.c:1433`).
     (only (schemacs editor menu) x-popup-menu)
-    (only (schemacs editor dired) dired)
+    (only (schemacs editor dired) dired dired-from-menubar)
     ;; The predicates the `:enable` expressions read. They are evaluated
     ;; by `menu-item-eval-property` when the bar is built, in the
     ;; editor's own environment - so they are the *functions* this tree
@@ -126,7 +131,13 @@
     ;; and `buffer-read-only` is `(buffer-read-only? (current-buffer))`.
     (only (schemacs editor buffer)
           buffer-list buffer-local-value buffer-name current-buffer
-          buffer-read-only? buffer-modified-p buffer-file-name)
+          buffer-read-only? buffer-modified-p buffer-file-name
+          ;; Emacs's `buffer-undo-list`, which the Undo and Redo items'
+          ;; `:enable` expressions read.
+          text-editor-undo-list)
+    ;; The Paste item asks whether anything owns the clipboard -
+    ;; `select.el`'s question, over the display's own answer.
+    (only (schemacs editor select) gui-backend-selection-exists-p)
     ;; The menu lists frames as well as buffers, which is what
     ;; `frame-or-buffer-changed-p` compares.
     (only (schemacs editor frame) frame-list frame-name)
@@ -151,6 +162,7 @@
   (export
    menu-bar-separator
    menu-bar-file-menu menu-bar-edit-menu
+   menu-find-file-existing
    menu-bar-i-search-menu menu-bar-replace-menu
    kill-this-buffer kill-this-buffer-enabled-p
    delete-frame-enabled-p
@@ -335,17 +347,19 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
           '(menu-item "Insert File..." insert-file
                       :help "Insert another file into current buffer"))
 
+        ;; "Open Directory..." binds `dired-from-menubar` in the C
+        ;; (`menu-bar.el:235`), a command of its own so that a remapping
+        ;; of `dired` cannot make a menu click do the wrong thing.
         (define-key menu (kbd "<open-directory>")
-          '(menu-item "Open Directory..." dired
+          '(menu-item "Open Directory..." dired-from-menubar
                       :help "Read a directory, to operate on its files"))
 
-        ;; "Open File..." is `menu-find-file-existing` in the C, which
-        ;; reads a name with `find-file-read-args` and then visits it
-        ;; with `find-file-existing`. Neither is ported; `find-file` asks
-        ;; the same question and visits what it is given, which is what
-        ;; this entry does until they are.
+        ;; "Open File..." binds `menu-find-file-existing`
+        ;; (`menu-bar.el:243`), which reads a name that must name an
+        ;; existing file and visits it; the command is defined below the
+        ;; menu, as it is in the C.
         (define-key menu (kbd "<open-file>")
-          '(menu-item "Open File..." find-file
+          '(menu-item "Open File..." menu-find-file-existing
                       :help "Read an existing file into an Emacs buffer"))
 
         (define-key menu (kbd "<new-file>")
@@ -353,6 +367,26 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
                       :help "Specify a new file's name, to edit the file"))
 
         menu))
+
+    (define-command (menu-find-file-existing)
+      ;; GNU Emacs's `menu-find-file-existing` (`menu-bar.el:253`):
+      ;; "Edit the existing file FILENAME." - the File menu's "Open
+      ;; File..." and the tool bar's Open button, kept apart from
+      ;; `find-file` so that a remapping of `find-file` cannot change
+      ;; what a menu click does.
+      ;;
+      ;; **MUSTMATCH is always true here**: the C asks
+      ;; `x-uses-old-gtk-dialog`, an obsolete flag that is nil unless a
+      ;; pre-3.10 Gtk dialog is in use, and this tree has no such
+      ;; dialog. The untaken branch is kept so the shape is the C's.
+      ;;--------------------------------------------------------------
+      "Edit the existing file FILENAME."
+      (interactive)
+      (let* ((mustmatch #t)
+             (filename (car (find-file-read-args "Find file: " mustmatch))))
+        (if mustmatch
+            (find-file-existing filename)
+            (find-file filename))))
 
     ;;----------------------------------------------------------------
     ;; The Edit menu's sub-menus
@@ -423,7 +457,12 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
 
         (define-key menu (kbd "<paste>")
           '(menu-item "Paste" yank
-                      :enable (not (buffer-read-only? (current-buffer)))
+                      :enable (and (not (buffer-read-only? (current-buffer)))
+                                   (or (gui-backend-selection-exists-p 'CLIPBOARD)
+                                       ;; Elisp's `kill-ring' is nil when
+                                       ;; the ring is empty; the ring
+                                       ;; here is `()' and would be true.
+                                       (pair? (*kill-ring*))))
                       :help "Paste (yank) text most recently cut/copied"))
 
         (define-key menu (kbd "<copy>")
@@ -439,12 +478,26 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
 
         (define-key menu (kbd "<undo-redo>")
           '(menu-item "Redo" undo-redo
-                      :enable (not (buffer-read-only? (current-buffer)))
+                      :enable (and (not (buffer-read-only? (current-buffer)))
+                                   (undo--last-change-was-undo-p
+                                    (text-editor-undo-list (current-buffer))))
                       :help "Redo last undone edits"))
 
         (define-key menu (kbd "<undo>")
           '(menu-item "Undo" undo
-                      :enable (not (buffer-read-only? (current-buffer)))
+                      ;; `(and (not buffer-read-only) (not (eq t
+                      ;; buffer-undo-list)) (if (eq last-command 'undo)
+                      ;; (listp pending-undo-list) (consp
+                      ;; buffer-undo-list)))' - `#t' is this tree's
+                      ;; spelling of the `t' sentinel, and `listp' is
+                      ;; `list?' over a pending run that ends at `#t'.
+                      :enable (and (not (buffer-read-only? (current-buffer)))
+                                   (not (eq? #t (text-editor-undo-list
+                                                 (current-buffer))))
+                                   (if (eq? (*last-command*) undo)
+                                       (list? (*pending-undo-list*))
+                                       (pair? (text-editor-undo-list
+                                               (current-buffer)))))
                       :help "Undo last edits"))
 
         menu))

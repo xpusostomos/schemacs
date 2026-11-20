@@ -29,9 +29,10 @@
 (import
  (scheme base)
  (scheme char)
- (only (guile) setvbuf)
+ (only (guile) setvbuf usleep)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (oop goops) define-class define-method make)
+ (only (guile) module-ref resolve-module)
  ;; The display the events are read from and the row is measured against:
  ;; `(schemacs editor test-display)'s stub, so this suite needs no front
  ;; end - it borrowed `<pgtk-display>' before, for a display object.
@@ -48,30 +49,54 @@
  ;; `mouse-position' below is the frame-level function that calls it
  (rename (only (schemacs editor dispnew)
                current-display display-mouse-position key-event->key
+               display-define-frame-cursor
                read-input-event)
          (read-input-event display-read-input-event))
  (only (schemacs editor frame)
        *current-frame* *echo-area-buffer* *frame-list* frame? frame-height
        *default-frame-alist*
        frame-minibuffer-window frame-windows minibuffer-window-active-p
-       select-window
-       set-window-buffer! window-height window-top
-       frame-message
+       select-window window-live-p
+       set-window-buffer! window-height window-top window-list
+       frame-message frame-keymap-state
        selected-window
        frame-selected-window mouse-position
-       new-frame
+       new-frame window-last-mode-line
        set-window-start!
-       window-body-height window-buffer window-edges window-height)
+       window-body-height window-body-left window-buffer window-edges
+       window-height window-left window-width)
  (only (schemacs editor xdisp)
        posn-at-x-y posn-at-point render! track-mouse vertical-motion
-       window-end window-start)
+       window-end window-start
+       ;; the mouse face - `note_mouse_highlight` and the pieces its
+       ;; highlight is made of
+       note-mouse-highlight mouse-face-at mouse-highlight
+       face-at-buffer-position *drawing-window*)
+ ;; the row a highlight is painted into: the current matrix's glyphs
+ (only (schemacs editor matrix) window-current-matrix glyph-matrix-row-ref)
+ (only (schemacs editor glyph) glyph-row-glyphs glyph-face-id)
  (only (schemacs editor keyboard)
        *last-read-event* *overriding-terminal-local-map*
-       *unread-command-events* dispatch-key sit-for)
+       *unread-command-events* dispatch-key sit-for
+       key-translation-translate)
  (only (schemacs editor mouse) *mouse-scroll-delay* *mouse-scroll-min-lines*
-       mouse-minibuffer-check posn-set-point)
- (only (schemacs editor subr) event-start posn-window)
- (only (schemacs editor window) other-window)
+       *mouse-1-click-follows-link*
+       mouse-minibuffer-check posn-set-point
+       mouse-on-link-p mouse--down-1-maybe-follows-link
+       mouse--click-1-maybe-follows-link)
+ ;; `follow-link` is a text property, and the click that follows it reads
+ ;; it with `get-char-property`.
+ (only (schemacs editor textprop) put-text-property remove-text-properties
+       get-text-property)
+ ;; `mouse-on-link-p` of a *buffer position* (not a posn) reads the
+ ;; current buffer's properties.
+ (only (schemacs editor buffer) *current-buffer*)
+(only (schemacs editor subr) event-start posn-window posn-area posn-string
+       posn-point)
+ (only (schemacs editor fns) equal-including-properties)
+ (only (schemacs editor window) other-window split-window
+       adjust-window-trailing-edge)
+ (only (schemacs editor keymap) *default-keymap*)
  (only (schemacs editor simple) region-active-p)
  (only (schemacs editor editfns) point insert
 )
@@ -93,7 +118,13 @@
   ;; read answers with, and the read itself, are the stub's: its
   ;; `read-input-event' pops `test-display-script' and answers #f when the
   ;; script runs out, which is what a wait that timed out answers.
-  (pointer #:init-value #f #:accessor test-display-pointer))
+  (pointer #:init-value #f #:accessor test-display-pointer)
+  ;; The cursor shape the frame last asked for - `set_cursor:`'s
+  ;; `define_frame_cursor1`, recorded by the method below so the pointer
+  ;; tests can read the decision. Not called `cursor`: the stub's own
+  ;; `cursor` slot records the drawn cursor's `(ROW COLUMN TYPE)`, and a
+  ;; subclass slot of that name redefines the stub's accessor.
+  (frame-cursor #:init-value #f #:accessor test-display-frame-cursor))
 ;; ^ A display that answers `mouse-position' with a row the test sets.
 ;; The real one asks Gdk where the pointer is; the question is the same
 ;; and that is the point - the drag must not be reading the pointer's row
@@ -357,14 +388,16 @@
     (test-equal "a drag below the window moves it by a recentre, not by jump"
       #t
       (recentred-on-cursor? w))
-    ;; **One row past the window's last row**, which is what makes the
-    ;; drag scroll by half a page a step: the redisplay's start decision
-    ;; (`scroll-to-cursor!') recentres a cursor that is off the bottom,
-    ;; and that is the "half a page" a drag past the edge moves by - the
-    ;; same thing as moving the keyboard cursor off the bottom row. A
-    ;; cursor left *on* the last row leaves the redisplay nothing to do.
-    (test-equal "point is left one row past the window's last row"
-      (+ 1 (* (+ jump (window-body-height w)) 5))
+    ;; **The walk leaves point one row past the last row, and the
+    ;; redisplay moves it back in.** `mouse-scroll-subr`'s own
+    ;; `(set-window-start window (point))` sets `w->force_start`, so the
+    ;; redisplay that the loop's next `sit-for` asks for keeps the start
+    ;; and moves *point* instead - "Give up and just move to the middle
+    ;; of the window" (`xdisp.c:20823`) - which is
+    ;; `scroll-to-cursor!`'s `force_start` branch. That is the same
+    ;; recentre the assertion above measures, seen from point's side.
+    (test-equal "the redisplay moves point into the dragged window"
+      (+ (window-start w) (* (quotient (window-body-height w) 2) 5))
       (point))
     (test-assert "the window really did move past where it was"
       (> (window-start w) start-before))
@@ -608,5 +641,401 @@
       (let ((w (selected-window)))
         (list (eq? (posn-window (posn-at-point 1 w)) w)
               (posn-at-point 10000 w))))))
+
+;;--------------------------------------------------------------------
+;; Following links with mouse-1 - `mouse.el:67-206'
+;;--------------------------------------------------------------------
+;; A mouse-1 release within `mouse-1-click-follows-link` of its press,
+;; over text carrying a `follow-link` property, is turned into a mouse-2
+;; event *at the same position*. That is how the Occur buffer's lines are
+;; clickable: `occur-mode` marks them `follow-link`, `occur-mode-map`
+;; binds `[mouse-2]`, and the translation is what makes a left click
+;; reach it. The position travelling with the translated event is the
+;; whole point of it - without it the command acts on point rather than
+;; on the line that was clicked.
+
+(test-equal '(#t #f)
+  (let* ((f (numbered-frame 3 24 80)))
+    (parameterize ((*current-frame* f))
+      (let ((w (selected-window)))
+        (put-text-property 1 6 'follow-link #t (window-buffer w))
+        (list (mouse-on-link-p (list w 1 (cons 0 0) 0))
+              (mouse-on-link-p (list w 7 (cons 0 0) 0)))))))
+
+;; `(mouse-on-link-p POS)` where POS is *not* a cons is a buffer
+;; position in the current buffer, and asks the same question there.
+(test-equal '(#t #f)
+  (let ((f (numbered-frame 3 24 80)))
+    ;; The bindings of one `parameterize` are evaluated outside it, as
+    ;; `let`'s are, so the buffer has to be read where the frame is
+    ;; already current.
+    (parameterize ((*current-frame* f))
+      (parameterize ((*current-buffer* (window-buffer (selected-window))))
+        (put-text-property 1 6 'follow-link #t)
+        (list (mouse-on-link-p 1) (mouse-on-link-p 7))))))
+
+;; The press records, the release translates - and the answer is the
+;; *whole* event, `(mouse-2 POSN)`, so `event-start` still names the
+;; clicked place. Emacs's `(setf (car last-input-event) newup)`.
+(test-equal '(1 mouse-2 #t #t)
+  (let* ((f (numbered-frame 3 24 80)))
+    (parameterize ((*current-frame* f))
+      (let* ((w (selected-window))
+             (posn (list w 1 (cons 0 0) 0))
+             (down (list 'down-mouse-1 posn))
+             (up (list 'mouse-1 posn)))
+        (put-text-property 1 6 'follow-link #t (window-buffer w))
+        (mouse--down-1-maybe-follows-link down)
+        (let ((answer (mouse--click-1-maybe-follows-link up)))
+          (list (vector-length answer)
+                (car (vector-ref answer 0))
+                (eq? (cadr (vector-ref answer 0)) posn)
+                (eq? (event-start (vector-ref answer 0)) posn)))))))
+
+;; And through the command loop's own translation step: the key that
+;; comes out is `mouse-2`, and `*last-read-event*` is the translated
+;; event - which is where `occur-mode-goto-occurrence`'s
+;; `last-nonmenu-event` and every mouse command read the position from.
+(test-equal '(mouse-2 mouse-2 #t)
+  (let* ((f (numbered-frame 3 24 80)))
+    (parameterize ((*current-frame* f))
+      (let* ((w (selected-window))
+             (posn (list w 1 (cons 0 0) 0))
+             (down (list 'down-mouse-1 posn))
+             (up (list 'mouse-1 posn)))
+        (put-text-property 1 6 'follow-link #t (window-buffer w))
+        (mouse--down-1-maybe-follows-link down)
+        (*last-read-event* up)
+        (let ((key (key-translation-translate 'mouse-1)))
+          (list key (car (*last-read-event*))
+                (eq? (cadr (*last-read-event*)) posn)))))))
+
+;; Off the link the release stays a `mouse-1`: it keeps its ordinary
+;; binding (`mouse-set-point`), and nothing is mutated.
+(test-equal '(mouse-1 mouse-1)
+  (let* ((f (numbered-frame 3 24 80)))
+    (parameterize ((*current-frame* f))
+      (let* ((w (selected-window))
+             (posn (list w 7 (cons 0 0) 0))
+             (down (list 'down-mouse-1 posn))
+             (up (list 'mouse-1 posn)))
+        (put-text-property 1 6 'follow-link #t (window-buffer w))
+        (mouse--down-1-maybe-follows-link down)
+        (*last-read-event* up)
+        (list (key-translation-translate 'mouse-1) (car (*last-read-event*)))))))
+
+;; The time is the switch: a press held longer than
+;; `mouse-1-click-follows-link` is an ordinary mouse-1, so the click sets
+;; point and does not follow. 0 milliseconds makes every release too
+;; slow. A negative value reverses the rule - only a *long* press
+;; follows - and the press here is made 10 ms long so the test does not
+;; depend on how fast this machine runs the two calls.
+(test-equal '(#f #t)
+  (let* ((f (numbered-frame 3 24 80)))
+    (parameterize ((*current-frame* f) (*mouse-1-click-follows-link* 0))
+      (let* ((w (selected-window))
+             (posn (list w 1 (cons 0 0) 0))
+             (down (list 'down-mouse-1 posn))
+             (up (list 'mouse-1 posn)))
+        (put-text-property 1 6 'follow-link #t (window-buffer w))
+        (mouse--down-1-maybe-follows-link down)
+        ;; The answer is a key *sequence* - a vector whose one element is
+        ;; the translated event - and `equal?` over it would walk the
+        ;; window record and its frame, so the test reads the event's
+        ;; name rather than comparing the vector.
+        (list (mouse--click-1-maybe-follows-link up)
+              (parameterize ((*mouse-1-click-follows-link* -1))
+                (mouse--down-1-maybe-follows-link down)
+                (usleep 10000)
+                (let ((answer (mouse--click-1-maybe-follows-link up)))
+                  (and (vector? answer) (> (vector-length answer) 0)
+                       (pair? (vector-ref answer 0))
+                       (eq? 'mouse-2 (car (vector-ref answer 0)))))))))))
+
+;;----------------------------------------------------------------
+;; The mouse face - `note_mouse_highlight` (`xdisp.c:37061`)
+;;----------------------------------------------------------------
+;; What Emacs does when the pointer is over a `mouse-face` run: the run
+;; is highlighted by painting it with the `highlight` face, which is
+;; what Occur's search hits and Dired's file names ask for. The state is
+;; the display's, not the buffer's, so this is a redisplay test: the
+;; primitive decides, and the row builder is what paints.
+(test-begin "schemacs_editor_mouse_face")
+
+(let ((f (numbered-frame 10 10 40)))
+  (parameterize ((*current-frame* f))
+    (let* ((w (selected-window))
+           (b (window-buffer w)))
+      ;; Line 3 is positions 11..15 ("1003\n"), and the run is put in
+      ;; the *middle* of it: no `face` property changes there, so a
+      ;; renderer that split runs only on `face` would paint the whole
+      ;; line with one token and the highlight would never appear. That
+      ;; is the Dired shape, where the name sits inside a line.
+      (put-text-property 13 15 'mouse-face 'highlight b)
+      (test-equal "mouse-face-at answers the run" '(highlight 13 15)
+                  (mouse-face-at w 13))
+      (test-equal "a position with no mouse-face answers #f" #f
+                  (mouse-face-at w 6))
+      ;; The state machine, by the C's answers: entering highlights,
+      ;; a report inside the same run does nothing, leaving clears.
+      (test-equal "entering the run highlights" #t
+                  (note-mouse-highlight f 3 2))
+      (test-equal "a second report on the same run changes nothing" #f
+                  (note-mouse-highlight f 3 2))
+      ;; With the state set, the run's edges split the face runs: the
+      ;; token at 12 (before the run) differs from 13 (inside it) only
+      ;; when the window being drawn is the one the pointer is over.
+      (let ((bound (lambda (pos) (parameterize ((*drawing-window* w))
+                                   (face-at-buffer-position b pos))))
+            (plain (lambda (pos) (face-at-buffer-position b pos))))
+        (test-assert "the drawing window sees the mouse face"
+                     (not (= (bound 12) (bound 13))))
+        (test-assert "with no window bound every position is the plain face"
+                     (= (plain 12) (plain 13))))
+      ;; And the pixels: the glyph at the run's start (position 13, which
+      ;; is glyph 2 of row 2) carries the mouse face's token.
+      (render! f)
+      (let* ((row (glyph-matrix-row-ref (window-current-matrix w) 2))
+             (g (vector-ref (glyph-row-glyphs row) 2)))
+        (test-equal "the row is painted with the mouse face"
+                    (parameterize ((*drawing-window* w))
+                      (face-at-buffer-position b 13))
+                    (glyph-face-id g)))
+      (test-equal "leaving the run clears" #t
+                  (note-mouse-highlight f 0 1))
+      (test-equal "and the row is painted plain again" #t
+                  (begin
+                    (render! f)
+                    (let* ((row (glyph-matrix-row-ref
+                                 (window-current-matrix w) 2))
+                           (g (vector-ref (glyph-row-glyphs row) 2)))
+                      (= (face-at-buffer-position b 13)
+                         (glyph-face-id g)))))
+      ;; `mouse-highlight` is Emacs's off switch - a plain variable,
+      ;; `setq`-ed by a user, so this binds it by hand and puts it back.
+      (test-equal "entering again highlights" #t
+                  (note-mouse-highlight f 3 2))
+      (let ((saved mouse-highlight))
+        (set! mouse-highlight #f)
+        (test-equal "mouse-highlight nil clears the run" #t
+                    (note-mouse-highlight f 3 2))
+        (test-equal "and lights nothing" #f
+                    (note-mouse-highlight f 3 2))
+        (set! mouse-highlight saved)))))
+
+(test-end "schemacs_editor_mouse_face")
+
+;;----------------------------------------------------------------
+;; The mode line as a handle - `mouse.el:871-1180`, `:3818`
+;;----------------------------------------------------------------
+;; A press on a mode line drags the window's bottom edge; the click
+;; selects the window it belongs to, mouse-2 deletes the other windows
+;; and mouse-3 deletes that one. The events are the display's own shape -
+;; a posn whose AREA is `mode-line` and whose object is the drawn mode
+;; line string - delivered through `dispatch-key`, the same call the
+;; command loop makes.
+(test-begin "schemacs_editor_mouse_mode_line")
+
+;; The mode line's string is the click's object - `store_mode_line_string`
+;; - which is what makes the `keymap`/`local-map` properties on it
+;; readable at all.
+(let ((f (numbered-frame 10 12 40)))
+  (parameterize ((*current-frame* f))
+    (let* ((w (selected-window))
+           (row (+ (window-top w) (window-height w) -1))
+           (posn (posn-at-x-y 3 row f))
+           (ps (posn-string posn)))
+      (test-equal "the mode line posn names the mode-line area" 'mode-line
+                  (posn-area posn))
+      (test-assert "and carries the drawn string and an offset in it"
+                   (and (pair? ps) (string? (car ps))
+                        (integer? (cdr ps))
+                        (< (cdr ps) (string-length (car ps)))))
+      (test-assert "the string is the one drawn"
+                   (equal-including-properties
+                    (car ps) (car (window-last-mode-line w)))))))
+
+;; `[mode-line mouse-1]` runs `mouse-select-window`: the window whose mode
+;; line was clicked becomes the selected one, and point does not move.
+(let ((f (numbered-frame 20 12 40)))
+  (parameterize ((*current-frame* f))
+    (let* ((top (selected-window))
+           (bottom (split-window top #f 'below))
+           (row (+ (window-top bottom) (window-height bottom) -1)))
+      (select-window top)
+      (*last-read-event* (list 'mouse-1 (list bottom 'mode-line (cons 1 row) 0)))
+      (dispatch-key f 'mouse-1)
+      (test-equal "clicking a mode line selects its window"
+                  (list #t 1)
+                  (list (eq? (selected-window) bottom) (point))))))
+
+;; `[mode-line down-mouse-1]` is `mouse-drag-mode-line`: the press
+;; installs the transient map, each `mouse-movement` resizes the window
+;; whose mode line it was, and the first key the map does not bind ends
+;; the drag (`mouse-drag-line`, `mouse.el:871`).
+(let ((f (numbered-frame 20 12 40)))
+  (parameterize ((*current-frame* f))
+    (let* ((top (selected-window))
+           (bottom (split-window top #f 'below))
+           (h-top (window-height top))
+           (h-bottom (window-height bottom))
+           (row (+ (window-top top) (window-height top) -1)))
+      (pointer-at! row)
+      (*last-read-event* (list 'down-mouse-1
+                               (list top 'mode-line (cons 1 row) 0)))
+      (dispatch-key f 'down-mouse-1)
+      (test-equal "adjust-window-trailing-edge moves the edge directly"
+                  (list 2 -2)
+                  (let ((f2 (numbered-frame 20 12 40)))
+                    (parameterize ((*current-frame* f2))
+                      (let* ((t2 (selected-window))
+                             (b2 (split-window t2 #f 'below))
+                             (a (window-height t2)) (bb (window-height b2)))
+                        (adjust-window-trailing-edge t2 2 #f #t)
+                        (list (- (window-height t2) a) (- (window-height b2) bb))))))
+      (test-equal "the press starts tracking the mouse" 'dragging track-mouse)
+      (test-equal "no modal state is left after the press" #f (frame-keymap-state f))
+      ;; Two rows down: the window above the dragged mode line grows by
+      ;; two rows and the one below gives them up.
+      (pointer-at! (+ row 2))
+      (*last-read-event* (list 'mouse-movement
+                               (list top 'mode-line (cons 1 (+ row 2)) 0)))
+      (dispatch-key f 'mouse-movement)
+      (test-equal "dragging the mode line down resizes both windows"
+                  (list 2 -2)
+                  (list (- (window-height top) h-top)
+                        (- (window-height bottom) h-bottom)))
+      ;; A key the map does not bind ends the drag and restores
+      ;; `track-mouse`.
+      (*last-read-event* (list 'mouse-1 (list top 'mode-line (cons 1 row) 0)))
+      (dispatch-key f 'mouse-1)
+      (test-equal "the drag ends and mouse tracking is restored" #f track-mouse))))
+
+
+(let ((f (numbered-frame 20 12 40)))
+  (parameterize ((*current-frame* f))
+    (let* ((top (selected-window))
+           (bottom (split-window top #f 'below))
+           (row (+ (window-top bottom) (window-height bottom) -1)))
+      (*last-read-event* (list 'mouse-3 (list bottom 'mode-line (cons 1 row) 0)))
+      (dispatch-key f 'mouse-3)
+      (test-equal "mouse-3 on a mode line deletes that window"
+                  (list 1 #t)
+                  (list (length (window-list f))
+                        (window-live-p top))))))
+
+(test-end "schemacs_editor_mouse_mode_line")
+
+;;----------------------------------------------------------------
+;; The pointer's shape - the `set_cursor:` decision (`xdisp.c:36690`)
+;;----------------------------------------------------------------
+;; "The mouse cursor should change when you hover the mode line": a
+;; mode line that can be dragged by its edge shows the vertical-drag
+;; cursor, a `mouse-face` run shows the hand, and a `pointer` text
+;; property wins over everything. The decision is
+;; `frame-cursor-for-posn`, and what it asks the display for is
+;; `display-define-frame-cursor` - so the test display records the
+;; answer instead of a toolkit drawing a cursor.
+(test-begin "schemacs_editor_frame_cursor")
+
+;; The suite's display takes the cursor the frame asked for.
+(define-method (display-define-frame-cursor (d <test-display>) frame cursor)
+  (set! (test-display-frame-cursor d) cursor)
+  cursor)
+
+(define (cursor-over! frame x y)
+  ;; The shape the display was asked for by a pointer report at X, Y.
+  ;;--------------------------------------------------------------
+  (set! (test-display-frame-cursor d) 'none)
+  (note-mouse-highlight frame x y)
+  (test-display-frame-cursor d))
+
+;; Over text, over the frame's own last mode line, and over a
+;; `mouse-face` run in the text.
+(let ((f (numbered-frame 10 10 40)))
+  (parameterize ((*current-frame* f))
+    (let ((w (selected-window))
+          (b (window-buffer (selected-window))))
+      (test-equal "over text the pointer is the text cursor" 'text
+                  (cursor-over! f 0 0))
+      ;; `WINDOW_BOTTOMMOST_P (w)` with `resize-mini-windows` non-nil
+      ;; and no prompt up: the frame's last mode line is not a resize
+      ;; handle, so it is the nontext cursor (`xdisp.c:36777`).
+      (test-equal "the frame's last mode line answers the nontext cursor"
+                  'nontext
+                  (cursor-over! f (window-body-left w)
+                                (+ (window-top w) (window-height w) -1)))
+      (put-text-property 2 4 'mouse-face 'highlight b)
+      (test-equal "over a mouse-face run the pointer is the hand" 'hand
+                  (cursor-over! f 1 0))
+      (note-mouse-highlight f -1 -1)     ; the pointer left; clears the run
+      ;; A `pointer` text property wins over the area and over the run
+      ;; (`set_cursor:` reads it first, `xdisp.c:36736`).
+      (put-text-property 2 4 'pointer 'vdrag b)
+      (test-equal "a pointer property asks for the scroll-bar cursor"
+                  'scrollbar
+                  (cursor-over! f 1 0))
+      ;; Both properties go: the `mouse-face` run is the hand cursor's
+      ;; own trigger, so removing only `pointer` leaves the hand.
+      (remove-text-properties 2 4 '(pointer nil) b)
+      (note-mouse-highlight f -1 -1)
+      (remove-text-properties 2 4 '(mouse-face nil) b)
+      (test-equal "with neither property the text cursor is back" 'text
+                  (cursor-over! f 1 0))
+      ;; Negative coordinates mean the pointer has gone, and the C
+      ;; returns before changing anything.
+      (set! (test-display-frame-cursor d) 'none)
+      (note-mouse-highlight f -1 -1)
+      (test-equal "a pointer that left does not change the shape" 'none
+                  (test-display-frame-cursor d)))))
+
+;; Two windows: the top one's mode line is a drag handle for its bottom
+;; edge, and a `keymap` property on the drawn string keeps it nontext -
+;; that is what makes a clickable item on the mode line clickable
+;; (`xdisp.c:36802`).
+(let ((f (numbered-frame 20 12 40)))
+  (parameterize ((*current-frame* f))
+    (let* ((top (selected-window))
+           (bottom (split-window top #f 'below))
+           (row (+ (window-top top) (window-height top) -1)))
+      (render! f)
+      (test-equal "a non-bottom window's mode line is a vertical drag"
+                  'vertical-drag
+                  (cursor-over! f (window-body-left top) row))
+      (test-equal "...and the bottom window's is not" 'nontext
+                  (cursor-over! f (window-body-left bottom)
+                                (+ (window-top bottom)
+                                   (window-height bottom) -1)))
+      (let* ((record (window-last-mode-line top))
+             (string (and record (car record))))
+        (when (and (string? string) (> (string-length string) 3))
+          (put-text-property 2 3 'keymap *default-keymap* string))
+        (test-equal "a keymap on the mode-line string keeps it nontext"
+                    'nontext
+                    (cursor-over! f (+ (window-body-left top) 2) row))
+        ;; Restore the drawn string for any later group.
+        (when (and (string? string) (> (string-length string) 3))
+          (remove-text-properties 2 3 '(keymap nil) string))))))
+
+;; Side by side on a frame with no scroll bars: the shared edge is the
+;; `vertical-line` area - `coordinates_in_window` answers
+;; `ON_VERTICAL_BORDER` for it (`window.c:1411-1418` on the mode line,
+;; `:1448-1453` on a text row), and `note_mouse_highlight` turns that
+;; into the horizontal-drag cursor and the "drag-mouse-1: resize" help
+;; (`xdisp.c:37257`).
+(let ((f (numbered-frame 10 10 40)))
+  (parameterize ((*current-frame* f))
+    (let* ((left (selected-window))
+           (right (split-window left #f 'right))
+           (col (- (+ (window-left left) (window-width left)) 1))
+           (row (+ (window-top left) (window-height left) -1)))
+      (render! f)
+      (test-equal "a side-by-side window's mode-line edge is a horizontal drag"
+                  'horizontal-drag
+                  (cursor-over! f col row))
+      (test-equal "and its border column on a text row too"
+                  'horizontal-drag
+                  (cursor-over! f col 0)))))
+(test-end "schemacs_editor_frame_cursor")
 
 (test-end "schemacs_editor_mouse")
