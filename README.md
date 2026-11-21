@@ -40,8 +40,6 @@ Here's what works already:
 * visual line mode, fill mode
 * And many more...
 
-How does it feel? Zippy! 
-
 ![Screen Shot](images/schemacs-screenshot-1.jpg)
 
 ## A quick word from our lack of sponsors...
