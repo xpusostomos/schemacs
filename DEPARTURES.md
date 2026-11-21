@@ -12435,3 +12435,89 @@ syntax-table text properties stripped (this tree has none; c-mode's
 font-lock properties make Emacs 31.1 itself answer differently in the
 middle of a stale-cache window, which is why the comparison strips
 them). `cc-engine-tests.scm` grew 17 assertions, `syntax-tests.scm` 5.
+
+# cc-mode: the syntactic-whitespace engine (2026-11-21)
+
+`c-forward-sws` (`cc-engine.el:2127`) and `c-backward-sws` (`:2381`) are
+in, with everything they stand on: `c-sws-lit-type`/`c-sws-lit-limits`
+(`:1949`, plain `defvar`s in Emacs and plain variables here),
+`c-enclosing-c++-attribute` (`:1961`), the three change hooks
+(`c-invalidate-sws-region-before` `:1983`, `-after-ins` `:2045`,
+`-after-del` `:2028`, `-after` `:2060`), `c-looking-at-c++-attribute`
+(`:721`), `c-partial-ws-p` (`:2678`), and the two `cc-defs.el` macros
+`c-forward-syntactic-ws`/`c-backward-syntactic-ws` (`:739`, `:762`).
+`c-point`'s `'bosws`/`'eosws` arms - errors until now - are Emacs's.
+
+## Placement departures
+
+- **`c-forward-syntactic-ws`/`c-backward-syntactic-ws` live in
+  `cc-engine.scm`**, not `cc-defs.scm`, because they call
+  `c-forward-sws`/`c-backward-sws`, which live here and cc-defs is
+  imported *by* this library. (Emacs has them in cc-defs and no cycle,
+  having no imports.) Their macros choose their expansion by whether
+  the *caller* passed a LIMIT; as procedures the question is a run-time
+  `#f` test, and an explicit nil LIMIT takes the limiting branch with
+  `(or limit (point-max))` - the same expansion Emacs gives an explicit
+  nil.
+- `c-skip-ws-forward`/`c-skip-ws-backward` (`cc-defs.el:1076`, `:1098`)
+  and `c-previous-single-property-change` (`:487`) are in
+  `cc-defs.scm`, where Emacs has them.
+
+## Three Elisp/Scheme traps, all in condition position
+
+1. **`(while (when TEST BODY...))` must become a named let whose test is
+   the `when`, with the body after it** - and a `when` that fails
+   answers the *unspecified* value, which is **true** in Scheme. The
+   first `c-skip-ws-forward` loop read `(when (begin (skip-chars...)
+   (when ...)) (loop))`: on any character that is not whitespace the
+   inner `when` answered unspecified, the outer loop spun, and the
+   first `c-forward-syntactic-ws` never returned. The inner test is an
+   `and` now, whose failure answer is `#f`.
+2. **A `cond` with no matching clause answers unspecified too.** Both
+   sws engines end `advance` with a cond whose last arm is
+   `(looking-at c-doc-line-join-re)`; Emacs's nil ends its `while`, the
+   unspecified value looped it. Written out as `(else #f)` in both, with
+   a comment, since this is the fourth time in the tree (`when` in
+   value position, `set!` in value position, and now `cond`).
+3. **`(char-after)` with no argument is an error here** (Emacs's
+   defaults to point): `(char-after (point))` in the skip-ws
+   procedures.
+
+## The whitespace sets carry a literal no-break space
+
+Emacs writes four sets inline - `" \t\n\r\f\v"`, `" \t\f\v"`, `" \t\f"`,
+`" \t"` - each with a literal U+00A0 after the visible characters
+(checked byte for byte: `302 240`). They are `%c-sws-any`,
+`%c-sws-horiz`, `%c-sws-back-horiz` and `%c-sws-bol` here, spelled with
+Guile's `\xa0` escape (which takes no trailing semicolon: `"\xa0;"`
+would be two characters, measured).
+
+## Verification
+
+Whole-fixture differentials against Emacs 31.1 in a real `c-mode`
+buffer, with the syntax-table text properties stripped:
+
+- `c-forward-syntactic-ws` and `c-backward-syntactic-ws` at **all 102
+  positions** of the `cc-engine-tests` fixture: **identical** (a
+  306-answer table).
+- `c-partial-ws-p` over all **101 adjacent pairs**: identical.
+- `c-looking-at-c++-attribute` at 10 positions and
+  `c-enclosing-c++-attribute` at 14, on `"int x; [[a]] int y; [[b]\n"`:
+  identical, including the corner that the enclosing function answers
+  *nil* between the two opening brackets and at the first bracket, and
+  `(8 . 13)` from the attribute's first interior character to one past
+  the closing `]]`.
+- The change hooks: after a `c-forward-sws` ladder, a before/after pair
+  around an insert inside a block comment and around a deletion that
+  destroys a comment opener - the recorded literal type and limits
+  (`c (70 . 95)`, `pound (56 . 97)`) and the state of the ladder after
+  each change are identical.
+
+**A test-harness fact**: `c-major-mode-is` reads `*c-buffer-is-cc-mode*`,
+which Emacs sets buffer-locally in the mode's init, and no mode exists
+here yet - so a test of anything that branches on the major mode must
+`parameterize` it around the call. `cc-engine-tests.scm` does.
+
+The suite is `cc-engine-tests` 170 (25 new); `cc-defs-tests` 45, and the
+other four cc suites unchanged. `tools/pty-check.py imports scratch`
+passes (2/2); imports.scm regenerated (112 libraries, 4215 names).

@@ -8,7 +8,10 @@ translate real emacs source code into scheme, and put that ported code into
 files with the same name as in emacs. e.g. intervals.c in emacs became intervals.sld
 in this project. Also, each function in the same file should be kept in the same
 order as emacs. Each function in emacs should be ported with the same name to the 
-same file here, generally with the same parameters too. 
+same file here, generally with the same parameters too. And it should be in the same 
+subdirectory too. e.g. emacs lisp/progmodes/cc-engine.el should be in 
+schemacs/progmodes/cc-engine.scm. lisp/font-lock.el should be in schemacs/font-lock.scm
+src/frame.c should be in schemacs/frame.scm
 We are working on exact emacs replication, right down to the
 exact functionality, messages, layout, everything. So it's important that you
 read emacs source code before implementing, are replicating it as close as possible
@@ -15419,3 +15422,46 @@ shared primitive.
 `c-forward-syntactic-ws`/`c-backward-syntactic-ws`, and the
 `c-invalidate-sws-region-*` hooks (they need `c-literal-limits`, now
 here).
+
+## cc-mode: the syntactic-whitespace engine (2026-11-21)
+
+`c-forward-sws`, `c-backward-sws` and everything under them are in
+(`cc-engine.el:1800'-`:2694'`): the `c-is-sws`/`c-in-sws` ladder, the
+change hooks (`c-invalidate-sws-region-before`/`-after`, with
+`c-sws-lit-type`/`c-sws-lit-limits` as plain variables),
+`c-enclosing-c++-attribute`, `c-looking-at-c++-attribute`,
+`c-partial-ws-p`, and `c-forward-syntactic-ws`/`c-backward-syntactic-ws`
+(in cc-engine - a placement departure: Emacs has them in cc-defs, whose
+import graph is this tree's). `c-point`'s `'bosws`/`'eosws` arms work
+now. DEPARTURES.md has the traps and the measured tables.
+
+**The trap that cost the two hangs is worth keeping**: both a `when`
+whose test fails and a `cond` with no matching clause answer the
+*unspecified* value in Scheme, which is **true**, where Elisp answers
+nil. Both sws loops had one in condition position, so the engine spun
+forever on ordinary text - and the symptom was a silent hang, not an
+error. Grep for `(when` and `cond` in any port where the value is a
+loop condition.
+
+**The whitespace sets** are `%c-sws-any`, `%c-sws-horiz`,
+`%c-sws-back-horiz`, `%c-sws-bol`, each ending in a literal no-break
+space (U+00A0) as Emacs's inline strings do; Guile's `\xa0` escape
+takes no semicolon.
+
+**Testing anything that branches on the major mode** requires
+`(parameterize ((*c-buffer-is-cc-mode* 'c-mode)) ...)`, because Emacs's
+`c-buffer-is-cc-mode` is a buffer-local set by the mode's init and no
+mode exists here yet.
+
+Verification at the right size: the six cc suites (cc-engine-tests 170,
+25 new) and `pty-check imports scratch` 2/2, plus whole-fixture
+differentials against Emacs 31.1 - the two moves at all 102 positions
+of the fixture, `c-partial-ws-p` over 101 pairs, the attribute functions
+at 24 positions, and the change hooks' recorded types/limits and ladder
+state - all identical.
+
+**Next**, in cc-engine.el's order: `c-syntactic-content` (`:530`),
+`c-beginning-of-statement-1` (`:730') and its automaton,
+`c-parse-state` (`:3885'), and the declaration machinery; then
+`c-before-change`/`c-after-change` (`cc-mode.el`) wiring the change
+hooks, `cc-fonts`, and `cc-mode` itself.

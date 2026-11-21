@@ -25,11 +25,11 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor buffer) allocate-buffer set-buffer current-buffer
        set-buffer-local-value!)
- (only (schemacs editor editfns) insert goto-char point
+ (only (schemacs editor editfns) insert goto-char point delete-region
        buffer-substring-no-properties)
  (only (schemacs editor syntax) set-syntax-table)
  (only (schemacs editor textprop) get-text-property text-property-any)
- (only (schemacs editor cc-defs) c-lang-const
+ (only (schemacs editor cc-defs) c-lang-const *c-buffer-is-cc-mode*
        c-skip-ws-chars-forward c-skip-ws-chars-backward)
  (schemacs editor cc-langs)
  (schemacs editor cc-vars)
@@ -501,5 +501,131 @@
        (loop (+ p 1))))
    (test-equal "after probing every position, 40 is still outside" '(#f #f)
                (semi 40))))
+
+;;----------------------------------------------------------------------
+;; The syntactic-whitespace engine (`cc-engine.el:1800'-`:2694').
+;;
+;; Every expectation is Emacs 31.1's answer on this fixture, measured
+;; with `emacs -Q --batch' in a real `c-mode' buffer first; the whole
+;; table (forward and backward at all 102 positions, and
+;; `c-partial-ws-p' over all 101 adjacent pairs) is identical both ways.
+;;----------------------------------------------------------------------
+(c-buffer
+ (lambda ()
+   (define (fwd p) (goto-char p) (c-forward-syntactic-ws) (point))
+   (define (bwd p) (goto-char p) (c-backward-syntactic-ws) (point))
+   (define (fwbw p) (list p (fwd p) (bwd p)))
+
+   (test-equal "sws: at bob, over the #include directive" '(1 49 1) (fwbw 1))
+   (test-equal "sws: at a directive's #" '(20 49 1) (fwbw 20))
+   (test-equal "sws: at a line continuation" '(34 39 34) (fwbw 34))
+   (test-equal "sws: inside a trailing block comment" '(55 85 55) (fwbw 55))
+   (test-equal "sws: on the comment's second line" '(69 96 69) (fwbw 69))
+   (test-equal "sws: at a comment end" '(81 85 81) (fwbw 81))
+   (test-equal "sws: at the newline after a block comment" '(95 96 55) (fwbw 95))
+   (test-equal "sws: at eob" '(102 103 102) (fwbw 102))
+
+   ;; The second pass runs on the ladder the first one laid down; its
+   ;; answers must not move.
+   (test-equal "sws: a cached second pass answers the same" '(55 85 55)
+               (fwbw 55))
+   (test-equal "sws: a cached forward scan" 49 (fwd 1))
+
+   (test-equal "c-point 'bosws at a directive" 1 (begin (goto-char 49) (c-point 'bosws)))
+   (test-equal "c-point 'eosws at a directive" 49 (begin (goto-char 20) (c-point 'eosws)))
+   (test-equal "c-point 'bosws after a comment" 55 (begin (goto-char 95) (c-point 'bosws)))
+
+   (test-equal "c-partial-ws-p: inside a line continuation" #t
+               (c-partial-ws-p 34 35))
+   (test-equal "c-partial-ws-p: inside a directive's block comment" #t
+               (c-partial-ws-p 81 82))
+   (test-equal "c-partial-ws-p: ordinary text" #f
+               (c-partial-ws-p 1 2))))
+
+;;----------------------------------------------------------------------
+;; `c-looking-at-c++-attribute' and `c-enclosing-c++-attribute'
+;;----------------------------------------------------------------------
+;; Emacs's `c-buffer-is-cc-mode' is a buffer-local set by the mode's
+;; init; until `c-mode' exists here it is the parameter, bound as a
+;; mode's init will bind it.
+(define attr-fixture "int x; [[a]] int y; [[b]\n")
+
+(define (with-attr-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert attr-fixture)
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+    (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+      (thunk))))
+
+(with-attr-buffer
+ (lambda ()
+   (define (att p) (goto-char p) (c-looking-at-c++-attribute))
+   (define (enc p)
+     (goto-char p)
+     (let ((r (c-enclosing-c++-attribute)))
+       (and r (cons (car r) (cdr r)))))
+
+   (test-equal "c-looking-at-c++-attribute: the opening [[ of a balanced attribute"
+               13 (att 8))
+   (test-equal "c-looking-at-c++-attribute: between the two brackets" #f
+               (att 9))
+   (test-equal "c-looking-at-c++-attribute: an ordinary position" #f
+               (att 14))
+   (test-equal "c-looking-at-c++-attribute: an unbalanced [[b]" #f
+               (att 21))
+
+   (test-equal "c-enclosing-c++-attribute: inside the attribute"
+               '(8 . 13) (enc 10))
+   (test-equal "c-enclosing-c++-attribute: at the attribute's last char"
+               '(8 . 13) (enc 13))
+   (test-equal "c-enclosing-c++-attribute: just before it" #f (enc 7))
+   (test-equal "c-enclosing-c++-attribute: at its first bracket" #f (enc 8))
+   (test-equal "c-enclosing-c++-attribute: an unbalanced one" #f (enc 23))))
+
+;;----------------------------------------------------------------------
+;; The change hooks (`c-invalidate-sws-region-before'/`-after').
+;;
+;; Every value here - the literal type and limits the before-change hook
+;; records, and the state of the ladder after the change - is Emacs
+;; 31.1's answer on the same edits, measured with `emacs -Q --batch'.
+;;----------------------------------------------------------------------
+(c-buffer
+ (lambda ()
+   (define (in-sws-any from to)
+     (let loop ((p from) (r #f))
+       (if (< p to)
+           (loop (+ p 1)
+                 (if (or (get-text-property p 'c-in-sws)
+                         (get-text-property p 'c-is-sws))
+                     #t r))
+           r)))
+
+   (goto-char 1)
+   (c-forward-sws)
+   (test-equal "the ladder covers the region the forward scan crossed"
+               '(#t #f) (list (in-sws-any 1 50) (in-sws-any 50 103)))
+
+   (c-invalidate-sws-region-before 84 84)
+   (test-equal "before-change: a block comment is noted with its bounds"
+               (list 'c (cons 70 95)) (list c-sws-lit-type c-sws-lit-limits))
+   (goto-char 84)
+   (insert "xx")
+   (c-invalidate-sws-region-after 84 86 0)
+   (test-equal "after-change: the edited region's ladder is gone"
+               #f (in-sws-any 82 100))
+
+   (goto-char 55)
+   (let ((bp (point)))
+     (c-invalidate-sws-region-before bp (+ bp 1))
+     (test-equal "before-change: a cpp directive is noted with its bounds"
+                 (list 'pound (cons 56 97))
+                 (list c-sws-lit-type c-sws-lit-limits))
+     (delete-region bp (+ bp 1))
+     (c-invalidate-sws-region-after bp bp 1))
+   (test-equal "after-change: a damaged comment opener breaks the ladder"
+               #f (in-sws-any 50 81))))
 
 (test-end "schemacs_editor_cc_engine")

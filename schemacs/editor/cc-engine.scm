@@ -86,19 +86,22 @@
     (only (schemacs editor fns) nth nthcdr)
     (only (schemacs editor indent) back-to-indentation)
     (only (schemacs editor indentc) current-indentation indent-to)
-    (only (schemacs editor search) re-search-forward looking-at
-          match-beginning match-end save-match-data)
+    (only (schemacs editor search) re-search-forward re-search-backward
+          looking-at match-beginning match-end save-match-data)
     (only (schemacs editor textprop) get-text-property put-text-property
           remove-text-properties text-property-any)
     (only (schemacs editor syntax) skip-chars-backward skip-chars-forward
           skip-syntax-backward skip-syntax-forward forward-comment
           parse-partial-sexp)
-    (only (schemacs editor subr) regexp-unmatchable last delq copy-tree)
+    (only (schemacs editor subr) regexp-unmatchable last delq copy-tree
+          with-silent-modifications)
     (only (schemacs editor cc-defs) c-emacs-features c-save-buffer-state
           c-put-char-property c-clear-char-property c-get-char-property
-          c-next-single-property-change %c-true %c-false
-          c-get-lang-constant *c-buffer-is-cc-mode* c-major-mode-is
-          c-safe c-forward-sexp c-backward-sexp)
+          c-next-single-property-change c-previous-single-property-change
+          %c-true %c-false c-get-lang-constant *c-buffer-is-cc-mode*
+          c-major-mode-is c-safe c-forward-sexp c-backward-sexp
+          c-go-list-forward c-go-list-backward c-skip-ws-chars-forward
+          c-skip-ws-chars-backward c-skip-ws-forward c-skip-ws-backward)
     (only (schemacs editor intervals) get)
     (only (schemacs editor cc-vars) *c-report-syntactic-errors*
           c-noise-macro-name-re c-noise-macro-with-parens-name-re))
@@ -130,6 +133,12 @@
    c-simple-skip-symbol-backward c-beginning-of-current-token
    c-put-is-sws c-put-in-sws c-remove-is-sws c-remove-in-sws
    c-remove-is-and-in-sws c-debug-sws-msg
+   c-sws-lit-type c-sws-lit-limits c-enclosing-c++-attribute
+   c-looking-at-c++-attribute
+   c-invalidate-sws-region-before c-invalidate-sws-region-after
+   c-invalidate-sws-region-after-del c-invalidate-sws-region-after-ins
+   c-forward-sws c-backward-sws c-partial-ws-p
+   c-forward-syntactic-ws c-backward-syntactic-ws
    c-doc-line-join-re c-doc-bright-comment-start-re c-doc-line-join-end-ch
    c-state-nonlit-pos-interval
    c-lit-pos-cache set!c-lit-pos-cache
@@ -1603,9 +1612,9 @@
                (back-to-indentation)
                (point)))
             ((bosws)
-             (error "c-point 'bosws' waits on `c-backward-syntactic-ws', which is not ported yet"))
+             (save-excursion (c-backward-syntactic-ws) (point)))
             ((eosws)
-             (error "c-point 'eosws' waits on `c-forward-syntactic-ws', which is not ported yet"))
+             (save-excursion (c-forward-syntactic-ws) (point)))
             (else
              (error "Unknown buffer position requested: ~a" position)))))
 
@@ -1617,4 +1626,876 @@
                  (memv (char-after (point)) (list #\newline #\return)))
             (eq? (char-before) #\\)
             (not (zero? (logand (skip-chars-backward "\\\\") 1))))))
+    ;;------------------------------------------------------------------
+    ;; `c-looking-at-c++-attribute' (`cc-engine.el:721')
+    ;;------------------------------------------------------------------
+    ;; Emacs's macro is all expression, so it is a procedure here. It
+    ;; answers the position just after the attribute's closing `]]', or
+    ;; #f; point is left where it was, as the macro's `save-excursion'
+    ;; leaves it.
+    (define (c-looking-at-c++-attribute)
+      ;; "If we're in C or C++ Mode, and point is at the [[ introducing
+      ;; an attribute, return the position of the end of the attribute,
+      ;; otherwise return nil.  The match data are NOT preserved over
+      ;; this macro."
+      (and (c-major-mode-is '(c-mode c++-mode))
+           (looking-at "\\[\\[")
+           (save-excursion
+             (and (c-go-list-forward)
+                  (eq? (char-before) #\])
+                  (eq? (char-before (1- (point))) #\])
+                  (point)))))
+
+    ;;------------------------------------------------------------------
+    ;; The syntactic-whitespace change hooks (`cc-engine.el:1947'-`:2125')
+    ;;------------------------------------------------------------------
+    ;; "The type of literal position `end' is in a `before-change-functions'
+    ;; function - one of `c', `c++', `pound', `noise', `attribute' or nil
+    ;; (but NOT `string')." Emacs declares both with a plain `defvar'
+    ;; and nothing makes them buffer-local, so they are plain variables.
+    (define c-sws-lit-type #f)
+    ;; "A cons (START . STOP) of the bounds of the comment or CPP
+    ;; construct, etc., enclosing END, if any, else nil."
+    (define c-sws-lit-limits #f)
+
+    (define (c-enclosing-c++-attribute)
+      ;; "If we're in C or C++ Mode, and point is within a correctly
+      ;; balanced [[ ... ]] attribute structure, return a cons of its
+      ;; starting and ending positions. Otherwise, return nil."
+      (and (c-major-mode-is '(c-mode c++-mode))
+           (save-excursion
+             (let ((lim (max (- (point) 200) (point-min)))
+                   (cand #f))
+               (let loop ()
+                 (when (and (begin
+                              (skip-chars-backward "^[;{}" lim)
+                              (eq? (char-before) #\[))
+                            (not (eq? (char-before (1- (point))) #\[))
+                            (> (point) lim))
+                   (backward-char)
+                   (loop)))
+               (and (eq? (char-before) #\[)
+                    (eq? (char-before (1- (point))) #\[)
+                    (begin (backward-char 2) #t)
+                    (begin (set! cand (point)) #t)
+                    (c-go-list-forward #f (min (+ (point) 200) (point-max)))
+                    (eq? (char-before) #\])
+                    (eq? (char-before (1- (point))) #\])
+                    (not (c-literal-limits))
+                    (cons cand (point)))))))
+
+    (define (c-invalidate-sws-region-before beg end)
+      ;; "Called from `c-before-change'. BEG and END are the bounds of
+      ;; the change region, the standard parameters given to all
+      ;; before-change-functions.
+      ;;
+      ;; Note whether END is inside a comment, CPP construct, or noise
+      ;; macro, and if so note its bounds in `c-sws-lit-limits' and type
+      ;; in `c-sws-lit-type'."
+      (set! c-sws-lit-type #f)
+      (set! c-sws-lit-limits #f)
+      (save-match-data
+        (save-excursion
+          (goto-char end)
+          (let* ((limits (c-literal-limits))
+                 (lit-type (c-literal-type limits)))
+            (cond
+             ((memq lit-type '(c c++))
+              (set! c-sws-lit-type lit-type)
+              (set! c-sws-lit-limits limits))
+             ((c-beginning-of-macro)
+              (set! c-sws-lit-type 'pound)
+              (set! c-sws-lit-limits (cons (point)
+                                           (begin (c-end-of-macro) (point)))))
+             ((eq? lit-type 'string)
+              #f)
+             ((begin (set! c-sws-lit-limits (c-enclosing-c++-attribute))
+                     c-sws-lit-limits)
+              (set! c-sws-lit-type 'attribute))
+             ((begin (skip-syntax-backward "w_")
+                     (looking-at (c-noise-macro-name-re)))
+              (set! c-sws-lit-type 'noise)
+              (set! c-sws-lit-limits (cons (match-beginning 1) (match-end 1))))
+             (else #f))))
+        (save-excursion
+          (goto-char beg)
+          (let ((attr-limits (c-enclosing-c++-attribute)))
+            (if attr-limits
+                (if (pair? c-sws-lit-limits)
+                    (set-car! c-sws-lit-limits (car attr-limits))
+                    (set! c-sws-lit-limits attr-limits))
+                (begin
+                  (skip-syntax-backward "w_")
+                  (when (looking-at (c-noise-macro-name-re))
+                    (set! c-sws-lit-type 'noise)
+                    (if (pair? c-sws-lit-limits)
+                        (set-car! c-sws-lit-limits (match-beginning 1))
+                        (set! c-sws-lit-limits (cons (match-beginning 1)
+                                                     (match-end 1)))))))))))
+
+    (define (c-invalidate-sws-region-after-del beg end old-len)
+      ;; "Text has been deleted, OLD-LEN characters of it starting from
+      ;; position BEG. END is typically eq to BEG. Should there have
+      ;; been a comment or CPP construct open at END before the
+      ;; deletion, check whether this deletion deleted or "damaged" its
+      ;; opening delimiter. If so, return the current position of where
+      ;; the construct ended, otherwise return nil."
+      (when c-sws-lit-limits
+        (if (and (< beg (+ (car c-sws-lit-limits) 2))
+                 ;; "A lazy assumption that comment delimiters are 2
+                 ;; chars long."
+                 (or (get-text-property end 'c-in-sws)
+                     (c-next-single-property-change end 'c-in-sws #f
+                                                    (cdr c-sws-lit-limits))
+                     (get-text-property end 'c-is-sws)
+                     (c-next-single-property-change end 'c-is-sws #f
+                                                    (cdr c-sws-lit-limits))))
+            (cdr c-sws-lit-limits)
+            #f)))
+
+    (define (c-invalidate-sws-region-after-ins end)
+      ;; "Text has been inserted, ending at buffer position END. Should
+      ;; there be a literal or CPP construct open at END, check whether
+      ;; there are `c-in-sws' or `c-is-sws' text properties inside this
+      ;; literal. If there are, return the buffer position of the end
+      ;; of the literal, else return nil."
+      (save-excursion
+        (goto-char end)
+        (let* ((limits (c-literal-limits))
+               (lit-type (c-literal-type limits)))
+          (when (and (not (memq lit-type '(c c++)))
+                     (c-beginning-of-macro))
+            (set! lit-type 'pound)
+            (set! limits (cons (point)
+                               (begin (c-end-of-macro) (point)))))
+          (when (memq lit-type '(c c++ pound))
+            (let ((next-in (c-next-single-property-change (car limits) 'c-in-sws
+                                                          #f (cdr limits)))
+                  (next-is (c-next-single-property-change (car limits) 'c-is-sws
+                                                          #f (cdr limits))))
+              (and (or next-in next-is)
+                   (cdr limits)))))))
+
+    (define (c-invalidate-sws-region-after beg end old-len)
+      ;; "Called from `after-change-functions'. Remove any stale
+      ;; `c-in-sws' or `c-is-sws' text properties from the vicinity of
+      ;; the change. BEG, END, and OLD-LEN are the standard arguments
+      ;; given to after-change functions.
+      ;;
+      ;; Note that if `c-forward-sws' or `c-backward-sws' are used
+      ;; outside `c-save-buffer-state' or similar then this will remove
+      ;; the cache properties right after they're added.
+      ;;
+      ;; This function does hidden buffer changes."
+      (when c-sws-lit-limits
+        (set-car! c-sws-lit-limits (min beg (car c-sws-lit-limits)))
+        (set-cdr! c-sws-lit-limits
+                  (max end (- (+ (cdr c-sws-lit-limits) (- end beg)) old-len))))
+      (let ((del-end (and (> old-len 0)
+                          (c-invalidate-sws-region-after-del beg end old-len)))
+            (ins-end (and (> end beg)
+                          (c-invalidate-sws-region-after-ins end))))
+        (begin
+          (save-excursion
+            ;; "Adjust the end to remove the properties in any following
+            ;; simple ws up to and including the next line break, if
+            ;; there is any after the changed region. This is necessary
+            ;; e.g. when a rung marked empty line is converted to a
+            ;; line comment by inserting "//" before the line break. In
+            ;; that case the line break would keep the rung mark which
+            ;; could make a later `c-backward-sws' move into the line
+            ;; comment instead of over it."
+            (goto-char end)
+            (skip-chars-forward " \t\f\v")
+            (when (and (eolp) (not (eobp)))
+              (set! end (+ (point) 1))))
+
+          (when (memq c-sws-lit-type '(noise attribute))
+            (set! beg (car c-sws-lit-limits))
+            (set! end (cdr c-sws-lit-limits))) ; "This last setting may be redundant."
+
+          (when (and (= beg end)
+                     (get-text-property beg 'c-in-sws)
+                     (> beg (point-min))
+                     (get-text-property (- beg 1) 'c-in-sws))
+            ;; "Ensure that an `c-in-sws' range gets broken. Note that
+            ;; it isn't safe to keep a range that was continuous before
+            ;; the change. E.g:
+            ;;
+            ;;    #define foo
+            ;;         \
+            ;;    bar
+            ;;
+            ;; There can be a "ladder" between "#" and "b". Now, if
+            ;; the newline after "foo" is removed then "bar" will
+            ;; become part of the cpp directive instead of a
+            ;; syntactically relevant token. In that case there's no
+            ;; longer syntactic ws from "#" to "b"."
+            (set! beg (- beg 1)))
+
+          (set! end (max (or del-end end)
+                         (or ins-end end)
+                         (or (if c-sws-lit-limits (cdr c-sws-lit-limits) #f) end)
+                         end))
+
+          (c-debug-sws-msg "c-invalidate-sws-region-after [~a..~a]" beg end)
+          (c-remove-is-and-in-sws beg end))))
+    ;;------------------------------------------------------------------
+    ;; `c-forward-sws' (`cc-engine.el:2127')
+    ;;------------------------------------------------------------------
+    ;; The syntactic-whitespace engine's four whitespace sets. Emacs
+    ;; writes them inline in the source, each ending in a literal
+    ;; no-break space (U+00A0); the names here say which is which.
+    (define %c-sws-any " \t\n\r\f\v\xa0")
+    (define %c-sws-horiz " \t\f\v\xa0")
+    (define %c-sws-back-horiz " \t\f\xa0")
+    (define %c-sws-bol " \t\xa0")
+
+    (define (c-forward-sws)
+      ;; "Used by `c-forward-syntactic-ws' to implement the unbounded
+      ;; search.
+      ;;
+      ;; This function might do hidden buffer changes."
+      (let ((rung-pos (point))
+            (next-rung-pos #f)
+            (rung-end-pos #f)
+            (last-put-in-sws-pos #f)
+            (rung-is-marked #f)
+            (next-rung-is-marked #f)
+            (simple-ws-end #f)
+            (macro-start #f)
+            (macro-end #f)
+            (safe-start #f))
+        ;; "Skip simple ws and do a quick check on the following
+        ;; character to see if it's anything that can't start syntactic
+        ;; ws, so we can bail out early in the majority of cases when
+        ;; there just are a few ws chars."
+        (c-skip-ws-chars-forward %c-sws-any)
+        (when (or (let ((re (%c-langvar 'c-syntactic-ws-start)))
+                    (and re (looking-at re)))
+                  (and (%c-langvar 'c-opt-cpp-prefix)
+                       (looking-at (c-noise-macro-name-re)))
+                  (and (c-major-mode-is '(c-mode c++-mode))
+                       (looking-at "\\[\\["))
+                  (looking-at c-doc-line-join-re))
+
+          (set! rung-end-pos (min (+ (point) 1) (point-max)))
+          (if (begin
+                (set! rung-is-marked
+                      (text-property-any rung-pos rung-end-pos 'c-is-sws #t))
+                rung-is-marked)
+              ;; "Find the last rung position to avoid setting properties
+              ;; in all the cases when the marked rung is complete.
+              ;; (`c-next-single-property-change' is certain to move at
+              ;; least one step forward.)"
+              (set! rung-pos
+                    (- (c-next-single-property-change rung-is-marked 'c-is-sws
+                                                      #f rung-end-pos)
+                       1))
+              ;; "Got no marked rung here. Since the simple ws might have
+              ;; started inside a line comment or cpp directive we must
+              ;; set `rung-pos' as high as possible."
+              (set! rung-pos (point)))
+
+          (with-silent-modifications
+            (define (ladder-step)
+              (if (and rung-is-marked
+                       (get-text-property (point) 'c-in-sws))
+                  (begin
+                    ;; "The following search is the main reason that
+                    ;; `c-in-sws' and `c-is-sws' aren't combined to one
+                    ;; property."
+                    (goto-char (c-next-single-property-change
+                                (point) 'c-in-sws #f (point-max)))
+                    (unless (get-text-property (point) 'c-is-sws)
+                      ;; "If the `c-in-sws' region extended past the last
+                      ;; `c-is-sws' char we have to go back a bit."
+                      (or (get-text-property (- (point) 1) 'c-is-sws)
+                          (goto-char (c-previous-single-property-change
+                                      (point) 'c-is-sws #f #f)))
+                      (backward-char))
+                    (c-debug-sws-msg
+                     "c-forward-sws cached move ~a -> ~a (max ~a)"
+                     rung-pos (point) (point-max))
+                    (set! rung-pos (point))
+                    (and (> (c-skip-ws-chars-forward %c-sws-any) 0)
+                         (not (eobp))))
+                  #f))
+
+            (define (ladder)
+              ;; Emacs's `(while (when TEST BODY...))': the test has the
+              ;; side effects, and the loop runs its body while the test
+              ;; is true.
+              (when (ladder-step)
+                ;; "We'll loop here if there is simple ws after the last
+                ;; rung. That means that there's been some change in it
+                ;; and it's possible that we've stepped into another
+                ;; ladder, so extend the previous one to join with it if
+                ;; there is one, and try to use the cache again."
+                (c-debug-sws-msg
+                 "c-forward-sws extending rung with [~a..~a] (max ~a)"
+                 (+ rung-pos 1) (+ (point) 1) (point-max))
+                (unless (get-text-property (point) 'c-is-sws)
+                  ;; "Remove any `c-in-sws' property from the last char of
+                  ;; the rung before we mark it with `c-is-sws', so that
+                  ;; we won't connect with the remains of a broken
+                  ;; "ladder"."
+                  (c-remove-in-sws (point) (+ (point) 1)))
+                (c-put-is-sws (+ rung-pos 1) (+ (point) 1))
+                (c-put-in-sws rung-pos (point))
+                (set! rung-pos (point))
+                (set! last-put-in-sws-pos rung-pos)
+                (ladder)))
+
+            (define (advance)
+              (ladder)
+              ;; "Now move over any comments (x)or a CPP construct."
+              (set! simple-ws-end (point))
+              (set! safe-start #t)
+              ;; "Take elaborate precautions to detect an open block
+              ;; comment at the end of a macro. If we find one, we set
+              ;; `safe-start' to nil and break off any further scanning of
+              ;; comments."
+              ;;
+              ;; "(2019-05-02): `c-end-of-macro' now moves completely over
+              ;; block comments, even multiline ones lacking \s at their
+              ;; EOLs. So a lot of the following is probably redundant
+              ;; now."
+              (let ((com-begin (point))
+                    (com-end #f)
+                    (in-macro #f))
+                (when (and (c-forward-single-comment)
+                           (begin (set! com-end (point)) #t)
+                           (save-excursion
+                             (goto-char com-begin)
+                             (c-beginning-of-macro)))
+                  (set! in-macro #t)
+                  (goto-char com-begin)
+                  (if (begin (c-end-of-macro com-end)
+                             (< (point) com-end))
+                      (set! safe-start #f)
+                      #f))
+                (if in-macro
+                    (let loop ()
+                      (when (and safe-start
+                                 com-end (> com-end com-begin)
+                                 (begin (set! com-begin (point)) #t)
+                                 (if (and (c-forward-single-comment)
+                                          (begin (set! com-end (point)) #t))
+                                     (begin
+                                       (goto-char com-begin)
+                                       (if (begin (c-end-of-macro com-end)
+                                                  (< (point) com-end))
+                                           (set! safe-start #f)
+                                           #f)
+                                       safe-start)
+                                     #f))
+                        (loop)))
+                    (c-forward-comments)))
+              (cond
+               ((not (= (point) simple-ws-end))
+                ;; "Skipped over comments. Don't cache at eob in case the
+                ;; buffer is narrowed."
+                (not (eobp)))
+
+               ((save-excursion
+                  (let ((cpp-start (%c-langvar 'c-opt-cpp-start)))
+                    (and (%c-langvar 'c-opt-cpp-prefix)
+                         (and cpp-start (looking-at cpp-start))
+                         (begin (set! macro-start (point)) #t)
+                         (begin (c-skip-ws-chars-backward %c-sws-bol) (bolp))
+                         (or (bobp)
+                             (begin (backward-char)
+                                    (not (eq? (char-before) #\\)))))))
+                ;; "Skip a preprocessor directive."
+                (end-of-line)
+                (let loop ()
+                  (if (and (eq? (char-before) #\\)
+                           (= (forward-line 1) 0))
+                      (begin (end-of-line) (loop))
+                      #f))
+                (set! macro-end (point))
+                ;; "Check for an open block comment at the end of the
+                ;; macro."
+                (let ((s (parse-partial-sexp macro-start macro-end)))
+                  (if (and (%c-true (nth 4 s))     ; "in a comment"
+                           (%c-false (nth 7 s)))   ; "a block comment"
+                      (set! safe-start #f)
+                      #f))
+                (forward-line 1)
+                ;; "Don't cache at eob in case the buffer is narrowed."
+                (not (eobp)))
+
+               ((and (%c-langvar 'c-opt-cpp-prefix)
+                     (looking-at (c-noise-macro-name-re)))
+                ;; "Skip over a noise macro without parens."
+                (goto-char (match-end 1))
+                (not (eobp)))
+
+               ((begin (set! next-rung-pos (c-looking-at-c++-attribute))
+                       next-rung-pos)
+                (goto-char next-rung-pos)
+                (not (eobp)))
+
+               ((looking-at c-doc-line-join-re)
+                ;; "Skip over a line join in (e.g.) Pike autodoc."
+                (goto-char (match-end 0))
+                (set! safe-start #f) ; "Never cache this; the doc style
+                                     ; could be changed at any time."
+                (not (eobp)))
+
+               ;; Emacs's `cond' answers nil when nothing matches and
+               ;; the outer loop then ends; a Scheme `cond' answers the
+               ;; *unspecified* value, which is true, so the arm is
+               ;; written out.
+               (else #f)))
+
+            (let outer ()
+              (when (advance)
+                ;; "We've searched over a piece of non-white syntactic ws.
+                ;; See if this can be cached."
+                (set! next-rung-pos (point))
+                (c-skip-ws-chars-forward %c-sws-any)
+                (set! rung-end-pos (min (+ (point) 1) (point-max)))
+
+                (if (or
+                     ;; "Cache if we haven't skipped comments only, and
+                     ;; if we started either from a marked rung or from a
+                     ;; completely uncached position."
+                     (and safe-start
+                          (or rung-is-marked
+                              (not (get-text-property simple-ws-end 'c-in-sws))))
+
+                     ;; "See if there's a marked rung in the encountered
+                     ;; simple ws. If so then we can cache, unless
+                     ;; `safe-start' is nil. Even then we need to do this
+                     ;; to check if the cache can be used for the next
+                     ;; step."
+                     (and (begin
+                            (set! next-rung-is-marked
+                                  (text-property-any next-rung-pos rung-end-pos
+                                                     'c-is-sws #t))
+                            next-rung-is-marked)
+                          safe-start))
+
+                    (begin
+                      (c-debug-sws-msg
+                       "c-forward-sws caching [~a..~a] - [~a..~a] (max ~a)"
+                       rung-pos (+ simple-ws-end 1) next-rung-pos rung-end-pos
+                       (point-max))
+
+                      ;; "Remove the properties for any nested ws that
+                      ;; might be cached. Only necessary for `c-is-sws'
+                      ;; since `c-in-sws' will be set anyway."
+                      (c-remove-is-sws (+ simple-ws-end 1) next-rung-pos)
+                      (unless (and rung-is-marked (= rung-pos simple-ws-end))
+                        (c-put-is-sws rung-pos (+ simple-ws-end 1))
+                        (set! rung-is-marked #t))
+                      (c-put-in-sws rung-pos
+                                    (begin (set! rung-pos (point))
+                                           (set! last-put-in-sws-pos rung-pos)
+                                           rung-pos))
+                      (unless (get-text-property (- rung-end-pos 1) 'c-is-sws)
+                        ;; "Remove any `c-in-sws' property from the last
+                        ;; char of the rung before we mark it with
+                        ;; `c-is-sws', so that we won't connect with the
+                        ;; remains of a broken "ladder"."
+                        (c-remove-in-sws (- rung-end-pos 1) rung-end-pos))
+                      (c-put-is-sws next-rung-pos rung-end-pos))
+
+                    (begin
+                      (c-debug-sws-msg
+                       "c-forward-sws not caching [~a..~a] - [~a..~a] (max ~a)"
+                       rung-pos (+ simple-ws-end 1) next-rung-pos rung-end-pos
+                       (point-max))
+
+                      ;; "Set `rung-pos' for the next rung. It's the same
+                      ;; thing here as initially, except that the rung
+                      ;; position is set as early as possible since we
+                      ;; can't be in the ending ws of a line comment or
+                      ;; cpp directive now."
+                      (if (begin (set! rung-is-marked next-rung-is-marked)
+                                 rung-is-marked)
+                          (set! rung-pos
+                                (- (c-next-single-property-change
+                                    rung-is-marked 'c-is-sws #f rung-end-pos)
+                                   1))
+                          (set! rung-pos next-rung-pos))))
+                (outer)))
+
+            ;; "Make sure that the newly marked `c-in-sws' region doesn't
+            ;; connect to another one after the point (which might occur
+            ;; when editing inside a comment or macro)."
+            (when (eq? last-put-in-sws-pos (point))
+              (cond ((< last-put-in-sws-pos (point-max))
+                     (c-debug-sws-msg
+                      "c-forward-sws clearing at ~a for cache separation"
+                      last-put-in-sws-pos)
+                     (c-remove-in-sws last-put-in-sws-pos
+                                      (+ last-put-in-sws-pos 1)))
+                    (else
+                     ;; "If at eob we have to clear the last character
+                     ;; before the end instead since the buffer might be
+                     ;; narrowed and there might be a `c-in-sws' after
+                     ;; (point-max). In this case it's necessary to clear
+                     ;; both properties."
+                     (c-debug-sws-msg
+                      "c-forward-sws clearing thoroughly at ~a for cache separation"
+                      (- last-put-in-sws-pos 1))
+                     (c-remove-is-and-in-sws (- last-put-in-sws-pos 1)
+                                             last-put-in-sws-pos))))))))
+    ;;------------------------------------------------------------------
+    ;; `c-backward-sws' (`cc-engine.el:2381')
+    ;;------------------------------------------------------------------
+    (define (c-backward-sws)
+      ;; "Used by `c-backward-syntactic-ws' to implement the unbounded
+      ;; search.
+      ;;
+      ;; This function might do hidden buffer changes."
+      (let ((rung-pos (point))
+            (next-rung-pos #f)
+            (last-put-in-sws-pos #f)
+            (rung-is-marked #f)
+            (simple-ws-beg #f)
+            (cmt-skip-pos #f)
+            (doc-line-join-here (string-append c-doc-line-join-re "\\="))
+            (attr-end #f))
+        ;; "Skip simple horizontal ws and do a quick check on the
+        ;; preceding character to see if it's anything that can't end
+        ;; syntactic ws, so we can bail out early in the majority of cases
+        ;; when there just are a few ws chars. Newlines are complicated in
+        ;; the backward direction, so we can't skip over them."
+        (c-skip-ws-chars-backward %c-sws-back-horiz)
+        (when (and (not (bobp))
+                   (save-excursion
+                     (or (and c-doc-line-join-end-ch
+                              (memq (char-before) c-doc-line-join-end-ch) ; "For speed."
+                              (re-search-backward doc-line-join-here
+                                                  (c-point 'bopl) #t))
+                         (and (c-major-mode-is '(c-mode c++-mode))
+                              (eq? (char-before) #\])
+                              (eq? (char-before (- (point) 1)) #\])
+                              (save-excursion
+                                (and (c-go-list-backward)
+                                     (looking-at "\\[\\[")))
+                              (begin (set! attr-end (point)) attr-end))
+                         (begin
+                           (backward-char)
+                           (or (let ((re (%c-langvar 'c-syntactic-ws-end)))
+                                 (and re (looking-at re)))
+                               (and (%c-langvar 'c-opt-cpp-prefix)
+                                    (let ((re (%c-langvar 'c-symbol-char-key)))
+                                      (and re (looking-at re)))
+                                    (begin
+                                      (c-beginning-of-current-token)
+                                      (looking-at (c-noise-macro-name-re)))))))))
+          ;; "Try to find a rung position in the simple ws preceding point,
+          ;; so that we can get a cache hit even if the last bit of the
+          ;; simple ws has changed recently."
+          (set! simple-ws-beg (or attr-end (match-end 1) (match-end 0)))
+          (c-skip-ws-chars-backward %c-sws-any)
+          (if (begin
+                (set! rung-is-marked
+                      (text-property-any (point) (min (+ rung-pos 1) (point-max))
+                                         'c-is-sws #t))
+                rung-is-marked)
+              ;; "`rung-pos' will be the earliest marked position, which
+              ;; means that there might be later unmarked parts in the
+              ;; simple ws region. It's not worth the effort to fix that;
+              ;; the last part of the simple ws is also typically edited
+              ;; often, so it could be wasted."
+              (goto-char (begin (set! rung-pos rung-is-marked) rung-pos))
+              (goto-char simple-ws-beg))
+
+          (with-silent-modifications
+            (define (ladder-step)
+              (if (and rung-is-marked
+                       (not (bobp))
+                       (get-text-property (- (point) 1) 'c-in-sws))
+                  (begin
+                    ;; "The following search is the main reason that
+                    ;; `c-in-sws' and `c-is-sws' aren't combined to one
+                    ;; property."
+                    (goto-char (c-previous-single-property-change
+                                (point) 'c-in-sws #f (point-min)))
+                    (unless (get-text-property (point) 'c-is-sws)
+                      ;; "If the `c-in-sws' region extended past the first
+                      ;; `c-is-sws' char we have to go forward a bit."
+                      (goto-char (c-next-single-property-change
+                                  (point) 'c-is-sws #f #f)))
+                    (c-debug-sws-msg
+                     "c-backward-sws cached move ~a <- ~a (min ~a)"
+                     (point) rung-pos (point-min))
+                    (set! rung-pos (point))
+                    (if (and (< (min (c-skip-ws-chars-backward %c-sws-horiz)
+                                     (begin (set! simple-ws-beg (point))
+                                            (c-skip-ws-chars-backward %c-sws-any)))
+                                0)
+                             (begin
+                               (set! rung-is-marked
+                                     (text-property-any (point) rung-pos
+                                                        'c-is-sws #t))
+                               rung-is-marked))
+                        #t
+                        (begin (goto-char simple-ws-beg) #f)))
+                  #f))
+
+            (define (ladder)
+              (when (ladder-step)
+                ;; "We'll loop here if there is simple ws before the first
+                ;; rung. That means that there's been some change in it
+                ;; and it's possible that we've stepped into another
+                ;; ladder, so extend the previous one to join with it if
+                ;; there is one, and try to use the cache again."
+                (c-debug-sws-msg
+                 "c-backward-sws extending rung with [~a..~a] (min ~a)"
+                 rung-is-marked rung-pos (point-min))
+                (unless (get-text-property (- rung-pos 1) 'c-is-sws)
+                  ;; "Remove any `c-in-sws' property from the last char of
+                  ;; the rung before we mark it with `c-is-sws', so that
+                  ;; we won't connect with the remains of a broken
+                  ;; "ladder"."
+                  (c-remove-in-sws (- rung-pos 1) rung-pos))
+                (c-put-is-sws rung-is-marked rung-pos)
+                (c-put-in-sws rung-is-marked (- rung-pos 1))
+                (set! rung-pos rung-is-marked)
+                (set! last-put-in-sws-pos rung-pos)
+                (ladder)))
+
+            (define (advance)
+              (ladder)
+              (c-backward-comments)
+              (set! cmt-skip-pos (point))
+              (cond
+               ((and (%c-langvar 'c-opt-cpp-prefix)
+                     (not (= cmt-skip-pos simple-ws-beg))
+                     (c-beginning-of-macro))
+                ;; "Inside a cpp directive. See if it should be skipped
+                ;; over."
+                (let ((cpp-beg (point))
+                      (pause #f)
+                      (pos #f))
+                  ;; "Move back over all line continuations and block
+                  ;; comments in the region skipped over by
+                  ;; `c-backward-comments'. If we go past it then we
+                  ;; started inside the cpp directive."
+                  (goto-char simple-ws-beg)
+                  (beginning-of-line)
+                  ;; "Note the similarity of the code here to some in
+                  ;; `c-beginning-of-macro'."
+                  (set! pause (point))
+                  (let loop ()
+                    (when (begin
+                            (let cont ()
+                              (if (and (> (point) cmt-skip-pos)
+                                       (begin (backward-char)
+                                              (eq? (char-before) #\\)))
+                                  (begin (beginning-of-line) (cont))
+                                  #f))
+                            (set! pos (point))
+                            (let ((re (%c-langvar
+                                       'c-last-c-comment-end-on-line-re)))
+                              (if (and re (re-search-forward re pause #t))
+                                  (begin
+                                    (goto-char (match-end 1))
+                                    (if (c-backward-single-comment)
+                                        (begin (beginning-of-line)
+                                               (set! pause (point))
+                                               #t)
+                                        (begin (goto-char pos) #f)))
+                                  #f)))
+                      (loop)))
+                  (if (< (point) cmt-skip-pos)
+                      ;; "Don't move past the cpp directive if we began
+                      ;; inside it. Note that the position at the end of
+                      ;; the last line of the macro is also considered to
+                      ;; be within it."
+                      (begin (goto-char cmt-skip-pos) #f)
+                      ;; "It's worthwhile to spend a little bit of effort
+                      ;; on finding the end of the macro, to get a good
+                      ;; `simple-ws-beg' position for the cache. Note that
+                      ;; `c-backward-comments' could have stepped over some
+                      ;; comments before going into the macro, and then
+                      ;; `simple-ws-beg' must be kept on the same side of
+                      ;; those comments."
+                      (begin
+                        (goto-char simple-ws-beg)
+                        (c-skip-ws-chars-backward %c-sws-any)
+                        (if (eq? (char-before) #\\) (forward-char))
+                        (forward-line 1)
+                        (if (< (point) simple-ws-beg)
+                            (set! simple-ws-beg (point)))
+                        (goto-char cpp-beg)
+                        #t))))
+
+               ((not (= (save-excursion
+                          (c-skip-ws-chars-forward %c-sws-any simple-ws-beg)
+                          (set! next-rung-pos (point))
+                          next-rung-pos)
+                        simple-ws-beg))
+                ;; "Skipped over comments. Must put point at the end of
+                ;; the simple ws at point since we might be after a line
+                ;; comment or cpp directive that's been partially narrowed
+                ;; out, and we can't risk marking the simple ws at the end
+                ;; of it."
+                (goto-char next-rung-pos)
+                #t)
+
+               ((and (%c-langvar 'c-opt-cpp-prefix)
+                     (save-excursion
+                       (and (< (skip-syntax-backward "w_") 0)
+                            (begin (set! next-rung-pos (point)) #t)
+                            (looking-at (c-noise-macro-name-re)))))
+                ;; "Skipped over a noise macro"
+                (goto-char next-rung-pos)
+                #t)
+
+               ((and (c-major-mode-is '(c-mode c++-mode))
+                     (eq? (char-before) #\])
+                     (eq? (char-before (- (point) 1)) #\])
+                     (save-excursion
+                       (and (c-go-list-backward)
+                            (begin (set! next-rung-pos (point)) #t)
+                            (looking-at "\\[\\["))))
+                (goto-char next-rung-pos)
+                #t)
+
+               ((and c-doc-line-join-end-ch
+                     (memq (char-before) c-doc-line-join-end-ch) ; "For speed."
+                     (re-search-backward doc-line-join-here (c-point 'bopl) #t))
+                #t)
+
+               ;; See the note on the forward engine's `cond'.
+               (else #f)))
+
+            (let outer ()
+              (when (advance)
+                ;; "We've searched over a piece of non-white syntactic ws.
+                ;; See if this can be cached."
+                (set! next-rung-pos (point))
+                (c-skip-ws-chars-backward %c-sws-back-horiz)
+
+                (if (or
+                     ;; "Cache if we started either from a marked rung or
+                     ;; from a completely uncached position."
+                     rung-is-marked
+                     (not (get-text-property (- simple-ws-beg 1) 'c-in-sws))
+
+                     ;; "Cache if there's a marked rung in the encountered
+                     ;; simple ws."
+                     (save-excursion
+                       (c-skip-ws-chars-backward %c-sws-any)
+                       (text-property-any (point) (min (+ next-rung-pos 1)
+                                                       (point-max))
+                                          'c-is-sws #t)))
+
+                    (begin
+                      (c-debug-sws-msg
+                       "c-backward-sws caching [~a..~a] - [~a..~a] (min ~a)"
+                       (point) (+ next-rung-pos 1)
+                       simple-ws-beg (min (+ rung-pos 1) (point-max))
+                       (point-min))
+
+                      ;; "Remove the properties for any nested ws that
+                      ;; might be cached. Only necessary for `c-is-sws'
+                      ;; since `c-in-sws' will be set anyway."
+                      (c-remove-is-sws (+ next-rung-pos 1) simple-ws-beg)
+                      (unless (and rung-is-marked (= simple-ws-beg rung-pos))
+                        (let ((rung-end-pos (min (+ rung-pos 1) (point-max))))
+                          (unless (get-text-property (- rung-end-pos 1) 'c-is-sws)
+                            ;; "Remove any `c-in-sws' property from the
+                            ;; last char of the rung before we mark it with
+                            ;; `c-is-sws', so that we won't connect with
+                            ;; the remains of a broken "ladder"."
+                            (c-remove-in-sws (- rung-end-pos 1) rung-end-pos))
+                          (c-put-is-sws simple-ws-beg rung-end-pos)
+                          (set! rung-is-marked #t)))
+                      (c-put-in-sws (begin (set! simple-ws-beg (point))
+                                           (set! last-put-in-sws-pos simple-ws-beg)
+                                           simple-ws-beg)
+                                    rung-pos)
+                      (c-put-is-sws (begin (set! rung-pos simple-ws-beg)
+                                           rung-pos)
+                                    (+ next-rung-pos 1)))
+
+                    (begin
+                      (c-debug-sws-msg
+                       "c-backward-sws not caching [~a..~a] - [~a..~a] (min ~a)"
+                       (point) (+ next-rung-pos 1)
+                       simple-ws-beg (min (+ rung-pos 1) (point-max))
+                       (point-min))
+                      (set! rung-pos next-rung-pos)
+                      (set! simple-ws-beg (point))))
+                (outer)))
+
+            ;; "Make sure that the newly marked `c-in-sws' region doesn't
+            ;; connect to another one before the point (which might occur
+            ;; when editing inside a comment or macro)."
+            (when (eq? last-put-in-sws-pos (point))
+              (cond ((< (point-min) last-put-in-sws-pos)
+                     (c-debug-sws-msg
+                      "c-backward-sws clearing at ~a for cache separation"
+                      (- last-put-in-sws-pos 1))
+                     (c-remove-in-sws (- last-put-in-sws-pos 1)
+                                      last-put-in-sws-pos))
+                    ((> (point-min) 1)
+                     ;; "If at bob and the buffer is narrowed, we have to
+                     ;; clear the character we're standing on instead
+                     ;; since there might be a `c-in-sws' before
+                     ;; (point-min). In this case it's necessary to clear
+                     ;; both properties."
+                     (c-debug-sws-msg
+                      "c-backward-sws clearing thoroughly at ~a for cache separation"
+                      last-put-in-sws-pos)
+                     (c-remove-is-and-in-sws last-put-in-sws-pos
+                                             (+ last-put-in-sws-pos 1)))))))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-partial-ws-p' (`cc-engine.el:2678')
+    ;;------------------------------------------------------------------
+    (define (c-partial-ws-p beg end)
+      ;; "Is the region (beg end) WS, and is there WS (or BOB/EOB) next
+      ;; to the region? This is a "heuristic" function. .....
+      ;;
+      ;; The motivation for the second bit is to check whether removing
+      ;; this region would coalesce two symbols."
+      ;;
+      ;; "FIXME!!! This function doesn't check virtual semicolons in any
+      ;; way. Be careful about using this function for, e.g. AWK.
+      ;; (2007/3/7)"
+      (save-excursion
+        (let ((end+1 (min (+ end 1) (point-max))))
+          (or (begin
+                (goto-char (max (point-min) (- beg 1)))
+                (c-skip-ws-forward end)
+                (= (point) end))
+              (begin
+                (goto-char beg)
+                (c-skip-ws-forward end+1)
+                (= (point) end+1))))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-forward-syntactic-ws'/`c-backward-syntactic-ws'
+    ;; (`cc-defs.el:739', `:762' - a placement departure)
+    ;;------------------------------------------------------------------
+    ;; Emacs's macros decide at *expansion* time whether the caller
+    ;; passed a LIMIT; as procedures the question is asked at run time.
+    ;; An explicit nil LIMIT and no argument then take the same branch -
+    ;; the limiting one with `(or limit (point-max))' - which is what
+    ;; Emacs's expansion of an explicit nil does too.
+    (define (c-forward-syntactic-ws . limit-args)
+      ;; "Forward skip over syntactic whitespace. ..."
+      (let ((limit (if (pair? limit-args) (car limit-args) #f)))
+        (when (< (point) (or limit (point-max)))
+          (save-restriction
+            (narrow-to-region (point-min) (or limit (point-max)))
+            (c-forward-sws)))))
+
+    (define (c-backward-syntactic-ws . limit-args)
+      ;; "Backward skip over syntactic whitespace. ..."
+      (let ((limit (if (pair? limit-args) (car limit-args) #f)))
+        (when (> (point) (or limit (point-min)))
+          (save-restriction
+            (narrow-to-region (or limit (point-min)) (point-max))
+            (c-backward-sws)))))
     ))

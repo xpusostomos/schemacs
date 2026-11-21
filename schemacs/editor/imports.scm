@@ -1101,6 +1101,8 @@
     c-backward-comments
     c-backward-sexp
     c-backward-single-comment
+    c-backward-sws
+    c-backward-syntactic-ws
     c-beginning-of-current-token
     c-beginning-of-macro
     c-benign-error
@@ -1125,6 +1127,7 @@
     c-echo-parsing-error
     c-electric-flag
     c-emacs-features
+    c-enclosing-c++-attribute
     c-end-of-macro
     c-filter-ops
     c-find-assignment-for-mode
@@ -1133,6 +1136,8 @@
     c-forward-over-cpp-define-id
     c-forward-sexp
     c-forward-single-comment
+    c-forward-sws
+    c-forward-syntactic-ws
     c-forward-to-cpp-define-body
     c-full-get-near-cache-entry
     c-full-lit-near-cache
@@ -1154,6 +1159,10 @@
     c-init-language-vars
     c-int-to-char
     c-invalidate-macro-cache
+    c-invalidate-sws-region-after
+    c-invalidate-sws-region-after-del
+    c-invalidate-sws-region-after-ins
+    c-invalidate-sws-region-before
     c-is-escaped
     c-keyword-member
     c-keyword-sym
@@ -1177,6 +1186,7 @@
     c-literal-limits
     c-literal-start
     c-literal-type
+    c-looking-at-c++-attribute
     c-lower
     c-macro-cache
     c-macro-cache-no-comment
@@ -1201,7 +1211,9 @@
     c-parse-ps-state-below
     c-parse-ps-state-to-cache
     c-parsing-error
+    c-partial-ws-p
     c-point
+    c-previous-single-property-change
     c-ps-state-cache-pos
     c-put-c-type-property
     c-put-char-properties
@@ -1225,12 +1237,16 @@
     c-semi-trim-near-cache
     c-shift-line-indentation
     c-simple-skip-symbol-backward
+    c-skip-ws-backward
     c-skip-ws-chars-backward
     c-skip-ws-chars-forward
+    c-skip-ws-forward
     c-state-nonlit-pos-interval
     c-string-limit-regexp
     c-string-list-p
     c-string-syntax
+    c-sws-lit-limits
+    c-sws-lit-type
     c-syntactic-end-of-macro
     c-syntax-table-hwm
     c-trim-lit-pos-cache

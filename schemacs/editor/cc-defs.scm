@@ -61,7 +61,8 @@
     ;; `c-skip-ws-chars-*' and the scan-lists wrappers move point and
     ;; narrow.
     (only (schemacs editor editfns) point goto-char point-min point-max
-          save-restriction narrow-to-region)
+          save-restriction narrow-to-region char-after char-before eolp)
+    (only (schemacs editor cmds) forward-char backward-char)
     (only (schemacs editor syntax) scan-lists scan-sexps)
     ;; `c-safe' re-raises a quit; this tree's quit is command.scm's
     ;; record, and Emacs's `condition-case ... (error nil)' does not
@@ -73,7 +74,8 @@
     ;; The property API `c-put-char-property' and friends stand on
     ;; (`textprop.c''s), which `cc-defs.el' reaches directly in Emacs.
     (only (schemacs editor textprop) put-text-property get-text-property
-          remove-text-properties next-single-property-change)
+          remove-text-properties next-single-property-change
+          previous-single-property-change)
     (only (schemacs regexp-opt) regexp-opt))
 
   (export
@@ -95,8 +97,9 @@
    c-syntax-table-hwm
    c-put-char-property c-get-char-property c-clear-char-property
    c-put-char-properties c-clear-char-properties c-min-property-position
-   c-next-single-property-change
+   c-next-single-property-change c-previous-single-property-change
    c-skip-ws-chars-forward c-skip-ws-chars-backward
+   c-skip-ws-forward c-skip-ws-backward
    c-safe c-forward-sexp c-backward-sexp c-safe-scan-lists
    c-go-list-forward c-go-list-backward
    c-up-list-forward c-up-list-backward
@@ -940,6 +943,60 @@
           (goto-char here)
           (skip-syntax-backward " >" (+ here count)))
         count)))
+
+(define (c-skip-ws-forward . limit-args)
+  ;; "Skip over any whitespace following point. This function skips
+  ;; over horizontal and vertical whitespace and line continuations."
+  ;; Emacs's macro; a procedure with LIMIT as the optional argument.
+  (let ((limit (if (pair? limit-args) (car limit-args) #f)))
+    (if limit
+        (let loop ()
+          (when (begin
+                  ;; "skip-syntax-* doesn't count \n as whitespace.."
+                  (skip-chars-forward " \t\n\r\f\v" limit)
+                  (and (eq? (char-after (point)) #\\)
+                       (< (point) limit)
+                       (begin
+                         (forward-char)
+                         (or (eolp)
+                             (begin (backward-char) #f)))))
+            (loop)))
+        (let loop ()
+          (when (begin
+                  (skip-chars-forward " \t\n\r\f\v")
+                  (and (eq? (char-after (point)) #\\)
+                       (begin
+                         (forward-char)
+                         (or (eolp)
+                             (begin (backward-char) #f)))))
+            (loop))))))
+
+(define (c-skip-ws-backward . limit-args)
+  ;; "Skip over any whitespace preceding point. This function skips
+  ;; over horizontal and vertical whitespace and line continuations."
+  (let ((limit (if (pair? limit-args) (car limit-args) #f)))
+    (if limit
+        (let loop ()
+          (when (begin
+                  ;; "skip-syntax-* doesn't count \n as whitespace.."
+                  (skip-chars-backward " \t\n\r\f\v" limit)
+                  (and (eolp)
+                       (eq? (char-before) #\\)
+                       (> (point) limit)))
+            (backward-char)
+            (loop)))
+        (let loop ()
+          (when (begin
+                  (skip-chars-backward " \t\n\r\f\v")
+                  (and (eolp)
+                       (eq? (char-before) #\\)))
+            (backward-char)
+            (loop))))))
+
+(define (c-previous-single-property-change position prop object limit)
+  ;; `cc-defs.el:487': Emacs's `previous-single-property-change', with
+  ;; the XEmacs `previous-single-char-property-change' arm not carried.
+  (previous-single-property-change position prop object limit))
 
 ;;----------------------------------------------------------------------
 ;; The `scan-lists' wrappers (`cc-defs.el:541', `:780'-`:930')
