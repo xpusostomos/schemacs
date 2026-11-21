@@ -11665,3 +11665,110 @@ main-loop's own compiled form. The workaround can be reduced to
 - A compiled-vs-interpreted check: the matcher is 7.8x faster
   compiled, so the library is genuinely compiled despite the
   `main-loop` workaround.
+
+# cc-mode step 1: the language-constant system (2026-11-21)
+
+`schemacs/editor/cc-defs.scm` is the first piece of the cc-mode port:
+`cc-defs.el:2427-2990`, the machinery every cc-*.el file is built on.
+`schemacs/editor/cc-defs-tests.scm` (21 tests) pins it.
+
+## What is ported
+
+`c-add-language`, the seven core language declarations
+(`cc-defs.el:2098`), the constant registry, `c-lang-defconst`,
+`c-lang-const`, `c-get-lang-constant`, `c-find-assignment-for-mode`,
+`c-lang-defconst-eval-immediately` and `c-lang-major-mode-is`, with
+Emacs's per-language `t` fallback, the fallback-mode chain, the value
+cache, the reverse dependency recording and invalidation, and the
+setq-like self-reference (the source-position vector is mutated as the
+walk advances, exactly as in the C's Lisp).
+
+## The one design departure, and the evidence for it
+
+Emacs stores each VAL as a source form, byte-compiles it into the
+`.elc` where it stands, and expands `c-lang-const` *at compile time* to
+the value. Measured on the installed Emacs 31.1: `(require 'cc-mode)`
+then `(featurep 'cc-langs)` is **nil**, and the constants obarray has 9
+entries - a compiled cc-mode runs with cc-langs never loaded, because
+every value it needs was baked into the `.elc` files. Loading
+`cc-langs` explicitly registers 363 constants and makes
+`c-lang-const` work at run time.
+
+A literal transcription of that is not available in Guile: the Elisp
+version needs `c--macroexpand-all` plus the `c-lang-const-expansion`
+dynamic flag to make the *same* macro expand to a value in ordinary
+code and to a runtime call inside a `c-lang-defconst` VAL (so forward
+references and self-extension work). psyntax is hygienic, so a
+`let-syntax`/`syntax-parameterize` in the generated code cannot capture
+the user's `c-lang-const` identifiers, and a hand-written recursive
+expander is exactly what `c--macroexpand-all` is - with quotes,
+lambdas and shadowing to get right.
+
+The port instead:
+
+- registers every VAL as **source data** together with the module that
+  defines it, at expand, load and eval time
+  (`eval-when (expand load eval)`, which Guile honours in a
+  `define-library` file - the tests prove the expand-time half);
+- evaluates a source on first request with `eval` in its defining
+  module (`c-lang-defconst-make-source-thunk`), where every top-level
+  definition exists;
+- makes `c-lang-const` with an explicit LANG **bake the value into the
+  expansion when it resolves at expansion time**, and emit a runtime
+  `c-get-lang-constant` call when it does not (a forward reference, or
+  no LANG at all, where the answer depends on the buffer's language).
+
+The observable behaviour matches Emacs's compiled one, including the
+wart the cc-langs header documents: a use compiled while a constant
+had an old value keeps it after a redefinition (pinned by a test).
+`cc-defs-tests.scm` also pins t-vs-LANG override, the fallback chain,
+lazy evaluation once per mode, forward references, self-extension,
+dependency invalidation and `c-lang-major-mode-is`.
+
+## Named departures
+
+1. **A "source file" is a module name.** Emacs keys the source alist
+   by source-file symbol with `assq`; module names are lists here, so
+   the keys are compared with `assoc`/`equal?`.
+2. **No `pre-files` and no load-on-demand.** Emacs's
+   `c-define-lang-constant`'s PRE-FILES and
+   `c-find-assignment-for-mode`'s "load the file whose bindings are
+   missing" exist for compiled files whose defining file may not be
+   loaded. Imports are explicit here: a defining module is loaded when
+   it is imported, and a module that was never imported has no entry
+   at all. A derived mode must therefore be imported, not autoloaded.
+3. **The registry is a record in a hash table**, where Emacs uses an
+   obarray with value cells and symbol plists. Language metadata
+   (`c-mode-prefix`, `c-fallback-mode`) stays on symbol plists via
+   `get`/`put`, as in Emacs.
+4. **An eval error raises one condition** naming the constant and the
+   language; Emacs `message`s the same text and re-signals the
+   original error (the tree has a single error condition type).
+5. `t` in a `c-lang-defconst` argument list stays the **symbol** `t`,
+   not `#t`: the macro consumes it as data, so cc-langs' source reads
+   as Emacs writes it.
+
+## Guile facts this step cost
+
+- `eval-when (expand load eval)` works at the top level of a
+  `define-library` file and runs in the module being compiled; that is
+  what makes the registration visible to a later macro expansion.
+- A macro transformer that emits code needs `syntax`, `with-syntax`,
+  `syntax-case`, `syntax->datum` and `datum->syntax` in the library's
+  import list; a missing `syntax` reports as "reference to pattern
+  variable outside syntax form", and a missing `with-syntax` as
+  "possibly unbound".
+- `macroexpand` returns a wrapped-syntax struct that
+  `syntax->datum` does not unwrap in Guile 3.0.11 (probed with
+  `macroexpand`, `macroexpand-1` - absent - and
+  `primitive-macroexpand` - absent), so a test of "is this baked"
+  has to be behavioural. Ours is: a procedure defined while a
+  constant has value `old` still sees `old` after the constant is
+  redefined, which is what a baked expansion means.
+- Module names are lists; `assq` on them silently misses (fresh list
+  objects), which registered a second source entry per load. `assoc`
+  is the fix.
+- Three `nil`-versus-`#f` bugs in a row: `(unless (null? files))`
+  where files may be `#f` (`(car #f)`), and `(cond (assignment-entry
+  ...) (file-entry ...))` where `'()` is *true* in Scheme. Emacs's
+  nil tests must be `pair?` here.

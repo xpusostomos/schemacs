@@ -39,6 +39,7 @@ SUITES = [
     'schemacs/editor/character-tests.scm',
     'schemacs/editor/casetab-tests.scm',
     'schemacs/editor/category-tests.scm',
+    'schemacs/editor/cc-defs-tests.scm',
     'schemacs/editor/chartab-tests.scm',
     'schemacs/editor/syntax-tests.scm',
     'schemacs/editor/narrow-tests.scm',

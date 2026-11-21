@@ -14956,3 +14956,76 @@ stack walk - see the DEPARTURES table before choosing one.
    gap and base (second wave), so what remains is specializing the
    matcher's per-character read by substrate, which is the last ~10%
    of self-time and a large change.
+
+# cc-mode has started: the language-constant core (2026-11-21)
+
+The regexp engine is committed (`c8dc5b4`) and measured against the
+real cc-mode patterns, and the first cc-mode library is in.
+
+## The engine against cc-mode's own regexps
+
+25 patterns dumped from a running Emacs 31.1 (`c-symbol-key`,
+`c-identifier-key`, `c-nonlabel-token-key`, `c-decl-prefix-re`,
+`c-lang-const` strings from `c-matchers-1/2/3`,
+`c-basic-matchers-before/after`, `c-complex-decl-matchers`,
+`c-simple-decl-matchers`, `c-cpp-matchers`), on
+`GITE/emacs/src/minibuf.c` (2,760 lines), with the same syntax table on
+both sides:
+
+| shape | Emacs | engine | ratio |
+|---|---|---|---|
+| 69,000 anchored `looking-at` (25 patterns x 2,760 line starts) | 0.51-0.52 µs/call | 1.61-1.67 µs/call | **3.2x** |
+| 108,039 forward matches (whole-file `re-search` loop) | 4.53 ms/scan | 30.4 ms/scan | **6.7x** |
+
+**The answers are exact**: per-pattern counts and the first five match
+spans agree on all 25 patterns. Two traps when rebuilding this:
+`find-file-noselect` puts the C file in c-mode, which changes `\s`
+classes (`(fundamental-mode)` after opening); and Emacs's
+`string-match` uses the *current buffer's* syntax table, while a
+buffer's `looking-at` uses its own. `\=` never matches in a string
+search on either side (measured), so a buffer-point harness must not
+expect it in string mode.
+
+The harnesses are `/tmp/ccdump2.el` (dump patterns as hex),
+`/tmp/bench/cc-bench.scm`, `/tmp/emacs-ccbench.el`,
+`/tmp/emacs-ccscan.el`, plus the match differential
+`/tmp/bench/cc-matches.scm` and `/tmp/emacs-ccstrings.el`. They should
+move into `tools/` when they are next touched.
+
+## What landed
+
+`schemacs/editor/cc-defs.scm`: `c-add-language`, the seven core
+language declarations, the constant registry, `c-lang-defconst`,
+`c-lang-const`, `c-get-lang-constant`, `c-find-assignment-for-mode`,
+`c-lang-defconst-eval-immediately`, `c-lang-major-mode-is`.
+`schemacs/editor/cc-defs-tests.scm` (21) is in the suite runner; the
+library is in `loadup.scm`'s list and `imports.scm` is regenerated.
+
+**Read DEPARTURES.md's "cc-mode step 1" before touching it.** The one
+design departure: a VAL is source data evaluated on demand in its
+defining module; `c-lang-const` bakes the value when it resolves at
+expansion time and emits a runtime call when it does not. The
+behavioural test that a baked use keeps its old value after a
+redefinition is what pins it.
+
+## Next, in order
+
+1. **`cc-langs`'s half of the variable system**: `c-lang-defvar`,
+   `c-lang-setvar`, `c-make-init-lang-vars-fun` and
+   `c-init-language-vars` (`cc-langs.el:153`, `:4616`, `:4707`), plus
+   `c-make-keywords-re` (`cc-defs.el:2147`) and
+   `c-mode-symbol`/`c-mode-var` (`cc-defs.el:2106`). Those are
+   the bridge from constants to buffer-local variables and are needed
+   before any language data can be ported.
+2. `cc-vars.el`'s defcustoms, then `cc-langs.el`'s `c-lang-defconst`
+   data. Differential every (constant, language) pair against a
+   running Emacs, the way the charset data was verified.
+3. First visible milestone: `c-mode` opening `.c`/`.h` with the right
+   syntax table and font-lock faces, compared face-for-face with
+   Emacs. Indentation (cc-engine/cc-align/cc-cmds, ~22k lines) is the
+   second milestone.
+
+**Prerequisites still missing**: `easy-menu-define` (8 uses in
+`cc-mode.el`; the menu rule says the menus ship with the mode) and a
+`def-edebug-spec` declaration stub. `rx` is not needed (0 uses), and
+cl-lib only for a handful of helper functions.

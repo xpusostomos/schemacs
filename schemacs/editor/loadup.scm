@@ -141,6 +141,7 @@
         (schemacs editor casefiddle)
         (schemacs editor casetab)
         (schemacs editor category)
+        (schemacs editor cc-defs)
         (schemacs editor character)
         (schemacs editor characters)
         (schemacs editor charset)

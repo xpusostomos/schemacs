@@ -64,6 +64,7 @@
     (schemacs editor xfaces)
     (schemacs editor editfns)
     (schemacs editor lisp)
+    (schemacs editor cc-defs)
     (schemacs editor callproc)
     (schemacs editor casetab)
     (schemacs editor casefiddle)
@@ -106,6 +107,7 @@
     (schemacs editor chartab)
     (schemacs editor diffseq)
     (schemacs editor data)
+    (schemacs editor regex-emacs)
     (except (schemacs editor menu-bar)  *tty-menu-open-use-tmm*)
     (except (schemacs editor simple)  backward-char beginning-of-line delete-char end-of-line forward-char *inhibit-auto-fill* *page-delimiter* *use-hard-newlines* back-to-indentation self-insert-command self-insert-tab mark)
     (schemacs editor mule-cmds)
@@ -170,6 +172,7 @@
     %run-command
     %set!keymap-order!
     %setup-syntax-table
+    %spec-code
     %styleb-bit
     %stylec2
     %substring
@@ -245,6 +248,7 @@
     *buffers-menu-show-status*
     *build-marker-function*
     *byte-count-to-string-function*
+    *c-buffer-is-cc-mode*
     *calculate-lisp-indent-function*
     *calculate-lisp-indent-last-sexp*
     *called-interactively*
@@ -860,6 +864,7 @@
     <itree-tree>
     <marker>
     <quit-condition>
+    <re-charset>
     <scan-error>
     <test-display>
     <widget-value>
@@ -976,6 +981,7 @@
     bool-vector-subsetp
     bool-vector-union
     bool-vector?
+    buffer->re-text
     buffer-auto-fill-function
     buffer-auto-hscroll-mode
     buffer-beg
@@ -1052,6 +1058,18 @@
     bury-buffer
     byte8-to-char
     bytes-have-null?
+    c-add-language
+    c-define-lang-constant
+    c-define-lang-constant-here
+    c-find-assignment-for-mode
+    c-get-lang-constant
+    c-lang-const
+    c-lang-defconst
+    c-lang-defconst-bindings
+    c-lang-defconst-eval-immediately
+    c-lang-defconst-eval-now
+    c-lang-defconst-thunk
+    c-lang-major-mode-is
     cache-long-scans
     calculate-lisp-indent
     call-interactively
@@ -2392,6 +2410,12 @@
     make-menu-state
     make-mode-line-mouse-map
     make-overlay
+    make-re-charset
+    make-re-context
+    make-re-fastmap
+    make-re-pattern-buffer
+    make-re-registers
+    make-re-text
     make-scan-error
     make-separator-line
     make-sparse-keymap
@@ -2819,8 +2843,46 @@
     raise-frame
     rarely-quit
     raw-cursor-to!
+    re-charset-classes
+    re-charset-map
+    re-charset-member-full?
+    re-charset-member?
+    re-charset-ranges
+    re-charset?
+    re-compile-fastmap
+    re-compile-pattern
+    re-context-buffer?
+    re-context-category-table
+    re-context-point
+    re-context-position
+    re-context-syntax-table
+    re-context-text
+    re-context-translate
+    re-context?
+    re-fastmap-ref
+    re-fastmap?
+    re-iswctype
+    re-match-2
+    re-opcode-name
+    re-pattern-buffer-buffer
+    re-pattern-buffer-can-be-null?
+    re-pattern-buffer-fastmap
+    re-pattern-buffer-fastmap-accurate?
+    re-pattern-buffer-nsub
+    re-pattern-buffer-translate
+    re-pattern-buffer-used-syntax?
+    re-pattern-buffer?
+    re-registers-end
+    re-registers-num
+    re-registers-start
+    re-registers?
+    re-search
     re-search-backward
     re-search-forward
+    re-text-length
+    re-text-ref
+    re-text?
+    re-wctype-parse
     read--expression
     read--expression-map
     read--expression-try-read
@@ -3258,6 +3320,13 @@
     set-mouse-position
     set-object-intervals
     set-point
+    set-re-pattern-buffer-buffer!
+    set-re-pattern-buffer-can-be-null!
+    set-re-pattern-buffer-fastmap!
+    set-re-pattern-buffer-fastmap-accurate!
+    set-re-pattern-buffer-nsub!
+    set-re-pattern-buffer-translate!
+    set-re-pattern-buffer-used-syntax!
     set-scroll-bar-mode
     set-selection!
     set-standard-case-table
@@ -3343,6 +3412,7 @@
     status-string
     store-in-alist
     store-in-keymap
+    string->re-text
     string->texts
     string-collate-lessp
     string-empty-p
