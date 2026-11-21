@@ -12253,3 +12253,31 @@ buffer's jit-lock fontification probes the same cache, so a table that
 does not reset it is measuring fontification timing as well). The
 cache-sequence group pins Emacs's own `(56) -> (56 . 95) -> (56) -> nil`
 walk with explicit resets.
+
+# cc-engine: the comment and syntactic-whitespace tools (2026-11-21)
+
+The layer `c-forward-sws`/`c-backward-sws` will stand on, ported whole
+and measured: `c-forward-single-comment`, `c-forward-comments`,
+`c-backward-comments` (`cc-engine.el:1631'-`:1790', moved up beside
+`c-beginning-of-macro' and `c-backward-single-comment`, which they
+belong with here), and `c-skip-ws-chars-forward`/`-backward`
+(`cc-defs.el:1118', `:1134').
+
+**Departures, all the tree's usual shape:**
+
+- `c-skip-ws-chars-forward`/`-backward` are procedures with LIM as the
+  optional (rest) argument where Emacs's are macros binding a temp.
+  They are `cc-defs.el`'s and stay in `cc-defs.scm`, which gains an
+  `editfns.scm` import for `point` and `goto-char` - the one place
+  `cc-defs` reaches that far up, named in the source.
+- The three comment functions are in `cc-engine.scm` at their Emacs
+  order in the file but *above* their first caller; the section comment
+  says why.
+
+**Verification.** A differential probes all five functions at every
+position 1..59 of a fixture that holds a block comment, two line
+comments, a line continuation and a multi-line comment, printing the
+return value and point: 295 answered lines, byte-identical between
+Emacs 31.1 and this tree. Every expectation in the new
+`comment_tools` group of `cc-engine-tests.scm` is one of those
+answers.

@@ -15281,3 +15281,29 @@ and the tree compiles with no warnings in the touched libraries.
 `imports.scm` is regenerated. The full suite battery is **88/88**
 (`cc-engine-tests` 88) and `tools/pty-check.py` is **100/100** on the
 settled tree.
+
+## cc-engine: the comment and whitespace tools (2026-11-21)
+
+The layer under the syntactic-whitespace engine is in: cc-engine's
+`c-forward-single-comment`, `c-forward-comments` and
+`c-backward-comments` (`cc-engine.el:1631'-`:1790', moved up beside the
+functions they belong with), and cc-defs' `c-skip-ws-chars-forward`/
+`-backward`. The latter are procedures here, and cc-defs now imports
+`editfns.scm` for `point`/`goto-char` - its one reach that far up,
+named in the source.
+
+Verification: a differential probes all five at every position of a
+fixture with a block comment, two line comments, a continuation and a
+multi-line comment - 295 answered lines, identical to Emacs 31.1. The
+measured answers are pinned in `cc-engine-tests.scm`'s `comment_tools`
+group (the suite is 107 passes now).
+
+**Next**: `c-forward-sws`/`c-backward-sws` proper
+(`cc-engine.el:2127', `:2381') with their `c-is-sws`/`c-in-sws`
+property scheme and the `c-put-is-sws`/`c-put-in-sws`/
+`c-remove-is-sws`/`c-remove-in-sws`/`c-remove-is-and-in-sws` helpers,
+then the invalidate hooks (`c-invalidate-sws-region-*`), which also
+want `c-literal-limits`/`c-literal-type`/`c-go-list-forward` and the
+`c-doc-line-join-re` default from cc-mode.el. `c-forward-sws` also
+reads `c-noise-macro-name-re` (cc-vars' defvar, default
+`regexp-unmatchable') and `c-looking-at-c++-attribute`.

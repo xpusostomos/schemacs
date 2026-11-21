@@ -114,7 +114,8 @@
    c-beginning-of-macro c-end-of-macro
    c-syntactic-end-of-macro c-no-comment-end-of-macro
    c-forward-over-cpp-define-id c-forward-to-cpp-define-body
-   c-forward-comment-minus-1 c-backward-single-comment
+   c-forward-single-comment c-forward-comments
+   c-forward-comment-minus-1 c-backward-single-comment c-backward-comments
    ;; basic utilities
    c-delq-from-dotted-list c-shift-line-indentation
    c-keyword-sym c-keyword-member
@@ -485,14 +486,56 @@
             #f)))
 
     ;;------------------------------------------------------------------
-    ;; `c-forward-comment-minus-1' and `c-backward-single-comment'
-    ;; (`cc-engine.el:1685', `:1704')
+    ;; `c-forward-single-comment', `c-forward-comments',
+    ;; `c-forward-comment-minus-1', `c-backward-single-comment' and
+    ;; `c-backward-comments' (`cc-engine.el:1631'-`:1790')
     ;;------------------------------------------------------------------
-    ;; Moved up from their place in the file: both are what
-    ;; `c-beginning-of-macro' above stands on, and a library's own
-    ;; procedures may be defined after their callers but read better
-    ;; beside them. Emacs's `c-forward-comments' (`:1660') is not
-    ;; carried yet - nothing in this tranche calls it.
+    ;; This block is moved up from its place in the file: these are
+    ;; what `c-beginning-of-macro' above stands on, and what the
+    ;; syntactic-whitespace engine below stands on too.
+    (define (c-forward-single-comment)
+      ;; "Move forward past whitespace and the closest following
+      ;; comment, if any. Return t if a comment was found, nil
+      ;; otherwise. In either case, the point is moved past the
+      ;; following whitespace. Line continuations, i.e. a backslashes
+      ;; followed by line breaks, are treated as whitespace. The line
+      ;; breaks that end line comments are considered to be the comment
+      ;; enders, so the point will be put on the beginning of the next
+      ;; line if it moved past a line comment."
+      (let ((start (point)))
+        (when (looking-at "\\([ \t\n\r\f\v]\\|\\\\[\n\r]\\)+")
+          (goto-char (match-end 0)))
+        (if (forward-comment 1)
+            (if (eobp)
+                ;; "Some emacsen (e.g. XEmacs 21) return t when moving
+                ;; forwards at eob."
+                #f
+                (begin
+                  ;; "Emacs includes the ending newline in a b-style
+                  ;; (c++) comment, but XEmacs doesn't. We depend on
+                  ;; the Emacs behavior (which also is symmetric)."
+                  (if (and (eolp)
+                           (%c-true (nth 7 (parse-partial-sexp start (point)))))
+                      (forward-char 1))
+                  #t))
+            #f)))
+
+    (define (c-forward-comments . lim-args)
+      ;; "Move forward past all following whitespace and comments. Line
+      ;; continuations, i.e. backslashes followed by line breaks, are
+      ;; treated as whitespace. LIM, if non-nil, is a forward search
+      ;; limit. If LIM is inside a comment, point may be left at LIM."
+      (let ((lim (if (pair? lim-args) (car lim-args) #f)))
+        (save-restriction
+          (if lim (narrow-to-region (point-min) lim))
+          (let loop ()
+            (let ((more (if (and (forward-comment 5) (not (eobp)))
+                            #t
+                            (if (looking-at "\\\\[\n\r]")
+                                (begin (forward-char 2) #t)
+                                #f))))
+              (if more (loop) #f))))))
+
     (define (c-forward-comment-minus-1)
       ;; "Call (forward-comment -1), taking care of escaped newlines.
       ;; Return the result of `forward-comment' if it gets called, nil
@@ -560,6 +603,55 @@
                       (begin (forward-char 2) #f)
                       #t)
                   #f)))))
+
+    (define (c-backward-comments)
+      ;; "Move backward past all preceding whitespace and comments. Line
+      ;; continuations, i.e. a backslashes followed by line breaks, are
+      ;; treated as whitespace. The line breaks that end line comments
+      ;; are considered to be the comment enders, so the point cannot be
+      ;; at the end of the same line to move over a line comment.
+      ;; Unlike `c-backward-syntactic-ws', this function doesn't move
+      ;; back over preprocessor directives."
+      (let ((start (point)))
+        (let loop ()
+          (if (and
+               ;; "`forward-comment' in some emacsen (e.g. XEmacs
+               ;; 21.4) return t when moving backwards at bob."
+               (not (bobp))
+               (if (let ((moved-comment #f))
+                     ;; "Cope specifically with ^M^J here - forward-
+                     ;; comment sometimes gets stuck after ^Ms,
+                     ;; sometimes after ^M^J."
+                     (let scan ()
+                       (set! moved-comment (c-forward-comment-minus-1))
+                       (if (and (not moved-comment)
+                                (or (if (eq? (char-before) #\return)
+                                        (begin (backward-char) #t)
+                                        #f)
+                                    (if (and (eq? (char-before) #\newline)
+                                             (eq? (char-before (1- (point)))
+                                                  #\return))
+                                        (begin (backward-char 2) #t)
+                                        #f)))
+                           (scan)
+                           #f))
+                     moved-comment)
+                   (if (looking-at "\\*/")
+                       ;; "Emacs <= 20 and XEmacs move back over the
+                       ;; closer of a block comment that lacks an
+                       ;; opener."
+                       (begin (forward-char 2) #f)
+                       #t)
+                   ;; "XEmacs treats line continuations as whitespace
+                   ;; but only in the backward direction, which seems a
+                   ;; bit odd. Anyway, this is necessary for Emacs."
+                   (if (and (looking-at "[\n\r]")
+                            (eq? (char-before) #\\)
+                            (< (point) start))
+                       (begin (backward-char) #t)
+                       #f)))
+              (loop)
+              #f))))
 
     ;;------------------------------------------------------------------
     ;; Basic utility functions (`cc-engine.el:520')

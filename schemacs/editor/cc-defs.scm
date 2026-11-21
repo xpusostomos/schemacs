@@ -55,7 +55,11 @@
     (only (schemacs editor cl-seq)
           cl-set-difference cl-intersection cl-delete-duplicates)
     (only (schemacs editor fns) mapcan)
-    (only (schemacs editor syntax) char-syntax-in with-syntax-table)
+    (only (schemacs editor syntax) char-syntax-in with-syntax-table
+          skip-chars-forward skip-chars-backward
+          skip-syntax-forward skip-syntax-backward)
+    ;; `c-skip-ws-chars-*' move point.
+    (only (schemacs editor editfns) point goto-char)
     ;; `c-save-buffer-state' is `with-silent-modifications' since Emacs
     ;; 24 (see below), which is `subr.el''s.
     (only (schemacs editor subr) with-silent-modifications)
@@ -84,7 +88,8 @@
    c-syntax-table-hwm
    c-put-char-property c-get-char-property c-clear-char-property
    c-put-char-properties c-clear-char-properties c-min-property-position
-   c-next-single-property-change)
+   c-next-single-property-change
+   c-skip-ws-chars-forward c-skip-ws-chars-backward)
 
   (begin
 
@@ -877,5 +882,37 @@
           (remove-text-properties ret to (list property #f))
           ret)
         #f)))
+
+
+;;----------------------------------------------------------------------
+;; `c-skip-ws-chars-forward'/`-backward' (`cc-defs.el:1118', `:1134')
+;;----------------------------------------------------------------------
+;; Emacs's are macros; here they are procedures with LIM as the
+;; optional argument. "Note that \n usually has comment-end syntax."
+(define (c-skip-ws-chars-forward string . lim-args)
+  ;; "Move point forward, stopping before a char which isn't in STRING,
+  ;; or a char whose syntax isn't whitespace or comment-end, or at pos
+  ;; LIM. ... Returns the distance traveled, either zero or positive."
+  (let* ((lim (if (pair? lim-args) (car lim-args) #f))
+         (here (point))
+         (count (skip-chars-forward string lim)))
+    (if (> count 0)
+        (begin
+          (goto-char here)
+          (skip-syntax-forward " >" (+ here count)))
+        count)))
+
+(define (c-skip-ws-chars-backward string . lim-args)
+  ;; "Move point backward, stopping after a char which isn't in STRING,
+  ;; or a char whose syntax isn't whitespace or comment-end, or at pos
+  ;; LIM. ... Returns the distance traveled, either zero or negative."
+  (let* ((lim (if (pair? lim-args) (car lim-args) #f))
+         (here (point))
+         (count (skip-chars-backward string lim)))
+    (if (< count 0)
+        (begin
+          (goto-char here)
+          (skip-syntax-backward " >" (+ here count)))
+        count)))
 )
 )

@@ -29,7 +29,8 @@
        buffer-substring-no-properties)
  (only (schemacs editor syntax) set-syntax-table)
  (only (schemacs editor textprop) get-text-property)
- (only (schemacs editor cc-defs) c-lang-const)
+ (only (schemacs editor cc-defs) c-lang-const
+       c-skip-ws-chars-forward c-skip-ws-chars-backward)
  (schemacs editor cc-langs)
  (schemacs editor cc-vars)
  (schemacs editor cc-engine))
@@ -296,5 +297,77 @@
    (test-equal "shifting line 3 right by two moves point and the text"
                '(44 "    ((x) + ")
                (list (point) (buffer-substring-no-properties 37 48)))))
+
+;;----------------------------------------------------------------------
+;; The comment and syntactic-whitespace tools
+;; (`c-forward-single-comment', `c-forward-comments',
+;; `c-backward-comments', `c-skip-ws-chars-forward/-backward').
+;;
+;; Every expectation is Emacs 31.1's answer at the same position on this
+;; fixture; a whole-file differential probes all five functions at every
+;; position 1..59 and is identical to Emacs's.
+;;----------------------------------------------------------------------
+(define ws-fixture
+  "a /* x */ b\n// line\nc \\\n d\n  e /* multi\nline */ f\n// last\n")
+
+(define (with-ws-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert ws-fixture)
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+    (thunk)))
+
+(with-ws-buffer
+ (lambda ()
+   (define (probe f p)
+     (goto-char p)
+     (let ((r (f))) (list r (point))))
+   (define (probe-skip f set p)
+     (goto-char p)
+     (let ((r (f set))) (list r (point))))
+
+   (test-equal "forward-single-comment skips the space and the comment"
+               '(#t 10) (probe c-forward-single-comment 2))
+   (test-equal "with no comment following, it only skips whitespace"
+               '(#f 11) (probe c-forward-single-comment 10))
+   (test-equal "a line comment's newline is included" '(#t 21)
+               (probe c-forward-single-comment 12))
+   (test-equal "at a comment's own start there is nothing to skip" '(#f 14)
+               (probe c-forward-single-comment 14))
+   (test-equal "a line continuation is whitespace" '(#f 26)
+               (probe c-forward-single-comment 22))
+
+   (test-equal "forward-comments moves over whitespace and comments"
+               '(#f 11) (probe c-forward-comments 2))
+   (test-equal "and over a line comment onto its next line" '(#f 21)
+               (probe c-forward-comments 13))
+   (test-equal "and over a continuation and the space after it"
+               '(#f 26) (probe c-forward-comments 22))
+   (test-equal "and over several spaces" '(#f 30)
+               (probe c-forward-comments 27))
+
+   (test-equal "backward-comments moves back over the block comment"
+               '(#f 2) (probe c-backward-comments 10))
+   (test-equal "from the line's start there is nothing to move over"
+               '(#f 22) (probe c-backward-comments 23))
+   (test-equal "and from a continued line it stops after the last break"
+               '(#f 22) (probe c-backward-comments 25))
+   (test-equal "from inside a multi-line comment it moves a character"
+               '(#f 40) (probe c-backward-comments 41))
+   (test-equal "over the whole second line comment" '(#f 50)
+               (probe c-backward-comments 59))
+
+   (test-equal "skip-ws-chars-forward takes the run of whitespace"
+               '(1 3) (probe-skip c-skip-ws-chars-forward " \t\n" 2))
+   (test-equal "and stops at a non-whitespace char"
+               '(3 30) (probe-skip c-skip-ws-chars-forward " \t\n" 27))
+   (test-equal "skip-ws-chars-backward takes the run before point"
+               '(-1 12) (probe-skip c-skip-ws-chars-backward " \t\n" 13))
+   (test-equal "and stops before a non-whitespace char"
+               '(-3 27) (probe-skip c-skip-ws-chars-backward " \t\n" 30))
+   (test-equal "a zero answer when nothing matches" '(0 1)
+               (probe-skip c-skip-ws-chars-backward " \t\n" 1))))
 
 (test-end "schemacs_editor_cc_engine")

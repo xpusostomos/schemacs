@@ -1091,6 +1091,7 @@
     c-alnum
     c-alpha
     c-auto-newline
+    c-backward-comments
     c-backward-single-comment
     c-beginning-of-macro
     c-benign-error
@@ -1112,7 +1113,9 @@
     c-filter-ops
     c-find-assignment-for-mode
     c-forward-comment-minus-1
+    c-forward-comments
     c-forward-over-cpp-define-id
+    c-forward-single-comment
     c-forward-to-cpp-define-body
     c-get-char-property
     c-get-lang-constant
@@ -1167,6 +1170,8 @@
     c-register-emacs-variable-reader!
     c-save-buffer-state
     c-shift-line-indentation
+    c-skip-ws-chars-backward
+    c-skip-ws-chars-forward
     c-string-limit-regexp
     c-string-list-p
     c-string-syntax
