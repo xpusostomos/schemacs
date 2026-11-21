@@ -15588,3 +15588,95 @@ automaton; after that `c-parse-state` and the declaration machinery.
 The vsemi path still wants `c-make-macro-with-semi-re`
 (`cc-vars.el:1813`) and `c-macro-names-with-semicolon`, which the mode's
 init calls - they come with `cc-mode.el`.
+
+## cc-mode: the syntactic scans and the statement-start predicates
+## (2026-11-22)
+
+The layer `c-beginning-of-statement-1` stands on is in, in Emacs's file
+order: `c-on-identifier` (`cc-engine.el:4852'`),
+`c-syntactic-re-search-forward` (`:5196'`),
+`c-syntactic-skip-backward` (`:5454'`), the `c-determine-limit` family
+(`:5864'-`:6012'`), `c-looking-at-special-brace-list` (`:13584'`), and
+`c-at-statement-start-p`/`c-at-expression-start-p` (`:1562'-`:1617'`,
+where Emacs has them - they reach forward to the two scans above,
+exactly as Emacs's file does).
+
+## Verification
+
+Whole-input differentials against Emacs 31.1, all identical:
+
+- `c-syntactic-skip-backward` (limit nil and the delimiter set),
+  `c-at-statement-start-p`, `c-at-expression-start-p`,
+  `c-on-identifier` and `c-determine-limit` (N = 1, 5, 20, 200) at
+  **every position** of the fixture;
+- `c-syntactic-re-search-forward` at every position with `"[[{]"`,
+  `"^;"` and `"\\_<int\\_>"`;
+- `c-looking-at-special-brace-list` at every position of a pike
+  fixture.
+
+`cc-engine-tests.scm` is 261 passes; the six cc suites pass and the pty
+battery's `imports` and `scratch` checks pass.
+
+## Three host-language traps this found, and the tests that pin them
+
+1. **`set!` is not `setq`.** In value position Guile's `set!` returns
+   the *unspecified* value - and in one context a **zero-values**
+   result: `(and (c-beginning-of-macro limit) ... (set! macro-start
+   (point)))` gave "Zero values returned to single-valued
+   continuation", and
+   `(< check-pos (save-excursion ... (set! last-token-end-pos (point))))`
+   gave "Wrong type argument in position 2: #<unspecified>". Both are
+   `(begin (set! v x) v)` now. Any ported `setq` whose value is read
+   needs this.
+
+2. **Argument evaluation order is unspecified, and the compiler does
+   not use the interpreter's order.** The C's
+
+       (> (point) (progn (c-backward-syntactic-ws limit) (point)))
+
+   reads point *before* the skip; written as the same expression in
+   Scheme the compiled code evaluated the second operand first, so the
+   comparison saw the *moved* point and the outer loop never ran. It is
+
+       (let ((before (point)))
+         (c-backward-syntactic-ws limit)
+         (> before (point)))
+
+   now. **Any comparison or constructor with a side-effecting operand
+   in a C `progn` must sequence the operands explicitly**; the
+   interpreter and the compiler disagree, so this class does not
+   reproduce under `guile -s` alone.
+
+3. **`=` on characters.** `(= (char-before) (cdr type))` in
+   `c-looking-at-special-brace-list` signals (characters are not
+   numbers); it is `char=?`. Emacs compares characters as integers.
+
+## The harness: cc-mode's `category` properties
+
+`c-mode` marks `<` with the `category` property `c-<-as-paren-syntax`,
+and `get-text-property` resolves it to a `syntax-table` of `(4 . 62)` -
+so `parse-partial-sexp` sees an opener the mode's *syntax table* does
+not declare. That propertization is `cc-mode.el`'s, not the language
+tables'; until it is ported, the Emacs side of a differential must strip
+it:
+
+    (setq-local syntax-propertize-function nil)
+    (syntax-ppss-flush-cache (point-min))
+    (let ((inhibit-modification-hooks t))
+      (remove-text-properties (point-min) (point-max)
+                              '(category nil syntax-table nil)))
+
+**Removing `syntax-table` alone is not enough** - the property is
+`category`; and without `inhibit-modification-hooks` the removal runs
+`c-after-change`, which puts it straight back. Our test buffers install
+the mode's syntax table only, so both sides then agree.
+
+## Next
+
+`c-looking-at-statement-block-1`/`-block` (`:13647'`, `:13736'`), which
+need `c-looking-at-c++-lambda-expression`, `c-just-after-func-arglist-p`
+and `c-back-over-member-initializer-braces` first; `c-in-method-def-p`
+(`:12171'`) and `c-looking-at-inexpr-block` (`:13917'`); then
+`c-beginning-of-statement-1` (`:793'`) and its automaton; then
+`c-parse-state` and the declaration machinery, `cc-fonts`, and
+`cc-mode.el`.

@@ -12682,3 +12682,75 @@ over 98 pairs, the barrier functions over 11 ranges of two fixtures,
 and virtual semicolons at all 36 positions of a `Q_FOO (x)` fixture.
 All identical.
 
+## cc-mode: the syntactic scans and statement starts (2026-11-22)
+
+Ported in `cc-engine.scm`: `c-on-identifier` (`cc-engine.el:4852'`),
+`c-syntactic-re-search-forward` (`:5196'`),
+`c-syntactic-skip-backward` (`:5454'`), `c-determine-limit-no-macro`,
+`c-determine-limit-get-base`, `c-determine-limit`,
+`c-determine-+ve-limit` (`:5864'-`:6012'`),
+`c-looking-at-special-brace-list` (`:13584'`), and
+`c-at-statement-start-p`/`c-at-expression-start-p` (`:1562'-`:1617'`).
+They are in Emacs's own file order; there is no placement departure.
+
+### `signal 'search-failed` is the tree's `error`
+
+`c-syntactic-re-search-forward` re-signals `(signal 'search-failed (list
+regexp))` in the C; this tree has one condition type, so it is
+`(error "Search failed" regexp)`, the same message `search.c`'s own
+DEFUNs use. A caller that wants to catch a search failure catches any
+error, as `c-safe` already does.
+
+### `c-at-expression-start-p`'s obsolescence
+
+`(make-obsolete 'c-at-expression-start-p nil "CC mode 5.35")` is not
+carried - there is no byte-compiler to warn.
+
+### `condition-case ()` is a non-quit guard
+
+`c-looking-at-special-brace-list` wraps its body in `(condition-case ()
+...)` - which catches every error. Our `guard` re-raises quit
+conditions and swallows the rest, the tree's standing spelling; a C-g
+during the scan propagates here where the C would swallow it.
+
+### The nil-safe accessors, again
+
+`c-determine-limit-get-base` reads the third element of
+`c-semi-pp-to-literal`'s answer, which is a one-element list when the
+position is not in a literal; `(car (cddr s))` is `%c-caddr`, as the
+literal functions' own callers are.
+
+### The language-variable guards
+
+The new functions use the same `(let ((re (%c-langvar 'name))) (and re
+(looking-at re)))` spelling as the rest of the file, so a buffer no
+mode has initialised skips the test instead of signalling a void
+variable. Reachable only outside a CC mode.
+
+### Two Scheme evaluation hazards (shared with the language, not the port)
+
+Both are in AGENTS.md's handoff in full; recorded here because they are
+representation departures from Elisp:
+
+- **`set!` in value position answers the unspecified value** (and once
+  a zero-values result), where `setq` answers the value set. Two ports
+  of `setq`-as-expression were fixed to `(begin (set! v x) v)`.
+- **Argument evaluation order is unspecified**, and Guile's compiled
+  code did not take the same order as the interpreter: `(> (point)
+  (progn (c-backward-syntactic-ws limit) (point)))` became an explicit
+  `let`. Any C `progn` as a comparison or constructor operand needs
+  explicit sequencing.
+
+### The harness's `category` properties
+
+A real `c-mode` buffer carries `category` text properties
+(`c-<-as-paren-syntax`) which resolve to syntax-table properties, so
+its `parse-partial-sexp` sees `<>` as parens even though the mode's
+syntax table says punctuation. That is `cc-mode.el`'s propertization
+and is not ported; the Emacs side of these differentials strips both
+`category` and `syntax-table` under `inhibit-modification-hooks` (see
+AGENTS.md). Until `cc-mode.el` lands, our buffers do not have those
+properties, which is a departure in *what a c-mode buffer contains*,
+not in any of the functions above.
+
+

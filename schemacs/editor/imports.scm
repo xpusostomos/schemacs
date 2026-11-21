@@ -1100,7 +1100,9 @@
     c-add-language
     c-alnum
     c-alpha
+    c-at-expression-start-p
     c-at-macro-vsemi-p
+    c-at-statement-start-p
     c-at-vsemi-p
     c-auto-newline
     c-backward-comments
@@ -1127,6 +1129,10 @@
     c-define-lang-constant
     c-define-lang-constant-here
     c-delq-from-dotted-list
+    c-determine-+ve-limit
+    c-determine-limit
+    c-determine-limit-get-base
+    c-determine-limit-no-macro
     c-digit
     c-doc-bright-comment-start-re
     c-doc-line-join-end-ch
@@ -1204,6 +1210,7 @@
     c-literal-start
     c-literal-type
     c-looking-at-c++-attribute
+    c-looking-at-special-brace-list
     c-lower
     c-macro-cache
     c-macro-cache-no-comment
@@ -1226,6 +1233,7 @@
     c-no-comment-end-of-macro
     c-noise-macro-name-re
     c-noise-macro-with-parens-name-re
+    c-on-identifier
     c-parse-ps-state-below
     c-parse-ps-state-to-cache
     c-parsing-error
@@ -1268,6 +1276,8 @@
     c-sws-lit-type
     c-syntactic-content
     c-syntactic-end-of-macro
+    c-syntactic-re-search-forward
+    c-syntactic-skip-backward
     c-syntax-table-hwm
     c-trim-lit-pos-cache
     c-truncate-lit-pos-cache

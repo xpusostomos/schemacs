@@ -837,4 +837,116 @@
    (test-equal "c-syntactic-content: an empty region" ""
                (c-syntactic-content 1 1 #f))))
 
+;;----------------------------------------------------------------------
+;; Syntactic scans: `c-syntactic-skip-backward',
+;; `c-at-statement-start-p', `c-at-expression-start-p',
+;; `c-on-identifier', `c-determine-limit', `c-syntactic-re-search-forward'
+;; (`cc-engine.el:1562'-`:6012')
+;;----------------------------------------------------------------------
+;; Every row is Emacs 31.1's answer. The whole-input differentials were
+;; identical: `c-syntactic-skip-backward' (both forms), the two
+;; statement predicates, `c-on-identifier' and `c-determine-limit' at
+;; every position of the fixture; `c-syntactic-re-search-forward' at
+;; every position with three patterns; and the special-brace-list at
+;; every position of the pike fixture.
+(define stmt-fixture
+  "#include <stdio.h>\n#define FOO(x) \\\n  ((x) + 1)\nint a;\n#define BAR 1 /* trailing\n   comment */\nint b; // x\n/* c */ int c = f (1, 2);\n")
+
+(define (with-stmt-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert stmt-fixture)
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+    (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+      (thunk))))
+
+(with-stmt-buffer
+ (lambda ()
+   (define (at n) (goto-char n))
+   (define (ssb p skip)
+     (at p)
+     (let ((r (c-syntactic-skip-backward skip #f #t)))
+       (list (and r #t) (point))))
+   (define (ass p) (at p) (and (c-at-statement-start-p) #t))
+   (define (aes p) (at p) (and (c-at-expression-start-p) #t))
+   (define (onid p) (at p) (c-on-identifier))
+   (define (dl n p) (at p) (c-determine-limit n))
+   (define (csr re p)
+     (at p)
+     (let ((r (c-syntactic-re-search-forward re #f #t #t #t)))
+       (and r (point))))
+
+   (test-equal "skip-backward at BOB does not move" '(#f 1) (ssb 1 "^;"))
+   (test-equal "skip-backward from the second character" '(#t 1) (ssb 2 "^;"))
+   (test-equal "skip-backward from a directive's start skips the line before"
+               '(#t 55) (ssb 56 "^;"))
+   (test-equal "skip-backward with the delimiter set stops after a directive"
+               '(#t 54) (ssb 56 ";{}?:"))
+   (test-equal "skip-backward at the end of a statement line skips the ';'"
+               '(#t 54) (ssb 55 ";{}?:"))
+
+   (test-equal "statement start at BOB" #t (ass 1))
+   (test-equal "not at a directive's line body" #f (ass 2))
+   (test-equal "a directive's start is a statement start" #t (ass 20))
+   (test-equal "and so is the next one, after a declaration" #t (ass 56))
+   (test-equal "a comment's continuation line is inside the statement" #t
+               (ass 82))
+   (test-equal "the line after a block comment" #t (ass 96))
+   (test-equal "inside a declaration" #f (ass 101))
+   (test-equal "the start of the comment-and-declaration line" #t (ass 108))
+
+   (test-equal "expression start agrees at BOB" #t (aes 1))
+   (test-equal "not inside a symbol" #f (aes 2))
+   (test-equal "a directive's start" #t (aes 20))
+   (test-equal "after a declaration" #t (aes 56))
+   (test-equal "inside a comment" #t (aes 82))
+   (test-equal "inside a declaration" #f (aes 101))
+
+   (test-equal "on-identifier inside a symbol answers its start" 2 (onid 2))
+   (test-equal "on-identifier on a keyword" 11 (onid 11))
+   (test-equal "on-identifier directly after a keyword" 11 (onid 12))
+   (test-equal "on-identifier at a ';'" #f (onid 36))
+   (test-equal "on-identifier before the last ';'" 100 (onid 101))
+
+   (test-equal "determine-limit 20 from BOB" 1 (dl 20 1))
+   (test-equal "determine-limit 1 inside a keyword" 10 (dl 1 11))
+   (test-equal "determine-limit 5 inside a keyword" 6 (dl 5 11))
+   (test-equal "determine-limit 20 from a directive's start" 20 (dl 20 56))
+   (test-equal "determine-limit 20 from inside a comment" 50 (dl 20 82))
+   (test-equal "determine-limit 20 from a declaration line" 51 (dl 20 96))
+   (test-equal "determine-limit 1 before a ';'" 100 (dl 1 101))
+
+   (test-equal "syntactic search skips the directives' text" 52
+               (csr "\\_<int\\_>" 1))
+   (test-equal "syntactic search from the second directive" 99
+               (csr "\\_<int\\_>" 56))
+   (test-equal "syntactic search from the comment line" 99
+               (csr "\\_<int\\_>" 96))
+   (test-equal "syntactic search for a brace finds none outside literals"
+               #f (csr "[[{]" 56))))
+
+;; `c-looking-at-special-brace-list' (`cc-engine.el:13584'), every
+;; position of a pike fixture; the whole table is Emacs 31.1's.
+(define pike-brace-fixture "([a]) ({b}) (<c>) ([d]\n")
+
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert pike-brace-fixture)
+  (set-buffer-local-value! b 'major-mode 'pike-mode)
+  (c-init-language-vars pike-mode)
+  (set-syntax-table ((c-lang-const c-make-mode-syntax-table pike)))
+  (parameterize ((*c-buffer-is-cc-mode* 'pike-mode))
+    (define (at n) (goto-char n))
+    (define (sbl p) (at p) (c-looking-at-special-brace-list))
+    (test-equal "a closed ([ ]) list" '((1 . 6) #\[ . #\]) (sbl 1))
+    (test-equal "at its first character, from the space before it" '((1 . 6) #\[ . #\])
+               (sbl 2))
+    (test-equal "a closed ({ }) list" '((6 . 12) #\{ . #\}) (sbl 6))
+    (test-equal "a closed (< >) list" '((12 . 18) #\< . #\>) (sbl 12))
+    (test-equal "an unclosed list answers its beginning only"
+               '((18) #\[ . #\]) (sbl 18))
+    (test-equal "at a list's content" #f (sbl 3))))
+
 (test-end "schemacs_editor_cc_engine")

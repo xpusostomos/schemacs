@@ -71,7 +71,7 @@
   (import
     (scheme base)
     (only (guile) most-positive-fixnum make-hash-table hash-ref hash-set!
-                  1- logand caddr)
+                  1- logand caddr cdddr cadddr cddddr)
     (only (schemacs editor subr) regexp-unmatchable)
     (only (schemacs editor buffer) current-buffer buffer-local-value
           set-buffer-local-value!)
@@ -87,12 +87,13 @@
     (only (schemacs editor indent) back-to-indentation)
     (only (schemacs editor indentc) current-indentation indent-to)
     (only (schemacs editor search) re-search-forward re-search-backward
-          looking-at match-beginning match-end save-match-data)
+          search-forward looking-at string-match
+          match-beginning match-end save-match-data)
     (only (schemacs editor textprop) get-text-property put-text-property
           remove-text-properties text-property-any)
     (only (schemacs editor syntax) skip-chars-backward skip-chars-forward
           skip-syntax-backward skip-syntax-forward forward-comment
-          parse-partial-sexp scan-sexps)
+          parse-partial-sexp scan-sexps scan-lists char-syntax)
     (only (schemacs editor subr) regexp-unmatchable last delq copy-tree
           with-silent-modifications)
     (only (schemacs editor cc-defs) c-emacs-features c-save-buffer-state
@@ -168,6 +169,14 @@
    c-end-of-token c-end-of-current-token c-forward-over-token
    c-forward-over-token-and-ws c-forward-token-2 c-backward-token-2
    c-forward-token-1 c-backward-token-1
+   ;; the statement-start predicates (`cc-engine.el:1562')
+   c-at-statement-start-p c-at-expression-start-p
+   ;; syntactic searches and scans (`cc-engine.el:4852'-`:6012')
+   c-on-identifier c-syntactic-re-search-forward c-syntactic-skip-backward
+   c-determine-limit c-determine-limit-no-macro c-determine-limit-get-base
+   c-determine-+ve-limit
+   ;; `cc-engine.el:13584'
+   c-looking-at-special-brace-list
    ;; virtual semicolons (`cc-engine.el:14184')
    c-at-vsemi-p c-vsemi-status-unknown-p
    c-c++-vsemi-p c-at-macro-vsemi-p c-macro-vsemi-status-unknown-p)
@@ -1864,6 +1873,58 @@
                    #f)))))))
 
     ;;------------------------------------------------------------------
+    ;; `c-at-statement-start-p' and `c-at-expression-start-p'
+    ;; (`cc-engine.el:1562'-`:1617')
+    ;;------------------------------------------------------------------
+    ;; They reach forward to `c-syntactic-skip-backward' and
+    ;; `c-looking-at-special-brace-list', which are ported later in the
+    ;; file - Emacs's own file has the same forward references.
+    (define (c-at-statement-start-p)
+      ;; "Return non-nil if point is at the first token in a statement or
+      ;; somewhere in the syntactic whitespace before it. ..."
+      ;;
+      ;; "Note that this function might do hidden buffer changes."
+      (save-excursion
+        (let ((end (point)))
+          (parameterize ((*c-maybe-labelp* #f))
+            (c-syntactic-skip-backward
+             (%substring
+              (if (*c-commas-bound-stmts*)
+                  (%c-langvar 'c-stmt-delim-chars-with-comma)
+                  (%c-langvar 'c-stmt-delim-chars))
+              1)
+             #f #t)
+            (or (bobp)
+                (eq? (char-before) #\})
+                (and (eq? (char-before) #\{)
+                     (not (and (%c-langvar 'c-special-brace-lists)
+                               (begin (backward-char)
+                                      (c-looking-at-special-brace-list)))))
+                (c-crosses-statement-barrier-p (point) end))))))
+
+    (define (c-at-expression-start-p)
+      ;; "Return non-nil if point is at the first token in an expression or
+      ;; statement, or somewhere in the syntactic whitespace before it.
+      ;; ..."
+      ;;
+      ;; "Note that this function might do hidden buffer changes."
+      (save-excursion
+        (let ((end (point)))
+          (parameterize ((*c-commas-bound-stmts* #t)
+                         (*c-maybe-labelp* #f))
+            (c-syntactic-skip-backward
+             (%substring (%c-langvar 'c-stmt-delim-chars-with-comma) 1)
+             #f #t)
+            (or (bobp)
+                (memv (char-before) (list #\{ #\}))
+                (save-excursion
+                  (backward-char)
+                  (looking-at "\\s("))
+                (c-crosses-statement-barrier-p (point) end))))))
+    ;; `(make-obsolete 'c-at-expression-start-p nil "CC mode 5.35")' -
+    ;; there is no byte-compiler to tell, so the marking is not carried.
+
+    ;;------------------------------------------------------------------
     ;; The syntactic-whitespace change hooks (`cc-engine.el:1947'-`:2125')
     ;;------------------------------------------------------------------
     ;; "The type of literal position `end' is in a `before-change-functions'
@@ -2717,6 +2778,66 @@
             (c-backward-sws)))))
 
     ;;------------------------------------------------------------------
+    ;; `c-on-identifier' (`cc-engine.el:4852'-`:4903')
+    ;;------------------------------------------------------------------
+    (define (c-on-identifier)
+      ;; "Return non-nil if the point is on or directly after an
+      ;; identifier. Keywords are recognized and not considered
+      ;; identifiers. ..."
+      ;;
+      ;; "FIXME: Shouldn't this function handle "operator" in C++?"
+      (save-excursion
+        (skip-syntax-backward "w_")
+        (or
+         ;; "Check for a normal (non-keyword) identifier."
+         (and (let ((re (%c-langvar 'c-symbol-start)))
+                (and re (looking-at re)))
+              (not (let ((re (%c-langvar 'c-keywords-regexp)))
+                     (and re (looking-at re))))
+              (point))
+
+         (if (c-major-mode-is 'pike-mode)
+             ;; "Handle the `<operator> syntax in Pike."
+             (let ((pos (point)))
+               (skip-chars-backward "-!%&*+/<=>^|~[]()")
+               (and (if (< (skip-chars-backward "`") 0)
+                        #t
+                        (begin (goto-char pos)
+                               (eq? (char-after (point)) #\`)))
+                    (let ((re (%c-langvar 'c-symbol-key)))
+                      (and re (looking-at re)))
+                    (>= (match-end 0) pos)
+                    (point)))
+             #f)
+
+         ;; "Handle the "operator +" syntax in C++."
+         (let ((op-re (%c-langvar 'c-overloadable-operators-regexp)))
+           (if (and op-re
+                    (= (c-backward-token-2
+                        0 #f (c-determine-limit 500))
+                       0))
+               (cond ((and (let ((re (%c-langvar
+                                      'c-overloadable-operators-regexp)))
+                             (and re (looking-at re)))
+                           (or (not (%c-langvar 'c-opt-op-identifier-prefix))
+                               (and (= (c-backward-token-2 1) 0)
+                                    (let ((re (%c-langvar
+                                               'c-opt-op-identifier-prefix)))
+                                      (and re (looking-at re))))))
+                      (point))
+
+                     ((save-excursion
+                        (and (let ((re (%c-langvar
+                                        'c-opt-op-identifier-prefix)))
+                               (and re (looking-at re)))
+                             (= (c-forward-token-2 1) 0)
+                             (let ((re (%c-langvar
+                                        'c-overloadable-operators-regexp)))
+                               (and re (looking-at re)))))
+                      (point)))
+               #f)))))
+
+    ;;------------------------------------------------------------------
     ;; Token movement (`cc-engine.el:4911'-`:5183')
     ;;------------------------------------------------------------------
     ;; `c-simple-skip-symbol-backward' and `c-beginning-of-current-token'
@@ -2973,6 +3094,579 @@
                       (cons (cons 'c-nonsymbol-token-regexp "\\s.")
                             (*c-lang-var-overrides*))))
         (apply c-backward-token-2 args)))
+
+    ;;------------------------------------------------------------------
+    ;; `c-syntactic-re-search-forward' (`cc-engine.el:5196'-`:5450')
+    ;;------------------------------------------------------------------
+    ;; The token and barrier code above and everything below reads it.
+    (define (c-syntactic-re-search-forward regexp . args)
+      ;; "Like `re-search-forward', but only report matches that are found
+      ;; in syntactically significant text. ..."
+      (let ((bound (if (pair? args) (car args) #f))
+            (noerror (if (and (pair? args) (pair? (cdr args)))
+                         (cadr args) #f))
+            (paren-level (if (and (pair? args) (pair? (cdr args))
+                                  (pair? (cddr args)))
+                             (caddr args) #f))
+            (not-inside-token (if (and (pair? args) (pair? (cdr args))
+                                       (pair? (cddr args))
+                                       (pair? (cdddr args)))
+                                  (cadddr args) #f))
+            (lookbehind-submatch (if (and (pair? args) (pair? (cdr args))
+                                          (pair? (cddr args))
+                                          (pair? (cdddr args))
+                                          (pair? (cddddr args)))
+                                     (car (cddddr args)) #f)))
+        (set! bound (or bound (point-max)))
+        (if paren-level (set! paren-level -1))
+
+        (let ((start (point))
+              (tmp #f)
+              ;; "Start position for the last search."
+              (search-pos #f)
+              ;; "The `parse-partial-sexp' state between the start
+              ;; position and the point."
+              (state #f)
+              ;; "The current position after the last state update. ..."
+              (state-pos (point))
+              ;; "The position at which to check the state and the state
+              ;; there. ..."
+              (check-pos #f)
+              (check-state #f)
+              ;; "Last position known to end a token."
+              (last-token-end-pos (point-min))
+              ;; "Set when a valid match is found."
+              (found #f))
+
+          (guard (e ((quit-condition? e) (raise e))
+                    (else (goto-char start) (raise e)))
+            (let loop ()
+              (when (and
+                     (begin
+                       (set! search-pos (point))
+                       (if (re-search-forward regexp bound noerror)
+                           #t
+                           ;; "Without the following, when PAREN-LEVEL is
+                           ;; non-nil, and NOERROR is not nil or t, and
+                           ;; the very first search above has just
+                           ;; failed, point would end up at BOUND rather
+                           ;; than just before the next close paren."
+                           (begin
+                             (when (and (eq? search-pos start)
+                                        paren-level
+                                        (not (or (not noerror)
+                                                 (eq? noerror #t))))
+                               (set! state (parse-partial-sexp start bound -1))
+                               (if (eq? (car state) -1)
+                                   (set! bound (- (point) 1))))
+                             #f)))
+
+                     (begin
+                       (set! state (parse-partial-sexp
+                                    state-pos (match-beginning 0)
+                                    paren-level #f state))
+                       (set! state-pos (point))
+                       (let ((cp (and lookbehind-submatch
+                                      (or (not paren-level)
+                                          (>= (car state) 0))
+                                      (match-end lookbehind-submatch))))
+                         (set! check-pos cp)
+                         (if cp
+                             (set! check-state (parse-partial-sexp
+                                                state-pos check-pos
+                                                paren-level #f state))
+                             (begin
+                               (set! check-pos state-pos)
+                               (set! check-state state))))
+
+                       (cond
+                        ;; "Match inside a line comment. Skip to eol.
+                        ;; Use `re-search-forward' instead of
+                        ;; `skip-chars-forward' to get the right bound
+                        ;; behavior."
+                        ((nth 7 check-state)
+                         (re-search-forward "[\n\r]" bound noerror))
+
+                        ;; "Match inside a block comment. Skip to the
+                        ;; '*/'."
+                        ((nth 4 check-state)
+                         (search-forward "*/" bound noerror))
+
+                        ;; "Match in the middle of the opener of a block
+                        ;; or line comment."
+                        ((and (not (nth 5 check-state))
+                              (eq? (char-before check-pos) #\/)
+                              (not (c-get-char-property (1- check-pos)
+                                                        'syntax-table))
+                              (memv (char-after check-pos) (list #\/ #\*)))
+                         (if (eq? (char-after check-pos) #\/)
+                             (re-search-forward "[\n\r]" bound noerror)
+                             (search-forward "*/" bound noerror)))
+
+                        ;; "The last `parse-partial-sexp' above might have
+                        ;; stopped short of the real check position if the
+                        ;; end of the current sexp was encountered in
+                        ;; paren-level mode. ..."
+                        ((begin (set! tmp (car check-state))
+                                (and paren-level (not (zero? tmp))))
+                         (if (> tmp 0)
+                             ;; "Inside a nested paren sexp."
+                             (if lookbehind-submatch
+                                 ;; "See the NOTE above."
+                                 (begin (goto-char state-pos) #t)
+                                 ;; "Skip out of the paren quickly."
+                                 (begin
+                                   (set! state (parse-partial-sexp
+                                                state-pos bound 0 #f state))
+                                   (set! state-pos (point))
+                                   #t))
+                             ;; "Have exited the current paren sexp."
+                             (if noerror
+                                 (begin
+                                   ;; "The last `parse-partial-sexp' call
+                                   ;; above has left us just after the
+                                   ;; closing paren in this case, so we
+                                   ;; can modify the bound to leave the
+                                   ;; point at the right position upon
+                                   ;; return."
+                                   (set! bound (- (point) 1))
+                                   #f)
+                                 (error "Search failed" regexp))))
+
+                        ;; "Match inside a string."
+                        ((begin (set! tmp (nth 3 check-state)) tmp)
+                         (if (or lookbehind-submatch
+                                 (not (integer? tmp)))
+                             ;; "See the NOTE above."
+                             (begin (goto-char state-pos) #t)
+                             ;; "Skip to the end of the string before
+                             ;; continuing."
+                             (let ((ender (string (integer->char tmp)))
+                                   (continue #t))
+                               (let skiploop ()
+                                 (when continue
+                                   (if (search-forward ender bound noerror)
+                                       (begin
+                                         (set! state (parse-partial-sexp
+                                                      state-pos (point)
+                                                      #f #f state))
+                                         (set! state-pos (point))
+                                         (set! continue (nth 3 state)))
+                                       (set! continue #f))))
+                               continue)))
+
+                        ;; "Match inside a macro. Skip to the end of it."
+                        ((save-excursion
+                           (save-match-data
+                             (c-beginning-of-macro start)))
+                         (c-end-of-macro)
+                         (cond ((<= (point) bound) #t)
+                               (noerror #f)
+                               (else (error "Search failed" regexp))))
+
+                        ;; "Inside a token."
+                        ((and not-inside-token
+                              (or (< check-pos last-token-end-pos)
+                                  (< check-pos
+                                     (save-excursion
+                                       (goto-char check-pos)
+                                       (save-match-data
+                                         (c-end-of-current-token
+                                          last-token-end-pos))
+                                       (set! last-token-end-pos (point))
+                                       last-token-end-pos))))
+                         (if lookbehind-submatch
+                             ;; "See the NOTE above."
+                             (goto-char state-pos)
+                             (goto-char (min last-token-end-pos bound)))
+                         #t)
+
+                        ;; "A real match."
+                        (else
+                         (set! found #t)
+                         #f)))
+
+                     ;; "Should loop to search again, but take care to
+                     ;; avoid looping on the same spot."
+                     (or (not (= search-pos (point)))
+                         (if (= (point) bound)
+                             (if noerror
+                                 #f
+                                 (error "Search failed" regexp))
+                             (begin (forward-char) #t))))
+                (loop)))
+
+            (if found
+                (begin
+                  (goto-char (match-end 0))
+                  (match-end 0))
+
+                ;; "Search failed. Set point as appropriate."
+                (begin
+                  (cond
+                   ((eq? noerror #t)
+                    (goto-char start))
+                   ((not (memq noerror '(before-literal after-literal)))
+                    (goto-char bound))
+                   (else
+                    (set! state (parse-partial-sexp state-pos bound #f #f state))
+                    (if (or (nth 3 state) (nth 4 state))
+                        (if (eq? noerror 'before-literal)
+                            (goto-char (nth 8 state))
+                            (parse-partial-sexp bound (point-max) #f #f
+                                                state 'syntax-table))
+                        (goto-char bound))))
+                  #f))))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-syntactic-skip-backward' (`cc-engine.el:5454'-`:5581')
+    ;;------------------------------------------------------------------
+    (define (c-syntactic-skip-backward skip-chars . args)
+      ;; "Like `skip-chars-backward' but only look at syntactically
+      ;; relevant chars. ..."
+      (let* ((limit (if (pair? args) (car args) #f))
+             (paren-level (if (and (pair? args) (pair? (cdr args)))
+                              (cadr args) #f))
+             (start (point))
+             ;; "The result from `c-beginning-of-macro' at the start
+             ;; position or the start position itself if it isn't within
+             ;; a macro."
+             (start-macro-beg
+              (save-excursion
+                (goto-char start)
+                (c-beginning-of-macro limit)
+                (point)))
+             (lit-beg #f)
+             ;; "The earliest position after the current one with the same
+             ;; paren level. Used only when `paren-level' is set."
+             (paren-level-pos (point))
+             ;; "Whether we can optimize with an early
+             ;; `c-backward-syntactic-ws'."
+             (opt-ws (string-match "^\\^[^ \t\n\r]+$" skip-chars)))
+
+        ;; "In the next while form, we only loop when `skip-chars' is
+        ;; something like "^/" and we've stopped at the end of a block
+        ;; comment."
+        (let outer ()
+          (when (begin
+                  ;; "The next loop "tries" to find the end point each
+                  ;; time round, loops when it's ended up at the wrong
+                  ;; level of nesting."
+                  (let inner ()
+                    (when (and
+                           ;; "Optimize for, in particular, large blocks of
+                           ;; comments from `comment-region'."
+                           (begin
+                             (when opt-ws
+                               (let ((opt-pos (point)))
+                                 (c-backward-syntactic-ws limit)
+                                 (if (or (not limit)
+                                         (> (point) limit))
+                                     (set! paren-level-pos (point))
+                                     (goto-char opt-pos))))
+                             #t)
+                           ;; "Move back to a candidate end point which
+                           ;; isn't in a literal or in a macro we didn't
+                           ;; start in."
+                           (let ((pos (point))
+                                 (macro-start #f))
+                             (let mover ()
+                               (when (and (< (skip-chars-backward
+                                              skip-chars limit)
+                                             0)
+                                          (or
+                                           (begin
+                                             (set! lit-beg (c-literal-start))
+                                             (if lit-beg
+                                                 (begin (goto-char lit-beg)
+                                                        #t)
+                                                 #f))
+                                           ;; "Don't stop inside a macro we
+                                           ;; didn't start in."
+                                           (if (save-excursion
+                                                 (and (c-beginning-of-macro
+                                                       limit)
+                                                      (< (point)
+                                                         start-macro-beg)
+                                                      (begin
+                                                        (set! macro-start
+                                                              (point))
+                                                        (point))))
+                                               (goto-char macro-start)
+                                               #f)))
+                                 (when opt-ws
+                                   (let ((opt-pos (point)))
+                                     (c-backward-syntactic-ws limit)
+                                     (if (and limit (<= (point) limit))
+                                         (goto-char opt-pos))))
+                                 (mover)))
+                             (< (point) pos))
+                           ;; "Check whether we're at the wrong level of
+                           ;; nesting (when `paren-level' is non-nil)."
+                           (let ((pos (point))
+                                 (state-2 #f)
+                                 (pps-end-pos #f))
+                             (if (and paren-level
+                                      (save-excursion
+                                        (set! state-2
+                                              (parse-partial-sexp
+                                               pos paren-level-pos -1))
+                                        (set! pps-end-pos (point))
+                                        (not (= (car state-2) 0))))
+                                 ;; "Not at the right level."
+                                 (if (and (< (car state-2) 0)
+                                          ;; "We stop above if we go out of
+                                          ;; a paren. Now check whether it
+                                          ;; precedes or is nested in the
+                                          ;; starting sexp."
+                                          (save-excursion
+                                            (set! state-2
+                                                  (parse-partial-sexp
+                                                   pps-end-pos
+                                                   paren-level-pos
+                                                   #f #f state-2))
+                                            (< (car state-2) 0)))
+                                     ;; "We've stopped short of the starting
+                                     ;; position so the hit was inside a
+                                     ;; nested list. Go up until we are at
+                                     ;; the right level."
+                                     (guard (e ((quit-condition? e)
+                                                (raise e))
+                                               (else
+                                                (goto-char (or limit
+                                                               (point-min)))
+                                                #f))
+                                       (goto-char (scan-lists
+                                                   pos -1 (- (car state-2))))
+                                       (set! paren-level-pos (point))
+                                       (if (and limit
+                                                (>= limit paren-level-pos))
+                                           (begin (goto-char limit) #f)
+                                           #t))
+                                     ;; "The hit was outside the list at
+                                     ;; the start position. Go to the start
+                                     ;; of the list and exit."
+                                     (begin
+                                       (goto-char (+ 1 (nth 1 state-2)))
+                                       #f))
+                                 #f)))
+                      (inner)))
+
+                  ;; "Skip syntactic ws afterwards so that we don't stop
+                  ;; at the end of a comment if `skip-chars' is something
+                  ;; like "^/"."
+                  ;; "Skip syntactic ws afterwards..." The C reads
+                  ;; POINT before the skip; Scheme argument order is
+                  ;; unspecified (Guile's compiler took the second one
+                  ;; first here), so the read is sequenced explicitly.
+                  (let ((before (point)))
+                    (c-backward-syntactic-ws limit)
+                    (> before (point))))
+            (outer)))
+
+        ;; "We might want to extend this with more useful return values in
+        ;; the future."
+        (not (= (point) start))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-determine-limit' (`cc-engine.el:5864'-`:6012')
+    ;;------------------------------------------------------------------
+    ;; Moved up from its file position: `c-on-identifier' reads it, and
+    ;; so does much of the declaration machinery to come.
+    (define (c-determine-limit-no-macro here org-start)
+      ;; "If HERE is inside a macro, and ORG-START is not also in the same
+      ;; macro, return the beginning of the macro. Otherwise return HERE.
+      ;; Point is not preserved by this function."
+      (goto-char here)
+      (let ((here-BOM (and (c-beginning-of-macro) (point))))
+        (if (and here-BOM
+                 (not (eq? (begin (goto-char org-start)
+                                  (and (c-beginning-of-macro) (point)))
+                           here-BOM)))
+            here-BOM
+            here)))
+
+    (define (c-determine-limit-get-base start try-size)
+      ;; "Get a "safe place" approximately TRY-SIZE characters before
+      ;; START. This defsubst doesn't preserve point."
+      (goto-char start)
+      (let* ((pos (max (- start try-size) (point-min)))
+             (s (c-semi-pp-to-literal pos))
+             (cand (or (%c-caddr s) pos)))
+        (if (>= cand (point-min))
+            cand
+            (begin
+              (parse-partial-sexp pos start #f #f (car s) 'syntax-table)
+              (point)))))
+
+    (define (c-determine-limit how-far-back . args)
+      ;; "Return a buffer position approximately HOW-FAR-BACK non-literal
+      ;; characters from START (default point). ..."
+      (let ((start (if (pair? args) (car args) #f))
+            (try-size (if (and (pair? args) (pair? (cdr args)))
+                          (cadr args) #f))
+            (org-start (if (and (pair? args) (pair? (cdr args))
+                                (pair? (cddr args)))
+                           (caddr args) #f)))
+        (save-excursion
+          (let* ((start (or start (point)))
+                 (org-start (or org-start start))
+                 (try-size (or try-size (* 2 how-far-back)))
+                 (base (c-determine-limit-get-base start try-size))
+                 (pos base)
+                 (s (parse-partial-sexp pos pos)) ; "null state."
+                 (stack '())
+                 (elt #f)
+                 (count 0))
+            ;; "Optimization for large blocks of comments, particularly
+            ;; those being created by `comment-region'."
+            (goto-char pos)
+            (forward-comment try-size)
+            (set! pos (point))
+
+            (let loop ()
+              (when (< pos start)
+                ;; "Move forward one literal each time round this loop.
+                ;; Move forward to the start of a comment or string."
+                (set! s (parse-partial-sexp pos start #f #f s 'syntax-table))
+
+                ;; "Gather details of the non-literal-bit - starting pos
+                ;; and size."
+                (let ((size (- (if (or (and (nth 4 s)
+                                            (not (eq? (nth 7 s) 'syntax-table)))
+                                       (nth 3 s))
+                                   (nth 8 s)
+                                   (point))
+                               pos)))
+                  (if (> size 0)
+                      (set! stack (cons (cons pos size) stack))))
+
+                ;; "Move forward to the end of the comment/string."
+                (if (or (and (nth 4 s) (not (eq? (nth 7 s) 'syntax-table)))
+                        (nth 3 s))
+                    (set! s (parse-partial-sexp (point) start #f #f s 'syntax-table)))
+                (set! pos (point))
+                (loop)))
+
+            ;; "Now try and find enough non-literal characters recorded on
+            ;; the stack. Go back one recorded literal each time round this
+            ;; loop."
+            (let loop ()
+              (when (and (< count how-far-back) (pair? stack))
+                (set! elt (car stack))
+                (set! stack (cdr stack))
+                (set! count (+ count (cdr elt)))
+                (loop)))
+            (cond
+             ((not elt)                 ; "No non-literal characters found."
+              (cond
+               ((> pos start)           ; "Nothing but literals"
+                base)
+               ((and (> base (point-min))
+                     (> (- base try-size) (point-min))) ; "prevent infinite recursion."
+                (c-determine-limit how-far-back base (* 2 try-size) org-start))
+               (else base)))
+             ((>= count how-far-back)
+              (c-determine-limit-no-macro
+               (+ (car elt) (- count how-far-back))
+               org-start))
+             ((= base (point-min))
+              (point-min))
+             ((> base (- start try-size)) ; "Can only happen if we hit point-min."
+              (c-determine-limit-no-macro (car elt) org-start))
+             (else
+              (c-determine-limit (- how-far-back count) base (* 2 try-size)
+                                 org-start)))))))
+
+    (define (c-determine-+ve-limit how-far . args)
+      ;; "Return a buffer position about HOW-FAR non-literal characters
+      ;; forward from START-POS (default point), which must not be inside
+      ;; a literal."
+      (let ((start-pos (if (pair? args) (car args) #f)))
+        (save-excursion
+          (let ((pos (or start-pos (point)))
+                (count how-far)
+                (s (parse-partial-sexp (point) (point)))) ; "null state"
+            (goto-char pos)
+            (let loop ()
+              (when (and (not (eobp)) (> count 0))
+                ;; "Scan over counted characters."
+                (set! s (parse-partial-sexp
+                         pos (min (+ pos count) (point-max))
+                         #f #f s 'syntax-table))
+                (set! count (- count (- (point) pos) 1))
+                (set! pos (point))
+                ;; "Scan over literal characters."
+                (when (nth 8 s)
+                  (set! s (parse-partial-sexp
+                           pos (point-max) #f #f s 'syntax-table))
+                  (set! pos (point)))
+                (loop)))
+            (point)))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-looking-at-special-brace-list' (`cc-engine.el:13584'-`:13645')
+    ;;------------------------------------------------------------------
+    ;; Moved up from its file position: `c-at-statement-start-p' reads it.
+    (define (c-looking-at-special-brace-list)
+      ;; "If we're looking at the start of a pike-style list, i.e., `({
+      ;; })', `([ ])', `(< >)', etc., a cons of a cons of its starting and
+      ;; ending positions and its entry in `c-special-brace-lists' is
+      ;; returned, nil otherwise. ..."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((sbl (%c-langvar 'c-special-brace-lists)))
+        (if sbl
+            (guard (e ((quit-condition? e) (raise e))
+                      (else #f))
+              (save-excursion
+                (let ((beg (point))
+                      (inner-beg #f)
+                      (end #f)
+                      (type #f))
+                  (c-forward-syntactic-ws)
+                  (if (eq? (char-after (point)) #\()
+                      (begin
+                        (forward-char 1)
+                        (c-forward-syntactic-ws)
+                        (set! inner-beg (point))
+                        (set! type (assq (char-after (point)) sbl)))
+                      (if (begin (set! type (assq (char-after (point)) sbl)) type)
+                          (begin
+                            (set! inner-beg (point))
+                            (c-backward-syntactic-ws)
+                            (forward-char -1)
+                            (set! beg (if (eq? (char-after (point)) #\()
+                                          (point)
+                                          #f)))))
+                  (if (and beg type)
+                      (if (and (c-safe
+                                (goto-char beg)
+                                (c-forward-sexp 1)
+                                (set! end (point))
+                                (eq? (char-before) #\)))
+                               (c-safe
+                                (goto-char inner-beg)
+                                (if (looking-at "\\s(")
+                                    ;; "Check balancing of the inner paren
+                                    ;; below."
+                                    (begin (c-forward-sexp 1) #t)
+                                    ;; "If the inner char isn't a paren
+                                    ;; then we can't check balancing, so
+                                    ;; just check the char before the outer
+                                    ;; closing paren."
+                                    (begin
+                                      (goto-char end)
+                                      (backward-char)
+                                      (c-backward-syntactic-ws)
+                                      (char=? (char-before) (cdr type))))))
+                          (if (or (not (eq? (char-syntax (char-before)) #\)))
+                                  (= (begin (c-forward-syntactic-ws) (point))
+                                     (- end 1)))
+                              (cons (cons beg end) type))
+                          (cons (list beg) type))
+                      #f))))
+            #f)))
 
     ;;------------------------------------------------------------------
     ;; Virtual semicolons (`cc-engine.el:14184'-`:14243')
