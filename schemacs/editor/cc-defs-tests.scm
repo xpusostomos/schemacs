@@ -11,6 +11,9 @@
  (scheme base)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) current-module eval)
+ (only (schemacs editor buffer) allocate-buffer set-buffer erase-buffer)
+ (only (schemacs editor editfns) insert goto-char point)
+ (only (schemacs editor command) signal-quit quit-condition?)
  (schemacs editor cc-defs))
 
 (test-begin "schemacs_editor_cc_defs")
@@ -139,5 +142,67 @@
                                 (current-module))
                  #f)
                (lambda (key . args) #t)))
+
+;;----------------------------------------------------------------------
+;; `c-major-mode-is' and the `scan-lists' wrappers
+;; (`cc-defs.el:541', `:780'-`:930')
+;;
+;; Every expectation is Emacs 31.1's answer on the same buffer.
+;;----------------------------------------------------------------------
+(test-begin "schemacs_editor_cc_defs_scan")
+
+(parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+  (test-equal "a quoted single mode is an eq test" #t
+              (c-major-mode-is 'c-mode))
+  (test-equal "another single mode is not the current one" #f
+              (c-major-mode-is 'c++-mode))
+  (test-equal "a quoted list answers the memq tail" '(c-mode c++-mode)
+              (c-major-mode-is '(c-mode c++-mode)))
+  (test-equal "a non-literal mode symbol works" #t
+              (let ((m 'c-mode)) (c-major-mode-is m)))
+  (test-equal "and a non-literal list answers its tail" '(c-mode)
+              (let ((m '(c++-mode c-mode))) (c-major-mode-is m))))
+
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert "(a (b)) x (c)\n")
+  (define (at n) (goto-char n))
+  (at 1) (test-equal "up-list-forward at the outer (" #f (c-up-list-forward))
+  (at 4) (test-equal "up-list-forward inside (b)" 8 (c-up-list-forward))
+  (at 4) (test-equal "up-list-backward from inside (b)" 1 (c-up-list-backward))
+  (at 1) (test-equal "down-list-forward after the outer (" 2 (c-down-list-forward))
+  (at 7) (test-equal "down-list-backward before the outer )" 6 (c-down-list-backward))
+  (at 1) (test-equal "go-list-forward returns the position" 8
+          (begin (c-go-list-forward)))
+  (at 7) (test-equal "go-list-backward returns the position" 4
+          (begin (c-go-list-backward)))
+  (at 1) (test-equal "go-up-list-forward moves when there is a list" #f
+          (c-go-up-list-forward))
+  (at 7) (test-equal "go-up-list-backward moves to the list's start" #t
+          (begin (c-go-up-list-backward) #t))
+  (at 1) (test-equal "go-down-list-forward moves inside" #t
+          (begin (c-go-down-list-forward) (= (point) 2)))
+  (at 7) (test-equal "go-down-list-backward moves inside" #t
+          (begin (c-go-down-list-backward) (= (point) 6)))
+  (at 1) (test-equal "safe-scan-lists answers the same as scan-lists" 8
+          (c-safe-scan-lists (point) 1 0))
+  (at 13) (test-equal "and nil at a lone close paren" #f
+          (c-safe-scan-lists (point) 1 0))
+  (erase-buffer) (insert "((a)\n") (at 1)
+  (test-equal "an unbalanced scan answers nil instead of signalling" #f
+              (c-safe-scan-lists (point) 1 0))
+  (at 1) (test-equal "and go-list-forward leaves point unmoved" #f
+          (begin (c-go-list-forward) #f))
+  (at 1) (test-equal "point is where it was" 1 (point)))
+
+(test-equal "c-safe answers the body's value" 3 (c-safe (+ 1 2)))
+(test-equal "c-safe answers #f for an error" #f (c-safe (error "boom")))
+(test-equal "c-safe re-raises a quit (Emacs's condition-case does not catch one)"
+            'quit
+            (guard (e ((quit-condition? e) 'quit))
+              (c-safe (signal-quit))
+              'no-quit))
+
+(test-end "schemacs_editor_cc_defs_scan")
 
 (test-end "schemacs_editor_cc_defs")

@@ -58,8 +58,15 @@
     (only (schemacs editor syntax) char-syntax-in with-syntax-table
           skip-chars-forward skip-chars-backward
           skip-syntax-forward skip-syntax-backward)
-    ;; `c-skip-ws-chars-*' move point.
-    (only (schemacs editor editfns) point goto-char)
+    ;; `c-skip-ws-chars-*' and the scan-lists wrappers move point and
+    ;; narrow.
+    (only (schemacs editor editfns) point goto-char point-min point-max
+          save-restriction narrow-to-region)
+    (only (schemacs editor syntax) scan-lists scan-sexps)
+    ;; `c-safe' re-raises a quit; this tree's quit is command.scm's
+    ;; record, and Emacs's `condition-case ... (error nil)' does not
+    ;; catch one.
+    (only (schemacs editor command) quit-condition?)
     ;; `c-save-buffer-state' is `with-silent-modifications' since Emacs
     ;; 24 (see below), which is `subr.el''s.
     (only (schemacs editor subr) with-silent-modifications)
@@ -89,7 +96,13 @@
    c-put-char-property c-get-char-property c-clear-char-property
    c-put-char-properties c-clear-char-properties c-min-property-position
    c-next-single-property-change
-   c-skip-ws-chars-forward c-skip-ws-chars-backward)
+   c-skip-ws-chars-forward c-skip-ws-chars-backward
+   c-safe c-forward-sexp c-backward-sexp c-safe-scan-lists
+   c-go-list-forward c-go-list-backward
+   c-up-list-forward c-up-list-backward
+   c-down-list-forward c-down-list-backward
+   c-go-up-list-forward c-go-up-list-backward
+   c-go-down-list-forward c-go-down-list-backward)
 
   (begin
 
@@ -772,12 +785,25 @@
            (with-syntax ((m* (datum->syntax (syntax mode)
                                             (syntax->datum (syntax mode)))))
              #'(c-lang-major-mode-is m*))
+           ;; `cc-defs.el:1162'-`:1171': a quoted *mode symbol* is an
+           ;; `eq' test, a quoted *list* of them a `memq', and a
+           ;; non-literal MODE is evaluated once and then tested the
+           ;; same way. Emitting `memq' for a single symbol (`(memq m
+           ;; (quote pike-mode))') is a run-time error - `c-backward-sws'
+           ;; is the first caller outside a `c-lang-defconst' to find
+           ;; out.
            (let ((d (syntax->datum (syntax mode))))
              (if (and (pair? d) (eq? (car d) 'quote))
-                 (with-syntax ((ms (datum->syntax (syntax mode) (cadr d))))
-                   #'(memq (*c-buffer-is-cc-mode*) 'ms))
+                 (let ((m (cadr d)))
+                   (with-syntax ((ms (datum->syntax (syntax mode) m)))
+                     (if (list? m)
+                         #'(memq (*c-buffer-is-cc-mode*) 'ms)
+                         #'(eq? (*c-buffer-is-cc-mode*) 'ms))))
                  (with-syntax ((m* (datum->syntax (syntax mode) d)))
-                   #'(eq? (*c-buffer-is-cc-mode*) m*)))))))))
+                   #'(let ((mode m*))
+                       (if (list? mode)
+                           (memq (*c-buffer-is-cc-mode*) mode)
+                           (eq? (*c-buffer-is-cc-mode*) mode)))))))))))
 
 ;;----------------------------------------------------------------------
 ;; `c-lang-major-mode-is' (`cc-defs.el:2967')
@@ -914,5 +940,119 @@
           (goto-char here)
           (skip-syntax-backward " >" (+ here count)))
         count)))
+
+;;----------------------------------------------------------------------
+;; The `scan-lists' wrappers (`cc-defs.el:541', `:780'-`:930')
+;;----------------------------------------------------------------------
+;; Emacs's `c-safe' catches `error' only, so a C-g passes through; this
+;; tree's quit is the `<quit-condition>' record `command.scm' raises, so
+;; it is re-raised by hand and everything else answers #f.
+(define-syntax c-safe
+  (syntax-rules ()
+    ((_ body ...)
+     (guard (e ((quit-condition? e) (raise e))
+               (else #f))
+       body ...))))
+
+(define (c-forward-sexp . count-args)
+  ;; "Move forward across COUNT balanced expressions. A negative COUNT
+  ;; means move backward. Signal an error if the move fails for any
+  ;; reason. This is like `forward-sexp' except that it isn't
+  ;; interactive ... and that it isn't susceptible to user
+  ;; configurations such as disabling of signals in certain
+  ;; situations."
+  (goto-char (scan-sexps (point) (if (pair? count-args) (car count-args) 1))))
+
+(define (c-backward-sexp . count-args)
+  ;; "See `c-forward-sexp' and reverse directions."
+  (c-forward-sexp (- (if (pair? count-args) (car count-args) 1))))
+
+(define (c-safe-scan-lists from count depth . limit-args)
+  ;; "Like `scan-lists' but returns nil instead of signaling errors for
+  ;; unbalanced parens. A limit for the search may be given. FROM is
+  ;; assumed to be on the right side of it."
+  (let ((limit (if (pair? limit-args) (car limit-args) #f)))
+    (if limit
+        (save-restriction
+          (if (< count 0)
+              (narrow-to-region limit (point-max))
+              (narrow-to-region (point-min) limit))
+          (c-safe (scan-lists from count depth)))
+        (c-safe (scan-lists from count depth)))))
+
+(define (c-go-list-forward . args)
+  ;; "Move forward across one balanced group of parentheses starting at
+  ;; POS or point. Return POINT when we succeed, NIL when we fail. In
+  ;; the latter case, leave point unmoved. A LIMIT for the search may
+  ;; be given. The start position is assumed to be before it."
+  (let* ((pos (if (pair? args) (car args) #f))
+         (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+         (dest (c-safe-scan-lists (if pos pos (point)) 1 0 limit)))
+    (if dest (begin (goto-char dest) dest) #f)))
+
+(define (c-go-list-backward . args)
+  ;; "Move backward across one balanced group of parentheses starting
+  ;; at POS or point. ... The start position is assumed to be after
+  ;; it."
+  (let* ((pos (if (pair? args) (car args) #f))
+         (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+         (dest (c-safe-scan-lists (if pos pos (point)) -1 0 limit)))
+    (if dest (begin (goto-char dest) dest) #f)))
+
+(define (c-up-list-forward . args)
+  ;; "Return the first position after the list sexp containing POS, or
+  ;; nil if no such position exists. The point is used if POS is left
+  ;; out."
+  (let ((pos (if (pair? args) (car args) #f))
+        (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+    (c-safe-scan-lists (if pos pos (point)) 1 1 limit)))
+
+(define (c-up-list-backward . args)
+  ;; "Return the position of the start of the list sexp containing POS,
+  ;; or nil if no such position exists."
+  (let ((pos (if (pair? args) (car args) #f))
+        (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+    (c-safe-scan-lists (if pos pos (point)) -1 1 limit)))
+
+(define (c-down-list-forward . args)
+  ;; "Return the first position inside the first list sexp after POS, or
+  ;; nil if no such position exists."
+  (let ((pos (if (pair? args) (car args) #f))
+        (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+    (c-safe-scan-lists (if pos pos (point)) 1 -1 limit)))
+
+(define (c-down-list-backward . args)
+  ;; "Return the last position inside the last list sexp before POS, or
+  ;; nil if no such position exists."
+  (let ((pos (if (pair? args) (car args) #f))
+        (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+    (c-safe-scan-lists (if pos pos (point)) -1 -1 limit)))
+
+(define (c-go-up-list-forward . args)
+  ;; "Move the point to the first position after the list sexp
+  ;; containing POS, or containing the point if POS is left out. Return
+  ;; t if such a position exists, otherwise nil is returned and the
+  ;; point isn't moved."
+  (let ((dest (apply c-up-list-forward args)))
+    (if dest (begin (goto-char dest) #t) #f)))
+
+(define (c-go-up-list-backward . args)
+  ;; "Move the point to the position of the start of the list sexp
+  ;; containing POS, or containing the point if POS is left out."
+  (let ((dest (apply c-up-list-backward args)))
+    (if dest (begin (goto-char dest) #t) #f)))
+
+(define (c-go-down-list-forward . args)
+  ;; "Move the point to the first position inside the first list sexp
+  ;; after POS, or before the point if POS is left out."
+  (let ((dest (apply c-down-list-forward args)))
+    (if dest (begin (goto-char dest) #t) #f)))
+
+(define (c-go-down-list-backward . args)
+  ;; "Move the point to the last position inside the last list sexp
+  ;; before POS, or before the point if POS is left out."
+  (let ((dest (apply c-down-list-backward args)))
+    (if dest (begin (goto-char dest) #t) #f)))
+
 )
 )

@@ -12281,3 +12281,53 @@ return value and point: 295 answered lines, byte-identical between
 Emacs 31.1 and this tree. Every expectation in the new
 `comment_tools` group of `cc-engine-tests.scm` is one of those
 answers.
+
+# cc-mode: the scan-lists wrappers, and a bug in `c-major-mode-is`
+# (2026-11-21)
+
+The block of `cc-defs.el` that wraps `scan-lists` is ported whole -
+`c-safe` (`:541'), `c-forward-sexp`/`c-backward-sexp`, `c-safe-scan-
+lists` (`:804'), `c-go-list-forward`/`-backward`, `c-up-list-forward`/
+`-backward`, `c-down-list-forward`/`-backward` and the four `c-go-...`
+movers - and cc-engine gained `c-simple-skip-symbol-backward` and
+`c-beginning-of-current-token` (`cc-engine.el:4911'-`:4938', moved up
+because `c-backward-sws' below reads the second).
+
+## The bug this found
+
+**`c-major-mode-is` expanded `(c-major-mode-is 'pike-mode)` to
+`(memq c-buffer-is-cc-mode 'pike-mode)`** - a run-time error - because
+the quoted-mode branch always emitted `memq` against a quoted *symbol*
+where Emacs emits an `eq` for a single mode and a `memq` only for a
+list (`cc-defs.el:1162'-`:1171'). Its non-literal branch had the
+matching flaw: it emitted `eq` whatever the value. Nothing had
+noticed, because until now every caller was inside a
+`c-lang-defconst` VAL, which takes the `c-langs-are-parametric` branch.
+Fixed in both branches; `cc-defs-tests.scm` now pins the four shapes
+(a quoted symbol, a quoted list, a non-literal symbol, a non-literal
+list) and their return values, which are Emacs's raw `eq`/`memq`
+answers (`(c-major-mode-is '(c-mode c++-mode))` is the list, not `t`).
+
+This is the second time a cc-mode helper has been wrong in the branch
+its tests never took; the first was syntax-propertize's `when`-in-value.
+
+## Departures, the usual shape
+
+- The wrappers are procedures: POS and LIMIT are the two optional (rest)
+  arguments, where Emacs's macros splice them.
+- **`c-safe` re-raises a quit.** Emacs's `condition-case ... (error
+  nil)` does not catch `quit`; this tree's quit is the
+  `<quit-condition>` record `command.scm` raises, which a bare `guard`
+  would swallow, so `c-safe` re-raises it before answering `#f` for
+  everything else. `cc-defs` imports `quit-condition?` for it.
+
+## Verification
+
+Two differentials, byte-identical to Emacs 31.1:
+- the token/list table: every position of a five-line C fixture probed
+  with `c-beginning-of-current-token`, `c-simple-skip-symbol-backward`,
+  the six list wrappers, `c-go-list-*` and `c-safe-scan-lists` - 423
+  answered lines;
+- the list/mode table on `(a (b)) x (c)`: the wrappers' answers at six
+  positions plus the five `c-major-mode-is` shapes, and an unbalanced
+  `((a)` where `c-safe-scan-lists` must answer nil.

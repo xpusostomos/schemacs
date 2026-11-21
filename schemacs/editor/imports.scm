@@ -1092,7 +1092,9 @@
     c-alpha
     c-auto-newline
     c-backward-comments
+    c-backward-sexp
     c-backward-single-comment
+    c-beginning-of-current-token
     c-beginning-of-macro
     c-benign-error
     c-calculate-state
@@ -1106,6 +1108,8 @@
     c-define-lang-constant-here
     c-delq-from-dotted-list
     c-digit
+    c-down-list-backward
+    c-down-list-forward
     c-echo-parsing-error
     c-electric-flag
     c-emacs-features
@@ -1115,10 +1119,17 @@
     c-forward-comment-minus-1
     c-forward-comments
     c-forward-over-cpp-define-id
+    c-forward-sexp
     c-forward-single-comment
     c-forward-to-cpp-define-body
     c-get-char-property
     c-get-lang-constant
+    c-go-down-list-backward
+    c-go-down-list-forward
+    c-go-list-backward
+    c-go-list-forward
+    c-go-up-list-backward
+    c-go-up-list-forward
     c-hungry-delete-key
     c-indentation-style
     c-init-language-vars
@@ -1168,8 +1179,11 @@
     c-query-and-set-macro-start
     c-query-macro-start
     c-register-emacs-variable-reader!
+    c-safe
+    c-safe-scan-lists
     c-save-buffer-state
     c-shift-line-indentation
+    c-simple-skip-symbol-backward
     c-skip-ws-chars-backward
     c-skip-ws-chars-forward
     c-string-limit-regexp
@@ -1177,6 +1191,8 @@
     c-string-syntax
     c-syntactic-end-of-macro
     c-syntax-table-hwm
+    c-up-list-backward
+    c-up-list-forward
     c-upper
     c-with-syntax-table
     c-ws*-string-limit-regexp

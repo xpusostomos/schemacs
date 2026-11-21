@@ -15307,3 +15307,47 @@ want `c-literal-limits`/`c-literal-type`/`c-go-list-forward` and the
 `c-doc-line-join-re` default from cc-mode.el. `c-forward-sws` also
 reads `c-noise-macro-name-re` (cc-vars' defvar, default
 `regexp-unmatchable') and `c-looking-at-c++-attribute`.
+
+## cc-mode: scan-lists wrappers and token boundaries (2026-11-21)
+
+cc-defs now has the whole `scan-lists` wrapper block - `c-safe`,
+`c-forward-sexp`/`c-backward-sexp`, `c-safe-scan-lists`,
+`c-go-list-forward`/`-backward`, `c-up-list-*`, `c-down-list-*`, the
+`c-go-...` movers - and cc-engine has `c-simple-skip-symbol-backward`
+and `c-beginning-of-current-token` (moved up; `c-backward-sws` reads
+it).
+
+**Fixed a bug in `c-major-mode-is`**: a quoted single mode expanded to
+`(memq m 'pike-mode)`, a runtime error, and the non-literal branch
+emitted `eq` whatever the value. Emacs's macro is `eq` for a symbol,
+`memq` for a list, and evaluates a non-literal MODE once
+(`cc-defs.el:1162`). Every earlier caller was inside a
+`c-lang-defconst` and took the parametric branch, which is why nothing
+had found it. Four shapes are pinned in `cc-defs-tests.scm`
+(45 passes); note the return values are Emacs's raw answers - the list
+itself for a list, not `t`.
+
+**`c-safe` re-raises a quit** (Emacs's `condition-case` does not catch
+one; a bare `guard` would), and cc-defs imports `quit-condition?` from
+`command.scm` for it - its second reach upward, named in the source.
+
+Verification: a 423-line token/list differential and a 50-line
+list/mode table, both identical to Emacs 31.1. `cc-engine-tests` is
+115 passes.
+
+**Right-sizing the verification (Chris's point).** The full 88-suite
+battery is for changes to *shared* primitives - `syntax.scm`, `buffer`,
+`editfns`, `keyboard`, `xdisp` - because those reach every front end.
+A cc-mode-only change (the cc-* libraries, which nothing else imports)
+gets `cc-defs-tests`, `cc-langs-tests`, `cc-vars-tests`,
+`cc-engine-tests`, `cl-seq-tests` and `loadup-tests`, plus
+`python3 tools/pty-check.py imports scratch` when `imports.scm`/
+`loadup.scm` changed - a couple of minutes, not twenty.
+
+**Next**: the syntactic-whitespace engine proper still needs
+`c-looking-at-c++-attribute` (which reads `c-literal-limits`, hence
+`c-full-pp-to-literal`), the `c-doc-line-join-re`/`-end-ch` and
+`c-noise-macro-name-re` defaults (cc-mode.el's and cc-vars'), the
+`c-is-sws`/`c-in-sws` property helpers, then `c-forward-sws` and
+`c-backward-sws` themselves, and the `c-invalidate-sws-region-*`
+hooks with `c-before-change`/`c-after-change`.

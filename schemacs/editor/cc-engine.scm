@@ -94,7 +94,7 @@
     (only (schemacs editor cc-defs) c-emacs-features c-save-buffer-state
           c-put-char-property c-clear-char-property c-get-char-property
           c-next-single-property-change %c-true %c-false
-          c-get-lang-constant *c-buffer-is-cc-mode*)
+          c-get-lang-constant *c-buffer-is-cc-mode* c-major-mode-is)
     (only (schemacs editor intervals) get)
     (only (schemacs editor cc-vars) *c-report-syntactic-errors*))
 
@@ -122,6 +122,7 @@
    c-string-syntax c-string-limit-regexp c-ws*-string-limit-regexp
    c-parsing-error set!c-parsing-error c-echo-parsing-error
    c-put-c-type-property c-clear-c-type-property
+   c-simple-skip-symbol-backward c-beginning-of-current-token
    ;; cc-defs.el's, placed here because they call down from Emacs' obarray
    c-point c-is-escaped c-benign-error)
 
@@ -822,6 +823,56 @@
             (c-clear-char-property (point) 'c-type))
           (goto-char (c-next-single-property-change (point) 'c-type #f to))
           (if (< (point) to) (loop) #f))))
+
+    ;;------------------------------------------------------------------
+    ;; Token boundaries (`cc-engine.el:4911'-`:4938', moved up)
+    ;;------------------------------------------------------------------
+    ;; Moved up from their place in the file: `c-backward-sws' below
+    ;; reads `c-beginning-of-current-token'. `c-end-of-token' and
+    ;; `c-end-of-current-token' stay at their file position, which
+    ;; nothing here reaches yet.
+    (define (c-simple-skip-symbol-backward)
+      ;; "If the point is at the end of a symbol then skip backward to
+      ;; the beginning of it. Don't move otherwise. Return non-nil if
+      ;; point moved."
+      (or (< (skip-syntax-backward "w_") 0)
+          (and (c-major-mode-is 'pike-mode)
+               ;; "Handle the `<operator> syntax in Pike."
+               (let ((pos (point)))
+                 (if (and (< (skip-chars-backward "-!%&*+/<=>^|~[]()") 0)
+                          (< (skip-chars-backward "`") 0)
+                          (let ((re (%c-langvar 'c-symbol-key)))
+                            (and re (looking-at re)))
+                          (>= (match-end 0) pos))
+                     #t
+                     (begin (goto-char pos) #f))))))
+
+    (define (c-beginning-of-current-token . back-limit-args)
+      ;; "Move to the beginning of the current token. Do not move if not
+      ;; in the middle of one. BACK-LIMIT may be used to bound the
+      ;; backward search; if given it's assumed to be at the boundary
+      ;; between two tokens. Return non-nil if the point is moved, nil
+      ;; otherwise."
+      (let ((back-limit (if (pair? back-limit-args) (car back-limit-args) #f))
+            (start (point)))
+        (if (looking-at "\\w\\|\\s_")
+            (skip-syntax-backward "w_" back-limit)
+            (when (< (skip-syntax-backward ".()" back-limit) 0)
+              (let loop ()
+                (let ((pos (or (and (let ((re (%c-langvar 'c-nonsymbol-token-regexp)))
+                                      (and re (looking-at re)))
+                                    (match-end 0))
+                               ;; "`c-nonsymbol-token-regexp' should
+                               ;; always match since we've skipped
+                               ;; backward over punctuation or paren
+                               ;; syntax, but consume one char in case it
+                               ;; doesn't so that we don't leave point
+                               ;; before some earlier incorrect token."
+                               (+ (point) 1))))
+                  (if (<= pos start)
+                      (begin (goto-char pos) (loop))
+                      #f)))))
+        (< (point) start)))
 
     ;;------------------------------------------------------------------
     ;; `c-point' and `c-is-escaped' (`cc-defs.el:249', `:431')

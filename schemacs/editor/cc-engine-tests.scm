@@ -370,4 +370,39 @@
    (test-equal "a zero answer when nothing matches" '(0 1)
                (probe-skip c-skip-ws-chars-backward " \t\n" 1))))
 
+;;----------------------------------------------------------------------
+;; Token boundaries (`c-beginning-of-current-token',
+;; `c-simple-skip-symbol-backward'), moved up for `c-backward-sws'.
+;; Expectations are Emacs 31.1's on the same buffer; a per-position
+;; differential (bot/sss and the list wrappers, 423 lines) is identical.
+;;----------------------------------------------------------------------
+(define token-fixture
+  "int foo_bar(baz);\nif (a->b) x++;\n((a) (b))\n(x\n")
+
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert token-fixture)
+  (set-buffer-local-value! b 'major-mode 'c-mode)
+  (c-init-language-vars c-mode)
+  (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+
+  (define (probe f p) (goto-char p) (list (f) (point)))
+
+  (test-equal "inside a symbol, backward to its start" '(#t 5)
+              (probe c-beginning-of-current-token 9))
+  (test-equal "between tokens it does not move" '(#f 4)
+              (probe c-beginning-of-current-token 4))
+  (test-equal "at the buffer start likewise" '(#f 1)
+              (probe c-beginning-of-current-token 1))
+  (test-equal "after an operator it moves over it" '(#t 13)
+              (probe c-beginning-of-current-token 15))
+  (test-equal "skip-symbol-backward from after 'int'" '(#t 1)
+              (probe c-simple-skip-symbol-backward 4))
+  (test-equal "and from inside foo_bar" '(#t 5)
+              (probe c-simple-skip-symbol-backward 9))
+  (test-equal "a word char after a paren" '(#t 36)
+              (probe c-simple-skip-symbol-backward 37))
+  (test-equal "and at the end of the buffer's last word" '(#t 45)
+              (probe c-simple-skip-symbol-backward 46)))
+
 (test-end "schemacs_editor_cc_engine")
