@@ -1114,6 +1114,7 @@
     c-backward-token-2
     c-beginning-of-current-token
     c-beginning-of-macro
+    c-beginning-of-statement-1
     c-benign-error
     c-c++-vsemi-p
     c-cache-to-parse-ps-state
@@ -1176,6 +1177,7 @@
     c-go-up-list-forward
     c-hungry-delete-key
     c-in-literal
+    c-in-method-def-p
     c-indentation-style
     c-init-language-vars
     c-int-to-char
@@ -1210,6 +1212,7 @@
     c-literal-start
     c-literal-type
     c-looking-at-c++-attribute
+    c-looking-at-inexpr-block
     c-looking-at-special-brace-list
     c-lower
     c-macro-cache

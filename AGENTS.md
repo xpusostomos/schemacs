@@ -15680,3 +15680,67 @@ and `c-back-over-member-initializer-braces` first; `c-in-method-def-p`
 `c-beginning-of-statement-1` (`:793'`) and its automaton; then
 `c-parse-state` and the declaration machinery, `cc-fonts`, and
 `cc-mode.el`.
+
+# cc-mode: `c-beginning-of-statement-1`, and the `cond` that answered
+# true (2026-11-22)
+
+`c-beginning-of-statement-1` (`cc-engine.el:793`) is in, with its
+`c-bos-*` automaton, `c-in-method-def-p` (`:12171`) and
+`c-looking-at-inexpr-block` (`:13917`), and the whole-input
+differential against Emacs 31.1 is **2,292 of 2,292 identical** - every
+position of a 23-statement fixture with six argument combinations
+(lim, ignore-labels, noerror, comma-delim, hit-lim). DEPARTURES.md's
+2026-11-22 section has the C for each rule and every departure; what
+the next session needs:
+
+## The two facts worth carrying into every remaining cc-engine port
+
+1. **A `cond` with no matching clause must `(else #f)` wherever its
+   value is tested.** Elisp's `cond` answers nil; Scheme's answers the
+   unspecified value, which is true. The state machine's `(or (cond
+   ...state...) (cond ...common...))` depends on the first answering
+   nil to fall through - without the elsies it *hangs* (the automaton
+   spins), and `c-looking-at-inexpr-block` returned truthy where Emacs
+   returns nil, flipping the brace-block branch in
+   `c-beginning-of-statement-1`. This is the `when`-in-value-position
+   trap in its `cond` spelling, and it is now the first thing to grep
+   for in a ported selector.
+
+2. **Elisp's `if` takes any number of else forms, and the C uses it.**
+   The semicolon `if` in `c-beginning-of-statement-1` has the whole
+   rest of the function - automaton, hit-lim test, drain, substatement
+   check, label handling - as its else list, so a bare-semicolon
+   statement skips all of it. In Scheme that is an explicit `(begin
+   ...)` in the else position; a port with a one-form else runs the
+   limit test on the semicolon path (two answers of the hit-lim
+   combination differed before this was fixed, and nothing else).
+
+## The macro automaton
+
+The `c-bos-*` macros are a `letrec-syntax` inside the function's `let`
+(they close over `state`, `stack`, `saved-pos`, `pos`, `tok`, `ptok`,
+`pptok`), and the two throwing ones take the `call-with-current-
+continuation` escape procedure as their first argument - the C's
+`(throw 'loop VALUE)` is `(done VALUE)`. `letrec-syntax`, not
+`let-syntax`: `c-bos-pop-state` expands to a call to itself.
+`c-bos-pop-state` must test `(pair? stack)`, not `stack`: the empty
+list is true in Scheme and the C's `(if (setq stack ...) ...)` is a nil
+test.
+
+## What is left of cc-engine
+
+`c-beginning-of-statement-1`'s dependencies are all in. Next in the
+file's order: `c-looking-at-statement-block-1`/`-block` (`:13647`,
+`:13736`), which need `c-looking-at-c++-lambda-expression`,
+`c-just-after-func-arglist-p` and `c-back-over-member-initializer-braces`
+(and thus `c-forward-<>-arglist` and `c-forward-type`), `c-in-method-
+def-p`'s sibling `c-backward-cpp-define-body`, then `c-parse-state`
+(`:3885`) and the declaration machinery, `cc-fonts`, `cc-mode.el`, and
+indentation (cc-align/cc-cmds/cc-styles).
+
+## Verification
+
+The six cc suites pass (`cc-engine-tests` 325, 64 of them the new
+`c-beginning-of-statement-1` group with every expectation Emacs 31.1's
+own), and `pty-check.py imports scratch` is 2/2. `imports.scm` is
+regenerated (112 libraries, 4,249 names).

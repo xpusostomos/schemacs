@@ -950,3 +950,107 @@
     (test-equal "at a list's content" #f (sbl 3))))
 
 (test-end "schemacs_editor_cc_engine")
+
+;;----------------------------------------------------------------------
+;; `c-beginning-of-statement-1' (`cc-engine.el:793') and its automaton
+;;----------------------------------------------------------------------
+;; The whole-input differential is Emacs 31.1's answer at every position
+;; of the fixture with six argument combinations - 2,292 answers, all
+;; identical. The rows below are a selection: the macro start, statement
+;; boundaries, `beginning' from an `else'/`else if', the do-while,
+;; `catch'/`finally', labels, bitfields, and the HIT-LIM corner - where
+;; the C's semicolon `if' takes the whole rest of the body as its else
+;; forms, so a semicolon-led statement never reaches the limit test.
+(test-begin "schemacs_editor_cc_engine_bos")
+(define bos-fixture
+  "int f (void)\n{\n  if (a)\n    b ();\n  else if (c)\n    d ();\n  else\n    e ();\n  while (x)\n    y ();\n  do\n    z ();\n  while (w);\n  for (;;)\n    q ();\n  switch (v)\n    {\n    case 1:\n      m ();\n      break;\n    default:\n      n ();\n    }\n  try { foo (); } catch (...) { bar (); } finally { baz (); }\nlbl:\n  goto lbl;\n  int bit : 3;\n  #define MAC(x) \\\n    ((x) + 1)\n  int g = MAC (2);\n}\n")
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert bos-fixture)
+  (set-buffer-local-value! b 'major-mode 'c-mode)
+  (c-init-language-vars c-mode)
+  (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+    (define (bos-check pos lim ig ne cd hl ret want-point)
+      (goto-char pos)
+      (let ((r (c-beginning-of-statement-1 lim ig ne cd hl)))
+        (test-equal (list pos lim ig ne cd hl)
+                    (list ret want-point) (list r (point)))))
+
+    ;; no arguments
+    (bos-check 1 #f #f #t #f #f 'same 1) ; the first character
+    (bos-check 8 #f #f #t #f #f 'same 8) ; after a return type
+    (bos-check 24 #f #f #t #f #f 'up 18) ; after a statement's terminator
+    (bos-check 34 #f #f #t #f #f 'previous 18) ; after a bare ';'
+    (bos-check 37 #f #f #t #f #f 'beginning 18) ; the 'else' resumes the 'if'
+    (bos-check 58 #f #f #t #f #f 'previous 18) ; the second 'else' clause
+    (bos-check 61 #f #f #t #f #f 'beginning 42) ; inside the else's body
+    (bos-check 75 #f #f #t #f #f 'previous 18) ; after the last semicolon of the do-while
+    (bos-check 115 #f #f #t #f #f 'beginning 100) ; 'beginning' from the else of the do-while
+    (bos-check 124 #f #f #t #f #f 'up 115) ; inside the for header
+    (bos-check 134 #f #f #t #f #f 'previous 133) ; the first ';' of 'for (;;)'
+    (bos-check 135 #f #f #t #f #f 'previous 134) ; the second ';'
+    (bos-check 146 #f #f #t #f #f 'previous 128) ; inside the switch body
+    (bos-check 151 #f #f #t #f #f 'same 149) ; a case label
+    (bos-check 165 #f #f #t #f #f 'same 165) ; after 'break;'
+    (bos-check 177 #f #f #t #f #f 'label 170) ; the label line
+    (bos-check 185 #f #f #t #f #f 'same 184) ; goto's body
+    (bos-check 189 #f #f #t #f #f 'previous 184) ; after 'goto lbl;'
+    (bos-check 251 #f #f #t #f #f 'previous 236) ; after the try block
+    (bos-check 253 #f #f #t #f #f 'same 252) ; inside 'catch'
+    (bos-check 263 #f #f #t #f #f 'same 252) ; inside the catch block
+    (bos-check 276 #f #f #t #f #f 'previous 252) ; before 'finally'
+    (bos-check 281 #f #f #t #f #f 'same 276) ; inside 'finally'
+    (bos-check 285 #f #f #t #f #f 'same 285) ; after the finally block
+    (bos-check 293 #f #f #t #f #f 'previous 286) ; after the switch's closing brace
+    (bos-check 297 #f #f #t #f #f 'same 296) ; inside 'lbl'
+    (bos-check 299 #f #f #t #f #f 'same 296) ; at the label's colon
+    (bos-check 300 #f #f #t #f #f 'label 296) ; the line after the label
+    (bos-check 310 #f #f #t #f #f 'same 303) ; after 'goto lbl;'
+    (bos-check 315 #f #f #t #f #f 'previous 303) ; after the declaration
+    (bos-check 326 #f #f #t #f #f 'same 315) ; after a bitfield
+    (bos-check 330 #f #f #t #f #f 'previous 315) ; at a macro's '#'
+    (bos-check 345 #f #f #t #f #f 'macro 330) ; the macro's continuation backslash
+    (bos-check 346 #f #f #t #f #f 'macro 330) ; 
+    (bos-check 351 #f #f #t #f #f 'macro 330) ; inside the macro body
+    (bos-check 360 #f #f #t #f #f 'same 351) ; after the macro body
+    (bos-check 363 #f #f #t #f #f 'previous 315) ; after a macro call
+    (bos-check 378 #f #f #t #f #f 'same 363) ; the last statement
+
+    ;; 1 #f #t #f #f
+    (bos-check 34 1 #f #t #f #f 'previous 18) ; with LIM at 1
+    (bos-check 37 1 #f #t #f #f 'beginning 18) ; with LIM
+    (bos-check 61 1 #f #t #f #f 'beginning 42) ; with LIM
+    (bos-check 115 1 #f #t #f #f 'beginning 100) ; with LIM
+    (bos-check 177 1 #f #t #f #f 'label 170) ; with LIM
+    (bos-check 297 1 #f #t #f #f 'same 296) ; with LIM
+    (bos-check 330 1 #f #t #f #f 'previous 315) ; with LIM
+
+    ;; #f #t #t #f #f
+    (bos-check 177 #f #t #t #f #f 'same 170) ; IGNORE-LABELS: the label is not stepped over
+    (bos-check 189 #f #t #t #f #f 'previous 170) ; IGNORE-LABELS
+    (bos-check 297 #f #t #t #f #f 'same 296) ; IGNORE-LABELS
+    (bos-check 299 #f #t #t #f #f 'same 296) ; IGNORE-LABELS
+    (bos-check 311 #f #t #t #f #f 'same 296) ; IGNORE-LABELS
+
+    ;; #f #f #f #t #f
+    (bos-check 134 #f #f #f #t #f 'previous 133) ; COMMA-DELIM: ';' still delimits
+    (bos-check 135 #f #f #f #t #f 'previous 134) ; COMMA-DELIM
+    (bos-check 136 #f #f #f #t #f 'up 128) ; COMMA-DELIM
+
+    ;; 30 #f #t #f #f
+    (bos-check 34 30 #f #t #f #f 'previous 31) ; with LIM at 30
+    (bos-check 37 30 #f #t #f #f 'previous 31) ; with LIM 30
+    (bos-check 61 30 #f #t #f #f 'beginning 42) ; with LIM 30
+    (bos-check 100 30 #f #t #f #f 'previous 78) ; with LIM 30
+    (bos-check 115 30 #f #t #f #f 'beginning 100) ; with LIM 30
+
+    ;; #f #f #t #f 1
+    (bos-check 133 #f #f #t #f 1 #f 133) ; HIT-LIM
+    (bos-check 134 #f #f #t #f 1 'previous 133) ; HIT-LIM: a semicolon-led statement skips the limit test
+    (bos-check 135 #f #f #t #f 1 'previous 134) ; HIT-LIM
+    (bos-check 136 #f #f #t #f 1 'up 128) ; HIT-LIM
+    (bos-check 177 #f #f #t #f 1 'label 170) ; HIT-LIM
+    (bos-check 297 #f #f #t #f 1 'same 296) ; HIT-LIM
+))
+(test-end "schemacs_editor_cc_engine_bos")

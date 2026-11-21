@@ -74,7 +74,7 @@
                   1- logand caddr cdddr cadddr cddddr)
     (only (schemacs editor subr) regexp-unmatchable)
     (only (schemacs editor buffer) current-buffer buffer-local-value
-          set-buffer-local-value!)
+          set-buffer-local-value! *case-fold-search*)
     (only (schemacs editor command) prefix-numeric-value quit-condition?)
     (only (schemacs editor cmds) beginning-of-line end-of-line forward-char
           backward-char delete-char)
@@ -82,26 +82,28 @@
           char-before char-after bobp eobp bolp eolp
           line-beginning-position line-end-position forward-line
           save-excursion save-restriction narrow-to-region widen
-          insert delete-region message buffer-substring-no-properties)
-    (only (schemacs editor fns) nth nthcdr %substring)
+          insert delete-region message format-message
+          buffer-substring-no-properties)
+    (only (schemacs editor fns) nth nthcdr %substring %count-lines)
     (only (schemacs editor indent) back-to-indentation)
     (only (schemacs editor indentc) current-indentation indent-to)
     (only (schemacs editor search) re-search-forward re-search-backward
           search-forward looking-at string-match
-          match-beginning match-end save-match-data)
+          match-beginning match-end match-string save-match-data)
     (only (schemacs editor textprop) get-text-property put-text-property
           remove-text-properties text-property-any)
     (only (schemacs editor syntax) skip-chars-backward skip-chars-forward
           skip-syntax-backward skip-syntax-forward forward-comment
           parse-partial-sexp scan-sexps scan-lists char-syntax)
     (only (schemacs editor subr) regexp-unmatchable last delq copy-tree
-          with-silent-modifications)
+          intern with-silent-modifications)
     (only (schemacs editor cc-defs) c-emacs-features c-save-buffer-state
           c-put-char-property c-clear-char-property c-get-char-property
           c-next-single-property-change c-previous-single-property-change
           %c-true %c-false c-get-lang-constant *c-buffer-is-cc-mode*
           c-major-mode-is c-safe c-forward-sexp c-backward-sexp
-          c-go-list-forward c-go-list-backward c-skip-ws-chars-forward
+          c-go-list-forward c-go-list-backward c-down-list-backward
+          c-skip-ws-chars-forward
           c-skip-ws-chars-backward c-skip-ws-forward c-skip-ws-backward
           *c-lang-var-overrides*)
     (only (schemacs editor intervals) get)
@@ -163,7 +165,9 @@
    c-point c-is-escaped c-benign-error
    ;; statement barriers (`cc-engine.el:1457')
    *c-maybe-labelp* *c-commas-bound-stmts* c-punctuation-in
-   c-crosses-statement-barrier-p
+   c-crosses-statement-barrier-p c-beginning-of-statement-1
+   ;; `cc-engine.el:12171' and `:13917'
+   c-in-method-def-p c-looking-at-inexpr-block
    ;; token movement (`cc-engine.el:4947')
    c-jump-syntax-balanced c-jump-syntax-unbalanced
    c-end-of-token c-end-of-current-token c-forward-over-token
@@ -1736,15 +1740,729 @@
                   (point)))))
 
     ;;------------------------------------------------------------------
-    ;; Statement barriers (`cc-engine.el:1457'-`:1560')
+    ;; `c-beginning-of-statement-1' and its automaton
+    ;; (`cc-engine.el:736'-`:1455')
     ;;------------------------------------------------------------------
-    ;; `c-maybe-labelp' is a `defvar' that `c-beginning-of-statement-1'
-    ;; `let'-binds around the calls to `c-crosses-statement-barrier-p',
-    ;; which is the convention's test for a parameter; the same goes for
-    ;; `c-commas-bound-stmts'.
+    ;; "KLUDGE ALERT: c-maybe-labelp is used to pass information between
+    ;; `c-crosses-statement-barrier-p' and `c-beginning-of-statement-1'."
+    ;; Both are `defvar's that this code `let'-binds, so both are
+    ;; parameters (their definitions are Emacs's own position, ahead of
+    ;; the functions that use them).
     (define *c-maybe-labelp* (make-parameter #f))
     (define *c-commas-bound-stmts* (make-parameter #f))
 
+    ;; The C's `c-bos-*' macros close over the automaton's lexical
+    ;; variables and the `catch' tag. Scheme macros are hygienic, so
+    ;; they are a `let-syntax' *inside* the function's `let' - which is
+    ;; where the variables they name are in scope - and the two that
+    ;; throw take the escape continuation as their first argument.
+    (define (c-beginning-of-statement-1 . args)
+      ;; "Move to the start of the current statement or declaration, or
+      ;; to the previous one if already at the beginning of one. ..."
+      ;;
+      ;; "The bulk of this function is a pushdown automaton ..."
+      (let ((lim (if (pair? args) (car args) #f))
+            (ignore-labels (if (and (pair? args) (pair? (cdr args)))
+                               (cadr args) #f))
+            (noerror (if (and (pair? args) (pair? (cdr args))
+                              (pair? (cddr args)))
+                         (caddr args) #f))
+            (comma-delim (if (and (pair? args) (pair? (cdr args))
+                                  (pair? (cddr args)) (pair? (cdddr args)))
+                             (cadddr args) #f))
+            (hit-lim (if (and (pair? args) (pair? (cdr args))
+                              (pair? (cddr args)) (pair? (cdddr args))
+                              (pair? (cddddr args)))
+                         (car (cddddr args)) #f)))
+        (parameterize ((*case-fold-search* #f)
+                       (*c-commas-bound-stmts*
+                        (or (*c-commas-bound-stmts*) comma-delim))
+                       (*c-maybe-labelp* #f))
+          (let* ((start (point))
+                 (macro-start #f)
+                 (delims (if comma-delim (list #\; #\,) (list #\;)))
+                 (after-case:-pos #f) ; `after-case:-pos' in the C.
+                 (saved #f)
+                 ;; "Current position."
+                 (pos #f)
+                 ;; "Position of last stmt boundary character (e.g. ;)."
+                 (boundary-pos #f)
+                 ;; "Non-nil when a construct has been found which
+                 ;; delimits the search for a statement start, e.g. an
+                 ;; opening brace or a macro start, or a keyword like
+                 ;; `if' when the PDA stack is empty."
+                 (pre-stmt-found #f)
+                 ;; "The position of the last sexp or bound that follows
+                 ;; the first found colon, i.e. the start of the nonlabel
+                 ;; part of the statement."
+                 (after-labels-pos #f)
+                 ;; "Like `after-labels-pos', but the first such
+                 ;; position inside a label."
+                 (last-label-pos #f)
+                 ;; "The last position where a label is possible ..."
+                 (label-good-pos #f)
+                 ;; "Putative positions of the components of a bitfield
+                 ;; declaration, e.g. \"int foo : NUM_FOO_BITS ;\"."
+                 (bitfield-type-pos #f)
+                 (bitfield-id-pos #f)
+                 (bitfield-size-pos #f)
+                 ;; "Symbol just scanned back over (e.g. 'while or
+                 ;; 'boundary)."
+                 (sym #f)
+                 ;; "Current state in the automaton."
+                 (state #f)
+                 ;; "Current saved positions."
+                 (saved-pos #f)
+                 ;; "Stack of conses (state . saved-pos)."
+                 (stack '())
+                 ;; "Regexp which matches \"for\", \"if\", etc."
+                 (cond-key (or (%c-langvar 'c-opt-block-stmt-key)
+                               regexp-unmatchable))
+                 ;; "Return value."
+                 (ret 'same)
+                 ;; "Positions of the last three sexps or bounds we've
+                 ;; stopped at."
+                 (tok #f)
+                 (ptok #f)
+                 (pptok #f))
+            (letrec-syntax
+                ((c-bos-push-state
+                  (syntax-rules ()
+                    ((_) (set! stack (cons (cons state saved-pos) stack)))))
+                 (c-bos-pop-state
+                  (syntax-rules ()
+                    ((_ done) (c-bos-pop-state done #f))
+                    ((_ done do)
+                     (begin
+                       (set! state (car (car stack)))
+                       (set! saved-pos (cdr (car stack)))
+                       (set! stack (cdr stack))
+                       ;; The C's condition is the value of the last
+                       ;; `setq' - the new stack. `'()' is true in
+                       ;; Scheme, so the C's `(if stack ...)' is a
+                       ;; `pair?' test.
+                       (if (pair? stack)
+                           #t
+                           (begin
+                             do
+                             (set! pre-stmt-found #t)
+                             (done #f)))))))
+                 (c-bos-pop-state-and-retry
+                  (syntax-rules ()
+                    ((_ done)
+                     (done
+                      (begin
+                        (set! state (car (car stack)))
+                        (set! saved-pos (cdr (car stack)))
+                        (set! pre-stmt-found (not (pair? (cdr stack))))
+                        ;; "Throw nil if stack is empty, else throw
+                        ;; non-nil."
+                        (set! stack (cdr stack))
+                        stack)))))
+                 (c-bos-save-pos
+                  (syntax-rules ()
+                    ((_) (set! saved-pos (vector pos tok ptok pptok)))))
+                 (c-bos-restore-pos
+                  (syntax-rules ()
+                    ((_)
+                     (if (not (eq? (vector-ref saved-pos 0) start))
+                         (begin
+                           (set! pos (vector-ref saved-pos 0))
+                           (set! tok (vector-ref saved-pos 1))
+                           (set! ptok (vector-ref saved-pos 2))
+                           (set! pptok (vector-ref saved-pos 3))
+                           (goto-char pos)
+                           (set! sym #f))))))
+                 (c-bos-save-error-info
+                  (syntax-rules ()
+                    ((_ missing got)
+                     (set! saved-pos (vector pos missing got)))))
+                 (c-bos-report-error
+                  (syntax-rules ()
+                    ((_)
+                     (if (not (%c-true noerror))
+                         (set!c-parsing-error
+                          (format-message
+                           "No matching `%s' found for `%s' on line %d"
+                           (vector-ref saved-pos 1)
+                           (vector-ref saved-pos 2)
+                           (+ 1 (%count-lines
+                                 (current-buffer) (point-min)
+                                 (c-point 'bol
+                                          (vector-ref saved-pos 0)))))))))))
+              (save-restriction
+                (set! lim (if lim (max lim (point-min)) (point-min)))
+                (widen)
+
+                (save-excursion
+                  (if (and (c-beginning-of-macro) (not (= (point) start)))
+                      (set! macro-start (point))))
+
+                  ;; "Try to skip back over unary operator characters, to
+                  ;; register that we've moved."
+                  (let skip ()
+                    (set! pos (point))
+                    (c-backward-syntactic-ws lim)
+                    ;; "Protect post-++/-- operators just before a
+                    ;; virtual semicolon."
+                    (when (and (not (c-at-vsemi-p))
+                               (not (= (skip-chars-backward "-+!*&~@`#") 0)))
+                      (skip)))
+
+                  ;; "Skip back over any semicolon here. If it was a bare
+                  ;; semicolon, we're done. ..."
+                  (if (and (memv (char-before) delims)
+                           (begin
+                             (forward-char -1)
+                             (set! saved (point))
+                             (c-backward-syntactic-ws lim)
+                             (or (memv (char-before) delims)
+                                 (eq? (char-before) #\:)
+                                 (not (char-before))
+                                 (eq? (char-syntax (char-before)) #\()
+                                 (c-at-vsemi-p))))
+                      (begin
+                        (set! ret 'previous)
+                        (set! pos saved))
+
+                      ;; "Begin at start and not pos to detect macros if
+                      ;; we stand directly after the #."
+                      (begin
+                        (goto-char start)
+                        (if (let ((re (%c-langvar 'c-symbol-start)))
+                              ;; Emacs's regexp is "\\_<\\|\\W"; the
+                              ;; language's c-symbol-start is the same
+                              ;; test for the modes here.
+                              (and re (looking-at "\\_<\\|\\W")))
+                            ;; "Record this as the first token if not
+                            ;; starting inside it."
+                            (set! tok start))
+
+                        ;; "The following while loop goes back one sexp
+                        ;; ... each iteration."
+                        (let automaton ()
+                          (when (call-with-current-continuation
+                                 (lambda (done)
+                                   ;; "Are we in a macro, just after the
+                                   ;; opening #?"
+                                   (cond
+                                    ((save-excursion
+                                       (and macro-start ; "Always NIL for AWK."
+                                            (begin
+                                              (skip-chars-backward " \t")
+                                              (eq? (char-before) #\#))
+                                            (begin
+                                              (set! saved (- (point) 1))
+                                              (beginning-of-line)
+                                              (not (eq? (char-before
+                                                         (- (point) 1))
+                                                        #\\)))
+                                            (let ((re (%c-langvar
+                                                       'c-opt-cpp-start)))
+                                              (and re (looking-at re)))
+                                            (begin
+                                              (skip-chars-forward " \t")
+                                              (eq? (point) saved))))
+                                     (goto-char saved)
+                                     (if (and (c-forward-to-cpp-define-body)
+                                              (begin
+                                                (c-forward-syntactic-ws start)
+                                                (< (point) start)))
+                                         ;; "Stop at the first token in the
+                                         ;; content of the macro."
+                                         (begin
+                                           (set! pos (point))
+                                           (set! ignore-labels #t))
+                                         (begin
+                                           (set! pos saved)
+                                           (set! ret 'macro)
+                                           (set! ignore-labels #t)))
+                                     (set! pre-stmt-found #t)
+                                     (done #f)) ; 1. Start of macro.
+
+                                    ;; "Do a round through the automaton if
+                                    ;; we've just passed a statement
+                                    ;; boundary or passed a "while"-like
+                                    ;; token."
+                                    ((or sym
+                                         (begin
+                                           (if (looking-at cond-key)
+                                               (set! sym (intern (match-string 1)))
+                                               #f)))
+                                     (when (and (< pos start) (null? stack))
+                                       (set! pre-stmt-found #t)
+                                       (done #f)) ; 2. Statement boundary.
+
+                                     ;; "The PDA state handling."
+                                     (or (cond
+                                          ((eq? state 'else)
+                                           (if (eq? sym 'boundary)
+                                               (set! state 'else-boundary)
+                                               (begin
+                                                 (c-bos-report-error)
+                                                 (c-bos-pop-state-and-retry done) #t)))
+                                          ((eq? state 'else-boundary)
+                                           (cond ((eq? sym 'if)
+                                                  (c-bos-pop-state
+                                                   done (set! ret 'beginning)))
+                                                 ((eq? sym 'boundary)
+                                                  (c-bos-report-error)
+                                                  (c-bos-pop-state done))
+                                                 (else #f)))
+                                          ((eq? state 'while)
+                                           (if (and (eq? sym 'boundary)
+                                                    ;; "Since this can cause
+                                                    ;; backtracking we do a
+                                                    ;; little more careful
+                                                    ;; analysis to avoid it:
+                                                    ;; If there's a label in
+                                                    ;; front of the while it
+                                                    ;; can't be part of a
+                                                    ;; do-while."
+                                                    (not after-labels-pos))
+                                               (begin
+                                                 (c-bos-save-pos)
+                                                 (set! state 'while-boundary)
+                                                 #t)
+                                               (begin
+                                                 (c-bos-pop-state-and-retry done)
+                                                 #t)))
+                                          ((eq? state 'while-boundary)
+                                           (cond ((eq? sym 'do)
+                                                  (c-bos-pop-state
+                                                   done (set! ret 'beginning)))
+                                                 ((eq? sym 'boundary) ; "isn't a do-while"
+                                                  (c-bos-restore-pos) ; "the position of the while"
+                                                  (c-bos-pop-state done))
+                                                 (else #f)))
+                                          ((eq? state 'catch)
+                                           (if (eq? sym 'boundary)
+                                               (set! state 'catch-boundary)
+                                               (begin
+                                                 (c-bos-report-error)
+                                                 (c-bos-pop-state-and-retry done) #t)))
+                                          ((eq? state 'catch-boundary)
+                                           (cond
+                                            ((eq? sym 'try)
+                                             (c-bos-pop-state
+                                              done (set! ret 'beginning)))
+                                            ((eq? sym 'catch)
+                                             (set! state 'catch))
+                                            ((eq? sym 'boundary)
+                                             (c-bos-report-error)
+                                             (c-bos-pop-state done))
+                                            (else #f)))
+                                           (else #f))
+                                         ;; "This is state common. ..."
+                                         (cond ((eq? sym 'boundary)
+                                                ;; "If we have a boundary at
+                                                ;; the start position we push
+                                                ;; a frame to go to the
+                                                ;; previous statement."
+                                                (if (>= pos start)
+                                                    (c-bos-push-state)
+                                                    (c-bos-pop-state done)))
+                                               ((eq? sym 'else)
+                                                (c-bos-push-state)
+                                                (c-bos-save-error-info 'if 'else)
+                                                (set! state 'else))
+                                               ((eq? sym 'while)
+                                                ;; "Is this a real while, or a
+                                                ;; do-while? ..."
+                                                (when (or (not pptok)
+                                                          (memv (char-after pptok)
+                                                                delims)
+                                                          ;; "The following
+                                                          ;; kludge is to
+                                                          ;; prevent infinite
+                                                          ;; recursion ..."
+                                                          (and (eq? (point) start)
+                                                               (c-vsemi-status-unknown-p))
+                                                          (c-at-vsemi-p pptok))
+                                                  (c-bos-push-state)
+                                                  (set! state 'while)))
+                                               ((memq sym '(catch finally))
+                                                (c-bos-push-state)
+                                                (c-bos-save-error-info 'try sym)
+                                                (set! state 'catch))))
+
+                                     (when (*c-maybe-labelp*)
+                                       ;; "We're either past a statement
+                                       ;; boundary or at the start of a
+                                       ;; statement, so throw away any label
+                                       ;; data for the previous one."
+                                       (set! after-labels-pos #f)
+                                       (set! last-label-pos #f)
+                                       (*c-maybe-labelp* #f))))
+
+                                   ;; "Step to the previous sexp, but not if
+                                   ;; we crossed a boundary, since that
+                                   ;; doesn't consume an sexp."
+                                   (if (eq? sym 'boundary)
+                                       (when (>= (point) lim)
+                                         (set! ret 'previous))
+
+                                       ;; "HERE IS THE SINGLE PLACE INSIDE
+                                       ;; THE PDA LOOP WHERE WE MOVE
+                                       ;; BACKWARDS THROUGH THE SOURCE."
+                                       (begin
+                                         (c-backward-syntactic-ws lim)
+                                         (let ((before-sws-pos (point))
+                                               ;; "The end position of the
+                                               ;; area to search for statement
+                                               ;; barriers in this round."
+                                               (maybe-after-boundary-pos pos)
+                                               (comma-delimited #f))
+
+                                           ;; "Go back over exactly one
+                                           ;; logical sexp, taking proper
+                                           ;; account of macros and escaped
+                                           ;; EOLs."
+                                           (let sexp-step ()
+                                             (when (and
+                                                    (begin
+                                                      (set! comma-delimited
+                                                            (and (not comma-delim)
+                                                                 (eq? (char-before) #\,)))
+                                                      (if (not (c-safe (c-backward-sexp) #t))
+                                                          (begin
+                                                            ;; "Give up if we
+                                                            ;; hit an unbalanced
+                                                            ;; block. ..."
+                                                            (set! pre-stmt-found #t)
+                                                            (done #f))
+                                                          #t)
+                                                      ;; "Handle C++'s
+                                                      ;; `constexpr', etc."
+                                                      (if (save-excursion
+                                                            (and (let ((re (%c-langvar
+                                                                            'c-block-stmt-hangon-key)))
+                                                                   (and re (looking-at re)))
+                                                                 (begin
+                                                                   (c-backward-syntactic-ws lim)
+                                                                   (c-safe (c-backward-sexp) #t))
+                                                                 (let ((re (%c-langvar
+                                                                            'c-block-stmt-2-key)))
+                                                                   (and re (looking-at re)))
+                                                                 (begin
+                                                                   (set! pos (point))
+                                                                   pos)))
+                                                          (goto-char pos)
+                                                          #f)
+                                                      (cond
+                                                       ;; "Have we moved into
+                                                       ;; a macro?"
+                                                       ((and (not macro-start)
+                                                             (c-beginning-of-macro))
+                                                        (save-excursion
+                                                          (c-backward-syntactic-ws lim)
+                                                          (set! before-sws-pos (point)))
+                                                        ;; "Have we crossed a
+                                                        ;; statement boundary?
+                                                        ;; If not, keep going
+                                                        ;; back until we find
+                                                        ;; one or a "real"
+                                                        ;; sexp."
+                                                        (if (save-excursion
+                                                              (c-end-of-macro)
+                                                              (not (c-crosses-statement-barrier-p
+                                                                    (point)
+                                                                    maybe-after-boundary-pos)))
+                                                            (begin
+                                                              (set! maybe-after-boundary-pos (point))
+                                                              maybe-after-boundary-pos)
+                                                            #f))
+                                                       ;; "Have we just gone
+                                                       ;; back over an escaped
+                                                       ;; NL? This doesn't
+                                                       ;; count as a sexp."
+                                                       ((looking-at "\\\\$"))
+                                                       (else #f)))
+                                                      (>= (point) lim))
+                                               (sexp-step)))
+
+                                           ;; "Have we crossed a statement
+                                           ;; boundary?"
+                                           (set! boundary-pos
+                                                 (cond
+                                                  ;; "Are we at a macro
+                                                  ;; beginning?"
+                                                  ((and (not macro-start)
+                                                        (%c-langvar 'c-opt-cpp-prefix)
+                                                        (let ((re (%c-langvar
+                                                                   'c-opt-cpp-prefix)))
+                                                          (and re (looking-at re))))
+                                                   (save-excursion
+                                                     (c-end-of-macro)
+                                                     (c-crosses-statement-barrier-p
+                                                      (point) maybe-after-boundary-pos)))
+                                                  ;; "Just gone back over a
+                                                  ;; brace block?"
+                                                  ((and (eq? (char-after (point)) #\{)
+                                                        (not comma-delimited)
+                                                        (not (c-looking-at-inexpr-block lim #f #t))
+                                                        (save-excursion
+                                                          (c-backward-token-2 1 #t #f) ; "Don't test the value"
+                                                          (not (let ((re "=\\([^=]\\|$\\)"))
+                                                                 (looking-at re))))
+                                                        (or
+                                                         (not (%c-langvar 'c-opt-block-decls-with-vars-key))
+                                                         (save-excursion
+                                                           (c-backward-token-2 1 #t #f)
+                                                           (if (and (let ((re (%c-langvar 'c-symbol-start)))
+                                                                      (and re (looking-at re)))
+                                                                    (not (let ((re (%c-langvar 'c-keywords-regexp)))
+                                                                           (and re (looking-at re)))))
+                                                               (c-backward-token-2 1 #t #f)
+                                                               #f)
+                                                           (and
+                                                            (not (let ((re (%c-langvar
+                                                                            'c-opt-block-decls-with-vars-key)))
+                                                                   (and re (looking-at re))))
+                                                            (or comma-delim
+                                                                (not (eq? (char-after (point)) #\,))))))
+                                                        ;; "Is the {..} followed
+                                                        ;; by an operator which
+                                                        ;; prevents it being a
+                                                        ;; statement in its own
+                                                        ;; right?"
+                                                        (save-excursion
+                                                          (and
+                                                           (c-go-list-forward)
+                                                           (begin
+                                                             (c-forward-syntactic-ws)
+                                                             (or
+                                                              (not (let ((re (%c-langvar
+                                                                              '|c-non-after-{}-ops-re|)))
+                                                                     (and re (looking-at re))))
+                                                              (let ((bad-op-len
+                                                                     (- (match-end 0)
+                                                                        (match-beginning 0))))
+                                                                (and
+                                                                 (let ((re (%c-langvar 'c-operator-re)))
+                                                                   (and re (looking-at re)))
+                                                                 (> (- (match-end 0)
+                                                                       (match-beginning 0))
+                                                                    bad-op-len))))))))
+                                                   (save-excursion
+                                                     (c-forward-sexp) (point)))
+                                                  ;; "Just gone back over some
+                                                  ;; paren block?"
+                                                  ((looking-at "\\s(")
+                                                   (save-excursion
+                                                     (goto-char (+ 1 (c-down-list-backward
+                                                                     before-sws-pos)))
+                                                     (c-crosses-statement-barrier-p
+                                                      (point) maybe-after-boundary-pos)))
+                                                  ;; "Just gone back over an
+                                                  ;; ordinary symbol of some
+                                                  ;; sort?"
+                                                  (else (c-crosses-statement-barrier-p
+                                                         (point) maybe-after-boundary-pos))))
+
+                                           (when boundary-pos
+                                             (set! pptok ptok)
+                                             (set! ptok tok)
+                                             (set! tok boundary-pos)
+                                             (set! sym 'boundary)
+                                             ;; "Like a C "continue". Analyze
+                                             ;; the next sexp."
+                                             (done #t)))))
+
+                                   ;; "Have we gone past the limit?"
+                                   (when (< (point) lim)
+                                     (done #f)) ; 3. Gone back over the limit.
+
+                                   ;; "ObjC method def?"
+                                   (when (and (%c-langvar 'c-opt-method-key)
+                                              (begin
+                                                (set! saved (c-in-method-def-p))
+                                                saved))
+                                     (set! pos saved)
+                                     (set! pre-stmt-found #t)
+                                     (set! ignore-labels #t) ; "Avoid the label check on exit."
+                                     (done #f)) ; 4. ObjC method def.
+
+                                   ;; "Might we have a bitfield
+                                   ;; declaration, \"<type> <id> : <size>\"?"
+                                   (if (%c-langvar 'c-has-bitfields)
+                                       (cond
+                                        ;; "The : <size> and <id> fields?"
+                                        ((and (number? (*c-maybe-labelp*))
+                                              (not bitfield-size-pos)
+                                              (save-excursion
+                                                (goto-char (or tok start))
+                                                (not (let ((re (%c-langvar 'c-keywords-regexp)))
+                                                       (and re (looking-at re)))))
+                                              (not (let ((re (%c-langvar 'c-keywords-regexp)))
+                                                     (and re (looking-at re))))
+                                              (not (c-punctuation-in (point)
+                                                                     (*c-maybe-labelp*))))
+                                         (set! bitfield-size-pos (or tok start))
+                                         (set! bitfield-id-pos (point)))
+                                        ;; "The <type> field?"
+                                        ((and bitfield-id-pos
+                                              (not bitfield-type-pos))
+                                         (if (and (let ((re (%c-langvar 'c-symbol-key)))
+                                                    (and re (looking-at re))) ; "Can only be an integer type. :-)"
+                                                  (not (let ((re (%c-langvar
+                                                                  'c-not-primitive-type-keywords-regexp)))
+                                                         (and re (looking-at re))))
+                                                  (not (c-punctuation-in (point) tok)))
+                                             (set! bitfield-type-pos (point))
+                                             (begin
+                                               (set! bitfield-size-pos #f)
+                                               (set! bitfield-id-pos #f))))))
+
+                                   ;; "Handle labels."
+                                   (if (not (eq? ignore-labels #t))
+                                       (begin
+                                         (when (number? (*c-maybe-labelp*))
+                                           ;; "`c-crosses-statement-barrier-p'
+                                           ;; has found a colon, so we might
+                                           ;; be in a label now. ..."
+                                           (set! after-case:-pos (or tok start))
+                                           (if (or (let ((re (%c-langvar 'c-nonlabel-nonparen-token-key)))
+                                                     (and re (looking-at re))) ; "e.g. \"while\" or \"'a'\""
+                                                   ;; "Catch C++'s inheritance
+                                                   ;; construct \"class foo :
+                                                   ;; bar\"."
+                                                   (save-excursion
+                                                     (and
+                                                      (c-safe (c-backward-sexp) #t)
+                                                      (let ((re (%c-langvar 'c-nonlabel-token-2-key)))
+                                                        (and re (looking-at re)))))
+                                                   ;; "Catch C++'s \"case a(1):\""
+                                                   (and (c-major-mode-is 'c++-mode)
+                                                        (eq? (char-after (point)) #\()
+                                                        (save-excursion
+                                                          (not (and
+                                                                (= (c-backward-token-2 2) 0)
+                                                                (let ((re (%c-langvar 'c-case-kwds-regexp)))
+                                                                  (and re (looking-at re))))))))
+                                               (*c-maybe-labelp* #f)
+                                               (begin
+                                                 (if after-labels-pos ; "Have we already encountered a label?"
+                                                     (if (not last-label-pos)
+                                                         (set! last-label-pos (or tok start)))
+                                                     (set! after-labels-pos (or tok start)))
+                                                 (*c-maybe-labelp* #t)
+                                                 (set! label-good-pos #f)))) ; "bogus \"label\""
+
+                                         (when (and (not label-good-pos) ; "i.e. no invalid \"label\"'s yet"
+                                                    (let ((re (%c-langvar 'c-nonlabel-token-key)))
+                                                      (and re (looking-at re)))) ; "e.g. \"while :\""
+                                           ;; "We're in a potential label and
+                                           ;; it's the first time we've found
+                                           ;; something that isn't allowed in
+                                           ;; one."
+                                           (set! label-good-pos (or tok start)))))
+
+                                   ;; "We've moved back by a sexp, so update
+                                   ;; the token positions."
+                                   (set! sym #f)
+                                   (set! pptok ptok)
+                                   (set! ptok tok)
+                                   (set! tok (point))
+                                   (set! pos tok) ; "always non-nil"
+                                   pos))
+                            (automaton)))
+
+                        (when (and hit-lim
+                                   (or (not pre-stmt-found)
+                                       (< pos lim)
+                                       (>= pos start)))
+                          (set! ret #f))
+
+                        ;; "If the stack isn't empty there might be errors
+                        ;; to report."
+                        (let drain ()
+                          (when (pair? stack)
+                            (if (and (vector? saved-pos)
+                                     (= (vector-length saved-pos) 3))
+                                (c-bos-report-error))
+                            (set! saved-pos (cdr (car stack)))
+                            (set! stack (cdr stack))
+                            (drain)))
+
+                        (when (and (eq? ret 'same)
+                                   (not (memq sym '(boundary ignore #f))))
+                          ;; "Need to investigate closer whether we've
+                          ;; crossed between a substatement and its
+                          ;; containing statement."
+                          (let ((saved2
+                                 (cond ((and (let ((re (%c-langvar 'c-block-stmt-1-2-key)))
+                                               (and re (looking-at re)))
+                                             (eq? (char-after ptok) #\())
+                                        pptok)
+                                       ((let ((re (%c-langvar 'c-block-stmt-1-key)))
+                                          (and re (looking-at re)))
+                                        ptok)
+                                       (else pptok))))
+                            (set! saved saved2)
+                            (when saved
+                              (cond ((> start saved) (set! pos saved))
+                                    ((= start saved) (set! ret 'up))))))
+
+                        (when (and (not ignore-labels)
+                                   (eq? (*c-maybe-labelp*) #t)
+                                   (not (eq? ret 'beginning))
+                                   after-labels-pos
+                                   (not bitfield-type-pos) ; "Bitfields take precedence over labels."
+                                   (or (not label-good-pos)
+                                       (<= label-good-pos pos)
+                                       (begin
+                                         (goto-char (if (and last-label-pos
+                                                             (< last-label-pos start))
+                                                        last-label-pos
+                                                        pos))
+                                         (let ((re (%c-langvar 'c-label-kwds-regexp)))
+                                           (and re (looking-at re))))))
+                          ;; "We're in a label. Maybe we should step to the
+                          ;; statement after it."
+                          (if (< after-labels-pos start)
+                              (set! pos after-labels-pos)
+                              (begin
+                                (set! ret 'label)
+                                (if (and last-label-pos (< last-label-pos start))
+                                    ;; "Might have jumped over several
+                                    ;; labels. Go to the last one."
+                                    (set! pos last-label-pos)))))))
+
+                        ;; "Have we got \"case <expression>:\"?"
+                        (goto-char pos)
+                        (when (and after-case:-pos
+                                   (not (eq? ret 'beginning))
+                                   (let ((re (%c-langvar 'c-case-kwds-regexp)))
+                                     (and re (looking-at re))))
+                          (if (< after-case:-pos start)
+                              (set! pos after-case:-pos))
+                          (if (eq? ret 'same)
+                              (set! ret 'label)))
+
+                        ;; "Skip over the unary operators that can start
+                        ;; the statement."
+                        (let trailing ()
+                          (when (and (> (point) lim)
+                                     (begin
+                                       (c-backward-syntactic-ws lim)
+                                       ;; "protect AWK post-inc/decrement
+                                       ;; operators, etc."
+                                       (and (not (c-at-vsemi-p (point)))
+                                            (not (= (skip-chars-backward
+                                                     "-.+!*&~@`#")
+                                                    0)))))
+                            (set! pos (point))
+                            (trailing)))
+
+                        (goto-char pos)
+                        ret))))))
+
+    ;;------------------------------------------------------------------
+    ;; Statement barriers (`cc-engine.el:1457'-`:1560')
+    ;;------------------------------------------------------------------
+    ;; `*c-maybe-labelp*' and `*c-commas-bound-stmts*' are defined above,
+    ;; at their `cc-engine.el:742' position.
     (define (c-punctuation-in from to)
       ;; "Return non-nil if there is a non-comment non-macro punctuation
       ;; character between FROM and TO. FROM must not be in a string or
@@ -3605,6 +4323,19 @@
             (point)))))
 
     ;;------------------------------------------------------------------
+    ;; `c-in-method-def-p' (`cc-engine.el:12171')
+    ;;------------------------------------------------------------------
+    (define (c-in-method-def-p)
+      ;; "Return nil if we aren't in a method definition, otherwise the
+      ;; position of the initial [+-]."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-excursion
+        (beginning-of-line)
+        (let ((re (%c-langvar 'c-opt-method-key)))
+          (and re (looking-at re) (point)))))
+
+    ;;------------------------------------------------------------------
     ;; `c-looking-at-special-brace-list' (`cc-engine.el:13584'-`:13645')
     ;;------------------------------------------------------------------
     ;; Moved up from its file position: `c-at-statement-start-p' reads it.
@@ -3667,6 +4398,193 @@
                           (cons (list beg) type))
                       #f))))
             #f)))
+
+    ;;------------------------------------------------------------------
+    ;; `c-looking-at-inexpr-block' (`cc-engine.el:13917')
+    ;;------------------------------------------------------------------
+    (define (c-looking-at-inexpr-block lim containing-sexp . args)
+      ;; "Return non-nil if we're looking at the beginning of a block
+      ;; inside an expression. The value returned is actually a cons of
+      ;; either 'inlambda, 'inexpr-statement or 'inexpr-class and the
+      ;; position of the beginning of the construct. ..."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((check-at-end (if (pair? args) (car args) #f)))
+        (save-excursion
+          (let ((res 'maybe)
+                (passed-bracket-pairs 0)
+                (bracket-pos #f)
+                (passed-paren #f)
+                (haskell-op-pos #f)
+                (closest-lim (or containing-sexp lim (point-min)))
+                ;; "Look at the character after point only as a last
+                ;; resort when we can't disambiguate."
+                (block-follows (and (eq? (char-after (point)) #\{)
+                                    (point))))
+
+            ;; "Search for a C++11 "->" which suggests a lambda
+            ;; declaration."
+            (set! haskell-op-pos
+                  (if (c-major-mode-is 'c++-mode)
+                      (save-excursion
+                        (let search ()
+                          (when (begin
+                                  (c-syntactic-skip-backward "^;=,}>" closest-lim #t)
+                                  (and (eq? (char-before) #\>)
+                                       (c-backward-token-2)
+                                       (not (let ((re (%c-langvar 'c-haskell-op-re)))
+                                              (and re (looking-at re))))))
+                            (search)))
+                        (let ((re (%c-langvar 'c-haskell-op-re)))
+                          (and re (looking-at re) (point))))
+                      #f))
+            (when haskell-op-pos
+              (goto-char haskell-op-pos))
+
+            (let loop ()
+              (when (and (eq? res 'maybe)
+                         (begin (c-backward-syntactic-ws lim)
+                                (> (point) closest-lim))
+                         (not (bobp))
+                         (begin (backward-char)
+                                (looking-at "[]).]\\|\\w\\|\\s_"))
+                         (c-safe (forward-char)
+                                 (goto-char (scan-sexps (point) -1))))
+                (set! res
+                      (if (let ((re (%c-langvar 'c-keywords-regexp)))
+                            (and re (looking-at re)))
+                          (let ((kw-sym (c-keyword-sym (match-string 1))))
+                            (cond
+                             ((and block-follows
+                                   (c-keyword-member kw-sym 'c-inexpr-class-kwds))
+                              (and (not (eq? passed-paren #\[))
+                                   (or (not (let ((re (%c-langvar 'c-class-key)))
+                                              (and re (looking-at re))))
+                                       ;; "If the class definition is at
+                                       ;; the start of a statement, we
+                                       ;; don't consider it an
+                                       ;; in-expression class."
+                                       (let ((prev (point)))
+                                         (let back ()
+                                           (when (and (= (c-backward-token-2
+                                                          1 #f closest-lim)
+                                                         0)
+                                                      (eq? (char-syntax
+                                                            (char-after (point)))
+                                                           #\w))
+                                             (set! prev (point))
+                                             (back)))
+                                         (goto-char prev)
+                                         (not (c-at-statement-start-p)))
+                                       ;; "Also, in Pike we treat it as an
+                                       ;; in-expression class if it's used
+                                       ;; in an object clone expression."
+                                       (save-excursion
+                                         (and check-at-end
+                                              (c-major-mode-is 'pike-mode)
+                                              (begin
+                                                (goto-char block-follows)
+                                                (= (c-forward-token-2 1 #t) 0))
+                                              (eq? (char-after (point)) #\()))))
+                                   (cons 'inexpr-class (point)))
+                             ((c-keyword-member kw-sym 'c-paren-any-kwds) ; "e.g. C++11 "throw" or "noexcept""
+                              (set! passed-paren #f)
+                              (set! passed-bracket-pairs 0)
+                              (set! bracket-pos #f)
+                              'maybe)
+                             ((c-keyword-member kw-sym 'c-inexpr-block-kwds)
+                              (if (not passed-paren)
+                                  (cons 'inexpr-statement (point))
+                                  #f))
+                             ((c-keyword-member kw-sym 'c-lambda-kwds)
+                              (if (or (not passed-paren)
+                                      (eq? passed-paren #\())
+                                  (cons 'inlambda (point))
+                                  #f))
+                             ((c-keyword-member kw-sym 'c-block-stmt-kwds)
+                              #f)
+                             (else 'maybe)))
+                          (if (looking-at "\\s(")
+                              (if passed-paren
+                                  (cond
+                                   ((and (eq? passed-paren #\[)
+                                         (eq? (char-after (point)) #\[)
+                                         (not (eq? (char-after (+ 1 (point))) #\[))) ; "C++ attribute."
+                                    ;; "Accept several square bracket sexps
+                                    ;; for Java array initializations."
+                                    (set! passed-bracket-pairs
+                                          (+ passed-bracket-pairs 1))
+                                    'maybe)
+                                   ((and (eq? passed-paren #\()
+                                         (eq? (char-after (point)) #\[)
+                                         (not (eq? (char-after (+ 1 (point))) #\[))
+                                         (= passed-bracket-pairs 0))
+                                    ;; "C++11 lambda function declaration"
+                                    (set! passed-bracket-pairs 1)
+                                    (set! bracket-pos (point))
+                                    'maybe)
+                                   (else #f))
+                                  (begin
+                                    (when (not (looking-at "\\[\\["))
+                                      (set! passed-paren (char-after (point)))
+                                      (when (eq? passed-paren #\[)
+                                        (set! passed-bracket-pairs 1)
+                                        (set! bracket-pos (point))))
+                                    'maybe))
+                              'maybe)))
+                (loop)))
+
+            (if (eq? res 'maybe)
+                (cond
+                 ((and (c-major-mode-is 'c++-mode)
+                       block-follows
+                       (= passed-bracket-pairs 1)
+                       (save-excursion
+                         (goto-char bracket-pos)
+                         (or (<= (point) (or lim (point-min)))
+                             (begin
+                               (c-backward-token-2 1 #f lim)
+                               (and
+                                (not (and (c-on-identifier)
+                                          (let ((re (%c-langvar 'c-symbol-char-key)))
+                                            (and re (looking-at re)))))
+                                (not (let ((re (%c-langvar 'c-opt-op-identifier-prefix)))
+                                       (and re (looking-at re)))))))))
+                  (cons 'inlambda bracket-pos))
+                 ((and (%c-langvar 'c-recognize-paren-inexpr-blocks)
+                       block-follows
+                       containing-sexp
+                       (eq? (char-after containing-sexp) #\())
+                  (goto-char containing-sexp)
+                  (if (or (save-excursion
+                            (c-backward-syntactic-ws lim)
+                            (let skip ()
+                              (when (and (eq? (char-before) #\>)
+                                         (c-get-char-property (- (point) 1)
+                                                              'syntax-table)
+                                         (c-go-list-backward #f lim))
+                                (c-backward-syntactic-ws lim)
+                                (skip)))
+                            (and (> (point) (or lim (point-min)))
+                                 (c-on-identifier)))
+                          (and (%c-langvar 'c-special-brace-lists)
+                               (c-looking-at-special-brace-list))
+                          ;; The third arm of the C's `or' is
+                          ;;   (and c-has-compound-literals
+                          ;;        (save-excursion
+                          ;;          (goto-char block-follows)
+                          ;;          (not (c-looking-at-statement-block))))
+                          ;; `c-looking-at-statement-block' is not
+                          ;; ported (it needs the C++ declaration
+                          ;; engine); an explicit error, and no ported
+                          ;; caller reaches it - `c-beginning-of-
+                          ;; statement-1' passes a nil CONTAINING-SEXP.
+                          (and (%c-langvar 'c-has-compound-literals)
+                               (error "c-looking-at-inexpr-block: the compound-literal branch waits on `c-looking-at-statement-block', which is not ported")))
+                      #f
+                      (cons 'inexpr-statement (point))))
+                 (else #f))
+                res)))))
 
     ;;------------------------------------------------------------------
     ;; Virtual semicolons (`cc-engine.el:14184'-`:14243')

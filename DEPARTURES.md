@@ -12754,3 +12754,97 @@ properties, which is a departure in *what a c-mode buffer contains*,
 not in any of the functions above.
 
 
+
+# `c-beginning-of-statement-1`: the automaton, and the `cond` that
+# answered true (2026-11-22)
+
+`c-beginning-of-statement-1` (`cc-engine.el:793`) is ported whole,
+with its `c-bos-*` macro automaton (as a `letrec-syntax` inside the
+function's `let`, since the macros close over its variables and two of
+them throw), `c-in-method-def-p` (`:12171`) and `c-looking-at-inexpr-block`
+(`:13917`). The whole-input differential - every position of a
+23-statement fixture (if/else/else-if, while, do-while, for, switch
+with case and default, try/catch/finally, a label, a bitfield and a
+multi-line macro) with six argument combinations - is **2,292 answers,
+all identical to Emacs 31.1**.
+
+## The two structural facts that reading the C alone did not give
+
+**A `cond` with no matching clause is nil in Elisp and the unspecified
+value in Scheme - which is true.** `c-beginning-of-statement-1`'s state
+machine is
+
+```elisp
+(or (cond ((eq state 'else) ...) ((eq state 'else-boundary) ...) ...)
+    (cond ((eq sym 'boundary) ...) ...))
+```
+
+and the whole point is that the first `cond` answers nil when no state
+handler applies, so the `or` falls through to the common handler. With
+Scheme's `cond`, the first leaf answered *true* and the common cond
+never ran: the automaton spun at one position for ever (the first
+symptom was a hang, not a wrong answer). The three inner `cond`s in the
+state arms have the same requirement. Every one now ends `(else #f)`,
+and `c-looking-at-inexpr-block`'s outer `cond` does too - its
+unspecified value was truthy, so `(not (c-looking-at-inexpr-block ...))`
+in the brace-block test answered false and flipped a branch.
+
+This is the same class as the `when`-in-value-position notes below, and
+it is the one to look for in any ported selector whose value is tested.
+
+**Emacs's `if` takes any number of else forms, and the semicolon `if`
+uses that.** The C's
+
+```elisp
+(if SEMI
+    (setq ret 'previous pos saved)
+  (goto-char start)
+  (if (looking-at "\\_<\\|\\W") (setq tok start))
+  (while (catch 'loop ...))         ; the automaton
+  (when (and hit-lim ...) (setq ret nil))
+  (while stack ...)                 ; error drain
+  (when (and (eq ret 'same) ...))   ; substatement investigation
+  (when (and (not ignore-labels) ...))  ; label handling
+  )
+```
+
+has the **whole rest of the function** as else forms: a bare-semicolon
+statement skips the automaton *and* the HIT-LIM test *and* the label
+processing. Ported as an else with only the automaton, the limit test
+ran on the semicolon path and answered nil where Emacs answers
+`previous` (found at two positions of one argument combination, and
+nowhere else - the other five combinations are exact). Our `begin`
+carries the four forms for the same reason.
+
+## The other bugs this port found, each three functions from its symptom
+
+- **`c-bos-pop-state` tested `stack` where the C tests nil.** After the
+  pop, the stack is `'()`; the C's `(if (setq stack (cdr stack)) t ...)`
+  answers nil and runs the do-if-done and the throw. Scheme's `if` took
+  the true branch - the empty list is true - so every pop-empty case
+  silently did nothing and `ret` never became `beginning` (the visible
+  difference was `previous` where Emacs says `beginning`, at every
+  `else if` in the fixture).
+- **`(set! *c-maybe-labelp* #f)` replaced the parameter object** instead
+  of calling it. The parameter convention is `(*name* value)`; the first
+  `set!` made the "parameter" a boolean, and the next reader applied it
+  ("Wrong type to apply: #t"). Two sites, in the label handling.
+- **`(when (c-major-mode-is 'c++-mode) ...)` assigned its unspecified
+  value to `haskell-op-pos`**, which is true, so every non-C++ buffer ran
+  `(goto-char <unspecified>)`. It is an `if` with `#f` now.
+- **`(c-at-vsemi-p)` belongs inside the semicolon branch's `or`**, not
+  after it: the port had split the C's four-element `or` and made the
+  call the value of the surrounding `begin`, so the branch was true only
+  when a virtual semicolon sat there.
+- **`1+` does not exist in this tree.** `(+ 1 x)` at the two sites (the
+  tree already takes `1-` from Guile, which is the same function; Emacs's
+  `1+` has no Guile counterpart imported anywhere).
+
+## Not carried
+
+`c-looking-at-inexpr-block`'s compound-literal third arm - `(and
+c-has-compound-literals (save-excursion (goto-char block-follows) (not
+(c-looking-at-statement-block))))` - signals with a message naming
+`c-looking-at-statement-block`, which is not ported (it needs the C++
+declaration engine). No ported caller reaches it: `c-beginning-of-
+statement-1` passes a nil CONTAINING-SEXP, and the arm requires one.
