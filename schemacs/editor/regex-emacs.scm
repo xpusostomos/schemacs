@@ -59,7 +59,7 @@
   (import
     (scheme base)
     (scheme char)
-    (only (guile) ash logand logior lognot logxor logcount u32vector-ref)
+    (only (guile) ash logand logior lognot logxor logcount u32vector-ref cadddr)
     (only (schemacs editor category) char-category-set category-table)
     (only (schemacs editor syntax) syntax-table syntax-class-to-char)
     (only (schemacs editor chartab)
@@ -413,5 +413,198 @@
     (define (re-charset-member-full? cs ch)
       (or (re-charset-member? cs ch)
           (%re-charset-class-member? cs ch)))
+
+
+    ;;----------------------------------------------------------------
+    ;; The compiler's instruction buffer and its helpers
+    ;;----------------------------------------------------------------
+    ;;
+    ;; The C's `bufp->buffer' and `b' are a byte array and a pointer; an
+    ;; insertion (`INSERT_JUMP') opens three bytes at a location and
+    ;; every jump, being a *relative* offset, is unaffected. Here the
+    ;; buffer is a vector of instruction vectors and the jumps are
+    ;; absolute indexes, so a helper that inserts an instruction must
+    ;; shift every address at or after the insertion point - and the
+    ;; compiler's own saved indexes with it. `<compile-state>' is those
+    ;; saved indexes, so an insertion can keep them right in one place,
+    ;; the way the C's offsets keep themselves right.
+    ;;--------------------------------------------------------------
+    (define-record-type <compile-state>
+      (%make-compile-state bufp translate buffer used laststart begalt
+                           fixup-alt-jump pending-exact nsub stack)
+      compile-state?
+      (bufp compile-state-bufp)
+      (translate compile-state-translate)
+      (buffer compile-state-buffer set-compile-state-buffer!)
+      (used compile-state-used set-compile-state-used!)
+      (laststart compile-state-laststart set-compile-state-laststart!)
+      (begalt compile-state-begalt set-compile-state-begalt!)
+      (fixup-alt-jump compile-state-fixup-alt-jump
+                      set-compile-state-fixup-alt-jump!)
+      (pending-exact compile-state-pending-exact
+                     set-compile-state-pending-exact!)
+      (nsub compile-state-nsub set-compile-state-nsub!)
+      (stack compile-state-stack set-compile-state-stack!))
+
+    (define (%address-op? op)
+      ;; The opcodes whose ARG1 is an instruction index.
+      ;;----------------------------------------------------------
+      (memv op (list op-jump op-on-failure-jump-memo
+                     op-on-failure-jump-nomemo op-on-failure-jump-prememo
+                     op-on-failure-keep-string-jump op-on-failure-jump-loop
+                     op-on-failure-jump-nastyloop op-on-failure-jump-smart
+                     op-succeed-n op-jump-n op-set-number-at)))
+
+    (define (%emit! st op a b)
+      ;; `BUF_PUSH' / `BUF_PUSH_2' / `STORE_JUMP' / `INSERT_JUMP''s
+      ;; effect: append an instruction and answer its index. A jump's
+      ;; ARG1 is filled in later, so 0 is a valid "no target yet".
+      ;;----------------------------------------------------------
+      (let* ((buffer (compile-state-buffer st))
+             (used (compile-state-used st)))
+        (when (>= used (vector-length buffer))
+          (let ((new (make-vector (* 2 (max 1 (vector-length buffer))) #f)))
+            (let loop ((i 0))
+              (when (< i used)
+                (vector-set! new i (vector-ref buffer i))
+                (loop (+ i 1))))
+            (set-compile-state-buffer! st new)
+            (set! buffer new)))
+        (vector-set! buffer used (vector op a b))
+        (set-compile-state-used! st (+ used 1))
+        used))
+
+    (define (%shift-index index at)
+      ;; A compiler index equal to AT designates the insertion point
+      ;; itself (the C's pointer stays there); only one beyond it has
+      ;; moved. An *instruction address*, by contrast, designates an
+      ;; instruction and shifts when it is at or after the insertion -
+      ;; see `%insert-at!`.
+      (if (and index (> index at)) (+ index 1) index))
+
+    (define (%insert-at! st at ins)
+      ;; Insert INS at index AT, shifting the instructions after it and
+      ;; every address argument at or after it (the C's `insert_op1'/
+      ;; `insert_op2' plus the relative-offset arithmetic it does not
+      ;; need). The compiler's saved indexes are shifted with it.
+      ;;----------------------------------------------------------
+      (let* ((buffer (compile-state-buffer st))
+             (used (compile-state-used st)))
+        (when (>= used (vector-length buffer))
+          (let ((new (make-vector (* 2 (max 1 (vector-length buffer))) #f)))
+            (let loop ((i 0))
+              (when (< i used)
+                (vector-set! new i (vector-ref buffer i))
+                (loop (+ i 1))))
+            (set-compile-state-buffer! st new)
+            (set! buffer new)))
+        (let loop ((i used))
+          (when (> i at)
+            (vector-set! buffer i (vector-ref buffer (- i 1)))
+            (loop (- i 1))))
+        (vector-set! buffer at ins)
+        (set-compile-state-used! st (+ used 1))
+        ;; The addresses the instruction stream already holds.
+        (let loop ((i 0))
+          (when (< i (+ used 1))
+            (let ((ins (vector-ref buffer i)))
+              (when (and ins (%address-op? (vector-ref ins 0)))
+                (let ((a (vector-ref ins 1)))
+                  (when (and (integer? a) (>= a at))
+                    (vector-set! ins 1 (+ a 1))))))
+            (loop (+ i 1))))
+        ;; The compiler's own indexes.
+        (set-compile-state-laststart!
+         st (%shift-index (compile-state-laststart st) at))
+        (set-compile-state-begalt!
+         st (%shift-index (compile-state-begalt st) at))
+        (set-compile-state-fixup-alt-jump!
+         st (%shift-index (compile-state-fixup-alt-jump st) at))
+        (set-compile-state-pending-exact!
+         st (%shift-index (compile-state-pending-exact st) at))
+        at))
+
+    (define (%store-jump! st at target)
+      ;; `STORE_JUMP': point the instruction at AT at TARGET.
+      ;;----------------------------------------------------------
+      (vector-set! (vector-ref (compile-state-buffer st) at) 1 target))
+
+    (define (%store-number-at! st at target n)
+      ;; `store_op2': the `succeed_n'/'jump_n' pair - target and count.
+      ;;----------------------------------------------------------
+      (let ((ins (vector-ref (compile-state-buffer st) at)))
+        (vector-set! ins 1 target)
+        (vector-set! ins 2 n)))
+
+    (define (%skip-one-char st p)
+      ;; `skip_one_char` (`regex-emacs.c:3758'): the index just after
+      ;; the one-character instruction at P, or #f when P is not one.
+      ;; The C's byte-length arithmetic is unnecessary: an instruction
+      ;; vector already spans exactly one opcode.
+      ;;----------------------------------------------------------
+      (let ((op (vector-ref (vector-ref (compile-state-buffer st) p) 0)))
+        (cond ((memv op (list op-anychar op-exactn op-charset op-charset-not
+                              op-syntaxspec op-notsyntaxspec
+                              op-categoryspec op-notcategoryspec))
+               (+ p 1))
+              (else #f))))
+
+    (define (%at-begline-loc? pattern p)
+      ;; `at_begline_loc_p` (`regex-emacs.c:2798'): is the `^` at P
+      ;; (P is one past it) after a group opening or an alternative?
+      ;; PATTERN and P are indexes into the pattern string; the C's
+      ;; pointer arithmetic becomes index arithmetic.
+      ;;----------------------------------------------------------
+      (let ((prev (- p 2)))
+        (cond
+         ((or (char=? (string-ref pattern prev) #\()
+              (char=? (string-ref pattern prev) #\|))
+          #t)
+         ((char=? (string-ref pattern prev) #\:)
+          ;; Skip over an optional regnum.
+          (let skip ((q prev))
+            (if (and (> q 0)
+                     (char-numeric? (string-ref pattern (- q 1))))
+                (skip (- q 1))
+                (if (and (> q 1)
+                         (char=? (string-ref pattern (- q 1)) #\?)
+                         (char=? (string-ref pattern (- q 2)) #\())
+                    (let ((q2 (- q 2)))
+                      ;; Count the preceding backslashes.
+                      (let count ((r q2) (n 0))
+                        (if (and (> r 0)
+                                 (char=? (string-ref pattern (- r 1)) #\\))
+                            (count (- r 1) (+ n 1))
+                            (odd? n))))
+                    #f))))
+         (else #f))))
+
+    (define (%at-endline-loc? pattern p pend)
+      ;; `at_endline_loc_p` (`regex-emacs.c:2834'): is the `$` at P
+      ;; before a subexpression or an alternative?
+      ;;----------------------------------------------------------
+      (and (< p pend)
+           (char=? (string-ref pattern p) #\\)
+           (< (+ p 1) pend)
+           (or (char=? (string-ref pattern (+ p 1)) #\))
+               (char=? (string-ref pattern (+ p 1)) #\|))))
+
+    (define (%group-in-compile-stack st regnum)
+      ;; `group_in_compile_stack` (`regex-emacs.c:2845').
+      ;;----------------------------------------------------------
+      (let loop ((frames (compile-state-stack st)))
+        (cond ((null? frames) #f)
+              ((= (cadddr (car frames)) regnum) #t)
+              (else (loop (cdr frames))))))
+
+    (define (%exactn-append! st at code)
+      ;; Add CODE to the `exactn` instruction at AT. The C appends a
+      ;; byte after the count; this appends to the instruction's
+      ;; character vector.
+      ;;----------------------------------------------------------
+      (let* ((ins (vector-ref (compile-state-buffer st) at))
+             (chars (vector-ref ins 1)))
+        (vector-set! ins 1 (append chars (list code)))
+        #t))
 
     ))
