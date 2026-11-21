@@ -47,11 +47,22 @@
   (import
     (scheme base)
     (only (guile) make-hash-table hashq-ref hashq-set! hashq-get-handle
-                  hash-clear! current-module module-name eval-when eval sort
+                  hash-clear! hash-map->list current-module module-name
+                  eval-when eval sort string<? most-positive-fixnum
                   syntax with-syntax syntax-case syntax->datum datum->syntax)
     (only (schemacs editor intervals) get put)
     (only (schemacs editor buffer) current-buffer buffer-local-value)
-    (only (schemacs editor search) string-match)
+    (only (schemacs editor cl-seq)
+          cl-set-difference cl-intersection cl-delete-duplicates)
+    (only (schemacs editor fns) mapcan)
+    (only (schemacs editor syntax) char-syntax-in with-syntax-table)
+    ;; `c-save-buffer-state' is `with-silent-modifications' since Emacs
+    ;; 24 (see below), which is `subr.el''s.
+    (only (schemacs editor subr) with-silent-modifications)
+    ;; The property API `c-put-char-property' and friends stand on
+    ;; (`textprop.c''s), which `cc-defs.el' reaches directly in Emacs.
+    (only (schemacs editor textprop) put-text-property get-text-property
+          remove-text-properties next-single-property-change)
     (only (schemacs regexp-opt) regexp-opt))
 
   (export
@@ -59,13 +70,66 @@
    c-get-lang-constant c-find-assignment-for-mode
    c-define-lang-constant c-define-lang-constant-here
    c-lang-defconst-bindings c-lang-defconst-thunk
-   c-lang-defconst-eval-now
+   c-lang-defconst-eval-now c-lang-constant-names
+   c--mapcan c--set-difference c--intersection c--delete-duplicates
+   %c-true %c-false
+   c-emacs-features c-with-syntax-table c-int-to-char c-characterp
+   c-register-emacs-variable-reader!
    c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
+   c-alpha c-alnum c-digit c-upper c-lower
    c-mode-symbol c-mode-var c-concat-separated c-make-bare-char-alt
-   c-make-keywords-re c-lang-constant-documentation c-literal-datum?)
+   c-make-keywords-re c-lang-constant-documentation c-literal-datum?
+   c-major-mode-is *c-langs-are-parametric* *c-lang-const-expansion*
+   c-save-buffer-state
+   c-syntax-table-hwm
+   c-put-char-property c-get-char-property c-clear-char-property
+   c-put-char-properties c-clear-char-properties c-min-property-position
+   c-next-single-property-change)
 
   (begin
 
+
+;;----------------------------------------------------------------------
+;; "Some helper constants" (`cc-defs.el:2427')
+;;----------------------------------------------------------------------
+;; Emacs's `c-emacs-features' has `posix-char-classes' (measured), so
+;; the character-class spelling is the one taken.
+(define c-alpha "[:alpha:]")
+(define c-alnum "[:alnum:]")
+(define c-digit "[:digit:]")
+(define c-upper "[:upper:]")
+(define c-lower "[:lower:]")
+
+;;----------------------------------------------------------------------
+;; `c-emacs-features' (`cc-defs.el:2236')
+;;----------------------------------------------------------------------
+;; Emacs probes the running Emacs at load for these flags; there is one
+;; Emacs here and it is this tree, so the answer is a measured constant
+;; (Emacs 31.1's own value). The `1-bit' entry is the syntax-table flag
+;; width `c-populate-syntax-table' was written against.
+(define c-emacs-features
+  '(pps-extended-state col-0-paren posix-char-classes gen-string-delim
+    gen-comment-delim syntax-properties category-properties 1-bit))
+
+;;----------------------------------------------------------------------
+;; `c-with-syntax-table' (`cc-defs.el:1063'), `c-int-to-char' (`:548')
+;; and `c-characterp' (`:558')
+;;----------------------------------------------------------------------
+;; Emacs's `c-with-syntax-table' is a macro over `unwind-protect'; the
+;; thunk-taking `with-syntax-table' here is the same binding, and the
+;; callers are the constant VALs and `c-filter-ops', which are
+;; expressions.
+(define (c-with-syntax-table table thunk)
+  (with-syntax-table table thunk))
+
+(define (c-int-to-char integer)
+  ;; Emacs's is the identity - "In Emacs, a character is an integer."
+  ;; In this tree a character is a Scheme character, so it converts; the
+  ;; places the C wraps a code point this tree must too.
+  (integer->char integer))
+
+(define (c-characterp arg)
+  (char? arg))
 
 ;;----------------------------------------------------------------------
 ;; `c-add-language' (`cc-defs.el:2477') and the language declarations
@@ -97,6 +161,57 @@
 (put 'awk-mode  'c-mode-prefix "awk-")
 
 ;;----------------------------------------------------------------------
+;; `c--mapcan' and the three `c--' set helpers (`cc-defs.el:169'-`:204')
+;;----------------------------------------------------------------------
+;; Emacs's are macros whose whole body chooses between two spellings -
+;; `mapcan' or `cl-mapcan', `set-difference' or `cl-set-difference' -
+;; depending on which the running Emacs has. Here the choice is fixed at
+;; the `cl-' spelling (measured: `(fboundp 'set-difference)' is nil on
+;; Emacs 31.1 with `cl-lib' loaded, so that is the branch Emacs takes
+;; too) and a macro becomes a procedure, because the only thing its
+;; expansion did was apply the `cl-' function to the same arguments.
+;; `:test` and friends pass straight through, as `&rest other-args` does.
+(define (%c-true x)
+  ;; Emacs's truth test, for the values a ported `c-lang-defconst' VAL
+  ;; computes: Emacs has one nil, and this tree has two - `#f` and the
+  ;; empty list - and Scheme treats `'()' as true. `(if X ...)' over a
+  ;; constant a language does not set is the common case: the constant
+  ;; is `#f`, but a *derived* value such as `c-filter-ops`'s empty
+  ;; answer is `'()', which Scheme would take for true. This is the
+  ;; test the translated VALs use wherever Emacs tests a value.
+  (not (or (eq? x #f) (null? x))))
+
+(define (%c-false x)
+  ;; `(not X)' in Emacs: true exactly for nil.
+  (or (eq? x #f) (null? x)))
+
+(define (c--mapcan fun liszt)
+  ;; "CC Mode equivalent of `mapcan'".
+  (mapcan fun liszt))
+
+(define (c--set-difference liszt1 liszt2 . other-args)
+  (apply cl-set-difference liszt1 liszt2 other-args))
+
+(define (c--intersection liszt1 liszt2 . other-args)
+  (apply cl-intersection liszt1 liszt2 other-args))
+
+(define (c--delete-duplicates cl-seq . cl-keys)
+  (apply cl-delete-duplicates cl-seq cl-keys))
+
+;;----------------------------------------------------------------------
+;; `c-lang-constant-names'
+;;----------------------------------------------------------------------
+;; Emacs has no such function: `c-kwds-lang-consts' walks the
+;; `c-lang-constants' obarray with `mapatoms' (`cc-langs.el:3581').
+;; There is no obarray here, so the registry answers its keys, sorted by
+;; name - a deterministic order where `mapatoms` has obarray order (a
+;; named departure; only the *membership* of this list reaches a
+;; keyword list's value, never its order).
+(define (c-lang-constant-names)
+  (sort (hash-map->list (lambda (k v) k) %c-lang-constants)
+        (lambda (a b) (string<? (symbol->string a) (symbol->string b)))))
+
+;;----------------------------------------------------------------------
 ;; `c-mode-symbol' and `c-mode-var' (`cc-defs.el:2106', `:2119')
 ;;----------------------------------------------------------------------
 (define (c-mode-symbol suffix)
@@ -110,12 +225,39 @@
                (*c-buffer-is-cc-mode*)))
     (string->symbol (string-append mode-prefix suffix))))
 
+(define %c-mode-var--absent (list 'c-mode-var-absent))
+
+(define %c-emacs-variable-readers (make-hash-table))
+
+(define (c-register-emacs-variable-reader! symbol reader)
+  ;; The bridge from an Emacs variable name to this tree's spelling of
+  ;; it. `c-mode-var' reads a buffer-local slot for the language
+  ;; variables; an ordinary Emacs variable (`defcustom') is a parameter
+  ;; here, whose name carries the stars the convention gives it
+  ;; (`c-font-lock-extra-types' is `*c-font-lock-extra-types*'), and a
+  ;; name cannot be reached from a value cell. The library that defines
+  ;; such a variable registers a reader under the *plain* Emacs name, and
+  ;; `c-mode-var' answers it when the buffer has no slot. Emacs's
+  ;; `(boundp (c-mode-symbol "font-lock-extra-types"))' test is this
+  ;; registration's existence.
+  (hashq-set! %c-emacs-variable-readers symbol reader)
+  symbol)
+
 (define (c-mode-var suffix)
   ;; Emacs's `(symbol-value (c-mode-symbol SUFFIX))'. Its language
   ;; variables are buffer-local, and so are ours: the value is the
   ;; buffer-local slot of the current buffer (a named departure - there
-  ;; is no symbol value cell here).
-  (buffer-local-value (current-buffer) (c-mode-symbol suffix) #f))
+  ;; is no symbol value cell here). A variable with no slot falls back
+  ;; to the registered Emacs-variable reader (see above), and with
+  ;; neither the variable is void, as Emacs's `symbol-value' says.
+  (let ((symbol (c-mode-symbol suffix)))
+    (let ((value (buffer-local-value (current-buffer) symbol
+                                     %c-mode-var--absent)))
+      (cond
+       ((not (eq? value %c-mode-var--absent)) value)
+       ((hashq-ref %c-emacs-variable-readers symbol)
+        => (lambda (reader) (reader)))
+       (else (error "Void variable ~a" symbol))))))
 
 ;;----------------------------------------------------------------------
 ;; `c-concat-separated', `c-make-bare-char-alt' and `c-make-keywords-re'
@@ -134,17 +276,43 @@
 
 (define (c-make-bare-char-alt chars . rest)
   ;; "Make a character alternative string from the list of characters
-  ;; CHARS ... If INVERTED is non-nil, a caret is prepended."
-  (let ((inverted (and (pair? rest) (car rest))))
-    (let loop ((cs (sort (map (lambda (c) (if (char? c) c (integer->char c)))
-                              chars)
-                         char<?))
-               (str (if inverted "^" "")))
-      (cond ((null? cs) str)
-            ((memv (car cs) (list #\\ #\^ #\-))
-             (loop (cdr cs)
-                   (string-append str "\\" (string (car cs)))))
-            (else (loop (cdr cs) (string-append str (string (car cs)))))))))
+  ;; CHARS. The returned string is of the type that can be used with
+  ;; `skip-chars-forward' and `skip-chars-backward'.  If INVERTED is
+  ;; non-nil, a caret is prepended to invert the set."
+  ;;
+  ;; Emacs's run-compressing algorithm, step for step: a run of three or
+  ;; more characters becomes `a-z', a run of two is written out. The
+  ;; arithmetic is done on code points as Emacs's is, and the list may
+  ;; hold characters or integers.
+  ;;--------------------------------------------------------------
+  (let* ((inverted (and (pair? rest) (car rest)))
+         (str (if inverted "^" ""))
+         (codes (sort (map (lambda (c) (if (char? c) (char->integer c) c))
+                           (or chars '()))
+                      <)))
+    ;; The C's `char' and `char2' are integers, so the walk is too; a
+    ;; character object is made only to write the string.
+    (let loop ((chars codes) (str str))
+      (if (null? chars)
+          str
+          (let* ((char (car chars))
+                 (chars (cdr chars))
+                 (str (if (memv char (list 92 94 45))   ; \ ^ -
+                          (string-append str "\\"
+                                         (string (integer->char char)))
+                          (string-append str (string (integer->char char)))))
+                 ;; "Check for range."
+                 (res (let inner ((cs chars) (char2 char))
+                        (if (and (pair? cs) (>= (+ char2 1) (car cs)))
+                            (inner (cdr cs) (car cs))
+                            (cons char2 cs))))
+                 (char2 (car res))
+                 (cs (cdr res)))
+            (cond ((= char char2) (loop cs str))
+                  ((< (+ char 1) char2)
+                   (loop cs (string-append str "-"
+                                           (string (integer->char char2)))))
+                  (else (loop (cons char2 cs) str))))))))
 
 (define (%delete-nil list)
   ;; Emacs's `(remq nil LIST)' for our two nils.
@@ -153,18 +321,32 @@
           ((or (not (car l)) (null? (car l))) (loop (cdr l) acc))
           (else (loop (cdr l) (cons (car l) acc))))))
 
+(define (%c-symbol-token? table elt)
+  ;; Emacs's `(string-match "\\`\\(\\sw\\|\\s_\\)*\\'" ELT)' with
+  ;; TABLE current: that regexp is exactly "every character's class is
+  ;; word or symbol", which this walks.
+  (let loop ((i 0))
+    (or (>= i (string-length elt))
+        (let ((s (char-syntax-in table (string-ref elt i))))
+          (and (or (char=? s #\w) (char=? s #\_))
+               (loop (+ i 1)))))))
+
 (define (c-make-keywords-re adorn list . rest)
   ;; "Make a regexp that matches any string in LIST. Duplicates and nil
-  ;; elements in the list are removed." The MODE argument selects the
-  ;; syntax table used to tell a symbol from a non-symbol; **named
-  ;; departure**: the mode's `c-<mode>-syntax-table' does not exist
-  ;; here yet, so the current (or standard) syntax table classifies the
-  ;; strings, which agrees with c-mode's for ordinary keyword text.
-  (let ((liszt (%delete-nil list))
-        (symbols '())
-        (non-symbols '()))
+  ;; elements in the list are removed." The strings are classified with
+  ;; the language's syntax table, Emacs's
+  ;; `(c-get-lang-constant 'c-make-mode-syntax-table nil mode)'
+  ;; fallback path (the `c-<mode>-syntax-table' variable is not
+  ;; consulted; see DEPARTURES.md).
+  (let* ((mode (or (and (pair? rest) (car rest))
+                   (*c-buffer-is-cc-mode*)
+                   (error "No current language")))
+         (table ((c-get-lang-constant 'c-make-mode-syntax-table #f mode)))
+         (liszt (%delete-nil (or list '())))
+         (symbols '())
+         (non-symbols '()))
     (for-each (lambda (elt)
-                (if (string-match "\\`\\(\\sw\\|\\s_\\)*\\'" elt)
+                (if (%c-symbol-token? table elt)
                     (set! symbols (cons elt symbols))
                     (set! non-symbols (cons elt non-symbols))))
               liszt)
@@ -239,6 +421,28 @@
 ;; variable).
 (define *c-buffer-is-cc-mode* (make-parameter #f))
 
+;; `c-langs-are-parametric' (`cc-defs.el:2540'): true while a
+;; `c-lang-defconst' VAL is being evaluated, which is when
+;; `c-major-mode-is' must expand to `c-lang-major-mode-is' - matching
+;; fallback modes - rather than to the `memq' of ordinary code. Emacs
+;; binds it around its own recursive expansion of the VAL; here the
+;; VAL is source evaluated on demand, and the expansion happens inside
+;; that `eval', so the parameter is seen.
+(define *c-langs-are-parametric* (make-parameter #f))
+
+;; `c-lang-const-expansion' (`cc-defs.el:2716'): Emacs's switch between
+;; baking a constant's value into compiled code (nil), expanding to a
+;; `c-get-lang-constant' *call* ('call), and 'immediate. `c-lang-defconst'
+;; binds it to 'call around the macroexpansion of a VAL - "To make
+;; `c-lang-const' expand to a straightforward call to
+;; `c-get-lang-constant' in `c--macroexpand-all'" - so a VAL's references
+;; to other constants are resolved when the VAL runs, which is what makes
+;; forward references and self-references work. This port's VAL is
+;; `eval'ed source, so the same binding has to be visible to the macro
+;; expander inside that `eval'. (`immediate' is not carried: nothing
+;; here asks for it.)
+(define *c-lang-const-expansion* (make-parameter 'bake))
+
 ;;----------------------------------------------------------------------
 ;; The registration the macros call, and their helpers
 ;;----------------------------------------------------------------------
@@ -247,7 +451,10 @@
   ;; current *now* (the defining module), where every top-level
   ;; definition is in place by the time a value is requested.
   (let ((module (current-module)))
-    (lambda () (eval val module))))
+    (lambda ()
+      (parameterize ((*c-langs-are-parametric* #t)
+                     (*c-lang-const-expansion* 'call))
+        (eval val module)))))
 
 (define (c-lang-defconst-bindings pairs)
   ;; PAIRS is `((MODES . VAL-SOURCE) ...)'; the bindings list Emacs's
@@ -264,8 +471,10 @@
 
 (define (c-lang-defconst-eval-now form)
   ;; `c-lang-defconst-eval-immediately''s runtime half: FORM is source
-  ;; data, evaluated in the module doing the evaluation.
-  (eval form (current-module)))
+  ;; data, evaluated in the module doing the evaluation - with the
+  ;; expansion switch at 'call, as inside any VAL.
+  (parameterize ((*c-lang-const-expansion* 'call))
+    (eval form (current-module))))
 
 ;;----------------------------------------------------------------------
 ;; `c-define-lang-constant' (`cc-defs.el:2664')
@@ -394,27 +603,40 @@
              (error "Unknown language ~s: no `c-mode-prefix' property" l))
            (with-syntax ((n* (datum->syntax (syntax name) nm))
                          (m* (datum->syntax (syntax lang) mode)))
-             (guard (e (#t #'(c-get-lang-constant 'n* #f 'm*)))
-               (let ((v (c-get-lang-constant nm #f mode)))
-                 (if (%c-literal-datum? v)
-                     (with-syntax ((v* (datum->syntax (syntax name) v)))
-                       #'(quote v*))
-                     #'(c-get-lang-constant 'n* #f 'm*)))))))))))
+             (if (eq? (*c-lang-const-expansion*) 'call)
+                 #'(c-get-lang-constant 'n* #f 'm*)
+                 (guard (e (#t #'(c-get-lang-constant 'n* #f 'm*)))
+                   (let ((v (c-get-lang-constant nm #f mode)))
+                     (if (%c-literal-datum? v)
+                         (with-syntax ((v* (datum->syntax (syntax name) v)))
+                           #'(quote v*))
+                         #'(c-get-lang-constant 'n* #f 'm*))))))))))))
 
 ;;----------------------------------------------------------------------
 ;; `c-lang-defconst-eval-immediately' (`cc-defs.el:2531')
 ;;----------------------------------------------------------------------
 (define-syntax c-lang-defconst-eval-immediately
   ;; "Can be used inside a VAL in `c-lang-defconst' to evaluate FORM
-  ;; immediately." Emacs evals at macro-expansion time; here a VAL is
-  ;; source evaluated on demand, so this evals at that moment in the
-  ;; defining module.
+  ;; immediately."
+  ;;
+  ;; **The expansion is the evaluated form itself**, as Emacs's is:
+  ;; `(defmacro c-lang-defconst-eval-immediately (form) (eval form))'
+  ;; evaluates the argument at macro-expansion time and *returns that
+  ;; value as the expansion*, so what the quasiquote built - a call form
+  ;; like `(append (c-lang-const a) ...)' - is then evaluated as code.
+  ;; (Expanding to `(eval ...)` instead returns the call form as a
+  ;; value, which is how the first port of this was wrong: the keyword
+  ;; list came out as the symbol `append' and a list of unevaluated
+  ;; `c-lang-const' forms.)
+  ;;
+  ;; Emacs evals at macro-expansion time; here a VAL is source evaluated
+  ;; on demand, so this evals at that moment, in the defining module.
   (lambda (stx)
     (syntax-case stx ()
       ((_ form)
-       (with-syntax ((f* (datum->syntax (syntax form)
-                                        (syntax->datum (syntax form)))))
-         #'(c-lang-defconst-eval-now 'f*))))))
+       (datum->syntax (syntax form)
+                      (c-lang-defconst-eval-now
+                       (syntax->datum (syntax form))))))))
 
 ;;----------------------------------------------------------------------
 ;; `c-get-lang-constant' (`cc-defs.el:2815')
@@ -482,13 +704,18 @@
                   (when (eq? value %c-lang--novalue)
                     (error "`~a' got no (prior) value in ~a (might be a cyclic reference)"
                            name mode))
-                  ;; Emacs messages "Eval error in the
-                  ;; `c-lang-defconst' for..." and re-signals; this
-                  ;; raises a summary condition instead (a named
-                  ;; departure: the tree has one error condition).
-                  (let ((v (guard (e (#t
-                                      (error "Eval error in the `c-lang-defconst' for `~a' in ~a"
-                                             name mode)))
+                  ;; Emacs "first messages 'Eval error in the
+                  ;; `c-lang-defconst' for `%S' in %s:' and then
+                  ;; re-signals the original condition" (`cc-defs.el'),
+                  ;; which is what this does - the original error reaches
+                  ;; the caller, so its own message is the one seen.
+                  ;; Emacs first *messages* "Eval error in the
+                  ;; `c-lang-defconst' for `%S' in %s:" and then
+                  ;; re-signals the original condition; this re-signals
+                  ;; it without the message (a named departure: the
+                  ;; message would be written to stderr, which the
+                  ;; editor owns), so the caller sees the real error.
+                  (let ((v (guard (e (#t (raise e)))
                              (value))))
                     (hashq-set! (c-lang-constant-values entry) mode v)
                     v)))))))))
@@ -529,6 +756,25 @@
      (else %c-lang--novalue))))
 
 ;;----------------------------------------------------------------------
+;; `c-major-mode-is' (`cc-defs.el:1153')
+;;----------------------------------------------------------------------
+(define-syntax c-major-mode-is
+  (lambda (stx)
+    (syntax-case stx ()
+      ((_ mode)
+       (if (*c-langs-are-parametric*)
+           ;; Inside a `c-lang-defconst' VAL: match fallback modes too.
+           (with-syntax ((m* (datum->syntax (syntax mode)
+                                            (syntax->datum (syntax mode)))))
+             #'(c-lang-major-mode-is m*))
+           (let ((d (syntax->datum (syntax mode))))
+             (if (and (pair? d) (eq? (car d) 'quote))
+                 (with-syntax ((ms (datum->syntax (syntax mode) (cadr d))))
+                   #'(memq (*c-buffer-is-cc-mode*) 'ms))
+                 (with-syntax ((m* (datum->syntax (syntax mode) d)))
+                   #'(eq? (*c-buffer-is-cc-mode*) m*)))))))))
+
+;;----------------------------------------------------------------------
 ;; `c-lang-major-mode-is' (`cc-defs.el:2967')
 ;;----------------------------------------------------------------------
 (define (c-lang-major-mode-is mode)
@@ -541,5 +787,95 @@
             ((get buf-mode 'c-fallback-mode)
              (loop (get buf-mode 'c-fallback-mode)))
             (else #f)))))
+
+
+;;----------------------------------------------------------------------
+;; `c-save-buffer-state' (`cc-defs.el:616')
+;;----------------------------------------------------------------------
+;; "Bind variables according to VARLIST (in `let*' style) and eval BODY,
+;; then restore the buffer state under the assumption that no
+;; significant modification has been made in BODY." Since Emacs 24 the
+;; macro is one call to `with-silent-modifications', which is the branch
+;; ported; the pre-24 fallback - a `let*' of `buffer-undo-list',
+;; `inhibit-read-only', `deactivate-mark' and the two change-hook lists
+;; around an `unwind-protect' - is not carried, because the primitive it
+;; exists to stand in for is here.
+(define-syntax c-save-buffer-state
+  (syntax-rules ()
+    ((_ (bindings ...) body ...)
+     (with-silent-modifications (let* (bindings ...) body ...)))))
+
+
+;;----------------------------------------------------------------------
+;; The character-property helpers (`cc-defs.el:1230'-`:1478')
+;;----------------------------------------------------------------------
+;; Emacs's are macros that `eval' PROPERTY at expansion time and pick an
+;; Emacs-version branch; here they are procedures and PROPERTY is an
+;; argument, which is the same contract with the constant supplied at run
+;; time. The XEmacs (`c-use-extents') arms and the Emacs < 21 arms are
+;; not carried: this tree has no extents and `text-property-default-
+;; nonsticky' is `intervals.scm''s, so the Emacs >= 21 arm - which
+;; assumes `rear-nonsticky' is already covered by that variable - is the
+;; one that applies. A `syntax-table' write moves `c-syntax-table-hwm'
+;; down, as the C's arm does for the state cache (`cc-engine.el''s
+;; `c-invalidate-state-cache' reads it); nothing reads it yet.
+;;
+;; `c-min-property-position' is Emacs's own answer for "no such
+;; position": `most-positive-fixnum', not nil.
+(define c-syntax-table-hwm most-positive-fixnum)
+
+(define (c-put-char-property pos property value)
+  ;; "Put the given property with the given value on the character at
+  ;; POS." This macro does a hidden buffer change.
+  (when (eq? property 'syntax-table)
+    (set! c-syntax-table-hwm (min c-syntax-table-hwm pos)))
+  (put-text-property pos (+ pos 1) property value))
+
+(define (c-get-char-property pos property)
+  ;; "Get the value of the given property on the character at POS if
+  ;; it's been put there by `c-put-char-property'."
+  (get-text-property pos property))
+
+(define (c-clear-char-property pos property)
+  ;; "Remove the given property on the character at POS if it's been put
+  ;; there by `c-put-char-property'." This macro does a hidden buffer
+  ;; change.
+  (when (eq? property 'syntax-table)
+    (set! c-syntax-table-hwm (min c-syntax-table-hwm pos)))
+  (remove-text-properties pos (+ pos 1) (list property #f)))
+
+(define (c-next-single-property-change position prop object limit)
+  ;; `cc-defs.el:477': Emacs's `next-single-property-change', with the
+  ;; XEmacs `next-single-char-property-change' arm not carried.
+  (next-single-property-change position prop object limit))
+
+(define (c-min-property-position from to property)
+  ;; "Return the first position in the range [FROM TO) where the text
+  ;; property PROPERTY is set, or `most-positive-fixnum' if there is no
+  ;; such position."
+  (cond ((and (< from to) (get-text-property from property)) from)
+        (else (let ((pos (c-next-single-property-change from property #f to)))
+                (if (< pos to) pos most-positive-fixnum)))))
+
+(define (c-put-char-properties from to property value)
+  ;; "Put the given PROPERTY with the given VALUE on the characters
+  ;; between FROM and TO." This macro does hidden buffer changes.
+  (when (eq? property 'syntax-table)
+    (set! c-syntax-table-hwm (min c-syntax-table-hwm from)))
+  (put-text-property from to property value))
+
+(define (c-clear-char-properties from to property)
+  ;; "Remove all the occurrences of the given property in the given
+  ;; region that has been put with `c-put-char-property'. The returned
+  ;; value is the buffer position of the lowest character whose PROPERTY
+  ;; was removed, or nil if there was none."
+  (let ((ret (c-min-property-position from to property)))
+    (if (< ret to)
+        (begin
+          (when (eq? property 'syntax-table)
+            (set! c-syntax-table-hwm (min c-syntax-table-hwm ret)))
+          (remove-text-properties ret to (list property #f))
+          ret)
+        #f)))
 )
 )

@@ -20,12 +20,15 @@
           hashq-get-handle hashq-set! make-hash-table)
     (only (schemacs editor buffer)
           buffer-local-value set-buffer-local-value! current-buffer)
+    ;; `aref`'s char-table arm - `CHAR_TABLE_REF` (`char_table_ref`).
+    (only (schemacs editor chartab) char-table? char-table-ref)
     )
 
   (export
    make-local-variable
    default-value set-default default-boundp
    keywordp
+   aref
    ;; `alloc.c''s `make-bool-vector' and `bool-vector', and `data.c''s
    ;; predicates and bitwise operations. See "Bool vectors" below.
    make-bool-vector bool-vector bool-vector-p bool-vector?
@@ -121,6 +124,35 @@
       ;; buffer-local value in a buffer, and a different default value."
       ;;--------------------------------------------------------------
       (and (hashq-get-handle *default-values* symbol) #t))
+
+    (define (aref array idx)
+      ;; GNU Emacs's `aref' (`data.c:2568`): "Return the element of
+      ;; ARRAY at index IDX. ARRAY may be a vector, a string, a
+      ;; char-table, a bool-vector, a record, or a byte-code object.
+      ;; IDX starts at 0."
+      ;;
+      ;; A string's element is its *character code* (`make_fixnum (c)'
+      ;; in the C), not a Scheme character. Not carried: the record and
+      ;; byte-code arms, because nothing here indexes a record with it -
+      ;; they signal rather than returning a wrong slot.
+      ;;--------------------------------------------------------------
+      (cond
+       ((string? array)
+        (if (or (< idx 0) (>= idx (string-length array)))
+            (error "Args out of range: ~s, ~s" array idx)
+            (char->integer (string-ref array idx))))
+       ((bool-vector? array)
+        (if (or (< idx 0) (>= idx (%bool-vector-length array)))
+            (error "Args out of range: ~s, ~s" array idx)
+            (bool-vector-ref array idx)))
+       ((char-table? array)
+        (char-table-ref array idx))
+       ((vector? array)
+        (if (or (< idx 0) (>= idx (vector-length array)))
+            (error "Args out of range: ~s, ~s" array idx)
+            (vector-ref array idx)))
+       (else
+        (error "Wrong type argument: arrayp, ~s" array))))
 
     ;;----------------------------------------------------------------
     ;; Bool vectors

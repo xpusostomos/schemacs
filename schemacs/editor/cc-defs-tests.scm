@@ -17,7 +17,8 @@
 
 ;; `c-mode' and the other core languages got their `c-mode-prefix'
 ;; when cc-defs loaded. A derived language exercises the fallback.
-(c-add-language 'ccdefs-derived-mode 'c-mode)
+(eval-when (expand load eval)
+  (c-add-language 'ccdefs-derived-mode 'c-mode))
 
 ;;----------------------------------------------------------------------
 ;; LANG overrides t; another language falls back to t
@@ -39,6 +40,11 @@
 ;; Lazy evaluation, cached per mode
 ;;----------------------------------------------------------------------
 (define counter 0)
+;; A self-assignment marks the binding mutable: without it the compiler
+;; folds reads of `counter' to 0, because the only `set!' on it lives in
+;; a VAL evaluated by `eval' (AGENTS.md's "a compiled library folds its
+;; own defvars").
+(set! counter counter)
 (c-lang-defconst ccdefs-count t (begin (set! counter (+ counter 1))
                                        'counted))
 
@@ -88,6 +94,7 @@
 ;; Redefining a constant clears the values that depend on it
 ;;----------------------------------------------------------------------
 (define dep-counter 0)
+(set! dep-counter dep-counter)
 (c-lang-defconst ccdefs-a t 'a1)
 (c-lang-defconst ccdefs-b t (begin (set! dep-counter (+ dep-counter 1))
                                    (list (c-lang-const ccdefs-a))))

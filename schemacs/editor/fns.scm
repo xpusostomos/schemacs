@@ -63,7 +63,7 @@
     ;; copies one, and `copy-category-table` (category.c) copies the
     ;; category sets it walks with it.
     (only (schemacs editor data)
-          bool-vector? %bool-vector-copy)
+          aref bool-vector? %bool-vector-copy %bool-vector-length)
     ;; `copy-sequence`'s char-table arm - `Fcopy_sequence` calls
     ;; `Fcopy_char_table` for one, and `casetab.c` copies a case table
     ;; with it.
@@ -77,6 +77,15 @@
   (export compare-strings
           equal-including-properties
           mapconcat
+          identity
+          delete
+          %string
+          nthcdr
+          nth
+          elt
+          %length
+          mapcar
+          mapcan
           %substring
           buffer-hash
           concat
@@ -391,6 +400,26 @@
                 (vector-set! result i (car rest))
                 (loop (+ i 1) (cdr rest)))))))
 
+    (define (mapconcat-sequence-elements sequence)
+      ;; The sequence walk `mapcar1' makes for a list, a vector or a
+      ;; string: a list of the elements, with a string's characters as
+      ;; integers. `mapconcat', `mapcar' and `mapcan' all read a
+      ;; sequence this way.
+      ;;--------------------------------------------------------------
+      (cond ((list? sequence) sequence)
+            ((not sequence) '())   ; Emacs's nil
+            ((vector? sequence) (vector->list sequence))
+            ((string? sequence)
+             (let loop ((i 0) (out '()))
+               (if (>= i (string-length sequence))
+                   (reverse out)
+                   (loop (+ i 1)
+                         (cons (char->integer
+                                (string-ref sequence i))
+                               out)))))
+            (else
+             (error "Wrong type argument: sequencep" sequence))))
+
     (define (mapconcat function sequence . rest)
       ;; GNU Emacs's `mapconcat' (`fns.c'): "Apply FUNCTION to each element
       ;; of SEQUENCE, and concat the results as strings. In between each
@@ -404,19 +433,7 @@
       ;; C's final `Fconcat' does. A bool-vector sequence is not carried;
       ;; nothing here makes one.
       ;;--------------------------------------------------------------
-      (let* ((elements
-              (cond ((list? sequence) sequence)
-                    ((vector? sequence) (vector->list sequence))
-                    ((string? sequence)
-                     (let loop ((i 0) (out '()))
-                       (if (>= i (string-length sequence))
-                           (reverse out)
-                           (loop (+ i 1)
-                                 (cons (char->integer
-                                        (string-ref sequence i))
-                                       out)))))
-                    (else
-                     (error "Wrong type argument: sequencep" sequence))))
+      (let* ((elements (mapconcat-sequence-elements sequence))
              (pieces
               (let loop ((rest elements) (out '()))
                 (if (null? rest)
@@ -429,6 +446,156 @@
               (if (null? rest)
                   out
                   (loop (cdr rest) (concat out sep (car rest))))))))
+
+    (define (delete elt seq)
+      ;; GNU Emacs's `delete' (`fns.c:2138`): "Delete members of SEQ
+      ;; which are `equal' to ELT, and return the result. SEQ must be a
+      ;; sequence (i.e. a list, a vector, or a string)."
+      ;;
+      ;; The list arm is `delq''s splice with `equal?' instead of `eq?'
+      ;; - destructive, as Emacs's is. The vector and string arms are
+      ;; non-destructive copies. Emacs's string arm compares *characters
+      ;; as integers*; an element of a Scheme string is a character, so
+      ;; an integer ELT is compared as its character.
+      ;;--------------------------------------------------------------
+      (define (same? a b)
+        (equal? (if (and (char? b) (integer? a)) (char->integer b) b) a))
+      (cond
+       ((or (pair? seq) (null? seq))
+        ;; "if (NILP (prev)) return ...; check the head, then splice."
+        (let skip ((l seq))
+          (cond ((null? l) l)
+                ((same? elt (car l)) (skip (cdr l)))
+                (else
+                 (let loop ((prev l) (rest (cdr l)))
+                   (cond ((null? rest) l)
+                         ((same? elt (car rest))
+                          (set-cdr! prev (cdr rest))
+                          (loop prev (cdr rest)))
+                         (else (loop rest (cdr rest)))))))))
+       ((vector? seq)
+        (list->vector
+         (let loop ((i 0) (out '()))
+           (if (>= i (vector-length seq))
+               (reverse out)
+               (loop (+ i 1)
+                     (if (same? elt (vector-ref seq i))
+                         out
+                         (cons (vector-ref seq i) out)))))))
+       ((string? seq)
+        (list->string
+         (let loop ((i 0) (out '()))
+           (if (>= i (string-length seq))
+               (reverse out)
+               (loop (+ i 1)
+                     (if (same? elt (string-ref seq i))
+                         out
+                         (cons (string-ref seq i) out)))))))
+       (else (error "Wrong type argument: sequencep, ~s" seq))))
+
+    (define (%string . elements)
+      ;; GNU Emacs's `string' (`character.c:846`): "Return a newly
+      ;; created string containing the characters whose codes are the
+      ;; arguments." Its arguments are integers in Emacs; characters
+      ;; are accepted here too, the same courtesy `aref' pays in
+      ;; reverse. **Placement**: `character.c' has no library here, and
+      ;; `%chars-or-numbers->string' (below) is the shared walk.
+      ;;--------------------------------------------------------------
+      (%chars-or-numbers->string elements))
+
+    (define (identity argument)
+      ;; GNU Emacs's `identity' (`fns.c:49`): "Return the ARGUMENT
+      ;; unchanged."
+      ;;--------------------------------------------------------------
+      argument)
+
+    (define (%length sequence)
+      ;; GNU Emacs's `length' (`fns.c:127`): "Return the length of vector,
+      ;; list or string SEQUENCE." - and, since the C tests them, a
+      ;; bool-vector's bit count and a char-table's `MAX_CHAR + 1'.
+      ;;
+      ;; **Named `%length' because a core binding cannot be shadowed**:
+      ;; `(scheme base)` exports `length`, and a library definition of it
+      ;; is refused (the rule `%assq' and `%substring` carry). Emacs's
+      ;; `length` also takes nil - either of this tree's nils - as 0.
+      ;;--------------------------------------------------------------
+      (cond ((null? sequence) 0)
+            ((pair? sequence) (length sequence))
+            ((string? sequence) (string-length sequence))
+            ((vector? sequence) (vector-length sequence))
+            ((bool-vector? sequence) (%bool-vector-length sequence))
+            ((char-table? sequence) (+ #x3FFFFF 1))
+            ((not sequence) 0)
+            (else (error "Wrong type argument: sequencep, ~s" sequence))))
+
+    (define (nthcdr n list)
+      ;; GNU Emacs's `nthcdr' (`fns.c:1750`): "Take cdr N times on
+      ;; LIST, return the result." A list shorter than N answers nil -
+      ;; the C's `return Qnil' after `CHECK_LIST_END' - rather than
+      ;; Scheme's `list-tail' error, which is the tolerance the callers
+      ;; rely on.
+      ;;
+      ;; **Moved here from `subr.scm', where it was a placement
+      ;; departure**: `nthcdr' and `nth' are `fns.c''s, and `elt' is
+      ;; written on them. `subr.scm' imports and re-exports both, so
+      ;; its callers are unchanged.
+      ;;--------------------------------------------------------------
+      (let loop ((n n) (rest list))
+        (if (or (<= n 0) (not (pair? rest)))
+            rest
+            (loop (- n 1) (cdr rest)))))
+
+    (define (nth n list)
+      ;; GNU Emacs's `nth' (`fns.c:1846`): "Return the Nth element of
+      ;; LIST. N counts from zero. If LIST is not that long, nil is
+      ;; returned." Emacs's body is `(car (nthcdr n list))' - and `(car
+      ;; nil)' is nil; this tree's nil for the callers that test the
+      ;; answer is `#f' (the spelling `subr.scm' used before the move).
+      ;;--------------------------------------------------------------
+      (let ((tail (nthcdr n list)))
+        (and (pair? tail) (car tail))))
+
+    (define (elt sequence n)
+      ;; GNU Emacs's `elt' (`fns.c:1854`): "Return element of SEQUENCE at
+      ;; index N."
+      ;;
+      ;; Emacs's own body is two lines: a list (and nil, which is a
+      ;; list) is `(car (nthcdr N SEQUENCE))', everything else is
+      ;; `aref' - whose string arm answers a character *code*. The
+      ;; list arm's out-of-range answer is `(car nil)' i.e. nil.
+      ;;--------------------------------------------------------------
+      (cond ((or (pair? sequence) (null? sequence))
+             (let ((tail (nthcdr n sequence)))
+               (if (pair? tail) (car tail) '())))
+            ((or (string? sequence) (vector? sequence)
+                 (char-table? sequence) (bool-vector? sequence))
+             (aref sequence n))
+            (else
+             (error "Wrong type argument: sequencep, ~s" sequence))))
+
+    (define (mapcar function sequence)
+      ;; GNU Emacs's `mapcar' (`fns.c:3552'): "Apply FUNCTION to each
+      ;; element of SEQUENCE, and make a list of the results."
+      ;;
+      ;; SEQUENCE may be a list, a vector or a string; over a string
+      ;; FUNCTION is called with each character as an *integer*, as the
+      ;; C's `mapcar1' does (`mapconcat' above takes the same walk).
+      ;;--------------------------------------------------------------
+      (let loop ((rest (mapconcat-sequence-elements sequence)) (out '()))
+        (if (null? rest)
+            (reverse out)
+            (loop (cdr rest) (cons (function (car rest)) out)))))
+
+    (define (mapcan function sequence)
+      ;; GNU Emacs's `mapcan' (`fns.c:3586'): "Apply FUNCTION to each
+      ;; element of SEQUENCE, and concatenate the results by altering
+      ;; them (using `nconc')."
+      ;;
+      ;; Emacs's body is `(apply #'nconc (Fmapcar ...))' over an
+      ;; argument vector; here the mapped results are handed straight to
+      ;; `nconc', which has the C's own mutating walk.
+      ;;--------------------------------------------------------------
+      (apply nconc (mapcar function sequence)))
 
     (define (%substring string . args)
       ;; GNU Emacs's `substring' (`fns.c:1579'): "Return a new string
@@ -613,7 +780,10 @@
             (if (>= argnum nargs)
                 val
                 (let ((tem (vector-ref args argnum)))
-                  (if (null? tem)
+                  ;; Emacs's `nil' is this tree's `'()` *and* `#f'; the
+                  ;; C's NILP test skips both, and `mapcan' hands #f in
+                  ;; as the result of a function that matched nothing.
+                  (if (or (null? tem) (not tem))
                       (loop (+ argnum 1))
                       (begin
                         (when (null? val) (set! val tem))
@@ -629,9 +799,17 @@
                                                   (last next)
                                                   tail)))))
                                 (let ((next (vector-ref args (+ argnum 1))))
-                                  (set-cdr! tail next)
-                                  (when (null? next)
-                                    (vector-set! args (+ argnum 1) tail)))
+                                  ;; A nil next is a proper list end; #f
+                                  ;; is this tree's other nil, so it is
+                                  ;; written as the empty list rather
+                                  ;; than left as a dotted tail. (`'()'
+                                  ;; is true in Scheme: the test must
+                                  ;; name both nils.)
+                                  (if (or (null? next) (not next))
+                                      (begin
+                                        (set-cdr! tail '())
+                                        (vector-set! args (+ argnum 1) tail))
+                                      (set-cdr! tail next)))
                                 (loop (+ argnum 1)))))))))))))
 
     (define (string-equal s1 s2)

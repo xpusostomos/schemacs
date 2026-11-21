@@ -30,7 +30,7 @@
     ;; cycle.
     (only (schemacs editor fns)
           compare-strings concat copy-sequence nreverse nconc
-          plist-get plist-put)
+          plist-get plist-put nthcdr nth delete)
     ;; The key event model and `kbd' live in `character.sld', the lowest
     ;; editor library - see its export note. They are re-exported from
     ;; here so that a library importing `(schemacs editor subr) kbd' still
@@ -1555,17 +1555,6 @@
             (delq elt (copy-sequence list))
             list)))
 
-    (define (nthcdr n list)
-      ;; GNU Emacs's `nthcdr': the tail of LIST after the first N
-      ;; elements - and nil when the list is shorter than that, which is
-      ;; the whole point of having it: Scheme's `list-tail' is an error
-      ;; there, and Elisp's sloppiness is what the callers rely on.
-      ;;--------------------------------------------------------------
-      (let loop ((n n) (rest list))
-        (if (or (<= n 0) (not (pair? rest)))
-            rest
-            (loop (- n 1) (cdr rest)))))
-
     (define (add-to-history history-list newelt . args)
       ;; GNU Emacs's `add-to-history': HISTORY-LIST with NEWELT on the
       ;; front, duplicates of it removed when
@@ -1604,15 +1593,6 @@
                   (if (pair? tail) (set-cdr! tail '()))
                   history))))
             history-list)))
-
-    (define (nth n list)
-      ;; GNU Emacs's `nth': the Nth element of LIST, or nil - this tree's
-      ;; #f - when the list is shorter than that. Built on `nthcdr'
-      ;; above, which is the half that exists in a Scheme without
-      ;; Elisp's tolerance for running off the end.
-      ;;--------------------------------------------------------------
-      (let ((tail (nthcdr n list)))
-        (and (pair? tail) (car tail))))
 
     ;;----------------------------------------------------------------
     ;; Positions: the value a mouse event carries

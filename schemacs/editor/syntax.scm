@@ -90,7 +90,8 @@
   (export
    ;; syntax.c's DEFUNs
    syntax-table-p syntax-table standard-syntax-table copy-syntax-table
-   set-syntax-table char-syntax syntax-class-to-char matching-paren
+   set-syntax-table char-syntax char-syntax-in syntax-class-to-char
+   matching-paren
    ;; the flag readers `internal-describe-syntax-value` (help-fns.scm)
    ;; prints - `SYNTAX_FLAGS_*` (`syntax.c:61`)
    %comstart-first? %comstart-second? %comend-first? %comend-second?
@@ -361,13 +362,22 @@
     (define (%char-code c)
       (if (char? c) (char->integer c) c))
 
+    (define (char-syntax-in table character)
+      ;; The class CHARACTER has in TABLE: `char-syntax` with the table
+      ;; explicit. **No Emacs counterpart** - `char_syntax` reads the
+      ;; current table only - but cc-defs' `c-make-keywords-re` needs
+      ;; the *mode's* table while cc-langs is being evaluated at
+      ;; compile time, where there is no current buffer.
+      ;;--------------------------------------------------------------
+      (let* ((c (%char-code character))
+             (code (%syntax-class (char-table-ref table c))))
+        (string-ref %syntax-code-spec code)))
+
     (define (char-syntax character)
       ;; GNU Emacs's `char-syntax' (`syntax.c:1098'): "Return the syntax
       ;; code of CHARACTER, described by a character."
       ;;--------------------------------------------------------------
-      (let* ((c (%char-code character))
-             (code (%syntax-class (char-table-ref (syntax-table) c))))
-        (string-ref %syntax-code-spec code)))
+      (char-syntax-in (syntax-table) character))
 
     (define (syntax-class-to-char syntax)
       ;; GNU Emacs's `syntax-class-to-char' (`syntax.c:1124'): "Return
@@ -1153,7 +1163,20 @@
                                   (else code))))
                   (cond
                    ;; "Ignore comment starters of a different style."
-                   ((and (= code scomment)
+                   ;;
+                   ;; **`(not com2start)` is the C's `else if' chain and
+                   ;; not a refinement of it** (`syntax.c:807'): the test
+                   ;; applies only to a *single-character* `Scomment'.
+                   ;; A two-character starter has just been converted to
+                   ;; `Scomment` by the line above, and its style is
+                   ;; computed from the pair, so asking `(%comment-style
+                   ;; syn 0)` about one half of it answers something
+                   ;; else. Without the guard `/* c */` never matches
+                   ;; its own opener (`/`'s style bit is 1 against the
+                   ;; pair's 0) and every backward `forward-comment`
+                   ;; over a C block comment reports lossage.
+                   ((and (not com2start)
+                         (= code scomment)
                          (or (not (= comstyle (%comment-style syn 0)))
                              (not (eq? (%nested? syn) comnested))))
                     (walk))
@@ -1930,10 +1953,19 @@
                                   (set! comstyle (%comment-style other syn))
                                   (set! comnested (or (%nested? other)
                                                       comnested))))
+                              ;; The dispatch is on `code`, not on the
+                              ;; character's own class: `code` is what
+                              ;; the two-char merge above rewrote, and
+                              ;; the C's switch is over it
+                              ;; (`syntax.c:812'). Dispatching on the
+                              ;; original made every merged comment end
+                              ;; (`*/`) look like punctuation and the
+                              ;; scan leave at the comment's last
+                              ;; character.
                               (cond
-                               ((= orig-code scomment-fence) (fence))
-                               ((= orig-code sendcomment) (comment-arm))
-                               ((or (not (= orig-code swhitespace)) quoted)
+                               ((= code scomment-fence) (fence))
+                               ((= code sendcomment) (comment-arm))
+                               ((or (not (= code swhitespace)) quoted)
                                 (leave))
                                (else (scan)))))))
                     (define (fence)
@@ -2359,7 +2391,12 @@
                       (else (state-incomment state)))
                 (and (state-quoted state) #t)
                 (state-mindepth state)
-                (cond ((not (state-comstyle state)) #f)
+                ;; "style of comment, if any" - and *no style* is
+                ;; `comstyle` 0, which must answer nil: Elisp's `(not 0)`
+                ;; is nil, so the C's `state.comstyle ? ... : Qnil`
+                ;; needs a zero test here, not a truthiness test (0 is
+                ;; true in Scheme, which made element 7 answer 0).
+                (cond ((zero? (state-comstyle state)) #f)
                       ((= (state-comstyle state) %st-comment-style) 'syntax-table)
                       (else (state-comstyle state)))
                 (if (or (not (= (state-incomment state) 0))
