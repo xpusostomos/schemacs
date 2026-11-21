@@ -14653,14 +14653,16 @@ match **111 ns** against 903 ns; compiled function call 8 ns, fixnum
 `cond` 5 ns, u32vector scan 3.9 ns/char. Projection: 200-600 regexp
 calls a keystroke × 0.05-1 µs = 0.01-0.6 ms.
 
-## Step 1, landed: bool vectors and the category table
+## Steps 1 and 2, landed: bool vectors, categories, case tables
 
-See DEPARTURES.md's 2026-11-21 section. `(schemacs editor data)` has
-`make-bool-vector`/`bool-vector` and data.c's operations over one exact
-integer; `(schemacs editor category)` is `category.c` whole, with
+See DEPARTURES.md's two 2026-11-21 sections. `(schemacs editor data)`
+has `make-bool-vector`/`bool-vector` and data.c's operations over one
+exact integer; `(schemacs editor category)` is `category.c` whole, with
 `word-boundary-p`, the standard table and `char-script-table` (empty
-until characters.el). `category-tests.scm` (20, Emacs's answers) is in
-the runner; all **82 suites** pass.
+until characters.el); `(schemacs editor casetab)` is `casetab.c`, with
+`set-case-table`, the derived UP/CANON/EQV slots and the ASCII standard
+table. `category-tests.scm` (20) and `casetab-tests.scm` (13), every
+expectation Emacs's own, are in the runner; all **83 suites** pass.
 
 ## What remains, in the order it has to be done
 

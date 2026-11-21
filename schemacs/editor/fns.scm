@@ -64,6 +64,10 @@
     ;; category sets it walks with it.
     (only (schemacs editor data)
           bool-vector? %bool-vector-copy)
+    ;; `copy-sequence`'s char-table arm - `Fcopy_sequence` calls
+    ;; `Fcopy_char_table` for one, and `casetab.c` copies a case table
+    ;; with it.
+    (only (schemacs editor chartab) char-table? copy-char-table)
     ;; the version comparison `string-version-lessp' is written over -
     ;; gnulib's `lib/filevercmp.c'.
     (only (schemacs editor filevercmp) %filevercmp)
@@ -547,6 +551,7 @@
        ;; `Fcopy_sequence`'s bool-vector arm (`fns.c`): a new vector with
        ;; the same elements.
        ((bool-vector? arg) (%bool-vector-copy arg))
+       ((char-table? arg) (copy-char-table arg))
        (else (error "Wrong type argument: sequencep" arg))))
 
     (define (nreverse seq)

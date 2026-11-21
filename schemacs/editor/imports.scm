@@ -65,6 +65,7 @@
     (schemacs editor editfns)
     (schemacs editor lisp)
     (schemacs editor callproc)
+    (schemacs editor casetab)
     (schemacs editor casefiddle)
     (except (schemacs editor character)  *tab-width*)
     (schemacs editor characters)
@@ -215,6 +216,10 @@
     *after-redisplay-hook*
     *amalgamating-count%
     *amalgamating-undo-limit*
+    *ascii-canon-table*
+    *ascii-downcase-table*
+    *ascii-eqv-table*
+    *ascii-upcase-table*
     *auto-coding-alist*
     *auto-coding-regexp-alist*
     *auto-fill-inhibit-regexp*
@@ -1056,6 +1061,9 @@
     canonically-space-region
     capitalize
     capitalize-word
+    case-canon-table
+    case-eqv-table
+    case-table-p
     casify-region
     casify-word
     category-docstring
@@ -1277,6 +1285,7 @@
     create-root-interval
     ctl-x-4-map
     current-buffer
+    current-case-table
     current-column
     current-display
     current-editor
@@ -3190,6 +3199,7 @@
     set-buffer-local-value!
     set-buffer-major-mode
     set-buffer-modified-p
+    set-case-table
     set-category-table
     set-char-table-extra-slot
     set-char-table-parent
@@ -3250,6 +3260,7 @@
     set-point
     set-scroll-bar-mode
     set-selection!
+    set-standard-case-table
     set-syntax-table
     set-terminal-cursor!
     set-terminal-modes!
@@ -3324,6 +3335,7 @@
     sstring
     sstring-fence
     ssymbol
+    standard-case-table
     standard-category-table
     standard-syntax-runs
     standard-syntax-table
@@ -3780,6 +3792,7 @@
     upcase
     upcase-initials
     upcase-region
+    upcase-table
     upcase-word
     update-begin!
     update-end!

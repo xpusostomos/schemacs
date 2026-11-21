@@ -11120,3 +11120,23 @@ the two objects that did not exist here: Emacs's **bool vector** and its
    Emacs's DEFUNs take the code point. Both are accepted because the
    ported `characters.el` call sites will write character literals and
    the tests write code points.
+
+## Case tables — step 2 of the regexp engine (2026-11-21)
+
+`(schemacs editor casetab)` is `src/casetab.c`: `case-table-p`,
+`current-case-table`, `standard-case-table`, `set-case-table`,
+`set-standard-case-table`, the three derivations (`set_identity`,
+`shuffle`, `set_canon`) and `init_casetab_once`'s ASCII table. The
+regexp engine's `translate` is the buffer's CANON slot and reads EQV
+from CANON's extra slot 2, exactly as `search.c` and
+`set_image_of_range` do. The derivation was checked against Emacs 31.1
+on a hand-made table where the answer is not obvious (down 65->97,
+97->97 gives up 65->97, up 97->65) and matches.
+
+Departures, also in the file: `map_char_table` is still not ported, so
+the three builders walk the table's runs with
+`char-table-ref-and-range`; a buffer's four case slots are buffer-local
+values here rather than `struct buffer` fields; and the standard table
+is ASCII only - `characters.el`'s Unicode extension is not ported yet,
+so a character with no entry translates to itself, which is
+`char_table_translate`'s fallback.
