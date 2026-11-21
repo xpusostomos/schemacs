@@ -106,7 +106,11 @@
           ;; the next redisplay repaint what the menu covered
           frame-width frame-height set-frame-garbaged!
           ;; `FRAME_MENU_BAR_ITEMS (f)`, which F10's next/prev look up
-          frame-menu-bar-items frame-menu-bar-items-used)
+          frame-menu-bar-items frame-menu-bar-items-used
+          ;; `write-glyphs!` and `clear-end-of-line!` clip to the window's
+          ;; body rectangle, not just the frame's last column: a row that
+          ;; overflows its window must not paint over its neighbour.
+          window-body-left window-body-width)
     ;; `init_signals` and the quit flag (`keyboard.c`): C-g and C-\ are the
     ;; terminal's interrupt characters, so they arrive as signals.
     (only (schemacs editor keyboard)
@@ -1201,10 +1205,25 @@
       ;; buffer line on the same screen row as the wrapped tail. The clip
       ;; is where the C's guarantee is enforced instead.
       ;;--------------------------------------------------------------
-      (let ((caps %terminal)
-            (cm (tty-cm %terminal)))
+      (let* ((caps %terminal)
+             (cm (tty-cm %terminal))
+             ;; **The window's body rectangle, not just the frame's last
+             ;; column.** A row that overflows its window must not paint
+            ;; over the window beside it: the C's guarantee is that a
+            ;; window's glyph matrix is its own box (`build_frame_matrix`
+            ;; and each window's matrix), so nothing it draws can reach a
+            ;; neighbour. This renderer builds rows directly and can hand
+            ;; over a wider one; the clip enforces the same invariant.
+            ;; **WINDOW may be #f**: `update-window!` writes a frame
+            ;; matrix row with no window, and that row is clipped to the
+            ;; frame.
+            (right (if window
+                       (min (cm-cols cm)
+                            (+ (window-body-left window)
+                               (window-body-width window)))
+                       (cm-cols cm))))
         (let loop ((i 0) (col x))
-          (when (and (< i len) (< col (cm-cols cm)))
+          (when (and (< i len) (< col right))
             (let* ((g (vector-ref glyphs i))
                    (face (glyph-face-id g))
                    (end (let scan ((j (+ i 1)))
@@ -1214,7 +1233,7 @@
                                         face))
                               (scan (+ j 1))
                               j)))
-                   (room (- (cm-cols cm) col))
+                   (room (- right col))
                    (taken (let sum ((j i) (n 0))
                             (if (or (>= j end) (>= n room))
                                 n
@@ -1268,11 +1287,26 @@
       (let* ((caps %terminal)
              (cm (tty-cm caps))
              (y (glyph-row-y row))
-             (first-unused (+ x width)))
+             ;; the window's body rectangle is the limit, as in
+             ;; `write-glyphs!`
+             (right (if window
+                        (min (cm-cols cm)
+                             (+ (window-body-left window)
+                                (window-body-width window)))
+                        (cm-cols cm)))
+             (first-unused (min (+ x width) right)))
         (cursor-to! d window y x)
         (let ((ce (tty-clr-line caps)))
           (cond
-           (ce
+           ;; **`ce` clears to the end of the terminal line, which is the
+           ;; end of the FRAME, not of the window.** Emacs can use it
+           ;; because it writes a composed frame matrix, where the line's
+           ;; unused tail is at the frame's right edge; this renderer
+           ;; writes one window's row at a time, so `ce` from a
+           ;; left-hand window would erase the window beside it. It is
+           ;; used only when the clear really does reach the frame's
+           ;; last column.
+           ((and ce (= first-unused (cm-cols cm)))
             (tty-turn-off-highlight caps)
             (%emit ce))
            ((= first-unused (cm-curX cm))

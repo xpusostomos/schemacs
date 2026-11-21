@@ -1,9 +1,9 @@
 (import
- (only (schemacs editor editfns) insert)
+ (only (schemacs editor editfns) insert point-max)
  (scheme base)
  (scheme char)
  (only (srfi 64) test-assert test-equal test-begin test-end)
- (only (guile) setvbuf)
+ (only (guile) setvbuf iota)
  (prefix (schemacs editor faces) f:)
  ;; for the run walk at the end: a buffer, a property on it, and the
  ;; computation that turns the two into runs
@@ -15,7 +15,7 @@
  (prefix (schemacs editor xfaces) x:)
  
  (only (schemacs editor buffer) set-buffer-local-value! %mark-marker with-current-buffer
- set-point allocate-buffer make-overlay overlay-put *current-buffer*)
+ set-point allocate-buffer make-overlay overlay-put *current-buffer* overlays-at)
  ;; the mark is a marker, so it is marker.c's `set-marker` that puts it
  ;; on the buffer's slot - `text-editor-mark`'s write before it, gone.
  (only (schemacs editor marker) set-marker)
@@ -56,6 +56,11 @@
                  (f:*window-system* #f)
                  (dn:current-display (make <test-display>)))
     (for-each f:face-spec-recalc (f:face-list))
+    ;; The first face a display realizes is the default one - that is
+    ;; what makes token 0 mean "plain" - and a display that draws nothing
+    ;; never realizes one by itself. Do what starting up does.
+    (dn:lookup-face (dn:current-display)
+                    (x:face-realized-attributes 'default))
     (thunk)))
 
 ;; A face exists, and the standard ones are there.
@@ -293,28 +298,41 @@
     (and (not (= (caddr (car runs)) (caddr (cadr runs))))
          (not (= (caddr (cadr runs)) (caddr (caddr runs)))))))
 
-;; The active region is another face merged after the text property's
-;; face. These tests set the point, mark and buffer-local mark-active just
-;; as the commands do, then exercise the same per-character run walk that
-;; redisplay uses.
+;; The active region is an overlay the window carries, and its face is
+;; merged with the text property's like any other overlay's. These tests
+;; make the overlay `redisplay--update-region-highlight` makes, then
+;; exercise the same per-character run walk that redisplay uses.
+;;
+;; **An 8-colour display, because the extension is the `:extend`
+;; attribute.** Emacs's region face sets `:extend t` on every colour
+;; branch and none on its `(class mono)` branch, and Emacs on a vt100
+;; paints only the characters and the newline's own cell (measured).
+;; The tests that ask whether a line break is painted to the edge need a
+;; display whose region spec has `:extend`.
 (define (region-buffer text point mark active?)
+  ;; **The active region is an overlay of the window's now**, not a face
+  ;; merged from point and mark: `redisplay--update-region-highlight`
+  ;; (`simple.el:7332`) makes one with the `region` face and a `window`
+  ;; property, from `(min point mark)` and `(max point mark)` - the
+  ;; overlay itself does not swap a reversed range
+  ;; (`clip_to_bounds (obeg, end, Z)`, `buffer.c`). The test makes what
+  ;; that function makes.
+  ;;
+  ;; An *inactive* region has no overlay; an empty one is a zero-length
+  ;; overlay, which `overlays-at` does not report - so neither paints.
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert text))
-    (set-point ed point)
-    (set-marker (%mark-marker ed) mark ed)
     (when active?
-      (set-buffer-local-value! ed 'mark-active #t))
+      (let ((ov (make-overlay (min point mark) (max point mark) ed)))
+        (overlay-put ov 'face 'region)))
     ed))
 
-(define (region-runs text point mark active?)
-  ;; On a monochrome terminal the region face is inverse-video, which
-  ;; makes the region's runs observable without an initialized ncurses
-  ;; color palette.
+(define (region-runs text start end active?)
   (with-display
    (lambda ()
-     (runs-for (region-buffer text point mark active?) 1
+     (runs-for (region-buffer text start end active?) 1
                         (string-length text)))
-   1 'mono #f))
+   8 'color #f))
 
 (define region-attribute (region-runs "abcdef" 2 5 #t))
 
@@ -330,28 +348,49 @@
 (test-equal (map caddr region-attribute)
   (map caddr (region-runs "abcdef" 5 2 #t)))
 
-;; Inactive, empty and unset-mark regions do not change the default face.
+;; Inactive and empty regions do not change the default face. (An empty
+;; overlay has no characters, so `overlays-at` never reports it; its two
+;; boundaries can still split a run, which paints nothing.)
 (test-equal '((0 6 0)) (region-runs "abcdef" 2 5 #f))
-(test-equal '((0 6 0)) (region-runs "abcdef" 2 2 #t))
-(test-equal '((0 6 0)) (region-runs "abcdef" 2 #f #t))
+(test-equal '(0 0) (map caddr (region-runs "abcdef" 2 2 #t)))
 
-;; When the active region reaches the end of a line, its face fills the
-;; remaining screen cells; a final line at point-max has no newline to extend.
-(test-equal #t
+;; **The `window` property is what keeps a region out of the other
+;; windows** - `sort_overlays`'s `overlay_matches_window`
+;; (`buffer.c:3367`), asked through `*drawing-window*`. A region overlay
+;; carries the window it belongs to and is invisible in every other.
+(test-equal '(#t #f)
   (with-display
    (lambda ()
-     (let* ((ed (region-buffer "ab\ncdef" 3 0 #t))
-            ;; the row's end position and its width in cells: `ab' from
-            ;; position 0, two characters and two cells
-            (attribute (xd:line-end-fill-attribute ed 2 2 10)))
-       (and attribute (not (= attribute 0)))))
+     (let* ((ed (allocate-buffer)))
+       (with-current-buffer ed
+         (insert "abcdef")
+         (let ((here (list 'window-a))
+               (there (list 'window-b))
+               (ov (make-overlay 2 5 ed)))
+           (overlay-put ov 'face 'region)
+           (overlay-put ov 'window here)
+           (list (parameterize ((*current-buffer* ed) (xd:*drawing-window* here))
+                   (not (= (xd:face-at-buffer-position ed 3) 0)))
+                 (parameterize ((*current-buffer* ed) (xd:*drawing-window* there))
+                   (not (= (xd:face-at-buffer-position ed 3) 0))))))))
    1 'mono #f))
-(test-equal #f
+
+;; When the active region covers a line's break, its face fills the rest
+;; of the row - including a *blank* line's - because the face at the
+;; newline has `:extend` (`extend_face_id`, `xdisp.c:24429`). A final
+;; line at `point-max` has no newline and extends nothing.
+(test-equal '(#t #f)
   (with-display
    (lambda ()
-     (xd:line-end-fill-attribute (region-buffer "abcdef" 3 0 #t)
-                                 6 6 10))
-   1 'mono #f))
+     (let ((ed (region-buffer "ab\n\ncd" 4 5 #t))
+           (default (xd:face->attribute 'default)))
+       ;; `\n\ncd` starts at position 3; the blank line's own break is
+       ;; position 4, and the buffer's last line ends at `point-max`.
+       (with-current-buffer ed
+         (list (not (= (xd:extend-fill-token ed 4 default) default))
+               (not (= (xd:extend-fill-token ed (point-max) default)
+                       default))))))
+   8 'color #f))
 
 (test-end "schemacs_editor_faces_runs")
 

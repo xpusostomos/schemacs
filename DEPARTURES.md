@@ -10739,3 +10739,325 @@ shape, so both passed the frame as the prompt and signalled inside
 that did nothing, and `revert-buffer`'s check caught it. Both take one
 argument now. This is the "a signature change has every caller updated
 or the key silently dies" class, with the pty battery as the net.
+
+# The region is an overlay per window; the row's tail is `:extend`
+# (2026-11-21)
+
+Chris, using the editor: a region that crosses a line break stopped at
+the end of the line instead of reaching the screen edge, a blank line
+inside a region was not painted at all, a region in one of several
+side-by-side windows leaked past that window's right edge, and "in real
+emacs it remembers the different regions in the different windows
+holding the buffer, but in schemacs it forgets the other regions that
+are highlighted". All four are one departure: **the region was a face
+merged by the run walk from the buffer's point and mark**, where GNU
+Emacs 29+ makes an *overlay per window* and lets the overlay machinery
+carry it. The old shape could only know one region (the current
+buffer's point/mark, the same in every window), had no `:extend` rule
+for the line break, and its fill painted from the first window's row
+arithmetic across the neighbour.
+
+## What is ported, and the C it came from
+
+- `redisplay--update-region-highlight` (`simple.el:7332`),
+  `redisplay--highlight-overlay-function` (`:7294`),
+  `redisplay--unhighlight-overlay-function` (`:7285`),
+  `redisplay-highlight-region-function` (`:7324`),
+  `redisplay-unhighlight-region-function` (`:7296`) and
+  `pre-redisplay-functions` (`:7376`) are `simple.scm`'s. The overlay
+  is stored in **`window-parameter 'internal-region-overlay`**, carries
+  `face region`, `priority (nil . 100)` and the `window` property, and
+  is moved to `[min(window-point, mark), max(...)]` on each redisplay.
+  `highlight-nonselected-windows` (`xdisp.c:38830`) is a plain
+  variable, nil as in Emacs; while a prompt is up the window the
+  minibuffer was entered from keeps its region through
+  `minibuffer-selected-window` - a seam, because `simple.scm` is below
+  `minibuffer.scm`.
+- `overlay_matches_window` (`buffer.c:3367`) is the overlay walk's
+  filter: a region overlay belongs to one window and is invisible in
+  every other, in `attrs-at-buffer-position` **and** in the
+  before/after-string walk (`load_overlay_strings`, `xdisp.c:7158`).
+  This is what stops the leak between side-by-side windows: the
+  renderer asks `*drawing-window*` for each overlay.
+- `window_outdated?` (`window.c:231`) reads `OVERLAY_MODIFF`, and moving
+  the overlay raises it, so `window-matrix-valid?` needs no region
+  question of its own - the C's own comment says it.
+- `extend_face_to_end_of_line` (`xdisp.c:24379`) and `extend_face_id`
+  (`:24429`): the row's tail is filled with the face at the line's
+  **end** when that face says `:extend`, with the last glyph's face
+  when the last glyph is not the default, and with the default face at
+  `ZV`. A row with no glyphs - a blank line - still extends, because
+  `it->face_id` at the call is the *newline's* face. That is what makes
+  a blank line inside a region paint to the edge.
+
+## Measured on Emacs 31.1 first, then matched
+
+A pty run of `emacs -Q -nw` with three side-by-side windows on one
+buffer, the region set in each in turn and the window parameters dumped
+(through a file port, so the dump itself could not disturb the buffer
+list):
+
+| step | window 1 | window 2 | window 3 |
+|---|---|---|---|
+| region set in w1 | live `[1,24]` | none | none |
+| region set in w2 | **deleted** | live `[20,34]` | none |
+| region set in w3 | deleted | deleted | live `[40,55]` |
+| back to w1 | live `[24,40]` | deleted | deleted |
+
+So the default really is "the selected window only", and returning to a
+window recomputes the region from **that window's point and the shared
+mark** (`[24,40]`, not the remembered `[1,24]`). With
+`highlight-nonselected-windows` t, all three windows' overlays are live
+at once, each `[window-point, mark]`. The screens were captured through
+tmux (`capture-pane -e`) and the region background counted per window:
+it is painted in exactly the windows whose overlay is live.
+
+Our tree reproduces both rows of behaviour: the overlay dump across the
+same sequence gives live/deleted in the same pattern, the return to w1
+gives `[window-point, mark]`, and a Gtk screenshot with the variable
+bound t shows each window's region clipped at its own right edge
+(pixel runs end at 341 for a 38-column left window, resume at 369 in
+the right window).
+
+## Departures this work names
+
+1. **`pre-redisplay-functions` runs from `render!` for every window.**
+   `prepare_menu_bars` (`xdisp.c:14267`) calls it with all windows when a
+   global redisplay is due, and `redisplay--pre-redisplay-functions`
+   (`simple.el:7391`) walks them; `redisplay--update-region-highlight`
+   (`simple.el:7332`) keeps WINDOW's overlay only when
+
+       (or highlight-nonselected-windows
+           (eq window (selected-window))
+           (and (window-minibuffer-p)
+                (eq window (minibuffer-selected-window))))
+
+   and otherwise calls the unhighlight function, which deletes it. **So
+   only the selected window's region is highlighted by default, and
+   moving to another window removes the highlight from the window left
+   behind.** This renderer repaints every window every frame, so it is
+   always in the C's "all windows" case and runs the hook for every
+   window; a hook run only for the selected window would leave the
+   other windows' overlays alive and paint stale regions, which is what
+   the previous pass's "remembered regions" policy did. That policy was
+   wrong: the code is the authority, and it is reverted. With
+   `highlight-nonselected-windows` true the hook keeps every window's
+   overlay, each at `[window-point, mark]`.
+2. **The backends clip a row to its window's body rectangle.**
+   `write-glyphs!` and `clear-end-of-line!` in both `term.scm` and
+   `pgtk.scm` stop at `window-body-left + window-body-width` (the frame's
+   last column when the window is #f - `update-window!` writes a frame
+   matrix row with no window). Emacs never needs this because it writes
+   a composed frame matrix whose window rows are already the window's
+   box; this renderer hands rows straight to the backend, and a row
+   wider than its window - a long line whose slice was not cut to the
+   window, a `display` string wider than the cells left on the row, or
+   an hscrolled row whose `x0 + width` reaches one cell past the body -
+   painted into the window beside it. That is the user's "the drawing
+   routine doesn't understand it's truncated, it keeps painting the
+   region highlight into the next window". The row builder also clamps
+   `draw-glyph-row!`'s clear limit to the body edge now. The terminal
+   `ce` (clear-to-end-of-line) capability is used only when the clear
+   reaches the frame's last column: `ce` clears the whole terminal line,
+   which in a split frame is the neighbour's text as well, and Emacs can
+   use it only because it writes a composed frame matrix.
+3. **The GUI fill is space glyphs in the row, not a stretch glyph.**
+   Emacs appends one stretch glyph over `last_visible_x - current_x`;
+   this tree's glyph is a cell, so the row is padded with cells carrying
+   the extend face, for both front ends. The row's own vector is reused,
+   so a keystroke still allocates no glyph records.
+4. **The GUI skip test is "the extend token is the default face's".**
+   Emacs skips the fill when the extend face's background equals the
+   frame's and it has no box, underline or overline. A face with the
+   frame's background but a box would be skipped here and drawn by
+   Emacs; no face in this tree does that today. Named rather than
+   modelled.
+5. **The mono inverse-video allowance is gone.** The previous
+   `line-end-fill-attribute` extended a region on a monochrome terminal
+   because the region's mono defface branch is `:inverse-video t` with
+   no `:extend`. Emacs has no such allowance (`face_at_pos` with
+   `LFACE_EXTEND_INDEX` asks `:extend` only), and measured on a vt100
+   it paints only the region's characters and the newline's own cell:
+   `alpha alpha alpha ` inverse, the padding after it not. The tests
+   that need an extension therefore ask an **8-colour** display, whose
+   region spec carries `:extend t`.
+6. **`w->last_mark` is recorded, not read.** `mark_window_display_accurate_1`
+   (`xdisp.c:18359`) stores the mark while it is active; this tree
+   stores it with the C's condition (`mark-active` and the buffer's mark
+   set, no transient-mark-mode question) and nothing reads it yet -
+   text-conversion is not ported.
+
+One more, small and only reachable without a frame: `deactivate-mark`'s
+call to `redisplay--update-region-highlight` is guarded on
+`(*current-frame*)`. Emacs always has a selected window there; this
+tree's headless tests and batch scripts have no frame at all, and
+`selected-window` signals - which made `command-tests.scm` abort at its
+first `deactivate-mark`. With no frame there is no window whose overlay
+could be painted, so the call has nothing to do.
+
+## The Gtk popup unmapping warning
+
+Chris saw `Gdk-WARNING: Tried to unmap the parent of a popup` after
+choosing Undo from the mode popup menu. Two pieces of `xmenu.c` /
+`pgtkmenu.c` were missing:
+
+- **`popup_activated_flag`** (`pgtkmenu.c:100`) is
+  `*pgtk-popup-depth*` here, a counter held by a `dynamic-wind` around
+  `pgtk-create-and-show-popup-menu`. The after-redisplay drain
+  (`pgtk-drain-queue!`) must not dispatch queued keys while it is
+  non-zero: selecting an item enqueues the item's keys, the command
+  loop's reader is what runs them, and here a timer's repaint *can*
+  drain them inside the popup's own Gtk loop - running a command that
+  rebuilt the menu bar, the parent of the popup being unmapped, under
+  Gtk's unmap. Emacs's reader cannot run there (`popup_widget_loop`
+  pumps Gtk itself), so it has no such guard.
+- **`menubar_selection_callback`'s flush** (`xmenu.c:819`): "When a menu
+  is popped down, X generates a focus event ... Since GTK buffers
+  events, we force it out here before the menu selection event."
+  `pgtk-menu-selection!` spins `gtk_events_pending`/`gtk_main_iteration`
+  before it queues the item's keys, which is the C's loop verbatim.
+
+The depth is released **after** `gtk-widget-destroy`, the order the C's
+`record_unwind_protect_ptr (pop_down_menu)` gives: nothing the destroy
+causes can dispatch a queued command in the middle of it. Not
+reproduced deterministically (it needs a real menu click), so the
+verification is structural - the port of the two C mechanisms - plus
+the live editor exercising the popup path.
+
+## The start after a narrowing goes to `recenter:` (2026-11-21)
+
+Chris: *"in real emacs if I have different windows on the same buffer
+but much different locations, and then I do C-x n n narrow in one of
+them, all windows showing that buffer scroll so the narrowed text is
+visible. We leave the window blank because we didn't scroll it to the
+visible text. Are you copying real emacs code..."*
+
+The rule, read out of `redisplay_window`:
+
+- **Markers are not clipped by narrowing.** Measured on Emacs 31.1:
+  `window-start` is still 1 after narrowing to 9..15.
+- Every optimization `redisplay_window` tries for a window whose start
+  is on screen is guarded on the start lying inside `[BEGV, ZV]` (the
+  `try_window_id` / `try_window_reusing_current_matrix` /
+  `try_cursor_movement` guards). A start outside the restriction fails
+  them all and control falls through to the `recenter:` label
+  (`xdisp.c:21158`).
+- `recenter:` seats the iterator on **PT** - the *buffer's* point, not
+  the window's point marker - with `init_iterator (&it, w, PT,
+  PT_BYTE, NULL, DEFAULT_FACE_ID)` (`:21165`), sets `it.current_y =
+  it.last_visible_y`, centers with `centering_position =
+  window_box_height (w) / 2` (`:21238`), walks back with
+  `move_it_vertically_backward` (`:21253`) never past BEGV (`:21248`),
+  and writes the result into `w->start` (`:21274`). `narrow_to_region`
+  has already clipped PT into the restriction (`editfns.c`), so every
+  window showing the buffer is seated around the buffer's point, on
+  the narrowed text.
+- The `force_start` clamp (`xdisp.c:20781`) is the **other** branch -
+  it belongs to a window whose start is `w->start` and forced, and is
+  what `scroll-to-cursor!` ports. It is not the ordinary case.
+
+`display-window!` used to clamp the window's start into
+`[point-min, point-max]` and lay rows out from there, so a window whose
+start was past ZV drew rows from ZV and the text area came out blank.
+It now asks the C's question and takes the C's fall-through:
+`recenter-window-on-cursor!` at the buffer's point, clamped into the
+restriction.
+
+The regression test is `tty-editor-tests.scm`'s *"narrowing brings
+every window on the buffer to the text"*: two windows on one buffer at
+distant positions, `narrow-to-region` `[800,900]` in the selected one,
+`render!`, and the other window's start is 800 with position 800
+visible in it. Seen failing under the old clamp (its rows blank).
+
+## Truncation vs wrapping, and the `$` marker, are `xdisp.c`'s
+
+Chris, the same day: *"Also why are we using a $ dollar sign as a marker
+that the line is long? Also, how come gtk schemacs is showing the line
+truncated, whereas tty schemacs is showing the line wrapped?"*
+
+- **The wrap rule is `init_iterator`'s** (`xdisp.c:3413`): a text row
+  wraps when the face is the default, the window is not horizontally
+  scrolled, the window is full-frame width **or**
+  `truncate-partial-width-windows` allows it (nil, or an integer not
+  greater than the window's total columns), and `truncate-lines` is
+  nil; otherwise it truncates. `truncate-partial-width-windows`
+  defaults to **50** (`:38779`), so a full-width window always wraps
+  and a partial one narrower than 50 columns truncates.
+- Both front ends draw text through `window-truncates-lines?`
+  (`indentc.scm`), which is that condition verbatim - there is no
+  per-front-end wrapping code. The difference the user saw was
+  geometry: a full-width 80-column terminal window wraps, and the
+  ~39-column windows after `C-x 3` truncate. Verified live on both.
+- **`$` is `produce_special_glyphs`'s IT_TRUNCATION glyph** and `\` its
+  IT_CONTINUATION glyph. `insert_left_trunc_glyphs` sets
+  `truncate_it.face_id = DEFAULT_FACE_ID` before asking for them
+  (`xdisp.c:23923`), so those cells carry the **default face**, not the
+  face of the line they mark - a `$` on a region row is *not*
+  region-coloured in Emacs. The left `$` that marks a horizontally
+  scrolled row is the same glyph in the same face, and our renderer
+  draws both with `(face->attribute 'default)`.
+
+## A blank line's first cell in a region
+
+Measured three ways - the desired matrix (`glyph-row-glyphs` gives the
+region face on glyph 0 of a blank row), a tty capture (the row begins
+with the region SGR at column 0), and a Gtk screenshot (the region band
+starts at x=0) - a blank line inside a region is filled from column 0.
+The only cells on such a row that are not region-coloured are Emacs's
+own: the **cursor's cell** (cursor face) and, when the window is
+horizontally scrolled, the **left `$`** at column 0 (default face, per
+`insert_left_trunc_glyphs` above - Emacs leaves that cell the frame's
+background too).
+
+## The cursor's cell came from the buffer, not the row (2026-11-21)
+
+The paragraph above was measured on a *fresh* frame. On a steady one it
+was wrong: the cursor's cell went to the frame background, and only
+when the cursor had been on a blank line - "moving up through a
+document, the first character on an empty line isn't painted" - while
+moving down looked right. Two omissions in the row and cursor model,
+both of them in `xdisp.c`:
+
+1. **`append_space_for_newline`** (`xdisp.c:24191`, called at `:26597`)
+   was not ported: "Add a space at the end of the line that is used to
+   display the cursor there." A row had no glyph at its newline at all;
+   a blank line's row was empty and only `extend_face_to_end_of_line`
+   painted anything. Emacs gives that space the **newline's face**
+   (`it->face_id`), so a blank line inside the region carries the
+   region face at column 0. `build-row!` appends it now when the row
+   reaches the end of its line (not `more?`, not `truncated?`), with
+   the newline's face - and the default face at `ZV`, which is the C's
+   `append_space_for_newline (it, true)` call at `:26083`.
+2. **The cursor's glyph came from the buffer.** `cursor-glyph` read the
+   line's string and the face at point; at the end of a line there is
+   no character in that string, so it answered `" "` with the
+   **default** face. `*phys-cursor*` recorded that, and the next
+   redisplay's `erase_phys_cursor` repainted the cell from it. GNU
+   Emacs's `get_phys_cursor_glyph` (`xdisp.c:37894`) takes the glyph
+   from the **row** the cursor is on, and `draw_phys_cursor_glyph`
+   (`:35105`) redraws *that* glyph with its own face - so a blank line
+   in the region keeps its colour under and after the cursor. The
+   renderer's cursor block is now `phys-cursor-glyph (row column)`: the
+   glyph at `column - (glyph-row-x row)`, the left `$` for the one cell
+   an hscrolled row gave up, and a default space past the row's glyphs.
+
+Why the two directions differ, and why the bug is invisible on a
+*fresh* frame: the region overlay's move raises `OVERLAY_MODIFF`, so the
+redisplay that changes the region rebuilds every row - the erase's
+paint is overwritten and the frame is right. The damage shows on the
+**next** redisplay with nothing changed (`redisplay--highlight-overlay-function`
+does not move an overlay whose bounds are unchanged, `simple.el:7294`,
+so the window is fresh, the row diff skips every row, and the cursor's
+erase is the only paint). Moving up, the blank line at the region's
+start is where the cursor was, so the erase hits the cell that matters;
+moving down, the blank lines the cursor passes are at the region's end
+or outside it, where a default cell is invisible.
+
+**Regression tests**: `pgtk-tests.scm`'s "the cursor on a blank line
+keeps the region in its cell" - a Gtk frame, two renders, the strong
+redisplay flag cleared before the second so the rows are skipped as in
+the steady state, and a pixel read from the cell's interior (it fails
+with `(255 255 255)` under the old glyph source); and
+`tty-editor-tests.scm`'s "a blank line's row carries the newline in the
+region's face", which pins the row's first glyph and the fill to the
+window's edge.

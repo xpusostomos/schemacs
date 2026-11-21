@@ -1937,11 +1937,13 @@
                     (loop state)
                     answer))))))
 
-    (define (sit-for seconds nodisp)
+    (define (sit-for seconds . rest)
       ;; GNU Emacs's `sit-for' (`subr.el:3836'): "Redisplay, then wait
       ;; for SECONDS seconds; stop when input is available. ... Value is
       ;; t if waited the full time with no input arriving, and nil
-      ;; otherwise."
+      ;; otherwise." NODISP is `&optional` in Emacs - `(sit-for 2)` is
+      ;; the ordinary call - so it is a rest parameter here; a required
+      ;; one made the answer loop's pause an arity error.
       ;;
       ;; **Here and not in `subr.sld', where Emacs's is.** Waiting for
       ;; input is `read-key-event' and redisplaying is
@@ -1964,18 +1966,19 @@
       ;; noninteractive frame - there is no `noninteractive' here, and
       ;; this editor always has a display to wait on.
       ;;--------------------------------------------------------------
-      (when (not nodisp)
-        (redisplay-frames!))
-      (if (<= seconds 0)
-          #t
-          (let ((key (read-key-event
-                      (inexact->exact (round (* seconds 1000))))))
-            (if key
-                (begin
-                  (*unread-command-events*
-                   (cons key (*unread-command-events*)))
-                  #f)
-                #t))))
+      (let ((nodisp (if (pair? rest) (car rest) #f)))
+        (when (not nodisp)
+          (redisplay-frames!))
+        (if (<= seconds 0)
+            #t
+            (let ((key (read-key-event
+                        (inexact->exact (round (* seconds 1000))))))
+              (if key
+                  (begin
+                    (*unread-command-events*
+                     (cons key (*unread-command-events*)))
+                    #f)
+                  #t)))))
 
     (define (set-transient-map map keep-pred on-exit)
       ;; GNU Emacs's `set-transient-map' (`subr.el:7006'): "Set MAP as a

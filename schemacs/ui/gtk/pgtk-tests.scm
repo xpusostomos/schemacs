@@ -225,9 +225,9 @@
 ;;------------------------------------------------------------------
 ;; Faces intern to integers, 0 meaning "plain"
 ;;
-;; `xdisp.sld''s `line-end-fill-attribute' compares a realized face with
-;; `=', so a display must hand back an integer, and 0 must be the plain
-;; face. A GUI cannot answer an opaque record.
+;; `xdisp.sld''s `extend-fill-token' compares a realized face with the
+;; default's, so a display must hand back an integer, and 0 must be the
+;; plain face. A GUI cannot answer an opaque record.
 ;;------------------------------------------------------------------
 
 (define (realize display face . attrs)
@@ -326,6 +326,57 @@
 (test-equal white (cell-pixel 0))
 (test-equal white (cell-pixel 1))
 (test-equal white (cell-pixel 6))
+
+;;------------------------------------------------------------------
+;; The cursor on a blank line leaves the region under it
+;;
+;; Point on an empty line is on its newline, column 0, and
+;; `display_line` gives that newline a space glyph carrying its face
+;; (`append_space_for_newline`, `xdisp.c:26597`); the cursor sits on
+;; that glyph and `erase_phys_cursor` redraws the *row's* glyph with its
+;; own face (`draw_phys_cursor_glyph`, `:35105`). Reading the glyph from
+;; the buffer instead answered the default face, so every redisplay
+;; repainted the cell the cursor sat on white - a hole in the region's
+;; first cell, and only the first, because that is where the newline is
+;; on an empty line.
+;;
+;; **The check needs two redisplays and a hollow cursor.** The first
+;; records the cursor; the second's erase repaints the cell (with
+;; nothing changed, the row diff skips the row, so the erase is the
+;; only paint). A filled box would cover the cell - a frame that is not
+;; focused draws the hollow one, whose interior is what the erase left.
+;;------------------------------------------------------------------
+
+(define (render-blank-region)
+  ;; "aaa\n\nbbb\n", the region [5, 9): the blank line at 5 is the
+  ;; region's first line and point 5 puts the cursor on its column 0.
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed (insert "aaa\n\nbbb\n"))
+    (set-point ed 5)
+    (set-marker (%mark-marker ed) 9 ed)
+    (set-buffer-local-value! ed 'mark-active #t)
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame)
+                     (fr:*frame-focus* #f))
+        (xd:render! frame)
+        ;; **The steady state has nothing to redraw.** A redisplay with
+        ;; no change leaves the rows alone and only the cursor is
+        ;; repainted; the test display's face realization sets the
+        ;; strong flag on the first render, so clear it to stand in for
+        ;; the steady-state loop the user sees.
+        (dn:set-windows-or-buffers-changed! #f)
+        (xd:render! frame)))
+    (shot-of d)))
+
+(define blank-shot (render-blank-region))
+;; The middle of row 1's first cell - the cell the cursor has just left.
+(test-equal "the cursor on a blank line keeps the region in its cell"
+            lightgoldenrod2
+            (blank-shot 4 (+ cell-h (quotient cell-h 2))))
+;; The cell beside it is the same region.
+(test-equal lightgoldenrod2
+            (blank-shot (+ cell-w 4) (+ cell-h (quotient cell-h 2))))
 
 ;;------------------------------------------------------------------
 ;; A face change repaints the *blank* rows as well

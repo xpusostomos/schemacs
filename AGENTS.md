@@ -14402,3 +14402,218 @@ and every named gap; the ones worth knowing before touching it:
   the battery is the net that catches the ones the suites miss.
 - Verified on the settled tree: all suites pass and
   `tools/pty-check.py` is **100/100**.
+
+# The region, the row's tail, and the popup's unmap (2026-11-21)
+
+Chris's four reports - a region stopping at the line end, blank lines in
+a region unpainted, a region leaking into the next window, and other
+windows' regions being forgotten - were one departure: the region was a
+face merged by the run walk, where Emacs 29+ keeps **one overlay per
+window**. `redisplay--update-region-highlight` and friends are in
+`simple.scm` now; the overlay lives in
+`window-parameter 'internal-region-overlay`, carries `face region`,
+`priority (nil . 100)` and the `window` property, and is filtered by
+`overlay_matches_window` in `attrs-at-buffer-position` and in the
+overlay-string walk. `extend_face_to_end_of_line`/`extend_face_id` are
+ported, so a row's tail is painted when the face at the line's **end**
+says `:extend` - including a blank line, whose "face at the end" is the
+newline's. DEPARTURES.md's 2026-11-21 section has every rule, the
+measured three-window table and the named departures.
+
+## What to know before touching it
+
+- **The default shows only the selected window's region.** Measured on
+  Emacs 31.1: setting a region in w1 and then selecting w2 leaves w1's
+  overlay *deleted*; returning to w1 recomputes it from w1's
+  `window-point` and the **shared** mark. `highlight-nonselected-windows`
+  t is what makes all windows show `[window-point, mark]` at once. The
+  user's "Emacs remembers the regions" is that setting (or the stale
+  pixels Emacs leaves in a window it does not repaint); this tree
+  reproduces the *state* in both settings.
+- **Only the selected window shows a region.** `redisplay--update-region-highlight`
+  (`simple.el:7332`) keeps a window's overlay only when
+  `highlight-nonselected-windows` is true, or the window is selected,
+  or the selected window is the minibuffer and this is the window it
+  was entered from; otherwise it deletes the overlay. `render!` runs
+  the hook for every window (it repaints every window every frame, so
+  it is always in the C's all-windows case), and moving between windows
+  therefore removes the highlight from the one left behind. An earlier
+  pass made non-selected windows "remember" their regions on the
+  strength of a user report that was later withdrawn; **the code is the
+  authority and that policy is reverted**. Selecting a window again
+  recomputes `[window-point, mark]`, as the hook does. With
+  `highlight-nonselected-windows` true every window keeps its own
+  `[window-point, mark]`.
+- **The backends clip to the window's body rectangle.**
+  `write-glyphs!`/`clear-end-of-line!` in `term.scm` and `pgtk.scm` stop
+  at `window-body-left + window-body-width` (the frame's last column
+  when there is no window - `update-window!` writes a frame-matrix row).
+  Without it a row wider than its window painted into the window beside
+  it; the row builder's clear limit is clamped too. On the terminal,
+  `ce` is used only when the clear reaches the frame's last column,
+  because `ce` wipes the whole terminal line.
+- **The GUI fill is space glyphs in the row, not a stretch glyph**
+  (Emacs's `append_stretch_glyph`): this tree's glyph is a cell. The
+  row's own vector is reused, so no allocation. The GUI skip is "the
+  extend token is the default face's" rather than Emacs's
+  background/box/underline test - named in DEPARTURES.
+- **The mono inverse-video allowance is gone.** Emacs's region defface
+  has no `:extend` on its mono branch and a vt100 paints only the
+  characters and the newline's own cell; the faces-tests use an
+  **8-colour** display wherever they ask for an extension.
+- `window-matrix-valid?` no longer asks about the region pair: moving
+  the overlay raises `OVERLAY_MODIFF`, which `window-outdated?` reads.
+- `(mark)` answers an integer, as Emacs's does (measured:
+  `(markerp (mark))` is nil there too); `mark-marker` is the marker.
+
+## The popup warning
+
+`Gdk-WARNING: Tried to unmap the parent of a popup` came from the
+after-redisplay drain dispatching a menu selection's queued keys
+*inside* the popup's own Gtk loop, so the item's command rebuilt the
+menu bar while Gtk was unmapping the popup attached to it. Two pieces
+of the C are now ported: `popup_activated_flag`
+(`*pgtk-popup-depth*`, a `dynamic-wind` around the popup; the drain
+refuses to run while it is non-zero) and
+`menubar_selection_callback`'s `gtk_events_pending` flush before the
+keys are queued. Not reproducible on demand; the check is structural.
+
+## How it was measured
+
+- Emacs 31.1 in a pty: three windows on one buffer, a dump of each
+  window's `internal-region-overlay` printed with
+  **`external-debugging-output`** (stderr). A temp *buffer* would set
+  `windows_or_buffers_changed` and invalidate the very state being
+  measured, and Emacs 31 has **no `open-file`** for a file port.
+  `M-:` deactivates the mark, so drive regions with keys only, and bind
+  the dump to a key.
+- Emacs 31.1 in **tmux** (`-L` its own socket): `capture-pane -p -e`
+  gives the screen with SGR, which is how the region's blue cells per
+  window were counted - a pty byte stream is not a screen.
+- The live Gtk editor: `window-parameter` dumps for the overlay state,
+  and `pgtk-write-screenshot!` + a pixel scan for the painting (region
+  `(238,220,130)`; the cursor cell is the one non-region cell at point).
+- The blank line inside a region was verified with a region spanning
+  lines 1-6: its row is a full-width run of the region colour, and each
+  line whose break is in the region is full width; the last line stops
+  where the region ends.
+- The final rule was driven live: three windows, a region set in each in
+  turn, then only the last-selected window has a live overlay - the
+  others' are deleted (`(#f #f #f)` from `(overlay-buffer o)`) - and the
+  screenshot's region pixels are inside that window's body alone
+  (x 567..638 in a body spanning 558..719; nothing outside it).
+
+### A direct check of the clip
+
+With the Gtk backend, `write-glyphs!` was handed a row of **43 glyphs**
+at the left window's body-left (`window-body-width` is 38) and the
+surface scanned at that row: ink in cells 0-37, **none from cell 38 on**
+- the scroll-bar columns and the next window untouched. That is the
+guarantee the user's truncated-line report was missing.
+
+## Still open
+
+- **Incremental redraw remains the real gap.** Emacs's visible "region
+  memory" is partly glyph matrices it has not rebuilt; this renderer
+  rebuilds them every frame, so its behaviour is reproduced by the hook
+  policy above rather than by stale pixels. `try_window_id` is still
+  the named project.
+- The GUI extend skip's simplification (background equal to the frame's
+  plus no box/underline, rather than "the default token").
+- `w->last_mark` is recorded but no text conversion reads it.
+
+## Verified
+
+All 81 suites pass on the final tree (`tty-editor-tests` 352,
+`faces-tests` 34, the five region tests among them) and the tree
+compiles with no new warnings. `tools/pty-check.py` on the final tree
+gave **97/100** under the machine's own load: `quoted-insert`,
+`completion-ui` and `metahelp` failed, and each passed **3/3 when rerun
+alone** on the same tree - the battery's documented between-key/startup
+race class (each failure's screen showed an editor that had not yet
+processed the key). The region, scroll, save, truecolor,
+completion-window, narrow and resize checks all passed in that run.
+**A running editor keeps the code it started with** - restart before
+looking at any of it.
+
+# Narrowing across windows, `$`, and the first cell of a blank line
+# (2026-11-21, the pass after the region work)
+
+Chris's four questions after using the region code. DEPARTURES.md's
+2026-11-21 section has the C and the full account; in one line each:
+
+- **A narrowing moves every window on the buffer onto the narrowed
+  text.** Not through a clamp: `redisplay_window`'s fast paths are all
+  guarded on the window's start lying in `[BEGV, ZV]`, so an
+  out-of-range start falls through to `recenter:` (`xdisp.c:21158`),
+  which seats the iterator on **PT** (the buffer's point, `:21165`),
+  centers half a window back, and writes `w->start` (`:21274`).
+  `display-window!` clamped the start to `point-max` and laid out from
+  there, which drew blank rows; it calls `recenter-window-on-cursor!`
+  at the buffer's point now. Regression:
+  `tty-editor-tests.scm`'s "narrowing brings every window on the
+  buffer to the text" (two windows, narrow [800,900], the other
+  window's start is 800 and 800 is visible), seen failing before.
+- **Truncation vs wrapping is `init_iterator` (`xdisp.c:3413`), shared
+  by both front ends** through `window-truncates-lines?`
+  (`indentc.scm`). A full-width window wraps; a partial one narrower
+  than `truncate-partial-width-windows` (50) truncates; `truncate-lines`
+  and hscroll also truncate. A full-width 80-column tty window wraps;
+  the ~39-column windows after `C-x 3` truncate - geometry, not a
+  front-end difference.
+- **`$`/`\` are `produce_special_glyphs`'s truncation/continuation
+  glyphs in the DEFAULT face** - `insert_left_trunc_glyphs` sets
+  `face_id = DEFAULT_FACE_ID` (`xdisp.c:23923`) - so they are not
+  region-coloured in Emacs either, left `$` included. We draw both with
+  `(face->attribute 'default)`.
+- **A blank line inside a region is filled from column 0.** The one
+  cell that can still look unpainted is the cursor's, and that was a
+  real bug of ours, now fixed - see "The cursor's glyph is the row's"
+  below.
+
+## The cursor's glyph is the row's, not the buffer's (2026-11-21)
+
+Chris, again: *"if I put a mark, then move the cursor up and it's
+painting the selected region, it doesn't paint the first character on
+an empty line"*, and then *"it works when moving down, just not moving
+up"*. The asymmetry is the diagnosis: Emacs's
+`redisplay--highlight-overlay-function` does not move an overlay whose
+bounds are unchanged (`simple.el:7294`), so the redisplay that *grows*
+the region rebuilds every row and masks the damage; the next redisplay
+with nothing changed skips every row (fresh window), and the cursor's
+own erase is the only paint on its cell. Moving up, that cell is the
+blank line at the region's start; moving down it is outside the region.
+
+Two omissions, both `xdisp.c`'s:
+
+1. **`append_space_for_newline`** (`:24191`, called at `:26597`) was
+   missing. Every row now ends with a space glyph carrying the
+   **newline's face** - region when the blank line is in the region -
+   and the default face at `ZV` (the `(it, true)` call at `:26083`).
+   `build-row!` appends it when the row reaches the line's end (not
+   `more?`, not `truncated?`), before the fill, so it is the row's last
+   glyph for `extend_face_id`.
+2. **`cursor-glyph` read the buffer**, and at the end of a line its
+   line string has no such character, so it answered `" "` with the
+   *default* face; `erase_phys_cursor` then repainted the cell from
+   that. Emacs's `get_phys_cursor_glyph` (`:37894`) takes the glyph
+   from the **row**, and `draw_phys_cursor_glyph` (`:35105`) redraws it
+   in its own face. `xdisp.scm`'s `phys-cursor-glyph (row column)` is
+   that: the glyph at `column - (glyph-row-x row)`, `$`/default for the
+   one cell an hscrolled row gives up, a default space past the row's
+   glyphs.
+
+Tests: `pgtk-tests.scm`'s "the cursor on a blank line keeps the region
+in its cell" - two Gtk renders with `dn:set-windows-or-buffers-changed!
+#f` between them (the steady state), sampling the cell's interior; it
+fails `(255 255 255)` under the old glyph source and passes region
+`(238 220 130)` now. `tty-editor-tests.scm`'s "a blank line's row
+carries the newline in the region's face" pins the row glyph and the
+fill. Both were seen failing with the fix reverted. All 81 suites pass
+(`tty-editor-tests` 354, `pgtk-tests` 119) and `tools/pty-check.py` is
+**100/100** on this tree. **A running editor keeps its code** -
+restart before looking.
+
+All 81 suites pass after the change (`tty-editor-tests` 353), and
+`tools/pty-check.py` is **100/100** on this tree, run on its own - the
+`narrow` check (which drives `C-x n n`) among them and green.

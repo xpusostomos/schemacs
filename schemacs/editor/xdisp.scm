@@ -283,6 +283,8 @@
           buffer-auto-hscroll-mode buffer-cursor-in-non-selected-windows
           buffer-cursor-type buffer-hscroll-margin buffer-hscroll-step
           buffer-local-value set-buffer-local-value! buffer-truncate-lines
+          ;; `w->last_mark` records the mark while it is active
+          mark-active
           buffer-word-wrap local-variable-p
           ;; the buffer's own bounds and text, which the `%l' cache's
           ;; `BEG_UNCHANGED' accessors below read - `BEG' and `Z' are
@@ -363,6 +365,11 @@
           *overwrite-mode-textual* *overwrite-mode-binary*
           ;; `mode-line-toggle-read-only` is `(read-only-mode 'toggle)`.
           read-only-mode
+          ;; `redisplay_internal`'s `pre-redisplay-function`
+          ;; (`xdisp.c:14267`): the window's region overlay is moved -
+          ;; or deleted, for a window that is not selected - before its
+          ;; rows are built.
+          *pre-redisplay-functions*
           ;; the `*Messages*' buffer's own mode, which `message-dolog'
           ;; switches a newly made buffer into
           messages-buffer-mode)
@@ -399,6 +406,7 @@
     ;; the mode line read one and `add-minor-mode' wrote the other, so a
     ;; minor mode registered the Emacs way never reached the mode line.
     (only (schemacs editor subr) *minor-mode-alist* run-hooks
+          run-hook-with-args
           ;; `note-mouse-highlight` reads a position list the same way the
           ;; mouse commands do - including the string a click landed on,
           ;; which is where a mode-line item's `keymap` and `pointer`
@@ -455,9 +463,7 @@
    ;; the run computation, which is what a caller can test without a
    ;; terminal: `draw-line!' itself needs one
    line-face-runs
-   line-end-fill-attribute
-   ;; Exported for the test that pins Emacs's `extend_face_id` rule, the
-   ;; same way `line-end-fill-attribute` is.
+   ;; Exported for the test that pins Emacs's `extend_face_id` rule.
    extend-fill-token
    *mode-line-format*
    ;; `files.el`'s, here for the mode line's `%@`; `read-file-name` uses
@@ -2804,9 +2810,11 @@ buffer size, the line number and the column number."
       ;;     if (l < *limit) *limit = l;
       ;;
       ;; - a run of one face is [POSITION, LIMIT) and nothing inside it
-      ;; can change. The region's own edges are candidates too, because
-      ;; the redisplay merges the `region' face over the text face inside
-      ;; it, so a run cannot span the mark.
+      ;; can change.
+      ;;
+      ;; **The region needs no split of its own**: it is an overlay now
+      ;; (`redisplay--update-region-highlight`), and `next-overlay-change`
+      ;; already reports its edges.
       ;;
       ;; **This is what makes a row cheap.** Asking for the face at every
       ;; character is ~13us a character here - 0.64ms for a 50-column
@@ -2818,28 +2826,6 @@ buffer size, the line number and the column number."
       (let* ((by-property
               (or (next-single-property-change position 'face ed limit) limit))
              (by-overlay (next-overlay-change position))
-             (by-region
-              (if (buffer-local-value ed 'mark-active #f)
-                  (let ((mark (and (%mark-marker ed)
-                                   (marker-position (%mark-marker ed)))))
-                    (if mark
-                        (let ((point (buffer-pt ed)))
-                          (let ((beg (min mark point)) (end (max mark point)))
-                            (cond
-                             ;; **An empty region covers nothing.** GNU
-                             ;; Emacs 29+ highlights the region with an
-                             ;; *overlay* (`redisplay--highlight-overlay-
-                             ;; function`, `simple.el`), and a zero-length
-                             ;; overlay has no characters - so it splits
-                             ;; no run. Splitting on the point/mark
-                             ;; position anyway gave two runs for a region
-                             ;; that shows nothing.
-                             ((not (< beg end)) limit)
-                             ((and (> beg position) (< beg limit)) beg)
-                             ((and (> end position) (< end limit)) end)
-                             (else limit))))
-                        limit))
-                  limit))
              ;; **The mouse face's edges split a run too.** Emacs paints
              ;; the highlight in a second pass (`show_mouse_face`), so its
              ;; edges need not be `face`-change points; this renderer
@@ -2862,7 +2848,7 @@ buffer size, the line number and the column number."
                          %mouse-face-end)
                         (else limit))
                   limit))
-             (next (min by-property by-overlay by-region by-mouse)))
+             (next (min by-property by-overlay by-mouse)))
         (max (+ position 1) (min next limit))))
 
     (define (line-face-runs ed line-start len)
@@ -3024,68 +3010,6 @@ buffer size, the line number and the column number."
       (write-run! (current-display) (list glyph) row-y (+ x0 width -1)
                   (face->attribute 'default)))
 
-    (define (line-end-fill-attribute ed row-end row-width width)
-      ;; Face used for cells after a line's text when the line-end
-      ;; position is inside the active region. ROW-END is the buffer
-      ;; position just past the row's last character - the position of the
-      ;; line break that ends it, or of the first character of the row
-      ;; below - and ROW-WIDTH how many screen cells the row took. A line
-      ;; that ends at point-max has no line break and gets no extension
-      ;; face in Emacs.
-      ;;--------------------------------------------------------------
-      (let* ((mark (marker-position (%mark-marker ed)))
-             (point (buffer-pt ed))
-             (region-start (and mark (min point mark)))
-             (region-end (and mark (max point mark))))
-        (and (< row-width width)
-             (region-face-active? ed)
-             region-start
-             region-end
-             (<= region-start row-end)
-             (< row-end region-end)
-             (< row-end (buffer-z ed))
-             (region-face-at-position? ed row-end)
-             ;; The region face's :extend fills newline space even in the
-             ;; monochrome spec, where :extend itself is unspecified and
-             ;; inverse-video is the visible TTY attribute.
-             (let* ((attrs (merge-face-ref 'region
-                                           (merge-face-vectors
-                                            (face-realized-attributes 'default)
-                                            (face-attributes-empty))))
-                    (extend (attribute-value attrs ':extend))
-                    (inverse (attribute-value attrs ':inverse-video))
-                    (attribute (face-at-buffer-position ed (- row-end 1))))
-               (and (or (and (not (eq? extend *undefined-face-attribute*))
-                             extend)
-                        (and (not (eq? inverse *undefined-face-attribute*))
-                             inverse))
-                    (not (= attribute 0))
-                    attribute)))))
-
-    (define (region-face-active? ed)
-      (and (buffer-local-value ed 'transient-mark-mode
-                               (*transient-mark-mode*))
-           (buffer-local-value ed 'mark-active #f)
-           (marker-position (%mark-marker ed))))
-
-    (define (region-face-at-position? ed position)
-      ;; Whether POSITION is covered by ED's active region. GNU Emacs
-      ;; redisplay merges the `region' face while the mark is active and
-      ;; transient-mark-mode is enabled; the region is [min(mark, point),
-      ;; max(mark, point)). Read ED directly, as redisplay does for the
-      ;; buffer belonging to the window it is drawing.
-      ;;--------------------------------------------------------------
-      (and (buffer-local-value ed 'transient-mark-mode
-                               (*transient-mark-mode*))
-           (buffer-local-value ed 'mark-active #f)
-           (let ((mark (marker-position (%mark-marker ed))))
-             (and mark
-                  (let* ((point (buffer-pt ed))
-                         (beginning (min mark point))
-                         (end (max mark point)))
-                    (and (>= position beginning)
-                         (< position end)))))))
-
     ;;----------------------------------------------------------------
     ;; The mouse face - `note_mouse_highlight` (`xdisp.c:37061`)
     ;;----------------------------------------------------------------
@@ -3135,6 +3059,19 @@ buffer size, the line number and the column number."
     ;; handed the window; this renderer resolves faces position by
     ;; position instead, hence the binding.
 
+    (define (overlay-applies-to-window? overlay)
+      ;; GNU Emacs's `overlay_matches_window` (`buffer.c`, reached from
+      ;; `sort_overlays`): "If we're interested in a specific window,
+      ;; then ignore overlays that are limited to some other window."
+      ;; The `window` property is what a region overlay carries so that
+      ;; only its own window paints it. With no window being drawn -
+      ;; `*drawing-window*` unbound, as a test asking for a face has it -
+      ;; every overlay applies, which is the C's NULL window.
+      ;;--------------------------------------------------------------
+      (let ((w (overlay-get overlay 'window))
+            (drawing (*drawing-window*)))
+        (or (not w) (not drawing) (eq? w drawing))))
+
     (define (attrs-at-buffer-position ed position)
       ;; The *unrealized* face in effect at POSITION in ED: the merged
       ;; attribute vector GNU Emacs's `face_at_buffer_position' computes,
@@ -3143,9 +3080,15 @@ buffer size, the line number and the column number."
       ;; list of either - is merged with the `default' face; `xfaces.c'
       ;; merges overlays after the text property, in *increasing* order
       ;; of priority so that the highest-priority one ends on top, which
-      ;; is where the same list, sorted the same way, is merged here; and
-      ;; the active region face follows those in Emacs's redisplay
-      ;; pipeline, and is merged here after the property face.
+      ;; is where the same list, sorted the same way, is merged here.
+      ;;
+      ;; **The active region is an overlay of the window's own now**, not
+      ;; a face merged here: `redisplay--update-region-highlight`
+      ;; (`simple.el:7332`) moves `window-parameter 'internal-region-overlay`
+      ;; and puts the `window` property on it, and `sort_overlays`'s
+      ;; `overlay_matches_window` (`buffer.c:3367`) is what keeps it out
+      ;; of every other window. That is why the overlay loop below asks
+      ;; which window it is drawing for.
       ;;
       ;; This is what the search highlight needs: `isearch' and
       ;; `lazy-highlight' are *overlay* faces in Emacs, so the face the
@@ -3194,10 +3137,10 @@ buffer size, the line number and the column number."
                     (if (null? ovs)
                         attrs
                         (loop (cdr ovs)
-                              (merge-face-ref (overlay-get (car ovs) 'face) attrs))))))
-            (if (region-face-at-position? ed position)
-                (merge-face-ref 'region attrs)
-                attrs))))
+                              (if (overlay-applies-to-window? (car ovs))
+                                  (merge-face-ref (overlay-get (car ovs) 'face) attrs)
+                                  attrs))))))
+            attrs)))
 
     (define (face-at-buffer-position ed position)
       ;; The display's token for the face in effect at POSITION in ED:
@@ -3228,10 +3171,11 @@ buffer size, the line number and the column number."
       ;; before-strings by *increasing* - so that the highest-priority
       ;; one ends up nearest the text either way.
       ;;
-      ;; Not ported: the `window' property, which limits a string to one
-      ;; window, and the invisible-text rule, which shows both the
-      ;; before- and after-strings of an overlay whose text is hidden
-      ;; (there is no `invisible' property here).
+      ;; The `window` property is honoured, as `load_overlay_strings`
+      ;; does (`xdisp.c:7158`): a string whose overlay belongs to another
+      ;; window is not loaded. Not ported: the invisible-text rule, which
+      ;; shows both the before- and after-strings of an overlay whose
+      ;; text is hidden (there is no `invisible' property here).
       ;;--------------------------------------------------------------
       (let ((entries
              ;; the C's query is over `[charpos - 1, charpos + 1]' - the
@@ -3248,9 +3192,11 @@ buffer size, the line number and the column number."
                  (let* ((ov (car ovs))
                         (start (overlay-start ov))
                         (end (overlay-end ov))
-                        (before (and (= start position)
+                        (before (and (overlay-applies-to-window? ov)
+                                     (= start position)
                                      (overlay-get ov 'before-string)))
-                        (after (and (= end position)
+                        (after (and (overlay-applies-to-window? ov)
+                                    (= end position)
                                     (overlay-get ov 'after-string))))
                    (loop (cdr ovs)
                          (append (reverse
@@ -3409,32 +3355,46 @@ buffer size, the line number and the column number."
           ;; yet (`x_draw_window_cursor' takes it and never reads it)
           (list (car shown) (cdr shown) active?))))
 
-    (define (cursor-glyph ed position)
-      ;; The buffer character POSITION in ED is drawn over, and the face
-      ;; in effect there, as `(TEXT . TOKEN)'.
+    (define (phys-cursor-glyph row column)
+      ;; GNU Emacs's `get_phys_cursor_glyph` (`xdisp.c:37894`): the glyph
+      ;; of the *row* the cursor sits on, at its screen column, as
+      ;; `(TEXT . TOKEN)`.
       ;;
-      ;; A display that can only fill a rectangle needs both: Emacs's
-      ;; cursor does not *hide* what is under it, it redraws the glyph in
-      ;; the cursor's colours (`draw_phys_cursor_glyph' with
-      ;; `DRAW_CURSOR'), so "the text inside the cursor stays visible".
-      ;; Past the end of the line there is no character, and what is
-      ;; under the cursor is the space beyond the text - Emacs draws the
-      ;; cursor there too.
+      ;; **The row's glyph, not the buffer character's.** `display_line`
+      ;; gives every line a space glyph where its newline is
+      ;; (`append_space_for_newline`), carrying the newline's face, and
+      ;; the cursor at the end of a line sits on that glyph -
+      ;; `draw_phys_cursor_glyph` draws the row's glyph at the cursor's
+      ;; hpos, so erasing the cursor redraws it with its own face. A
+      ;; blank line inside the region therefore keeps its region colour
+      ;; under the cursor. Taking the buffer's character instead (a
+      ;; newline, whose displayed glyph is none) answered the default
+      ;; face and wiped that cell.
       ;;
-      ;; **POSITION and not the buffer's own cursor.** The glyph under
-      ;; the cursor is the one at the *window's* point
-      ;; (`draw_phys_cursor_glyph' gets it from the glyph row the display
-      ;; iterator stopped on), and only the selected window's point is
-      ;; the buffer's. The echo area has no window and passes its
-      ;; buffer's cursor.
+      ;; COLUMN is a frame cell column, which is what the display is
+      ;; handed; the row's glyphs start at `(glyph-row-x row)` - one
+      ;; cell in from the window's body on a horizontally scrolled row,
+      ;; where the cell it gave up carries the left truncation glyph.
       ;;--------------------------------------------------------------
-      (let* ((line-start (text-editor-get-start-of-line ed position))
-             (line-string (line-string-at ed line-start))
-             (column (- position line-start)))
-        (if (< column (string-length line-string))
-            (cons (string (string-ref line-string column))
-                  (face-at-buffer-position ed position))
-            (cons " " (face->attribute 'default)))))
+      (let* ((x0 (and row (glyph-row-x row)))
+             (n (and row (glyph-row-used row))))
+        (cond
+         ((not (and row (> n 0)))
+          ;; A row with no glyphs has nothing under the cursor to draw
+          ;; back; the space beyond the text is what Emacs shows.
+          (cons " " (face->attribute 'default)))
+         (else
+          (let ((i (- column x0)))
+            (cond
+             ((< i 0)
+              ;; the left truncation glyph `glyph-row-draw!` writes at
+              ;; the window's first cell, in the default face
+              (cons "$" (face->attribute 'default)))
+             ((>= i n)
+              (cons " " (face->attribute 'default)))
+             (else
+              (let ((g (vector-ref (glyph-row-glyphs row) i)))
+                (cons (glyph-char g) (glyph-face-id g))))))))))
 
     (define (cursor-cells ed position)
       ;; How many cells wide the cursor over POSITION is drawn: the
@@ -4005,21 +3965,40 @@ buffer size, the line number and the column number."
       ;; covers END too - a font-locked word inside the region - and that
       ;; difference is named in DEPARTURES.md.
       ;;--------------------------------------------------------------
-      (let ((default-token (face->attribute 'default)))
+      (let ((default-token (face->attribute 'default))
+            (extends?
+             (lambda ()
+               ;; `face_at_pos (it, LFACE_EXTEND_INDEX)` (`xdisp.c:24414`:
+               ;; "Face extension extends the background and box of
+               ;; IT->extend_face_id to the end of the line") asks the
+               ;; `:extend` attribute and nothing else. The region's
+               ;; mono branch is `:inverse-video t` with no `:extend`,
+               ;; and Emacs measured on a vt100 paints only the
+               ;; characters and the newline's own cell there - so an
+               ;; inverse-video allowance here would paint to the edge
+               ;; where Emacs stops.
+               (let ((extend (attribute-value
+                              (attrs-at-buffer-position ed end) ':extend)))
+                 (and (not (eq? extend *undefined-face-attribute*))
+                      extend)))))
         (cond
-         ((eqv? last-token default-token) last-token)
          ((>= end (buffer-z ed)) default-token)
-         (else
-          (let ((extend (attribute-value (attrs-at-buffer-position ed end)
-                                         ':extend)))
-            (if (and (not (eq? extend *undefined-face-attribute*)) extend)
-                last-token
-                default-token))))))
+         ;; **A row with no glyphs, or one whose text stops before the
+         ;; region starts, still extends when the line break is in the
+         ;; region.** The C's `it->face_id` at this call is the face of
+         ;; the *newline* (or of the iterator's position at end of
+         ;; line), not the last glyph's - so a blank line inside a
+         ;; region is painted to the edge, which is what Emacs does.
+         ((eqv? last-token default-token)
+          (if (extends?) (face-at-buffer-position ed end) default-token))
+         ((extends?) last-token)
+         (else default-token))))
 
     (define (extend-face-to-end-of-line ed row end width)
-      ;; GNU Emacs's `extend_face_to_end_of_line` (`xdisp.c:24379`) for a
-      ;; *terminal*: fill the rest of the row with space glyphs carrying
-      ;; the extended face, so the whole line is painted in one face.
+      ;; GNU Emacs's `extend_face_to_end_of_line` (`xdisp.c:24379`):
+      ;; fill the rest of the row with the *extend* face - a terminal
+      ;; writes space glyphs, a window system a stretch of the same, and
+      ;; this tree writes cells in both because a glyph is a cell here.
       ;;
       ;; **A terminal cannot paint a background it has not written**, so
       ;; the cells to the right of the text have to be written too. GNU
@@ -4036,11 +4015,14 @@ buffer size, the line number and the column number."
       ;; the text plus spaces to the last column, wrapped in the default
       ;; face's `\e[38;2;…m\e[48;2;…m … \e[39;49m`.
       ;;
-      ;; The face is `extend-fill-token`'s: the last glyph's when the
-      ;; faces at the row's end say `:extend`, the default face when they
-      ;; do not (the `isearch` highlight stops at the match; the region
-      ;; reaches the edge), and the default face for a row with no glyphs
-      ;; at all or one that ends at `point-max`.
+      ;; **On a window system the fill is drawn only when it would paint
+      ;; something.** The C's skip test (`xdisp.c:24440`) is "the extend
+      ;; face's background equals the frame's, and it has no box,
+      ;; underline or overline": the frame background is already there.
+      ;; This tree's tokens say the same thing more bluntly - the fill is
+      ;; made when the token is not the default face's - which paints a
+      ;; region through the line break and across a blank line, and
+      ;; leaves an ordinary row's tail to `draw-glyph-row!`'s clearing.
       ;;--------------------------------------------------------------
       (let* ((vec (glyph-row-glyphs row))
              (n (glyph-row-used row))
@@ -4052,8 +4034,16 @@ buffer size, the line number and the column number."
                          w
                          (loop (+ i 1)
                                (+ w (glyph-pixel-width (vector-ref vec i)))))))
-             (pad (- width used)))
-        (when (> pad 0)
+             (pad (- width used))
+             (token (and (> pad 0)
+                         (extend-fill-token
+                          ed end (if (> n 0)
+                                     (glyph-face-id (vector-ref vec (- n 1)))
+                                     (face->attribute 'default))))))
+        ;; A window-system fill in the default face paints nothing.
+        (when (and token
+                   (or (not (window-system-display? (current-display)))
+                       (not (eqv? token (face->attribute 'default)))))
           ;; **The padding is written into the row's own storage**, the
           ;; same vector `line-slice-glyphs` just filled. Emacs's
           ;; `extend_face_to_end_of_line` appends glyphs to the row
@@ -4062,11 +4052,7 @@ buffer size, the line number and the column number."
           ;; second 80-slot vector and up to 80 new glyph records for
           ;; every row on every keystroke, which was the larger half of
           ;; the redisplay's garbage.
-          (let* ((token (if (> n 0)
-                            (extend-fill-token
-                             ed end (glyph-face-id (vector-ref vec (- n 1))))
-                            (face->attribute 'default)))
-                 (need (+ n pad))
+          (let* ((need (+ n pad))
                  (vec (if (>= (vector-length vec) need)
                           vec
                           (let ((new (make-vector need #f)))
@@ -4132,6 +4118,54 @@ buffer size, the line number and the column number."
             (parameterize ((*in-fontification-functions* #t))
               (for-each (lambda (f) (f pos)) fns))))))
 
+    (define (append-space-for-newline! ed row n line-end)
+      ;; GNU Emacs's `append_space_for_newline` (`xdisp.c:24191`), the
+      ;; call display_line makes when the iterator is at the end of a
+      ;; line (`:26597`): "Add a space at the end of the line that is
+      ;; used to display the cursor there."
+      ;;
+      ;; **The row needs a glyph at the newline.** Everything above the
+      ;; buffer level treats the newline as the line's terminator and
+      ;; gives it no glyph of its own, so this row had none there: a
+      ;; blank line's row was empty and only `extend_face_to_end_of_line`
+      ;; painted anything. The cursor, though, is drawn on the glyph at
+      ;; point (`draw_phys_cursor_glyph` draws the *row's* glyph at the
+      ;; cursor's hpos), and a blank line's point is exactly on that
+      ;; newline - so with no glyph the cursor's erase had nothing to
+      ;; redraw and took the buffer character's face instead, wiping the
+      ;; region's first cell to the default background.
+      ;;
+      ;; **The face is the newline's** - `it->face_id` in the C, which
+      ;; for a blank line inside a region is the region face - except at
+      ;; `ZV`, where the C calls the `default_face_p` form (`:26083`):
+      ;; the space past the buffer's last character is drawn in the
+      ;; default face.
+      ;;
+      ;; The glyph goes after the text's glyphs and before the fill, so
+      ;; `extend_face_to_end_of_line` sees it as the row's last glyph -
+      ;; which is what `it->face_id` is at its own call.
+      ;;--------------------------------------------------------------
+      (let* ((token (if (>= line-end (buffer-z ed))
+                        (face->attribute 'default)
+                        (face-at-buffer-position ed line-end)))
+             (vec (glyph-row-glyphs row))
+             (need (+ n 1))
+             (vec (if (>= (vector-length vec) need)
+                      vec
+                      (let ((new (make-vector need #f)))
+                        (let loop ((i 0))
+                          (when (< i n)
+                            (vector-set! new i (vector-ref vec i))
+                            (loop (+ i 1))))
+                        new))))
+        (let ((slot (vector-ref vec n)))
+          (if (glyph? slot)
+              (%reset-glyph! slot " " token 1)
+              (vector-set! vec n (make-glyph " " token 1 glyph-type-char #f 0))))
+        (set-glyph-row-glyphs! row vec)
+        (set-glyph-row-used! row need)
+        need))
+
     (define (build-row! ed row texts from to x0 y width
                         line-start more? truncated? row-width metrics)
       ;; Fill ROW from one screen row of a line: `display_line`.
@@ -4171,15 +4205,23 @@ buffer size, the line number and the column number."
              (n (cdr made)))
         (set-glyph-row-glyphs! row vec)
         (set-glyph-row-used! row n)
-        ;; **A terminal's row is filled to the window's edge**, which is
-        ;; `extend_face_to_end_of_line`'s terminal branch (`xdisp.c`) and
-        ;; is called here because `display_line` calls it there - the
-        ;; padding is part of the row, so the diff sees it and the whole
-        ;; line is painted in the face. A window-system display needs no
-        ;; glyphs for it: `draw-glyph-row!` paints the remainder with
-        ;; `clear-end-of-line!` in the default face.
-        (unless (window-system-display? (current-display))
-          (extend-face-to-end-of-line ed row (+ line-start to) width))
+        ;; **The newline's own space glyph**, which `display_line` adds
+        ;; when the row reaches the end of its line (`xdisp.c:26597`).
+        ;; A row cut off at the right edge (`truncated?`) has not reached
+        ;; the newline, and a continued row is not the line's end.
+        (when (and (not more?) (not truncated?))
+          (append-space-for-newline! ed row n (+ line-start to)))
+        ;; **The row is filled to the window's edge**, which is
+        ;; `display_line`'s call to `extend_face_to_end_of_line`
+        ;; (`xdisp.c:24379`). On a terminal the fill is glyphs because a
+        ;; terminal can only colour what it writes; on a window system it
+        ;; is the C's `append_stretch_glyph` - one run with the *extend*
+        ;; face, which is what paints a region through the line break and
+        ;; across a blank line to the edge of the window. The default
+        ;; face fills nothing there (the frame's background is already
+        ;; the default face's) and `draw-glyph-row!` still clears a
+        ;; shorter row's tail.
+        (extend-face-to-end-of-line ed row (+ line-start to) width)
         (set-glyph-row-x! row x0)
         (set-glyph-row-y! row y)
         ;; `compute_line_metrics`: the row is as tall as the tallest face
@@ -4227,11 +4269,10 @@ buffer size, the line number and the column number."
       ;; blank row below the text allocate its width in glyph records
       ;; again on every redisplay.
       (set-glyph-row-used! row 0)
-      ;; the same rule `build-row!` follows: the padding is a *terminal*
-      ;; row's, because a window system paints the remainder with
-      ;; `clear-end-of-line!` at draw time.
-      (unless (window-system-display? (current-display))
-        (extend-face-to-end-of-line ed row (buffer-z ed) width))
+      ;; the same rule `build-row!` follows; a row past the end of the
+      ;; buffer ends at `point-max`, so its fill face is the default
+      ;; face and a window-system row gets no glyphs from it.
+      (extend-face-to-end-of-line ed row (buffer-z ed) width)
       (set-glyph-row-x! row x0)
       (set-glyph-row-y! row y)
       (set-glyph-row-ascent! row (car metrics))
@@ -4320,18 +4361,30 @@ buffer size, the line number and the column number."
                                        (if (window-minibuffer-p window)
                                            0 -1))))
              (desired (window-desired-matrix window)))
-        ;; "If the window start is outside the accessible range, reset
-        ;; it" - `redisplay_window`'s local `startp` clamp
-        ;; (`xdisp.c:20781`: "if (CHARPOS (startp) < BEGV) SET_TEXT_POS
-        ;; (startp, BEGV, BEGV_BYTE); else if (CHARPOS (startp) > ZV)
-        ;; ..."). A narrowing moves `BEGV` without moving the window's
-        ;; start *marker*, and every walk below begins there: unclamped,
-        ;; `C-x n n` cleared the whole screen, because the row walk began
-        ;; before the accessible portion and produced no rows at all.
+        ;; **A window start outside [BEGV, ZV] goes to `recenter:`.**
+        ;; `redisplay_window` cannot call `start_display` there: every
+        ;; optimization it tries is guarded with `CHARPOS (startp) >=
+        ;; BEGV && <= ZV`, so an out-of-range start falls through them
+        ;; all to the `recenter:` label (`xdisp.c:21158`), which seats
+        ;; the iterator on **PT** - the buffer's point, not this
+        ;; window's - and walks back half a window's height. That is
+        ;; what scrolls every window showing a narrowed buffer to the
+        ;; narrowed text: a narrowing moves BEGV/ZV and leaves each
+        ;; window's start *marker* where it was (markers are not
+        ;; clipped by narrowing - measured on Emacs 31.1, `window-start`
+        ;; is still 1 after narrowing to 9..15). Clamping the start to
+        ;; ZV instead and laying out from there drew a window that had
+        ;; been scrolled past the restriction as blank rows, which is
+        ;; what the user saw.
+        ;;
+        ;; The force_start case's clamp (`xdisp.c:20781`) is the other
+        ;; branch and is `scroll-to-cursor!`'s.
         (let ((start (window-start window)))
           (unless (and (>= start (point-min)) (<= start (point-max)))
-            (%window-start-set! window
-                                (max (point-min) (min start (point-max))))))
+            (recenter-window-on-cursor!
+             window ed
+             (max (buffer-beg ed) (min (buffer-pt ed) (buffer-z ed)))
+             vheight)))
         (let loop ((row 0)
                    (y (row->pixel-y (window-body-top window)))
                    (line-start (window-start window)))
@@ -4560,8 +4613,14 @@ buffer size, the line number and the column number."
              (width (window-body-width window))
              (marker? (or (glyph-row-continued? row)
                           (glyph-row-truncated-on-right? row)))
-             ;; the last cell belongs to a marker when the row has one
-             (limit (+ x0 width (if marker? -1 0))))
+             ;; the last cell belongs to a marker when the row has one -
+             ;; and **never past the window's body edge**: an hscrolled
+             ;; row is drawn at `body-left + 1`, so `x0 + width` is one
+             ;; cell past the body, and that cell belongs to the scroll
+             ;; bar or the window beside it.
+             (limit (min (+ x0 width (if marker? -1 0))
+                         (+ (window-body-left window)
+                            (window-body-width window)))))
         ;; **The row is handed over whole, and the backend splits it into
         ;; runs** - `write_glyphs`' argument list, `(w, row, string, area,
         ;; len)`. The split moved out of here when the interface was
@@ -4921,25 +4980,13 @@ buffer size, the line number and the column number."
            (= (window-body-width window) (window-last-width window))
            (= (window-body-height window) (window-last-height window))
            (= (%window-hscroll window) (window-last-hscroll window))
-           ;; **The region is drawn from the buffer's point and mark**,
-           ;; so while one is active the rows depend on both and the
-           ;; matrix is only good for the pair it was built with. GNU
-           ;; Emacs gets the same invalidation from a different place:
-           ;; `redisplay--update-region-highlight` (`simple.el:7332')
-           ;; keeps the region in an *overlay* and moves it on every
-           ;; redisplay, and moving an overlay raises `OVERLAY_MODIFF`
-           ;; (`modify_overlay`), which `window_outdated` reads. This
-           ;; tree's renderer computes the region's face from the mark
-           ;; itself, so the pair has to be recorded where the rest of
-           ;; the matrix's provenance is. Only while the region is
-           ;; active: a window with no region is unaffected by point
-           ;; moving, which is what makes `C-n` rebuild nothing.
-           (let ((ed (window-buffer window)))
-             (or (not (region-face-active? ed))
-                 (and (= (window-point window)
-                         (window-last-point window))
-                      (= (marker-position (%mark-marker ed))
-                         (window-last-mark window)))))))
+           ;; **The region needs no question of its own here.** It is an
+           ;; overlay of the window's now
+           ;; (`redisplay--update-region-highlight`), and
+           ;; `redisplay--update-region-highlight` moving it raises
+           ;; `OVERLAY_MODIFF`, which is the `window-outdated?` tick
+           ;; compared above.
+           ))
 
     (define (mark-window-display-accurate-1 window accurate-p)
       ;; GNU Emacs's `mark_window_display_accurate_1` (`xdisp.c:18304`):
@@ -5004,9 +5051,12 @@ buffer size, the line number and the column number."
             ;; marker_position (w->pointm)" (`xdisp.c:18352').
             (set!window-last-point window (window-point window))
             ;; and `w->last_mark`, -1 when the mark is not active
-            ;; (`:18359').
+            ;; (`:18359'). Emacs records it for text conversion, and the
+            ;; condition is the C's: the buffer's mark is set *and*
+            ;; `mark-active`, with no transient-mark-mode question.
             (set!window-last-mark
-             window (if (region-face-active? buffer)
+             window (if (and (mark-active)
+                             (marker-position (%mark-marker buffer)))
                         (marker-position (%mark-marker buffer))
                         -1))))))
 
@@ -5548,6 +5598,36 @@ buffer size, the line number and the column number."
             ;; (`MINI_WINDOW_P`).
             (windows (window-list frame #t))
             (body (delq (frame-minibuffer-window frame) windows)))
+        ;; **`prepare_menu_bars`'s `pre-redisplay-function` call**
+        ;; (`xdisp.c:14267`), which `redisplay--pre-redisplay-functions`
+        ;; (`simple.el:7391`) makes the hook walk: each window's
+        ;; `pre-redisplay-functions` run with that window's buffer
+        ;; current, before any row is built. The default entry is
+        ;; `redisplay--update-region-highlight`, which moves the
+        ;; window's region overlay - and an overlay change is what makes
+        ;; `window_outdated?` say the matrix is stale, so a window whose
+        ;; region moved is rebuilt below.
+        ;;
+        ;; **Only the selected window shows a region** - the hook runs
+        ;; for every window and `redisplay--update-region-highlight`
+        ;; deletes the overlay of every window that is not selected
+        ;; (`highlight-nonselected-windows` nil). Moving to another
+        ;; window therefore removes the highlight from the window left
+        ;; behind, which is Emacs's behaviour: the C deletes that
+        ;; window's overlay when it redisplays it, and the old pixels
+        ;; survive only where Emacs has not repainted. This renderer
+        ;; repaints every window every frame, so skipping a window here
+        ;; would leave a stale highlight in it - which is exactly the
+        ;; "remembered regions" bug that was reported and then withdrawn.
+        ;; With `highlight-nonselected-windows` true every window's hook
+        ;; keeps it, each `[window-point, mark]`.
+        (for-each (lambda (w)
+                    (let ((b (window-buffer w)))
+                      (when b
+                        (with-current-buffer b
+                          (run-hook-with-args
+                           (*pre-redisplay-functions*) w)))))
+                  windows)
         ;; **The frame is not cleared.** GNU Emacs has no `clear_frame` in
         ;; the per-keystroke path at all: `update_window` writes into the
         ;; existing surface and the toolkit composites it, which is only
@@ -5786,8 +5866,8 @@ buffer size, the line number and the column number."
           ;; Emacs's frame is made with `make_minibuffer_window`, whose
           ;; `w->contents` is nil until `read_minibuf`'s
           ;; `set_window_buffer` (`minibuf.c:840`), and `redisplay_window`
-          ;; has nothing to walk for one. This block used to call
-          ;; `(cursor-glyph BUFFER (window-point WINDOW))' with both #f in
+          ;; has nothing to walk for one. This block used to read the
+          ;; glyph under the cursor through the buffer with both #f in
           ;; that state - `window-point` of a bufferless window is its
           ;; unset marker - and the line scan raised "Wrong type argument
           ;; in position 2: #f".
@@ -5796,10 +5876,14 @@ buffer size, the line number and the column number."
               (when at
                 (let* ((buffer (window-buffer selected))
                        (cursor (get-window-cursor-type selected))
-                       ;; the glyph under the cursor is the one at the
-                       ;; *window's* point, as Emacs's is (the glyph row
-                       ;; the display iterator stopped on)
-                       (glyph (cursor-glyph buffer (window-point selected))))
+                       ;; the glyph under the cursor is the *row's*, at
+                       ;; the cursor's screen column (`get_phys_cursor_glyph`)
+                       ;; - the row `update-window!` has just marked
+                       ;; current for this window.
+                       (index (- (car at) (window-body-top selected)))
+                       (matrix (window-current-matrix selected))
+                       (row (and matrix (glyph-matrix-row-ref matrix index)))
+                       (glyph (phys-cursor-glyph row (cdr at))))
                   (note-phys-cursor!
                    (current-display)
                    (window-to-frame-pixel-y

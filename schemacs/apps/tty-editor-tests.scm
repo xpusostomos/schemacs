@@ -35,6 +35,8 @@
        set-window-point! window-body-height window-body-width
        window-buffer window-edges frame-minibuffer-window
        window-height window-point window-right-border? window-top
+       ;; the region's overlay lives in a window parameter
+       window-parameter
        window-width)
  (only (schemacs editor keyboard)
        command-remapping dispatch-key-event dispatch-input-event timer-check!
@@ -51,9 +53,9 @@
  ;; The cursor's type, which `xdisp.sld' resolves from the buffer's
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
-       *truncate-partial-width-windows* get-window-cursor-type
+       *truncate-partial-width-windows* get-window-cursor-type face->attribute
        line-display-rows render! window-truncates-lines? scroll-to-cursor!
-       window-start)
+       window-start pos-visible-in-window-p)
  ;; The dispatch asks the display what a raw event means, and this is the
  ;; display it asks: a terminal object with no curses behind it, which is
  ;; all the character events these tests feed ever need (only an extended
@@ -84,6 +86,9 @@
        ;; `message-overlay-text` reads the overlay `minibuffer-message`
        ;; puts at the end of the prompt's buffer.
        overlays-in overlay-get
+       ;; the region-overlay group below reads what
+       ;; `redisplay--update-region-highlight` put in the window
+       overlayp overlay-buffer overlay-start overlay-end
        ;; `BVAR (b, mark)` - the slot itself, which is what the mark is
        ;; now that `text-editor-mark`/`set!text-editor-mark` are gone.
        %mark-marker set-point allocate-buffer set!text-editor-buffer-name buffer-pt text-editor-text-props set-buffer-modified-p set!buffer-read-only text-editor-undo-list buffer-beg buffer-z buffer-read-only? set!text-editor-file-name)
@@ -192,6 +197,11 @@
 )
  ;; `paragraphs.el': imported for the *bindings* its load installs (M-h,
  ;; M-k, M-C-k), which is why the M-h test below presses a key at all.
+ (only (schemacs editor glyph)
+       glyph-char glyph-face-id glyph-row-start glyph-row-end
+       glyph-row-used glyph-row-glyphs)
+ (only (schemacs editor matrix)
+       window-current-matrix glyph-matrix-row-ref glyph-matrix-rows)
  (only (schemacs editor textprop)
        get-text-property put-text-property)
  (only (schemacs editor paragraphs) mark-paragraph)
@@ -205,6 +215,8 @@
        current-kill kill-append kill-new kill-region kill-ring-save
        *use-empty-active-region* mark mark-ring push-mark region-active-p
        set-mark use-region-p
+       ;; the region-overlay group: a plain variable, as Emacs has it
+       highlight-nonselected-windows
        *this-command*
        *prefix-cu* *prefix-digits* *prefix-negative*
        clear-prefix! pending-uarg prefix-argument-description
@@ -3768,6 +3780,199 @@
 (test-end "schemacs_ncurses_editor_mark")
 
 ;;--------------------------------------------------------------------
+;; The region's overlay is the window's, not the buffer's
+;;
+;; GNU Emacs 29+ keeps one region overlay per window in the window's
+;; `internal-region-overlay` parameter (`simple.el:7332`), with the
+;; `window` property so that `overlay_matches_window` (`buffer.c:3367`)
+;; keeps it out of every other window. That is what lets two windows on
+;; one buffer show different regions - and why the default, with
+;; `highlight-nonselected-windows` nil, shows only the selected
+;; window's. Measured on Emacs 31.1: setting a region in w1 and then
+;; selecting w2 leaves w1's overlay *deleted*, and selecting w1 again
+;; recomputes it from w1's `window-point` and the buffer's shared mark.
+
+(test-begin "schemacs_ncurses_editor_region_overlay")
+
+(define (region-overlay-state w)
+  (let ((o (window-parameter w 'internal-region-overlay)))
+    (if (overlayp o)
+        (list (overlay-buffer o) (overlay-start o) (overlay-end o)
+              (overlay-get o 'window))
+        #f)))
+
+(define (with-region-frame thunk)
+  ;; Two side-by-side windows over "abcdefghij", the left one selected.
+  ;;
+  ;; `highlight-nonselected-windows` is a **plain variable**, not a
+  ;; parameter - Emacs `defvar`s it and nothing `let`-binds it - so it is
+  ;; saved and set by hand, not `parameterize`d.
+  ;;--------------------------------------------------------------
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed)))
+    (with-current-buffer ed (insert "abcdefghij"))
+    (let* ((w1 (frame-selected-window frame))
+           ;; SIZE #f is Emacs's nil: `split-window`'s optional size, and
+           ;; `nil` is not a value this test library binds.
+           (w2 (split-window w1 #f 'right))
+           (saved-highlight highlight-nonselected-windows))
+      (dynamic-wind
+        (lambda () (set! highlight-nonselected-windows #f))
+        (lambda ()
+          (parameterize ((*current-frame* frame)
+                         (*current-buffer* #f)
+                         (*buffer-list* '())
+                         (*this-command* #f)
+                         (*last-command* #f))
+            ;; **`*current-frame*` must be bound first**: `select-window`
+            ;; reads it, and a fabricated frame that is not current is
+            ;; the hazard this file's header names.
+            (select-window w1)
+            (thunk frame ed w1 w2)))
+        (lambda ()
+          (set! highlight-nonselected-windows saved-highlight))))))
+
+;; The selected window's overlay is [window-point, mark], carries the
+;; `region` face and names that window - the three things the renderer's
+;; `overlay_matches_window` filter reads.
+(test-equal "the selected window's region is its own overlay"
+  '(#t 2 4 region)
+  (with-region-frame
+   (lambda (frame ed w1 w2)
+     (with-current-buffer ed (set-mark 4))
+     (set-point ed 2)
+     (render! frame)
+     (let ((o (window-parameter w1 'internal-region-overlay)))
+       (list (and (overlayp o) (eq? (overlay-get o 'window) w1))
+             (overlay-start o) (overlay-end o)
+             (overlay-get o 'face))))))
+
+;; ...and a window that never showed the region has none.
+(test-equal "a window that was never selected shows no region"
+  '(#f #t)
+  (with-region-frame
+   (lambda (frame ed w1 w2)
+     (with-current-buffer ed (set-mark 4))
+     (set-point ed 2)
+     (render! frame)
+     (let ((o (window-parameter w2 'internal-region-overlay)))
+       (list (and (overlayp o) (overlay-buffer o))
+             (region-active-p))))))
+
+;; **A window that loses the selection loses its region.** Emacs's
+;; `redisplay--update-region-highlight` deletes the overlay of any
+;; window that is not selected (`highlight-nonselected-windows` nil),
+;; so moving to another window removes the highlight from the one left
+;; behind. This renderer repaints every window every frame, so the hook
+;; must run for every window or the old highlight would stay on screen -
+;; the "remembered regions" behaviour that was reported by mistake.
+(test-equal "a window that loses the selection loses its region"
+  '(#f (4 11))
+  (with-region-frame
+   (lambda (frame ed w1 w2)
+     (with-current-buffer ed (set-mark 4))
+     (set-point ed 2)
+     (render! frame)                    ; w1 shows [2,4]
+     (select-window w2)                 ; w2's point is 11 (the insert's
+                                        ; end), mark 4
+     (render! frame)
+     (let ((o1 (window-parameter w1 'internal-region-overlay))
+           (o2 (window-parameter w2 'internal-region-overlay)))
+       (list (and (overlayp o1) (overlay-buffer o1))
+             (if (overlayp o2)
+                 (list (overlay-start o2) (overlay-end o2))
+                 #f))))))
+
+;; **The mark is the buffer's, the point is the window's.** Working in
+;; w2 moves the shared mark, so coming back to w1 gives [w1's point,
+;; the *new* mark] - Emacs measured exactly that, not the region w1
+;; last showed.
+(test-equal "switching back recomputes the region from the window's point"
+  '((6 8) (2 8))
+  (with-region-frame
+   (lambda (frame ed w1 w2)
+     (with-current-buffer ed (set-mark 4))
+     (set-point ed 2)
+     (render! frame)                    ; w1 shows [2,4]
+     (select-window w2)
+     (with-current-buffer ed (set-mark 8))
+     (set-point ed 6)                   ; w2's own point
+     (render! frame)
+     (let ((w2-state (region-overlay-state w2)))
+       (select-window w1)
+       (render! frame)
+       (list (list (cadr w2-state) (caddr w2-state))
+             (let ((o (window-parameter w1 'internal-region-overlay)))
+               (list (overlay-start o) (overlay-end o))))))))
+
+;; With `highlight-nonselected-windows` t every window keeps its own
+;; overlay, each `[window-point, mark]` - three different regions in
+;; three windows on one buffer, which is what the variable means.
+(test-equal "highlight-nonselected-windows gives every window its own region"
+  '((2 8) (6 8) #t)
+  (with-region-frame
+   (lambda (frame ed w1 w2)
+     (with-current-buffer ed (set-mark 8))
+     (set-point ed 2)
+     (set-window-point! w2 6)
+     ;; a plain variable: set it, do not `parameterize` it
+     (set! highlight-nonselected-windows #t)
+     (render! frame)
+     (let ((o1 (window-parameter w1 'internal-region-overlay))
+           (o2 (window-parameter w2 'internal-region-overlay)))
+       (list (list (overlay-start o1) (overlay-end o1))
+             (list (overlay-start o2) (overlay-end o2))
+             (eq? (overlay-get o2 'window) w2))))))
+
+;; **A blank line's row carries a glyph where its newline is.**
+;; `display_line` calls `append_space_for_newline` (`xdisp.c:26597`):
+;; "Add a space at the end of the line that is used to display the
+;; cursor there" - and its face is the newline's (`it->face_id`), which
+;; for a blank line inside the region is the region face. The cursor on
+;; a blank line sits on that glyph, and `erase_phys_cursor` redraws the
+;; *row's* glyph with its own face (`draw_phys_cursor_glyph`,
+;; `xdisp.c:35105`). Without the glyph the cursor's cell was redrawn
+;; from the buffer's newline instead - the default face - and a blank
+;; line inside a region lost its first cell with the cursor parked on it.
+(test-equal "a blank line's row carries the newline in the region's face"
+  '(5 5 80 " " #t #t)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f)
+                 (*echo-area-buffer* #f) (*this-command* #f)
+                 (*last-command* #f))
+    (let* ((ed (allocate-buffer))
+           (frame (test-frame ed)))
+      (parameterize ((*current-frame* frame))
+        (set-buffer ed)
+        (insert "aaa\n\nbbb\n")
+        (set-mark 9)                    ; the last line's newline
+        (set-point ed 5)                ; the blank line's newline
+        (render! frame)
+        (let* ((w (frame-selected-window frame))
+               (m (window-current-matrix w))
+               (row (let loop ((i 0))
+                      (let ((r (glyph-matrix-row-ref m i)))
+                        (if (and r
+                                 (<= (glyph-row-start r) 5)
+                                 (<= 5 (glyph-row-end r)))
+                            r
+                            (loop (+ i 1))))))
+               (vec (glyph-row-glyphs row))
+               (n (glyph-row-used row))
+               (g0 (vector-ref vec 0))
+               (gl (vector-ref vec (- n 1)))
+               (rt (face->attribute 'region)))
+          (list (glyph-row-start row) (glyph-row-end row)
+                ;; the newline's own space glyph, then the fill to the
+                ;; window's edge
+                n
+                (glyph-char g0)
+                (eqv? (glyph-face-id g0) rt)
+                ;; and the fill carries the same face to the last cell
+                (eqv? (glyph-face-id gl) rt)))))))
+
+(test-end "schemacs_ncurses_editor_region_overlay")
+
+;;--------------------------------------------------------------------
 ;; The kill ring
 ;;
 ;; `kill-ring' is a list of strings with the yank pointer somewhere in
@@ -4881,6 +5086,39 @@
       (narrow-to-region 5 12)
       (render! frame)
       (car (cursor-screen-position (window-of frame))))))
+
+;; **Narrowing scrolls every window showing the buffer.** The C's
+;; `redisplay_window` cannot lay out a window whose start is outside
+;; [BEGV, ZV]: every optimization it tries is guarded on `CHARPOS
+;; (startp) >= BEGV && <= ZV`, so it falls through to the `recenter:`
+;; label (`xdisp.c:21158`), seats the iterator on **PT** - the buffer's
+;; point, not the window's - and walks back half a window. That is what
+;; brings a window scrolled far away to the narrowed text; clamping its
+;; start to ZV and laying out from there draws blank rows instead.
+(test-equal "narrowing brings every window on the buffer to the text"
+  '(#t)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f)
+                 (*echo-area-buffer* #f) (*last-command* #f))
+    (let* ((ed (allocate-buffer))
+           (frame (new-frame ed 24 80)))
+      (parameterize ((*current-frame* frame))
+        (set-buffer ed)
+        (let loop ((i 0))
+          (when (< i 100)
+            (insert (string-append "line " (number->string i)
+                                   " xxxxxxxxxxxxxxxxx\n"))
+            (loop (+ i 1))))
+        (goto-char 1)
+        (let* ((w1 (frame-selected-window frame))
+               (w2 (split-window w1 #f 'right)))
+          (select-window w2)
+          (goto-char (point-max))
+          (render! frame)
+          (select-window w1)
+          (goto-char 800)
+          (narrow-to-region 800 900)
+          (render! frame)
+          (list (pos-visible-in-window-p 800 w2)))))))
 
 (test-end "schemacs_ncurses_editor_narrow_start")
 

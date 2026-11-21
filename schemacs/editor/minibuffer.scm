@@ -171,7 +171,11 @@
        *completion-auto-wrap*
        ;; `goto-line`'s: whether it may widen for good when the line it
        ;; is asked for is outside the visible portion (`simple.el:7691`).
-       widen-automatically)
+       widen-automatically
+       ;; the region-overlay updater's minibuffer arm asks
+       ;; `minibuffer-selected-window`, which is this library's; the seam
+       ;; is installed at the end of the file.
+       *minibuffer-selected-window-function*)
     ;; `minibuffer-message` is an *overlay* with an `after-string`
     ;; (`minibuffer.el:836`), which is what draws it after the input
     ;; instead of over it - and the two message hooks in
@@ -4340,5 +4344,13 @@ else is Emacs's - the `Eval: ' prompt, the result echoed, and a
     ;; from `keyboard.scm`. `read-string` is `minibuf.c`'s and
     ;; `read-number` is `subr.el`'s; both are the library's own,
     ;; defined above.
+
+        (*minibuffer-selected-window-function* minibuffer-selected-window)
+    ;; ^ `redisplay--update-region-highlight` (`simple.el:7332`) keeps a
+    ;; prompt's region visible in the window the prompt was entered from:
+    ;; that is `(window-minibuffer-p)` with no argument plus this
+    ;; function, and `simple.scm` is below this library. Installed here,
+    ;; after the definition, because a seam names a procedure and the
+    ;; procedure has to exist when the form runs.
 
     ))

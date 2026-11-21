@@ -285,7 +285,12 @@
           ;; The tool bar's parsed items, which `update_frame_tool_bar`
           ;; reads - `f->tool_bar_items` and `f->n_tool_bar_items`.
           frame-tool-bar-items frame-tool-bar-items-used
-          %frame-tool-bar-lines)
+          %frame-tool-bar-lines
+          ;; `write-glyphs!` and `clear-end-of-line!` clip to the window's
+          ;; body rectangle - the C's guarantee that a row never paints
+          ;; outside its window (`build_frame_matrix` and
+          ;; `fill_glyph_string` both work from the window's own box).
+          window-body-left window-body-width)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
     (only (schemacs editor faces)
@@ -904,8 +909,9 @@
     ;; Faces
     ;;
     ;; `realize-face' answers a token the redisplay treats as opaque -
-    ;; except that `xdisp.sld''s `line-end-fill-attribute' compares it
-    ;; with `=', so it must be an INTEGER and 0 must mean "no face".
+    ;; except that `xdisp.sld''s `extend-fill-token' compares it with
+    ;; `eqv?` against the default token, so it must be an INTEGER and 0
+    ;; must mean "no face".
     ;; Faces are therefore interned to ids here, and the id's
     ;; attributes are kept beside it.
     ;;------------------------------------------------------------------
@@ -1479,7 +1485,7 @@
       ;; press - and the deadline sentinel (`#f`) are dropped, as the read
       ;; drops them.
       ;;--------------------------------------------------------------
-      (unless *draining*
+      (unless (or *draining* (> *pgtk-popup-depth* 0))
         (set! *draining* #t)
         (dynamic-wind
          (lambda () #t)
@@ -2753,8 +2759,18 @@
       ;; any text - GNU Emacs's `gui_clear_end_of_line`
       ;; (`xdisp.c:34644`) fills from X to the window's right edge.
       ;;--------------------------------------------------------------
-      (let ((cr (pgtk-cr d))
-            (y (glyph-row-y row)))
+      (let* ((cr (pgtk-cr d))
+             (y (glyph-row-y row))
+             ;; **Clip to the window's body rectangle**, as
+             ;; `write-glyphs!` does: the C's `gui_clear_end_of_line`
+             ;; fills to the window's right edge and not past it. A
+             ;; frame-matrix row has no window and is clipped to the
+             ;; frame.
+             (right (if window
+                        (+ (window-body-left window)
+                           (window-body-width window))
+                        (car (pgtk-cells d))))
+             (width (min width (- right x))))
         (when (and cr (> width 0))
           (apply cairo-set-source-rgb
                  cr (or (face-token-background token)
@@ -2955,11 +2971,31 @@
       ;; once a buffer is scaled.
       ;;--------------------------------------------------------------
       (let ((y (glyph-row-y row))
-            (x0 (+ x (if (eq? area 'text) 0 0))))
+            (x0 (+ x (if (eq? area 'text) 0 0)))
+            ;; **The window's body rectangle is the clip**, which is the
+            ;; C's own guarantee: `build_frame_matrix` never lets a row
+            ;; exceed `FRAME_COLS`, and each window's glyph matrix is its
+            ;; own box, so `fill_glyph_string` cannot paint into the
+            ;; window beside it. This renderer builds rows directly and
+            ;; has handed over a row wider than the window - a long line
+            ;; whose slice was not cut to the window, or a `display`
+            ;; string wider than the cells left on the row - and a width
+            ;; system has nothing to stop the cairo run at the window's
+            ;; edge. Measured on the user's report: a region on a long
+            ;; truncated line kept painting across the window border.
+            ;;
+            ;; **WINDOW may be #f**: `update-window!` writes a *frame
+            ;; matrix* row (the continuation marker at the frame's last
+            ;; column) with no window, and that row is clipped to the
+            ;; frame instead.
+            (right (if window
+                       (+ (window-body-left window)
+                          (window-body-width window))
+                       (car (pgtk-cells d)))))
         (if (= len 0)
-            (clear-end-of-line! d window row area x)
+            (clear-end-of-line! d window row area x 0 0)
             (let loop ((i 0) (col x0))
-              (when (< i len)
+              (when (and (< i len) (< col right))
                 (let* ((g (vector-ref glyphs i))
                        (token (glyph-face-id g))
                        (end (let scan ((j (+ i 1)))
@@ -2969,21 +3005,36 @@
                                              token))
                                   (scan (+ j 1))
                                   j)))
-                       (parts (let build ((j i) (acc '()))
-                                (if (>= j end)
+                       (room (- right col))
+                       (parts (let build ((j i) (acc '()) (n 0))
+                                (if (or (>= j end) (>= n room))
                                     (reverse acc)
                                     (build (+ j 1)
                                            (cons (glyph-char
                                                   (vector-ref glyphs j))
-                                                 acc)))))
+                                                 acc)
+                                           (+ n (glyph-pixel-width
+                                                 (vector-ref glyphs j)))))))
                        (cells (let sum ((j i) (n 0))
-                                (if (>= j end)
+                                (if (or (>= j end) (>= n room))
                                     n
                                     (sum (+ j 1)
                                          (+ n (glyph-pixel-width
-                                               (vector-ref glyphs j))))))))
-                  (%pgtk-write-run d parts y col token)
-                  (loop end (+ col cells))))))))
+                                               (vector-ref glyphs j)))))))
+                       (full (let sum ((j i) (n 0))
+                               (if (>= j end)
+                                   n
+                                   (sum (+ j 1)
+                                        (+ n (glyph-pixel-width
+                                              (vector-ref glyphs j))))))))
+                  (when (> cells 0)
+                    (%pgtk-write-run d parts y col token))
+                  ;; A run cut by the clip ends the window's row: what
+                  ;; follows it is outside this window and must not be
+                  ;; drawn there.
+                  (if (and (> cells 0) (= cells full))
+                      (loop end (+ col cells))
+                      #t)))))))
 
     (define-method (cursor-to! (d <pgtk-display>) window vpos hpos)
       ;; A window system has no terminal cursor to move: the cursor is
@@ -4473,6 +4524,19 @@
 
     (define *pgtk-popup-selection* (make-parameter #f))
     (define *pgtk-popup-active* (make-parameter #f))
+
+    (define *pgtk-popup-depth* 0)
+    ;; ^ How many of *our* popup menus are up, counted like GNU Emacs's
+    ;; `popup_activated_flag` (`pgtkmenu.c:100`, `popup_widget_loop`).
+    ;; **A queued key must not be dispatched while it is non-zero.**
+    ;; Selecting an item enqueues the key events the item stands for
+    ;; (`pgtk-menu-selection!`); the command loop's reader is the thing
+    ;; that runs them, and Emacs's reader cannot run while
+    ;; `popup_widget_loop` is pumping Gtk. Here the after-redisplay drain
+    ;; *can* - the cursor-blink timer repaints inside that loop - and
+    ;; running an item's command there rebuilt the menu bar while Gtk was
+    ;; still unmapping the menu that was popped from it: "Tried to unmap
+    ;; the parent of a popup". The drain asks this counter.
     ;; ^ `pgtkmenu.c`'s `menu_item_selection` and `popup_activated_flag`
     ;; (`:70`, `:74`). Parameters because that is this tree's spelling of
     ;; the C's statics.
@@ -4493,6 +4557,11 @@
 
     (define gtk-main-iteration
       (pgtk-popup-fn "gtk_main_iteration" int '()))
+    ;; `gtk_events_pending` is what `menubar_selection_callback` spins on
+    ;; (`xmenu.c:820`) to push Gtk's buffered menu teardown out before the
+    ;; selection becomes a key.
+    (define gtk-events-pending
+      (pgtk-popup-fn "gtk_events_pending" int '()))
     (define gtk-menu-popup-at-pointer
       (pgtk-popup-fn "gtk_menu_popup_at_pointer" void (list '* '*)))
     (define gtk-menu-popup-at-rect
@@ -4675,38 +4744,55 @@
       ;;--------------------------------------------------------------
       (let ((menu (pgtk-create-menus (widget-value-contents tree)
                                      d pgtk-popup-selected #f #f)))
-        (widget:show-all menu)
-        ;; "The menu is canceled if it is unmapped" - the same
-        ;; `popup_deactivate_callback` the C connects through
-        ;; `xg_create_widget`.
-        (connect menu (make <signal> #:name "deactivate")
-                 (lambda (widget) (pgtk-popup-deactivate) #f))
-        (let ((mp (pgtk-widget-pointer menu)))
-          (if for-click
-              (gtk-menu-popup-at-pointer mp %null-pointer)
-              ;; `gtk_menu_popup_at_rect (menu, window, &rect,
-              ;; NORTH_WEST, NORTH_WEST, last_click_event)` - a one-cell
-              ;; rectangle at (X, Y), which is where Emacs puts it too.
-              (let ((rect (make-c-struct (list int int int int)
-                                         (list x y 1 1))))
-                (gtk-menu-popup-at-rect
-                 mp
-                 (gtk-widget-get-window (pgtk-widget-pointer (pgtk-area d)))
-                 rect GDK-GRAVITY-NORTH-WEST GDK-GRAVITY-NORTH-WEST
-                 %null-pointer)))
-          (when (= 1 (gtk-widget-get-mapped mp))
-            (*pgtk-popup-active* #t)
-            ;; `popup_widget_loop` (`pgtkmenu.c:613`): "Process events in
-            ;; the Gtk event loop until done." This is a *nested* turn of
-            ;; the same loop the editor already runs inside
-            ;; (`gtk_main`), which is what Emacs does here as well.
-            (let loop ()
-              (when (*pgtk-popup-active*)
-                (gtk-main-iteration)
-                (loop))))
-          ;; `pop_down_menu`: the widget and its subtree go.
-          (gtk-widget-destroy mp)
-          #f)))
+        ;; The C's `record_unwind_protect_ptr (pop_down_menu, menu)': the
+        ;; menu is destroyed however the loop ends, and the depth is
+        ;; released with it - after the *destroy*, so that nothing the
+        ;; destroy causes can run a queued command in the middle of it.
+        (dynamic-wind
+          (lambda () (set! *pgtk-popup-depth* (+ *pgtk-popup-depth* 1)))
+          (lambda ()
+            (widget:show-all menu)
+            ;; "The menu is canceled if it is unmapped" - the same
+            ;; `popup_deactivate_callback` the C connects through
+            ;; `xg_create_widget`.
+            (connect menu (make <signal> #:name "deactivate")
+                     (lambda (widget) (pgtk-popup-deactivate) #f))
+            (let ((mp (pgtk-widget-pointer menu)))
+              (if for-click
+                  (gtk-menu-popup-at-pointer mp %null-pointer)
+                  ;; `gtk_menu_popup_at_rect (menu, window, &rect,
+                  ;; NORTH_WEST, NORTH_WEST, last_click_event)` - a
+                  ;; one-cell rectangle at (X, Y), which is where Emacs
+                  ;; puts it too.
+                  (let ((rect (make-c-struct (list int int int int)
+                                             (list x y 1 1))))
+                    (gtk-menu-popup-at-rect
+                     mp
+                     (gtk-widget-get-window (pgtk-widget-pointer (pgtk-area d)))
+                     rect GDK-GRAVITY-NORTH-WEST GDK-GRAVITY-NORTH-WEST
+                     %null-pointer)))
+              (when (= 1 (gtk-widget-get-mapped mp))
+                (*pgtk-popup-active* #t)
+                ;; `popup_widget_loop` (`pgtkmenu.c:613`): "Process events
+                ;; in the Gtk event loop until done." This is a *nested*
+                ;; turn of the same loop the editor already runs inside
+                ;; (`gtk_main`), which is what Emacs does here as well.
+                (let loop ()
+                  (when (*pgtk-popup-active*)
+                    (gtk-main-iteration)
+                    (loop))))
+              #f))
+          (lambda ()
+            ;; `pop_down_menu`: the widget and its subtree go however the
+            ;; loop ends - Emacs's `record_unwind_protect_ptr`, which is
+            ;; why this is the after thunk and not the body's tail.
+            (gtk-widget-destroy (pgtk-widget-pointer menu))
+            ;; "Must reset this manually because the button release event
+            ;; is not passed to Emacs event loop." - and then let the
+            ;; waiting reader (or the next redisplay) have whatever the
+            ;; menu put on the queue, now that the widget is gone.
+            (set! *pgtk-popup-depth* (- *pgtk-popup-depth* 1))
+            (pgtk-wake!)))))
 
     (define (pgtk-menu-show d frame x y flags title)
       ;; `pgtk_menu_show` (`pgtkmenu.c:588`): build, show, and answer the
@@ -4807,6 +4893,17 @@
       ;; buffer; this front end has two ways in and `pgtk-enqueue!` is
       ;; the one that picks between them.
       ;;--------------------------------------------------------------
+      ;; **Gtk's buffered menu teardown goes out first.**
+      ;; `menubar_selection_callback` (`xmenu.c:819`): "When a menu is
+      ;; popped down, X generates a focus event ... Since GTK buffers
+      ;; events, we force it out here before the menu selection event."
+      ;; Without it the key was queued while the menu widget was still
+      ;; mapped, and the command it ran could rebuild the menu bar - the
+      ;; parent of the popup - underneath Gtk's own unmap.
+      (let spin ()
+        (unless (= 0 (gtk-events-pending))
+          (gtk-main-iteration)
+          (spin)))
       (let ((vector (pgtk-menubar-vector d)))
         (when vector
           (find-and-call-menu-selection

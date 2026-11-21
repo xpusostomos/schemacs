@@ -65,7 +65,8 @@
          set!frame-message window-body-height
          ;; a screen line is the display's - see `*window-scroll-function*`
          *window-scroll-function*
-         window-buffer window-list window-width
+         window-buffer window-list window-width window-point
+         window-parameter set-window-parameter window-minibuffer-p
          recenter
          %window-hscroll %window-start set-window-start!)
     ;; The kill ring's window-system half: the cut and paste functions
@@ -117,7 +118,10 @@
           fetch-char set-point buffer-pt buffer-beg buffer-z buffer-read-only? set!buffer-read-only set!text-editor-undo-list text-editor-undo-list
           ;; `next-error-message-highlight`'s overlay over the current
           ;; error line.
-          make-overlay delete-overlay overlay-put)
+          make-overlay delete-overlay overlay-put
+          ;; the region-highlight overlay's own reads and moves
+          move-overlay overlayp overlay-get overlay-start overlay-end
+          overlay-buffer)
     (only (schemacs editor command)
           *mark-even-if-inactive*
           ;; The seams the interactive argument codes read; installed at
@@ -296,6 +300,11 @@
    mark mark-ring mark-whole-buffer negative-argument
    pop-mark pop-to-mark-command push-mark push-mark-command
    region-active-p set-mark set-mark-command
+   highlight-nonselected-windows
+   redisplay--unhighlight-overlay-function redisplay-unhighlight-region-function
+   redisplay--highlight-overlay-function redisplay-highlight-region-function
+   redisplay--update-region-highlight *pre-redisplay-functions*
+   *minibuffer-selected-window-function*
    set!mark-ring use-region-p use-region-beginning use-region-end
    region-bounds
    ;; `next-error' - its options and the one function occur calls.
@@ -2516,11 +2525,11 @@ non-nil."
       ;;
       ;; Not ported: the check of the `deactivate-mark' *variable*'s
       ;; `dont-save' value - the variable is the C command loop's flag,
-      ;; which this tree's loop applies itself - and
-      ;; `redisplay--update-region-highlight', the redraw being the
-      ;; command loop's here. `select-active-regions''s obsolete `only'
-      ;; value is not ported either; the temporary Transient Mark mode
-      ;; this tree knows is `lambda'.
+      ;; which this tree's loop applies itself. The call to
+      ;; `redisplay--update-region-highlight` at the end is made, as the
+      ;; C makes it. `select-active-regions''s obsolete `only' value is
+      ;; not ported either; the temporary Transient Mark mode this tree
+      ;; knows is `lambda'.
       ;;--------------------------------------------------------------
       (let ((force (if (pair? args) (car args) #f)))
         (when (or (region-active-p) force)
@@ -2575,7 +2584,135 @@ non-nil."
               (set-buffer-local-value! (current-buffer) 'transient-mark-mode
                                        (*transient-mark-mode*)))))
           (set!mark-active #f)
-          (for-each (lambda (hook) (hook)) (*deactivate-mark-hook*)))))
+          (for-each (lambda (hook) (hook)) (*deactivate-mark-hook*))
+          ;; "and make sure the region is not highlighted any more":
+          ;; `(redisplay--update-region-highlight (selected-window))`
+          ;; (`simple.el:7125`).
+          ;;
+          ;; **Guarded on a frame being current.** The C's
+          ;; `(selected-window)` always exists; this tree's headless
+          ;; tests and batch scripts have no frame at all, and
+          ;; `selected-window` signals there. With no frame there is no
+          ;; window whose overlay could be painted, so there is nothing
+          ;; to unhighlight.
+          (when (*current-frame*)
+            (redisplay--update-region-highlight (selected-window))))))
+
+    ;;----------------------------------------------------------------
+    ;; The region is an overlay per window (`simple.el`)
+    ;;----------------------------------------------------------------
+    ;;
+    ;; **Emacs 29+ does not paint the region from the mark at draw
+    ;; time.** `redisplay--update-region-highlight` (`simple.el:7332`)
+    ;; keeps one overlay per *window* - `window-parameter
+    ;; 'internal-region-overlay` - whose face is `region`, moved on every
+    ;; redisplay to `[window-point, mark]`. Because the overlay carries
+    ;; the `window` property, `face_at_buffer_position` ignores it in
+    ;; every other window (`overlay_matches_window`, `buffer.c:3367`),
+    ;; and `highlight-nonselected-windows` decides whether windows other
+    ;; than the selected one have one at all. That is why two windows on
+    ;; one buffer can show different regions, and why a window that is
+    ;; not selected shows none unless the user says otherwise.
+
+    (define highlight-nonselected-windows #f)
+    (set! highlight-nonselected-windows highlight-nonselected-windows)
+    ;; ^ GNU Emacs's `highlight-nonselected-windows` (`xdisp.c:38830`):
+    ;; "Non-nil means highlight active region even in nonselected
+    ;; windows. When nil (the default), the active region is only
+    ;; highlighted when the window is selected."
+
+    (define (redisplay--unhighlight-overlay-function rol)
+      ;; GNU Emacs's `redisplay--unhighlight-overlay-function`
+      ;; (`simple.el:7285`): "If ROL is an overlay, call
+      ;; `delete-overlay`."
+      ;;--------------------------------------------------------------
+      (when (overlayp rol) (delete-overlay rol)))
+
+    (define redisplay-unhighlight-region-function
+      (lambda (rol) (redisplay--unhighlight-overlay-function rol)))
+    (set! redisplay-unhighlight-region-function
+          redisplay-unhighlight-region-function)
+    ;; ^ GNU Emacs's `redisplay-unhighlight-region-function`: the hook a
+    ;; caller may replace; a plain variable, as the C declares it.
+
+    (define (redisplay--highlight-overlay-function start end window rol . rest)
+      ;; GNU Emacs's `redisplay--highlight-overlay-function`
+      ;; (`simple.el:7294`): "Update the overlay ROL in WINDOW with FACE
+      ;; in range START-END."
+      ;;
+      ;; The priority is `(nil . 100)`: normal priority so that a large
+      ;; region does not hide the overlays within it, but high secondary
+      ;; priority so that a small overlay ending or starting inside the
+      ;; region does not hide the region's boundaries.
+      ;;--------------------------------------------------------------
+      (let ((face (if (pair? rest) (car rest) 'region)))
+        (if (not (overlayp rol))
+            (let ((nrol (make-overlay start end)))
+              (redisplay-unhighlight-region-function rol)
+              (overlay-put nrol 'window window)
+              (overlay-put nrol 'face face)
+              (overlay-put nrol 'priority (cons #f 100))
+              nrol)
+            ;; Elisp's `if` takes several ELSE forms; Scheme's does not.
+            (begin
+              (unless (eq? (overlay-get rol 'face) face)
+                (overlay-put rol 'face face))
+              (unless (and (eq? (overlay-buffer rol) (current-buffer))
+                           (eqv? (overlay-start rol) start)
+                           (eqv? (overlay-end rol) end))
+                (move-overlay rol start end (current-buffer)))
+              rol))))
+
+    (define (redisplay-highlight-region-function start end window rol . rest)
+      (apply redisplay--highlight-overlay-function start end window rol rest))
+    (set! redisplay-highlight-region-function
+          redisplay-highlight-region-function)
+    ;; ^ GNU Emacs's `redisplay-highlight-region-function`
+    ;; (`simple.el:7324`): "Function to move the region-highlight
+    ;; overlay." Caller-replaceable, hence a variable.
+
+    (define *minibuffer-selected-window-function* (make-parameter #f))
+    ;; ^ A seam: `redisplay--update-region-highlight`'s minibuffer arm
+    ;; needs `minibuffer-selected-window`, which is `minibuffer.scm`'s
+    ;; and that library is above this one. `minibuffer.scm` installs it
+    ;; as it loads.
+
+    (define (redisplay--update-region-highlight window)
+      ;; GNU Emacs's `redisplay--update-region-highlight`
+      ;; (`simple.el:7332`): keep WINDOW's region overlay in step with
+      ;; its point and the buffer's mark, or delete it when the region
+      ;; is not active or not to be shown in this window.
+      ;;
+      ;; **The second arm is `(window-minibuffer-p)` with no argument** -
+      ;; "is the *selected* window a minibuffer window" - and `window` is
+      ;; then the window the prompt was entered from. While a prompt is
+      ;; up, that window keeps its region; other windows do not.
+      ;;--------------------------------------------------------------
+      (let ((rol (window-parameter window 'internal-region-overlay)))
+        (if (not (and (region-active-p)
+                      (or highlight-nonselected-windows
+                          (eq? window (selected-window))
+                          (and (window-minibuffer-p (selected-window))
+                               (let ((fn (*minibuffer-selected-window-function*)))
+                                 (and fn (eq? window (fn))))))))
+            (redisplay-unhighlight-region-function rol)
+            (let* ((pt (window-point window))
+                   (mk (mark))
+                   (start (min pt mk))
+                   (end (max pt mk))
+                   (new (redisplay-highlight-region-function
+                         start end window rol)))
+              (unless (equal? new rol)
+                (set-window-parameter window 'internal-region-overlay new))))))
+
+    (define *pre-redisplay-functions*
+      (make-parameter (list redisplay--update-region-highlight)))
+    ;; ^ GNU Emacs's `pre-redisplay-functions` (`simple.el:7376`): "Hook
+    ;; run just before redisplay. It is called in each window that is to
+    ;; be redisplayed. It takes one argument, which is the window that
+    ;; will be redisplayed. When run, the `current-buffer' is set to the
+    ;; buffer displayed in that window." The default value is the region
+    ;; updater, as Emacs's is.
 
     (define *mark-ring-max* (make-parameter 16))
     ;; ^ GNU Emacs's `mark-ring-max': "Maximum size of mark ring."

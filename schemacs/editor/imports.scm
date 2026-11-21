@@ -580,6 +580,7 @@
     *minibuffer-message-properties*
     *minibuffer-message-timeout*
     *minibuffer-selected-window*
+    *minibuffer-selected-window-function*
     *minibuffer-setup-hook*
     *minor-mode-alist*
     *minor-mode-list*
@@ -635,6 +636,7 @@
     *popup-menu-function*
     *post-self-insert-hook*
     *pre-command-hook*
+    *pre-redisplay-functions*
     *prefix-cu*
     *prefix-digits*
     *prefix-negative*
@@ -1969,6 +1971,7 @@
     help-mode-map
     help-quit
     help-setup-xref
+    highlight-nonselected-windows
     history-entries
     history?
     hscroll-line-slice
@@ -2220,7 +2223,6 @@
     line-display-rows
     line-display-texts
     line-display-width
-    line-end-fill-attribute
     line-end-position
     line-face-runs
     line-height
@@ -2821,7 +2823,12 @@
     record-nonmenu-event!
     record-window-buffer
     recursive-edit
+    redisplay--highlight-overlay-function
+    redisplay--unhighlight-overlay-function
+    redisplay--update-region-highlight
     redisplay-frames!
+    redisplay-highlight-region-function
+    redisplay-unhighlight-region-function
     regexp-history
     regexp-opt-depth
     regexp-quote
