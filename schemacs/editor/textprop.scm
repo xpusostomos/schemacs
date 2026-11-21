@@ -64,7 +64,8 @@
     ;; and the function is defined below, in the file that owns it.
     (only (schemacs editor insdel) prepare-to-modify-buffer-1)
     (only (schemacs editor undo) record-first-change)
-    (only (schemacs editor buffer) %text-editor-incr-modiff!)
+    (only (schemacs editor buffer) %text-editor-incr-modiff!
+          buffer-beg buffer-z)
     ;; `install-intervals-set-text-properties!' is the seam back *up*
     ;; into this library - see the end of the file.
     (only (schemacs editor fns) install-fns-textprop!)
@@ -164,8 +165,12 @@
       ;; interval tree yet, make one rather than answering #f. Only a
       ;; function that is about to *put* a property needs that.
       ;;--------------------------------------------------------------
-      (let* ((lo (iv:object-beg-position object))
-             (hi (iv:object-end-position object))
+      ;; The C's bounds are `BUF_BEGV'/`BUF_ZV' - the *restriction*,
+      ;; not the text - and a position outside them signals rather than
+      ;; being clipped. `iv:object-beg-position' is `BEG' (always 1) for
+      ;; `create_root_interval' and cannot answer this.
+      (let* ((lo (if (string? object) 0 (buffer-beg object)))
+             (hi (if (string? object) (string-length object) (buffer-z object)))
              (start (if (> start end) end start))
              (end (if (> start end) start end)))
         (cond
@@ -180,8 +185,8 @@
     (define (interval-of object position)
       ;; GNU Emacs's `interval_of': the interval POSITION is in, or #f.
       ;;--------------------------------------------------------------
-      (let ((lo (iv:object-beg-position object))
-            (hi (iv:object-end-position object)))
+      (let ((lo (if (string? object) 0 (buffer-beg object)))
+            (hi (if (string? object) (string-length object) (buffer-z object))))
         (if (or (< position lo) (< hi position))
             (error "Args out of range" position)
             (let ((i (iv:object-intervals object)))
@@ -1032,7 +1037,13 @@
       ;;--------------------------------------------------------------
       (let* ((prev-pos (- position 1))
              (default (assq prop (*text-property-default-nonsticky*)))
-             (ignore-previous (<= position (iv:object-beg-position buffer)))
+             ;; The C's `ignore_previous_character = pos <= BUF_BEGV' -
+             ;; the *restriction*, so that the previous character is
+             ;; never read outside it. `iv:object-beg-position' is
+             ;; `BEG' (always 1) and let a narrowed buffer read at
+             ;; BEGV-1, which now signals.
+             (ignore-previous (<= position
+                                  (if (string? buffer) 0 (buffer-beg buffer))))
              ;; "if (ignore_previous_character || (CONSP (defalt) && !NILP (XCDR (defalt))))"
              (rear-sticky? (not (or ignore-previous
                                     (and (pair? default) (cdr default)))))

@@ -11,7 +11,7 @@ order as emacs. Each function in emacs should be ported with the same name to th
 same file here, generally with the same parameters too. And it should be in the same 
 subdirectory too. e.g. emacs lisp/progmodes/cc-engine.el should be in 
 schemacs/progmodes/cc-engine.scm. lisp/font-lock.el should be in schemacs/font-lock.scm
-src/frame.c should be in schemacs/frame.scm
+src/frame.c should be in schemacs/frame.scm ... the lisp/emacs-lisp is mapped to schemacs/core
 We are working on exact emacs replication, right down to the
 exact functionality, messages, layout, everything. So it's important that you
 read emacs source code before implementing, are replicating it as close as possible
@@ -15465,3 +15465,32 @@ state - all identical.
 `c-parse-state` (`:3885'), and the declaration machinery; then
 `c-before-change`/`c-after-change` (`cc-mode.el`) wiring the change
 hooks, `cc-fonts`, and `cc-mode` itself.
+
+## cc-mode: `c-syntactic-content', and the interval narrowing bug
+## (2026-11-21)
+
+`c-syntactic-content` is in (`cc-engine.el:530`). Porting it found and
+fixed a **shared** bug: `intervals.scm`'s `object-length` computed a
+buffer's length as `ZV - BEGV` (the restriction) where Emacs's
+`create_root_interval` uses `BUF_Z - BUF_BEG` (the text). A property
+written while narrowed created a root interval covering only the
+narrowed text; the next write past it made a negative-length interval
+and the tree corrupted (`balance-an-interval` "expecting struct: #f").
+`validate_interval_range`/`interval_of` also now check `BEGV..ZV` and
+signal "Args out of range", as the C's hard validation does, and
+`text-property-stickiness` compares against `BEGV` (the C's
+`ignore_previous_character = pos <= BUF_BEGV`) - it read BEGV-1 and
+signalled, which took down `mode-line-tests` until fixed.
+
+**The symptom to recognise**: an interval tree with
+`total-length: -8` / "expecting struct: #f" from `balance-an-interval`,
+after any `put-text-property` performed inside a narrowing (font-lock,
+`syntax-propertize` and cc-mode all narrow). Regression tests are in
+`textprop-tests.scm` (46 passes now). Because this touched
+`intervals.scm`/`textprop.scm`, the full battery was run.
+
+Eight `c-syntactic-content` cases against Emacs 31.1 are identical and
+pinned in `cc-engine-tests.scm` (178 passes).
+
+**Next**: `c-beginning-of-statement-1` (`cc-engine.el:730'`, with its
+automaton macros), then `c-parse-state` and the declaration machinery.

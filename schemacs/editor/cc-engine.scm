@@ -82,7 +82,7 @@
           char-before char-after bobp eobp bolp eolp
           line-beginning-position line-end-position forward-line
           save-excursion save-restriction narrow-to-region widen
-          insert delete-region message)
+          insert delete-region message buffer-substring-no-properties)
     (only (schemacs editor fns) nth nthcdr)
     (only (schemacs editor indent) back-to-indentation)
     (only (schemacs editor indentc) current-indentation indent-to)
@@ -125,7 +125,7 @@
    c-forward-single-comment c-forward-comments
    c-forward-comment-minus-1 c-backward-single-comment c-backward-comments
    ;; basic utilities
-   c-delq-from-dotted-list c-shift-line-indentation
+   c-delq-from-dotted-list c-syntactic-content c-shift-line-indentation
    c-keyword-sym c-keyword-member
    c-string-syntax c-string-limit-regexp c-ws*-string-limit-regexp
    c-parsing-error set!c-parsing-error c-echo-parsing-error
@@ -1338,6 +1338,67 @@
             (set! tail (cdr tail))
             (loop)))
         dlist))
+
+    (define (c-syntactic-content from to paren-level)
+      ;; "Return the given region as a string where all syntactic
+      ;; whitespace is removed or, where necessary, replaced with a
+      ;; single space. If PAREN-LEVEL is given then all parens in the
+      ;; region are collapsed to "()", "[]" etc.
+      ;;
+      ;; This function might do hidden buffer changes."
+      (save-excursion
+        (save-restriction
+          (narrow-to-region from to)
+          (goto-char from)
+          (let* ((parts (list #f))
+                 (tail parts)
+                 (pos #f)
+                 (in-paren #f))
+            (let ((ws-start (%c-langvar 'c-syntactic-ws-start)))
+              (let loop ()
+                (if (and ws-start (re-search-forward ws-start to #t))
+                    (begin
+                      (goto-char (begin (set! pos (match-beginning 0)) pos))
+                      (c-forward-syntactic-ws)
+                      (if (= (point) pos)
+                          (forward-char)
+                          (begin
+                            (when paren-level
+                              (save-excursion
+                                (set! in-paren
+                                      (= (car (parse-partial-sexp from pos 1)) 1))
+                                (set! pos (point))))
+                            (if (and (> pos from)
+                                     (< (point) to)
+                                     (looking-at "\\w\\|\\s_")
+                                     (save-excursion
+                                       (goto-char (- pos 1))
+                                       (looking-at "\\w\\|\\s_")))
+                                (begin
+                                  (set-cdr! tail
+                                            (list (buffer-substring-no-properties
+                                                   from pos)
+                                                  " "))
+                                  (set! tail (cddr tail)))
+                                (begin
+                                  (set-cdr! tail
+                                            (list (buffer-substring-no-properties
+                                                   from pos)))
+                                  (set! tail (cdr tail))))
+                            (when in-paren
+                              (when (= (car (parse-partial-sexp pos to -1)) -1)
+                                (set-cdr! tail
+                                          (list (buffer-substring-no-properties
+                                                 (- (point) 1) (point))))
+                                (set! tail (cdr tail))))
+                            (set! from (point))))
+                      (loop))
+                    #f)))
+            (set-cdr! tail (list (buffer-substring-no-properties from to)))
+            ;; Emacs's `(apply 'concat (cdr parts))' answers "" with no
+            ;; parts; `string-append' with no arguments is an error, so
+            ;; the empty prefix is given explicitly.
+            (apply string-append "" (cdr parts))))))
 
     (define (c-shift-line-indentation shift-amt)
       ;; "Shift the indentation of the current line with the specified

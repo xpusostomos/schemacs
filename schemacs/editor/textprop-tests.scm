@@ -17,7 +17,7 @@
  (only (schemacs editor undo) undo-modified-entry?)
  (only (schemacs editor editfns)
        buffer-substring buffer-substring-no-properties delete-region insert insert-and-inherit
-       point point-min point-max propertize)
+       point point-min point-max propertize narrow-to-region widen)
  (only (schemacs editor fns) concat copy-sequence)
  (prefix (schemacs editor textprop) tp:)
  (only (ice-9 exceptions) exception-message))
@@ -532,5 +532,70 @@
       (cond ((null? l) #f)
             ((undo-modified-entry? (car l)) #t)
             (else (loop (cdr l)))))))
+
+;;----------------------------------------------------------------------
+;; The restriction's bounds (`validate_interval_range').
+;;
+;; The C checks START and END against BUF_BEGV/BUF_ZV and signals; the
+;; tree itself, and `create_root_interval''s length, are over the *text*
+;; (`BUF_Z - BUF_BEG'). Reading the restriction's Z there made a tree
+;; created while the buffer was narrowed cover only the narrowed text,
+;; and a later write past its end made a negative-length interval and
+;; corrupted the whole tree. Every answer here is Emacs 31.1's.
+(test-equal "a property write below the restriction signals"
+  "Args out of range"
+  (let ((ed (buffer-of "abcdefghij")))
+    (set-buffer ed)
+    (narrow-to-region 3 5)
+    (guard (e (else (exception-message e)))
+      (tp:put-text-property 2 4 'x #t ed)
+      "no error")))
+
+(test-equal "a property write above the restriction signals"
+  "Args out of range"
+  (let ((ed (buffer-of "abcdefghij")))
+    (set-buffer ed)
+    (narrow-to-region 3 5)
+    (guard (e (else (exception-message e)))
+      (tp:put-text-property 6 7 'x #t ed)
+      "no error")))
+
+(test-equal "a tree created while narrowed covers the whole text"
+  (list #t #f #f)
+  (let ((ed (buffer-of "abcdefghij")))
+    (set-buffer ed)
+    (narrow-to-region 3 5)
+    (tp:put-text-property 3 5 'x #t ed)   ; the root is made here
+    (widen)
+    (tp:put-text-property 9 10 'y #t ed)  ; past the old narrowing's end
+    (list (tp:get-text-property 3 'x)
+          (tp:get-text-property 9 'x)
+          (tp:get-text-property 5 'x))))
+
+;;----------------------------------------------------------------------
+;; `text_property_stickiness`'s bounds (`textprop.c`).
+;;
+;; The C's `ignore_previous_character = pos <= BUF_BEGV' is what keeps
+;; the read of the *previous* character's `rear-nonsticky' inside the
+;; restriction; reading at BEGV with `BEG' in its place signalled
+;; through `interval_of' on a narrowed buffer. Measured on Emacs 31.1:
+;; `(get-pos-property 3 'x)' in a buffer narrowed to 3..5 is nil, and
+;; `(get-pos-property 2 'x)' signals `(args-out-of-range 2 2)'.
+(test-equal "stickiness at the restriction's start reads nothing before it"
+  (list 0 -1)
+  (let ((ed (buffer-of "abcdefghij")))
+    (set-buffer ed)
+    (narrow-to-region 3 5)
+    (list (tp:text-property-stickiness 'x 3 ed)
+          (tp:text-property-stickiness 'x 4 ed))))
+
+(test-equal "a position before the restriction signals"
+  "Args out of range"
+  (let ((ed (buffer-of "abcdefghij")))
+    (set-buffer ed)
+    (narrow-to-region 3 5)
+    (guard (e (else (exception-message e)))
+      (tp:text-property-stickiness 'x 2 ed)
+      "no error")))
 
 (test-end "schemacs_editor_textprop")

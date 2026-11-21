@@ -1247,6 +1247,7 @@
     c-string-syntax
     c-sws-lit-limits
     c-sws-lit-type
+    c-syntactic-content
     c-syntactic-end-of-macro
     c-syntax-table-hwm
     c-trim-lit-pos-cache

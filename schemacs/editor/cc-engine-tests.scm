@@ -628,4 +628,40 @@
    (test-equal "after-change: a damaged comment opener breaks the ladder"
                #f (in-sws-any 50 81))))
 
+;;----------------------------------------------------------------------
+;; `c-syntactic-content' (`cc-engine.el:530').
+;;
+;; Emacs 31.1's answers on the same regions, paren-level nil and t.
+;;----------------------------------------------------------------------
+(define syntactic-fixture
+  "#include <stdio.h>\n#define FOO(x) \\\n  ((x) + 1)\nint a; /* c1  c2 */\nint b[3];\nint f (int x,  char *y)\n{\n  return x;\n}\n")
+
+(define (with-syntactic-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert syntactic-fixture)
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+    (thunk)))
+
+(with-syntactic-buffer
+ (lambda ()
+   (test-equal "c-syntactic-content: a directive tail" "int a;"
+               (c-syntactic-content 1 55 #f))
+   (test-equal "c-syntactic-content: the same with paren level" "int a;"
+               (c-syntactic-content 1 55 #t))
+   (test-equal "c-syntactic-content: from inside the directives" "int a;"
+               (c-syntactic-content 20 60 #f))
+   (test-equal "c-syntactic-content: from inside the directives, paren level" "int a;"
+               (c-syntactic-content 20 60 #t))
+   (test-equal "c-syntactic-content: a declaration run" "int b[3];int f(int x,char*y)"
+               (c-syntactic-content 56 103 #f))
+   (test-equal "c-syntactic-content: parens collapsed" "int b[];int f()"
+               (c-syntactic-content 56 103 #t))
+   (test-equal "c-syntactic-content: starting inside a comment" "c2*/int b[];i"
+               (c-syntactic-content 63 80 #t))
+   (test-equal "c-syntactic-content: an empty region" ""
+               (c-syntactic-content 1 1 #f))))
+
 (test-end "schemacs_editor_cc_engine")

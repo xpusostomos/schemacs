@@ -12521,3 +12521,69 @@ here yet - so a test of anything that branches on the major mode must
 The suite is `cc-engine-tests` 170 (25 new); `cc-defs-tests` 45, and the
 other four cc suites unchanged. `tools/pty-check.py imports scratch`
 passes (2/2); imports.scm regenerated (112 libraries, 4215 names).
+
+# cc-mode: `c-syntactic-content', and a narrowing bug in the interval tree
+# (2026-11-21)
+
+`c-syntactic-content` (`cc-engine.el:530`) is in, and porting it found a
+corruption in the shared interval layer that had been there since
+narrowing landed.
+
+## The bug
+
+`c-syntactic-content` narrows to the region it is asked about and then
+calls `c-forward-syntactic-ws`, which writes `c-is-sws`/`c-in-sws` text
+properties. The first such write **creates the buffer's interval tree**,
+and `intervals.scm`'s `object-length` computed a buffer's length as
+`(- (buffer-z d) (buffer-beg d))`. Since the narrowing pass those two
+answer `ZV` and `BEGV`, so the root interval of a 119-character buffer
+narrowed to 56..103 was created with length **47**:
+
+    split-interval-right #<<interval> total-length: 47 position: 1 ...>
+      → right: total-length: -8 position: 56
+
+and the next property write past its end produced a negative-length
+interval. The failure surfaced three layers away - `balance-an-interval`
+with "Wrong type argument in position 1 (expecting struct): #f" - and
+only when a property was first written *inside a narrowing*.
+
+Emacs's `create_root_interval` uses `BUF_Z - BUF_BEG`, the text's
+bounds, not the restriction's; likewise `insert_intervals`'
+"the inserted text constitutes the whole buffer" test (`intervals.c:1596`).
+Both sites now use `buffer-text-length` of the buffer's text.
+
+**And the validation was too lax.** `validate_interval_range` and
+`interval_of` check against `BUF_BEGV`/`BUF_ZV` in the C and signal
+`args-out-of-range`; ours used `[1, ZV]` (`iv:object-beg-position` is
+`BEG`, which is right for `create_root_interval`'s position and wrong
+for this check). Measured on Emacs 31.1: in a buffer narrowed to 3..5,
+`(put-text-property 2 4 ...)` and `(put-text-property 6 7 ...)` both
+signal `(args-out-of-range 2 4)` / `(6 7)`. Ours clipped and wrote.
+
+**A third site of the same conflation, found by the battery**:
+`text_property_stickiness` computes `ignore_previous_character = pos <=
+BUF_BEGV` and only then reads the previous character's
+`rear-nonsticky`; ours compared against `iv:object-beg-position` (BEG =
+1), so `get-pos-property` at BEGV of a narrowed buffer read position
+BEGV-1 and, with the stricter `interval_of`, signalled - it took down
+`mode-line-tests`, which narrows a fixture to 6..14 and redisplays.
+Measured on Emacs 31.1: in a buffer narrowed to 3..5,
+`(get-pos-property 3 'x)` is nil and `(get-pos-property 2 'x)` signals
+`(args-out-of-range 2 2)`.
+
+Five regression tests in `textprop-tests.scm`: the two out-of-range
+signals, "a tree created while narrowed covers the whole text" (put
+inside the narrowing, widen, put past the old narrowing's end, read
+both back), and the stickiness answers `(0 -1)` at BEGV and BEGV+1.
+
+## `c-syntactic-content` itself
+
+Emacs's `(apply 'concat (cdr parts))` answers "" when the region holds
+no syntactic whitespace; `(apply string-append '())` is an error here,
+so the call passes an explicit `""` prefix. Everything else is the C's
+shape, including the mutable parts list and the two `parse-partial-sexp`
+probes.
+
+Verified on eight regions against Emacs 31.1 (with and without
+PAREN-LEVEL, starting inside a comment, and an empty region):
+identical.

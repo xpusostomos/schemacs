@@ -78,7 +78,8 @@
     ;; `make-buffer-string` below slices the text out of the store with
     ;; `buffer-text-substring` - `buffer-text` is a leaf, so this is a
     ;; downward edge like the two above.
-    (only (schemacs editor buffer-text) buffer-text-substring)
+    (only (schemacs editor buffer-text) buffer-text-substring
+          buffer-text-length)
     ;; ... and the two seams are read straight from their own libraries,
     ;; which is where they are declared - `intervals.c` is below `insdel.c`
     ;; in Emacs's build order, so this is the direction the calls really
@@ -284,10 +285,18 @@
       ;; How many characters OBJECT holds. Emacs has two macros for this
       ;; and picks between them the same way: `(BUF_Z (b) - BUF_BEG (b))'
       ;; for a buffer and `SCHARS' for a string.
+      ;;
+      ;; **`BUF_Z' and `BUF_BEG' are the *text's*, not the restriction's.**
+      ;; `buffer-z' answers `ZV' since the narrowing work, and reading it
+      ;; here made a tree created while the buffer was narrowed cover
+      ;; only the narrowed text - an interval of 47 characters for a
+      ;; 119-character buffer - after which every `split-interval-right'
+      ;; past its end made a negative-length interval and the tree
+      ;; corrupted. `buffer_text' owns the whole-text length.
       ;;--------------------------------------------------------------
       (if (string? object)
           (string-length object)
-          (- (buffer-z object) (buffer-beg object))))
+          (buffer-text-length (text-editor-text object))))
 
     (define (object-beg-position object)
       ;; The first position of OBJECT: a buffer's `BEGV', which is 1, and
@@ -1720,7 +1729,7 @@
                 (if root
                     (set!buffer-intervals buffer (balance-an-interval root))))
               #f)
-            (if (= (- (buffer-z buffer) (buffer-beg buffer)) length)
+            (if (= (buffer-text-length (text-editor-text buffer)) length)
                 ;; "The inserted text constitutes the whole buffer, so
                 ;; simply copy over the interval structure." The C then
                 ;; re-states the root's position - `buffer_intervals
