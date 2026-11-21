@@ -15351,3 +15351,28 @@ gets `cc-defs-tests`, `cc-langs-tests`, `cc-vars-tests`,
 `c-is-sws`/`c-in-sws` property helpers, then `c-forward-sws` and
 `c-backward-sws` themselves, and the `c-invalidate-sws-region-*`
 hooks with `c-before-change`/`c-after-change`.
+
+## cc-mode: sws properties, noise macros, doc variables (2026-11-21)
+
+The last prerequisites of the syntactic-whitespace engine that do not
+need `c-literal-limits`: the `c-is-sws`/`c-in-sws` property helpers
+(`cc-engine.scm`, procedures; debug faces not carried, `facep` is not
+ported), the three doc-comment variables from `cc-mode.el:136'-`:147`
+(`c-doc-line-join-re`, `c-doc-bright-comment-start-re`,
+`c-doc-line-join-end-ch`, defined in cc-engine as a named placement
+departure), and cc-vars' noise macros (`c-noise-macro-name-re` /
+`c-noise-macro-with-parens-name-re` as slot accessors,
+`*c-noise-macro-names*` / `*c-noise-macro-with-parens-names*` as
+`define-custom` parameters, `c-make-noise-macro-regexps`).
+
+`cc-vars-tests` 28, `cc-engine-tests` 123. **Right-sized verification is
+now the rule**: the six cc suites plus `pty-check imports scratch` for
+a cc-only change; the full 88-suite battery only for a shared
+primitive.
+
+**Next**: `c-literal-limits` (`cc-engine.el:5719') with its
+non-LIM arm - `c-full-pp-to-literal` (`:3124'), `c-semi-pp-to-literal'
+(`:2978') and `c-parse-ps-state-below` (`:2864') - then
+`c-looking-at-c++-attribute`, then `c-forward-sws`/`c-backward-sws`
+(`:2127', `:2381') and the `c-invalidate-sws-region-*` hooks with
+`c-before-change`/`c-after-change`.

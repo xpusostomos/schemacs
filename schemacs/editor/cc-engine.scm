@@ -72,6 +72,7 @@
     (scheme base)
     (only (guile) most-positive-fixnum make-hash-table hash-ref hash-set!
                   1- logand)
+    (only (schemacs editor subr) regexp-unmatchable)
     (only (schemacs editor buffer) current-buffer buffer-local-value
           set-buffer-local-value!)
     (only (schemacs editor command) prefix-numeric-value)
@@ -87,7 +88,8 @@
     (only (schemacs editor indentc) current-indentation indent-to)
     (only (schemacs editor search) re-search-forward looking-at
           match-beginning match-end save-match-data)
-    (only (schemacs editor textprop) get-text-property)
+    (only (schemacs editor textprop) get-text-property put-text-property
+          remove-text-properties text-property-any)
     (only (schemacs editor syntax) skip-chars-backward skip-chars-forward
           skip-syntax-backward skip-syntax-forward forward-comment
           parse-partial-sexp)
@@ -96,7 +98,8 @@
           c-next-single-property-change %c-true %c-false
           c-get-lang-constant *c-buffer-is-cc-mode* c-major-mode-is)
     (only (schemacs editor intervals) get)
-    (only (schemacs editor cc-vars) *c-report-syntactic-errors*))
+    (only (schemacs editor cc-vars) *c-report-syntactic-errors*
+          c-noise-macro-name-re c-noise-macro-with-parens-name-re))
 
   (export
    ;; state variables and the mode-line sub-state calculation
@@ -123,6 +126,9 @@
    c-parsing-error set!c-parsing-error c-echo-parsing-error
    c-put-c-type-property c-clear-c-type-property
    c-simple-skip-symbol-backward c-beginning-of-current-token
+   c-put-is-sws c-put-in-sws c-remove-is-sws c-remove-in-sws
+   c-remove-is-and-in-sws c-debug-sws-msg
+   c-doc-line-join-re c-doc-bright-comment-start-re c-doc-line-join-end-ch
    ;; cc-defs.el's, placed here because they call down from Emacs' obarray
    c-point c-is-escaped c-benign-error)
 
@@ -653,6 +659,47 @@
                        #f)))
               (loop)
               #f))))
+
+    ;;------------------------------------------------------------------
+    ;; Tools for skipping over syntactic whitespace (`cc-engine.el:1770')
+    ;;------------------------------------------------------------------
+    ;; The `c-is-sws'/`c-in-sws' property scheme, which `c-forward-sws'
+    ;; and `c-backward-sws' (to come, at their place in the file) share:
+    ;;
+    ;;   * where a syntactic-whitespace region holds anything but simple
+    ;;     whitespace, `c-in-sws' is put over it, and at the places the
+    ;;     scan has stopped there is also `c-is-sws' - "a ladder where
+    ;;     `c-in-sws' marks the bars and `c-is-sws' the rungs";
+    ;;   * on buffer changes both are removed in the changed region
+    ;;     (the `c-invalidate-sws-region-*' hooks, which arrive with
+    ;;     `c-literal-limits'), so a later scan uses the parts either
+    ;;     side and repairs the gap with an ordinary search.
+    ;;
+    ;; Emacs's macros put the properties under `with-silent-modifications'
+    ;; at the call sites - the sws functions do that themselves - and
+    ;; their optional debug faces are not carried (`facep' is not ported,
+    ;; and no debug face is defined). `c-debug-sws-msg' is Emacs's
+    ;; no-op-by-default message macro.
+    (define (c-debug-sws-msg . args) #f)
+
+    (define (c-put-is-sws beg end)
+      (put-text-property beg end 'c-is-sws #t))
+    (define (c-put-in-sws beg end)
+      (put-text-property beg end 'c-in-sws #t))
+    (define (c-remove-is-sws beg end)
+      (remove-text-properties beg end (list 'c-is-sws #f)))
+    (define (c-remove-in-sws beg end)
+      (remove-text-properties beg end (list 'c-in-sws #f)))
+    (define (c-remove-is-and-in-sws beg end)
+      (remove-text-properties beg end (list 'c-is-sws #f 'c-in-sws #f)))
+
+    ;; The three doc-comment variables are `cc-mode.el:136'-`:147''s,
+    ;; "really belonging to cc-fonts.el" but declared by cc-engine for
+    ;; its own use there too. There is no cc-mode.scm yet, so they are
+    ;; defined here - a placement departure, named.
+    (define c-doc-line-join-re regexp-unmatchable)
+    (define c-doc-bright-comment-start-re regexp-unmatchable)
+    (define c-doc-line-join-end-ch #f)
 
     ;;------------------------------------------------------------------
     ;; Basic utility functions (`cc-engine.el:520')

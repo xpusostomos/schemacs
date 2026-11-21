@@ -12331,3 +12331,38 @@ Two differentials, byte-identical to Emacs 31.1:
 - the list/mode table on `(a (b)) x (c)`: the wrappers' answers at six
   positions plus the five `c-major-mode-is` shapes, and an unbalanced
   `((a)` where `c-safe-scan-lists` must answer nil.
+
+# cc-mode: the sws properties, the noise regexps and the doc variables
+# (2026-11-21)
+
+The last of the syntactic-whitespace engine's prerequisites that do not
+need `c-literal-limits':
+
+- `c-put-is-sws'/`c-put-in-sws'/`c-remove-is-sws'/`c-remove-in-sws'/
+  `c-remove-is-and-in-sws' (`cc-engine.el:1908'-`:1950') as procedures.
+  Emacs's macros put the properties under `with-silent-modifications`
+  at the *call sites* (the sws functions do that themselves) and carry
+  optional debug faces; the faces are not carried (`facep' is not
+  ported and no debug face is defined), and `c-debug-sws-msg' is Emacs's
+  no-op-by-default message macro. Property values are `#t` (Elisp's
+  `t`), which is what the C's `text-property-any ... t` tests against.
+- `c-doc-line-join-re`, `c-doc-bright-comment-start-re` and
+  `c-doc-line-join-end-ch` (`cc-mode.el:136'-`:147'), "really belonging
+  to cc-fonts.el" but declared for cc-engine's use; there is no
+  cc-mode.scm yet, so they are defined in `cc-engine.scm` - a named
+  placement departure - with Emacs's defaults (`regexp-unmatchable`,
+  `regexp-unmatchable`, nil).
+- cc-vars' noise macros (`cc-vars.el:1712'-`:1784'): the two
+  buffer-local regexps as slot accessors, the two options as
+  `define-custom` parameters, and `c-make-noise-macro-regexps`.
+  Emacs's defaults and the whole `regexp-opt ... 'symbols` output are
+  reproduced byte for byte (`"\\_<\\(\\(?:NO\\)?INLINE\\)\\_>"` for
+  `("INLINE" "NOINLINE")`).
+
+**Verification.** Every expectation is Emacs 31.1's: the noise-regexp
+table (list, nil, string, and the never-matching default) and the
+property helpers' behaviour including `text-property-any` by value.
+`cc-vars-tests` 28, `cc-engine-tests` 123; the targeted cc suites and
+the two pty checks that cover startup and the user environment
+(`imports`, `scratch`) pass - the full battery is not run for cc-only
+changes.

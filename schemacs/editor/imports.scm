@@ -265,6 +265,8 @@
     *c-langs-are-parametric*
     *c-macro-start*
     *c-mark-wrong-style-of-comment*
+    *c-noise-macro-names*
+    *c-noise-macro-with-parens-names*
     *c-report-syntactic-errors*
     *c-syntactic-indentation*
     *c-syntactic-indentation-in-macros*
@@ -1104,10 +1106,14 @@
     c-clear-char-property
     c-concat-separated
     c-current-comment-prefix
+    c-debug-sws-msg
     c-define-lang-constant
     c-define-lang-constant-here
     c-delq-from-dotted-list
     c-digit
+    c-doc-bright-comment-start-re
+    c-doc-line-join-end-ch
+    c-doc-line-join-re
     c-down-list-backward
     c-down-list-forward
     c-echo-parsing-error
@@ -1166,19 +1172,27 @@
     c-make-font-lock-extra-types-blurb
     c-make-init-lang-vars-fun
     c-make-keywords-re
+    c-make-noise-macro-regexps
     c-min-property-position
     c-mode-symbol
     c-mode-var
     c-next-single-property-change
     c-no-comment-end-of-macro
+    c-noise-macro-name-re
+    c-noise-macro-with-parens-name-re
     c-parsing-error
     c-point
     c-put-c-type-property
     c-put-char-properties
     c-put-char-property
+    c-put-in-sws
+    c-put-is-sws
     c-query-and-set-macro-start
     c-query-macro-start
     c-register-emacs-variable-reader!
+    c-remove-in-sws
+    c-remove-is-and-in-sws
+    c-remove-is-sws
     c-safe
     c-safe-scan-lists
     c-save-buffer-state
@@ -3285,6 +3299,8 @@
     set!c-macro-cache-start-pos
     set!c-macro-cache-syntactic
     set!c-macro-with-semi-re
+    set!c-noise-macro-name-re
+    set!c-noise-macro-with-parens-name-re
     set!c-parsing-error
     set!cache-long-scans
     set!cd-path

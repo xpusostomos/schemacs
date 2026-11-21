@@ -80,4 +80,34 @@
              (not (c-string-list-p (list "a" 1))))
 (test-assert "and a non-list" (not (c-string-list-p "a")))
 
+;;----------------------------------------------------------------------
+;; The noise-macro regexps (`cc-vars.el:1712'-`:1784')
+;; Every expectation is Emacs 31.1's.
+;;----------------------------------------------------------------------
+(test-begin "schemacs_editor_cc_vars_noise")
+
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (test-equal "with no names the regexp never matches" "\\`a\\`"
+              (c-noise-macro-name-re))
+  (*c-noise-macro-names* (list "INLINE" "NOINLINE"))
+  (*c-noise-macro-with-parens-names* (list "__attribute__"))
+  (c-make-noise-macro-regexps)
+  (test-equal "a list of names becomes a symbols regexp"
+              "\\_<\\(\\(?:NO\\)?INLINE\\)\\_>"
+              (c-noise-macro-name-re))
+  (test-equal "and the parens list its own"
+              "\\_<\\(__attribute__\\)\\_>"
+              (c-noise-macro-with-parens-name-re))
+  (*c-noise-macro-names* (quote ()))
+  (c-make-noise-macro-regexps)
+  (test-equal "nil goes back to the never-matching regexp" "\\`a\\`"
+              (c-noise-macro-name-re))
+  (*c-noise-macro-names* "FOO\\|BAR")
+  (c-make-noise-macro-regexps)
+  (test-equal "a string is used as it stands" "FOO\\|BAR"
+              (c-noise-macro-name-re)))
+
+(test-end "schemacs_editor_cc_vars_noise")
+
 (test-end "schemacs_editor_cc_vars")

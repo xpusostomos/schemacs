@@ -24,7 +24,9 @@
     (only (schemacs editor buffer) current-buffer buffer-local-value
           set-buffer-local-value!)
     (only (schemacs editor cc-defs) c-upper c-lower
-          c-register-emacs-variable-reader!))
+          c-register-emacs-variable-reader!)
+    (only (schemacs editor subr) regexp-unmatchable)
+    (only (schemacs regexp-opt) regexp-opt))
 
   (export c-make-font-lock-extra-types-blurb c-string-list-p
           *c-syntactic-indentation* *c-syntactic-indentation-in-macros*
@@ -36,7 +38,11 @@
           c-indentation-style
           c-current-comment-prefix set!c-current-comment-prefix
           c-macro-with-semi-re set!c-macro-with-semi-re
-          *c-report-syntactic-errors*)
+          *c-report-syntactic-errors*
+          c-noise-macro-name-re set!c-noise-macro-name-re
+          c-noise-macro-with-parens-name-re set!c-noise-macro-with-parens-name-re
+          *c-noise-macro-names* *c-noise-macro-with-parens-names*
+          c-make-noise-macro-regexps)
 
   (begin
 
@@ -250,6 +256,71 @@ report cases like the one above is that it can't find the correct
 anchoring position to indent the line in that case."
       :type 'boolean
       :group 'c)
+
+    ;;------------------------------------------------------------------
+    ;; The noise macros (`cc-vars.el:1712'-`:1784')
+    ;;------------------------------------------------------------------
+    ;; "Initialize the next two to a regexp which never matches." Emacs
+    ;; makes both buffer-local and computes them from the two options
+    ;; with `c-make-noise-macro-regexps'; they are buffer-local slots
+    ;; here, as every cc buffer-local variable is.
+    (define (c-noise-macro-with-parens-name-re)
+      (buffer-local-value (current-buffer) 'c-noise-macro-with-parens-name-re
+                          regexp-unmatchable))
+    (define (set!c-noise-macro-with-parens-name-re value)
+      (set-buffer-local-value! (current-buffer) 'c-noise-macro-with-parens-name-re
+                               value))
+    (define (c-noise-macro-name-re)
+      (buffer-local-value (current-buffer) 'c-noise-macro-name-re
+                          regexp-unmatchable))
+    (define (set!c-noise-macro-name-re value)
+      (set-buffer-local-value! (current-buffer) 'c-noise-macro-name-re value))
+
+    (define-custom *c-noise-macro-names* '()
+      "A list of names of macros which expand to nothing, or compiler extensions
+like \"INLINE\" which are syntactic noise.  Such a macro/extension is complete
+in itself, never having parentheses.  All these names must be syntactically
+valid identifiers.  Alternatively, this variable may be a regular expression
+which matches the names of such macros, in which case it must have a submatch
+1 which matches the actual noise macro name.
+
+If you change this variable's value, call the function
+`c-make-noise-macro-regexps' to set the necessary internal variables (or do
+this implicitly by reinitializing C/C++/Objc Mode on any buffer)."
+      :type '(choice (repeat string) regexp)
+      :group 'c)
+
+    (define-custom *c-noise-macro-with-parens-names* '()
+      "A list of names of macros (or compiler extensions like \"__attribute__\")
+which optionally take a parenthesized argument list.  All these names must be
+syntactically valid identifiers.  Alternatively, this variable may be a regular
+expression which matches the names of such macros, in which case it must have a
+submatch 1 which matches the actual noise macro name.
+
+If you change this variable's value, call the function
+`c-make-noise-macro-regexps' to set the necessary internal variables (or do
+this implicitly by reinitializing C/C++/Objc Mode on any buffer)."
+      :type '(choice (repeat string) regexp)
+      :group 'c)
+
+    (define (c-make-noise-macro-regexps)
+      ;; "Convert `c-noise-macro-names' and
+      ;; `c-noise-macro-with-parens-names' into `c-noise-macro-name-re'
+      ;; and `c-noise-macro-with-parens-name-re'."
+      (set!c-noise-macro-with-parens-name-re
+       (let ((names (*c-noise-macro-with-parens-names*)))
+         (cond ((or (not names) (null? names)) regexp-unmatchable)
+               ((pair? names) (regexp-opt names 'symbols))
+               ((string? names) (string-copy names))
+               (else (error "c-make-noise-macro-regexps: c-noise-macro-with-parens-names is invalid: ~a"
+                            names)))))
+      (set!c-noise-macro-name-re
+       (let ((names (*c-noise-macro-names*)))
+         (cond ((or (not names) (null? names)) regexp-unmatchable)
+               ((pair? names) (regexp-opt names 'symbols))
+               ((string? names) (string-copy names))
+               (else (error "c-make-noise-macro-regexps: c-noise-macro-names is invalid: ~a"
+                            names))))))
 
     ;;------------------------------------------------------------------
     ;; The bridge into `c-mode-var'

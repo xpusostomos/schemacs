@@ -28,7 +28,7 @@
  (only (schemacs editor editfns) insert goto-char point
        buffer-substring-no-properties)
  (only (schemacs editor syntax) set-syntax-table)
- (only (schemacs editor textprop) get-text-property)
+ (only (schemacs editor textprop) get-text-property text-property-any)
  (only (schemacs editor cc-defs) c-lang-const
        c-skip-ws-chars-forward c-skip-ws-chars-backward)
  (schemacs editor cc-langs)
@@ -404,5 +404,35 @@
               (probe c-simple-skip-symbol-backward 37))
   (test-equal "and at the end of the buffer's last word" '(#t 45)
               (probe c-simple-skip-symbol-backward 46)))
+
+;;----------------------------------------------------------------------
+;; The syntactic-whitespace property helpers (`cc-engine.el:1908') and
+;; the doc-comment defaults (`cc-mode.el:136'-`:147')
+;;----------------------------------------------------------------------
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert "(a b)\n(c d)\n")
+  (c-put-is-sws 2 3)
+  (c-put-in-sws 1 4)
+  (test-equal "c-put-is-sws marks its character"
+              #t (get-text-property 2 'c-is-sws))
+  (test-equal "c-put-in-sws marks its range"
+              #t (get-text-property 3 'c-in-sws))
+  (test-equal "text-property-any finds the rung by its value"
+              2 (text-property-any 1 5 'c-is-sws #t))
+  (c-remove-is-sws 2 3)
+  (test-equal "c-remove-is-sws removes only c-is-sws"
+              '(#f #t) (list (get-text-property 2 'c-is-sws)
+                             (get-text-property 2 'c-in-sws)))
+  (c-remove-is-and-in-sws 1 4)
+  (test-equal "c-remove-is-and-in-sws removes both"
+              '(#f #f) (list (get-text-property 2 'c-is-sws)
+                             (get-text-property 3 'c-in-sws))))
+
+(test-equal "the doc line-join regexp starts unmatchable"
+            "\\`a\\`" c-doc-line-join-re)
+(test-equal "and so does the bright-comment one"
+            "\\`a\\`" c-doc-bright-comment-start-re)
+(test-equal "the line-join end-char list starts nil" #f c-doc-line-join-end-ch)
 
 (test-end "schemacs_editor_cc_engine")
