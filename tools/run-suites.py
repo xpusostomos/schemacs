@@ -40,6 +40,7 @@ SUITES = [
     'schemacs/editor/casetab-tests.scm',
     'schemacs/editor/category-tests.scm',
     'schemacs/editor/cc-defs-tests.scm',
+    'schemacs/editor/cc-langs-tests.scm',
     'schemacs/editor/chartab-tests.scm',
     'schemacs/editor/syntax-tests.scm',
     'schemacs/editor/narrow-tests.scm',

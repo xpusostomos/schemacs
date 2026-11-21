@@ -15029,3 +15029,36 @@ redefinition is what pins it.
 `cc-mode.el`; the menu rule says the menus ship with the mode) and a
 `def-edebug-spec` declaration stub. `rx` is not needed (0 uses), and
 cl-lib only for a handful of helper functions.
+
+## cc-mode step 2: the language-variable system (2026-11-21)
+
+`schemacs/editor/cc-langs.scm` now has `c-lang-defvar`,
+`c-lang-setvar`, `c-make-emacs-variables-local`,
+`c-make-init-lang-vars-fun` and `c-init-language-vars`; `cc-defs.scm`
+gained `c-mode-symbol`, `c-mode-var`, `c-concat-separated`,
+`c-make-bare-char-alt` and `c-make-keywords-re`. `cc-langs-tests.scm`
+(12) is in the runner; both libraries are in `loadup.scm` and
+`imports.scm` is regenerated. All 85 suites pass.
+
+The key facts before building on it (DEPARTURES.md has the detail):
+language variables are **buffer-local slots keyed by the Emacs
+symbol**, read through `c-mode-var`/`buffer-local-value`, not symbol
+values; `c-init-language-vars` expands per mode with literal values
+baked and non-literal values left as runtime `c-lang-var-value` calls;
+and **`c-make-keywords-re`'s symbol/non-symbol split is only exact once
+c-mode's syntax tables are ported** - the standard table calls `+`
+symbol syntax where c-mode calls it punctuation. Revisit it when the
+syntax-table data lands.
+
+## Next
+
+1. **`cc-vars.el`**'s defcustoms (the option variables cc-mode and
+   cc-engine read), then **cc-langs' language data**: `c-mode-syntax-table`
+   and `c-lang-defconst` tables, with a differential of every
+   `(constant, language)` pair against a running Emacs. The syntax
+   tables also close the `c-make-keywords-re` question.
+2. `easy-menu-define` is still the one missing primitive for
+   `cc-mode.el`'s menus (8 uses), and `def-edebug-spec` needs a
+   declaration stub.
+3. Milestone: `c-mode` opens `.c`/`.h` with the right syntax table and
+   font-lock faces, compared face-for-face with Emacs.

@@ -65,6 +65,7 @@
     (schemacs editor editfns)
     (schemacs editor lisp)
     (schemacs editor cc-defs)
+    (schemacs editor cc-langs)
     (schemacs editor callproc)
     (schemacs editor casetab)
     (schemacs editor casefiddle)
@@ -1059,17 +1060,31 @@
     byte8-to-char
     bytes-have-null?
     c-add-language
+    c-concat-separated
     c-define-lang-constant
     c-define-lang-constant-here
     c-find-assignment-for-mode
     c-get-lang-constant
+    c-init-language-vars
     c-lang-const
+    c-lang-constant-documentation
     c-lang-defconst
     c-lang-defconst-bindings
     c-lang-defconst-eval-immediately
     c-lang-defconst-eval-now
     c-lang-defconst-thunk
+    c-lang-defvar
     c-lang-major-mode-is
+    c-lang-set-local!
+    c-lang-setvar
+    c-lang-var-value
+    c-literal-datum?
+    c-make-bare-char-alt
+    c-make-emacs-variables-local
+    c-make-init-lang-vars-fun
+    c-make-keywords-re
+    c-mode-symbol
+    c-mode-var
     cache-long-scans
     calculate-lisp-indent
     call-interactively

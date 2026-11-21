@@ -11772,3 +11772,86 @@ dependency invalidation and `c-lang-major-mode-is`.
   where files may be `#f` (`(car #f)`), and `(cond (assignment-entry
   ...) (file-entry ...))` where `'()` is *true* in Scheme. Emacs's
   nil tests must be `pair?` here.
+
+# cc-mode step 2: the language-variable system (2026-11-21)
+
+`schemacs/editor/cc-langs.scm` is the second piece of cc-mode:
+`c-lang-defvar`, `c-lang-setvar`, `c-make-emacs-variables-local`,
+`c-make-init-lang-vars-fun` and `c-init-language-vars`
+(`cc-langs.el:130-205`, `:4608-4715`), plus in `cc-defs.scm` the
+neighbours those use: `c-mode-symbol`, `c-mode-var`,
+`c-concat-separated`, `c-make-bare-char-alt` and `c-make-keywords-re`
+(`cc-defs.el:2106-2214`). `cc-langs-tests.scm` (12) pins it.
+
+## The representation departure
+
+Emacs's `c-lang-defvar` variables are buffer-local Emacs variables:
+`defvar`, `make-variable-buffer-local`, set by the function
+`c-init-language-vars` generates. Here a language variable is a
+**buffer-local slot keyed by the Emacs symbol** - the tree's
+`set-buffer-local-value!` mechanism - and ported cc-mode code reads one
+through `c-mode-var` or `buffer-local-value`. There is no symbol value
+cell and no global value to copy, so
+`c-make-emacs-variables-local` only ensures the slot exists.
+
+`c-lang-defvar`/`c-lang-setvar` register an ordered list of
+`(VAR KIND EXPR MODULE DOC)` records at expand, load and eval time,
+replacing an earlier registration in place - Emacs's list and its
+`(setcdr elem (list val doc))`. The `defconst`s that bake the list into
+Emacs's compiled cc-langs have no counterpart: the list is the
+registry.
+
+## The generated init function
+
+`c-init-language-vars MODE` expands at the caller's compile time.
+`c-make-init-lang-vars-fun` evaluates each variable's definition *then*
+- in the defining module, with `*c-buffer-is-cc-mode*` bound to MODE -
+and emits one `(c-lang-set-local! 'VAR VALUE)` per variable. A value
+that is literal data is **baked** into the expansion as a quoted
+value, which is Emacs's compiled path. A value that is not literal (a
+procedure, a record) becomes a runtime `(c-lang-var-value 'VAR 'MODE)`
+call, which evaluates the source then - Emacs's per-variable
+source-eval fallback. If the expansion-time evaluation raises, that
+variable alone takes the runtime path.
+
+A test pins the baked behaviour: an init function expanded while a
+constant held `old-value` still sets `old-value` after the constant is
+redefined, while the constant itself reads the new value.
+
+## Named departures and one open exactness question
+
+1. **`c-make-keywords-re`'s symbol/non-symbol split uses the current
+   (or standard) syntax table**, because `c-mode-syntax-table` and
+   Emacs's `c-make-mode-syntax-table` fallback come with cc-langs's
+   language data, which is the next step. Measured consequence: the
+   standard table gives `+` symbol syntax and a c-mode buffer gives it
+   punctuation, so a keyword list containing operators classifies
+   differently until the syntax tables are ported. The branching logic
+   itself is exact - five cases measured against Emacs agree to the
+   string. This must be revisited with the syntax-table data.
+2. **Return values**: `c-init-language-vars`' expansion answers the
+   last `c-lang-set-local!`'s unspecified value, where Emacs answers
+   the last variable's value. Nothing in cc-mode relies on it.
+3. Docstring inference from a bare `(c-lang-const VAR)` works
+   (`c-lang-constant-documentation` reads the constant registry), but
+   nothing displays it yet - `describe-mode`-style output comes with
+   cc-mode.
+
+## Guile facts this step cost
+
+- The registration must happen at both expand and load time
+  (`eval-when (expand load eval)`), for the same cross-process reason
+  as the constants: a consumer's compiler loads cc-langs, so the
+  *load* registration is the one it sees; the expand registration only
+  serves cc-langs's own compilation.
+- The generated code is data built with `datum->syntax` in the
+  caller's context, so its helper identifiers (`c-lang-set-local!`,
+  `c-lang-var-value`) resolve from the caller's import of cc-langs;
+  they are exported for that reason.
+- The tree's `buffer-local-value` takes an optional default and returns
+  `#f`; Emacs's `symbol-value` on a void variable signals. `c-mode-var`
+  uses the default.
+- `c-make-keywords-re` reproduces Emacs's four branches exactly,
+  including the unmatchable `\(\`a\`\)` for an empty list and the
+  `\(\`\)`-wrapped mixed branch; the only unknown is the syntax table
+  above.

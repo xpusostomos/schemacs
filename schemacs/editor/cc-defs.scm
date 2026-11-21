@@ -47,9 +47,12 @@
   (import
     (scheme base)
     (only (guile) make-hash-table hashq-ref hashq-set! hashq-get-handle
-                  hash-clear! current-module module-name eval-when eval
+                  hash-clear! current-module module-name eval-when eval sort
                   syntax with-syntax syntax-case syntax->datum datum->syntax)
-    (only (schemacs editor intervals) get put))
+    (only (schemacs editor intervals) get put)
+    (only (schemacs editor buffer) current-buffer buffer-local-value)
+    (only (schemacs editor search) string-match)
+    (only (schemacs regexp-opt) regexp-opt))
 
   (export
    c-lang-defconst c-lang-const c-lang-defconst-eval-immediately
@@ -57,7 +60,9 @@
    c-define-lang-constant c-define-lang-constant-here
    c-lang-defconst-bindings c-lang-defconst-thunk
    c-lang-defconst-eval-now
-   c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*)
+   c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
+   c-mode-symbol c-mode-var c-concat-separated c-make-bare-char-alt
+   c-make-keywords-re c-lang-constant-documentation c-literal-datum?)
 
   (begin
 
@@ -92,6 +97,87 @@
 (put 'awk-mode  'c-mode-prefix "awk-")
 
 ;;----------------------------------------------------------------------
+;; `c-mode-symbol' and `c-mode-var' (`cc-defs.el:2106', `:2119')
+;;----------------------------------------------------------------------
+(define (c-mode-symbol suffix)
+  ;; "Prefix the current mode prefix (e.g. \"c-\") to SUFFIX and return
+  ;; the corresponding symbol."
+  (or (*c-buffer-is-cc-mode*)
+      (error "Not inside a CC Mode based mode"))
+  (let ((mode-prefix (get (*c-buffer-is-cc-mode*) 'c-mode-prefix)))
+    (or mode-prefix
+        (error "~a has no mode prefix known to `c-mode-symbol'"
+               (*c-buffer-is-cc-mode*)))
+    (string->symbol (string-append mode-prefix suffix))))
+
+(define (c-mode-var suffix)
+  ;; Emacs's `(symbol-value (c-mode-symbol SUFFIX))'. Its language
+  ;; variables are buffer-local, and so are ours: the value is the
+  ;; buffer-local slot of the current buffer (a named departure - there
+  ;; is no symbol value cell here).
+  (buffer-local-value (current-buffer) (c-mode-symbol suffix) #f))
+
+;;----------------------------------------------------------------------
+;; `c-concat-separated', `c-make-bare-char-alt' and `c-make-keywords-re'
+;; (`cc-defs.el:2145'-`:2214')
+;;----------------------------------------------------------------------
+(define (c-concat-separated list separator)
+  ;; "Like `concat' on LIST, but separate each element with SEPARATOR.
+  ;; Notably, null elements in LIST are ignored."
+  (let loop ((l list) (acc #f))
+    (cond ((null? l) (or acc ""))
+          ((or (not (car l)) (null? (car l))) (loop (cdr l) acc))
+          (else (loop (cdr l)
+                      (if acc
+                          (string-append acc separator (car l))
+                          (car l)))))))
+
+(define (c-make-bare-char-alt chars . rest)
+  ;; "Make a character alternative string from the list of characters
+  ;; CHARS ... If INVERTED is non-nil, a caret is prepended."
+  (let ((inverted (and (pair? rest) (car rest))))
+    (let loop ((cs (sort (map (lambda (c) (if (char? c) c (integer->char c)))
+                              chars)
+                         char<?))
+               (str (if inverted "^" "")))
+      (cond ((null? cs) str)
+            ((memv (car cs) (list #\\ #\^ #\-))
+             (loop (cdr cs)
+                   (string-append str "\\" (string (car cs)))))
+            (else (loop (cdr cs) (string-append str (string (car cs)))))))))
+
+(define (%delete-nil list)
+  ;; Emacs's `(remq nil LIST)' for our two nils.
+  (let loop ((l list) (acc '()))
+    (cond ((null? l) (reverse acc))
+          ((or (not (car l)) (null? (car l))) (loop (cdr l) acc))
+          (else (loop (cdr l) (cons (car l) acc))))))
+
+(define (c-make-keywords-re adorn list . rest)
+  ;; "Make a regexp that matches any string in LIST. Duplicates and nil
+  ;; elements in the list are removed." The MODE argument selects the
+  ;; syntax table used to tell a symbol from a non-symbol; **named
+  ;; departure**: the mode's `c-<mode>-syntax-table' does not exist
+  ;; here yet, so the current (or standard) syntax table classifies the
+  ;; strings, which agrees with c-mode's for ordinary keyword text.
+  (let ((liszt (%delete-nil list))
+        (symbols '())
+        (non-symbols '()))
+    (for-each (lambda (elt)
+                (if (string-match "\\`\\(\\sw\\|\\s_\\)*\\'" elt)
+                    (set! symbols (cons elt symbols))
+                    (set! non-symbols (cons elt non-symbols))))
+              liszt)
+    (cond ((null? liszt)
+           (if adorn "\\(\\`a\\`\\)" "\\`a\\`"))
+          ((and (pair? symbols) (pair? non-symbols))
+           (string-append "\\(" (regexp-opt symbols 'symbols) "\\|"
+                          (regexp-opt non-symbols #t) "\\)"))
+          ((pair? symbols) (regexp-opt symbols 'symbols))
+          (adorn (regexp-opt non-symbols #t))
+          (else (regexp-opt non-symbols)))))
+
+;;----------------------------------------------------------------------
 ;; The registry (`c-lang-constants', `cc-defs.el:2491')
 ;;----------------------------------------------------------------------
 ;;
@@ -123,6 +209,11 @@
     (cond ((null? l) (reverse acc))
           ((pred (car l)) (loop (cdr l) (cons (car l) acc)))
           (else (loop (cdr l) acc)))))
+
+(define (c-lang-constant-documentation name)
+  ;; The docstring a `c-lang-defconst' carried, or #f.
+  (let ((entry (hashq-ref %c-lang-constants name)))
+    (and entry (c-lang-constant-doc entry))))
 
 (define (c-lang-constant-entry name)
   ;; The record for NAME, made on first mention (Emacs's `intern' in
@@ -277,6 +368,11 @@
                            (and (%c-literal-datum? (vector-ref x i))
                                 (loop (+ i 1))))))
         (else #f)))
+
+(define (c-literal-datum? x)
+  ;; The literal test the language-variable system uses to decide
+  ;; whether a value can be baked into generated code.
+  (%c-literal-datum? x))
 
 (define-syntax c-lang-const
   (lambda (stx)

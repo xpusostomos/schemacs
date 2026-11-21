@@ -142,6 +142,7 @@
         (schemacs editor casetab)
         (schemacs editor category)
         (schemacs editor cc-defs)
+        (schemacs editor cc-langs)
         (schemacs editor character)
         (schemacs editor characters)
         (schemacs editor charset)
