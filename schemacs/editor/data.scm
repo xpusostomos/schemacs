@@ -16,7 +16,8 @@
     ;; The global value table is a Guile hash table, as the coding system
     ;; registry is - `hashq-get-handle` is the one that tells a stored
     ;; nil from an absent entry, which `hashq-ref` cannot.
-    (only (guile) hashq-get-handle hashq-set! make-hash-table)
+    (only (guile) ash logand logior lognot logxor logcount
+          hashq-get-handle hashq-set! make-hash-table)
     (only (schemacs editor buffer)
           buffer-local-value set-buffer-local-value! current-buffer)
     )
@@ -25,6 +26,14 @@
    make-local-variable
    default-value set-default default-boundp
    keywordp
+   ;; `alloc.c''s `make-bool-vector' and `bool-vector', and `data.c''s
+   ;; predicates and bitwise operations. See "Bool vectors" below.
+   make-bool-vector bool-vector bool-vector-p bool-vector?
+   bool-vector-ref bool-vector-set!
+   %bool-vector-length %bool-vector-bits %bool-vector-copy
+   bool-vector-exclusive-or bool-vector-union bool-vector-intersection
+   bool-vector-set-difference bool-vector-subsetp bool-vector-not
+   bool-vector-count-population bool-vector-count-consecutive
    )
 
   (begin
@@ -112,5 +121,210 @@
       ;; buffer-local value in a buffer, and a different default value."
       ;;--------------------------------------------------------------
       (and (hashq-get-handle *default-values* symbol) #t))
+
+    ;;----------------------------------------------------------------
+    ;; Bool vectors
+    ;;
+    ;; `make-bool-vector' and `bool-vector' are `alloc.c''s
+    ;; (`:2080', `:2093'); the predicate and the bitwise operations are
+    ;; `data.c''s (`:454', `:3824'-`:3995'). They live here because the
+    ;; tree has no `alloc.sld', the same placement `locate-file-internal'
+    ;; takes in `fileio.sld'.
+    ;;
+    ;; Emacs's bool vector is a distinct Lisp object - a bit array with
+    ;; `t' and `nil' elements - because `aref'/`aset'/`length' and a
+    ;; dozen C callers (category sets among them) treat it as a
+    ;; sequence. This is the same object: a record holding the bits as
+    ;; one exact integer, bit I being element I, and the length. The
+    ;; integer is a bignum once it passes the fixnum range, so the
+    ;; representation does not bound the vector's size; the C's
+    ;; `bits_word' machinery is an optimization this does not carry.
+    ;;--------------------------------------------------------------
+    (define-record-type <bool-vector>
+      (make-bool-vector-raw bits length)
+      bool-vector?
+      (bits bool-vector-bits set-bool-vector-bits!)
+      (length %bool-vector-length set-bool-vector-length!))
+
+    (define (%nil? object)
+      ;; Elisp's `nil' as this tree spells it: `#f' or the empty list.
+      ;; Scheme's `'()` is *true*, so the C's `NILP` is this and not
+      ;; `null?` - the file's oldest hazard.
+      ;;--------------------------------------------------------------
+      (or (not object) (null? object)))
+
+    (define (bool-vector-p object)
+      ;; GNU Emacs's `bool-vector-p' (`data.c:454'): "Return t if OBJECT
+      ;; is a bool-vector." - `BOOL_VECTOR_P', which is the record
+      ;; predicate. The Emacs name has the `-p'; the record's own
+      ;; predicate keeps Scheme's `?'.
+      ;;--------------------------------------------------------------
+      (bool-vector? object))
+
+    (define (make-bool-vector length init)
+      ;; GNU Emacs's `make-bool-vector' (`alloc.c:2080'): "Return a new
+      ;; bool-vector of length LENGTH, using INIT for each element.
+      ;; LENGTH must be a number. INIT matters only in whether it is t
+      ;; or nil."
+      ;;--------------------------------------------------------------
+      (unless (and (exact-integer? length) (>= length 0))
+        (error "Wrong type argument: wholenump" length))
+      (make-bool-vector-raw (if (%nil? init) 0 (- (ash 1 length) 1)) length))
+
+    (define (bool-vector . objects)
+      ;; GNU Emacs's `bool-vector' (`alloc.c:2093'): "Return a new
+      ;; bool-vector with specified arguments as elements."
+      ;;--------------------------------------------------------------
+      (make-bool-vector (length objects) #t))
+
+    (define (%bool-vector-check bv who)
+      (unless (bool-vector? bv)
+        (error "Wrong type argument: bool-vector-p" bv))
+      bv)
+
+    (define (bool-vector-ref bv index)
+      ;; `bool_vector_ref' (`data.c'): element INDEX as `t' or `nil'.
+      ;; The C's `aref' calls it; the range check is `aref''s
+      ;; (`data.c:2594').
+      ;;--------------------------------------------------------------
+      (%bool-vector-check bv 'aref)
+      (unless (and (exact-integer? index)
+                   (>= index 0)
+                   (< index (%bool-vector-length bv)))
+        (error "Args out of range" bv index))
+      (not (zero? (logand (bool-vector-bits bv) (ash 1 index)))))
+
+    (define (bool-vector-set! bv index value)
+      ;; `bool_vector_set' (`data.c'): store whether VALUE is non-nil.
+      ;; Answers VALUE, as `aset' does.
+      ;;--------------------------------------------------------------
+      (%bool-vector-check bv 'aset)
+      (unless (and (exact-integer? index)
+                   (>= index 0)
+                   (< index (%bool-vector-length bv)))
+        (error "Args out of range" bv index))
+      (let ((bit (ash 1 index)))
+        (set-bool-vector-bits!
+         bv (if (%nil? value)
+                (logand (bool-vector-bits bv) (lognot bit))
+                (logior (bool-vector-bits bv) bit))))
+      value)
+
+    (define (%bool-vector-copy bv)
+      ;; `Fcopy_sequence''s bool-vector arm (`fns.c'): a new vector with
+      ;; the same elements. `copy-sequence` uses this.
+      ;;--------------------------------------------------------------
+      (%bool-vector-check bv 'copy-sequence)
+      (make-bool-vector-raw (bool-vector-bits bv)
+                            (%bool-vector-length bv)))
+
+    (define (%bool-vector-check-compatible a b dest)
+      (%bool-vector-check a 'bool-vector)
+      (%bool-vector-check b 'bool-vector)
+      (unless (= (%bool-vector-length a) (%bool-vector-length b))
+        (error "Wrong length argument" a b))
+      (when dest
+        (%bool-vector-check dest 'bool-vector)
+        (unless (= (%bool-vector-length dest) (%bool-vector-length a))
+          (error "Wrong length argument" a b dest))))
+
+    (define (bool-vector-binop a b dest op)
+      ;; `bool_vector_binop_driver' (`data.c:3719'), for the four
+      ;; operations that take an optional destination: the result is
+      ;; computed, stored into DEST when one is given, and the answer is
+      ;; DEST if it had to change and nil otherwise; with no DEST a new
+      ;; vector is made and answered.
+      ;;
+      ;; The C walks machine words and tests each before writing; an
+      ;; integer operation cannot be tested word by word, but "changed"
+      ;; is the same comparison of the whole bit pattern.
+      ;;--------------------------------------------------------------
+      (%bool-vector-check-compatible a b dest)
+      (let* ((result (op (bool-vector-bits a) (bool-vector-bits b)
+                         (%bool-vector-length a))))
+        (if dest
+            (if (= result (bool-vector-bits dest))
+                #f
+                (begin (set-bool-vector-bits! dest result) dest))
+            (make-bool-vector-raw result (%bool-vector-length a)))))
+
+    (define (bool-vector-exclusive-or a b . rest)
+      ;; GNU Emacs's `bool-vector-exclusive-or' (`data.c:3824'):
+      ;; "Return A ^ B, bitwise exclusive or. If optional third argument
+      ;; C is given, store result into C. ..."
+      ;;--------------------------------------------------------------
+      (bool-vector-binop a b (if (pair? rest) (car rest) #f)
+                         (lambda (x y n) (logxor x y))))
+
+    (define (bool-vector-union a b . rest)
+      ;; GNU Emacs's `bool-vector-union' (`data.c:3835').
+      ;;--------------------------------------------------------------
+      (bool-vector-binop a b (if (pair? rest) (car rest) #f)
+                         (lambda (x y n) (logior x y))))
+
+    (define (bool-vector-intersection a b . rest)
+      ;; GNU Emacs's `bool-vector-intersection' (`data.c:3846').
+      ;;--------------------------------------------------------------
+      (bool-vector-binop a b (if (pair? rest) (car rest) #f)
+                         (lambda (x y n) (logand x y))))
+
+    (define (bool-vector-set-difference a b . rest)
+      ;; GNU Emacs's `bool-vector-set-difference' (`data.c:3857'):
+      ;; "Return A &~ B, set difference. ..."
+      ;;--------------------------------------------------------------
+      (bool-vector-binop a b (if (pair? rest) (car rest) #f)
+                         (lambda (x y n) (logand x (lognot y)))))
+
+    (define (bool-vector-subsetp a b)
+      ;; GNU Emacs's `bool-vector-subsetp' (`data.c:3868'): "Return t if
+      ;; every t value in A is also t in B, nil otherwise."
+      ;;--------------------------------------------------------------
+      (%bool-vector-check-compatible a b #f)
+      (zero? (logand (bool-vector-bits a)
+                     (lognot (bool-vector-bits b)))))
+
+    (define (bool-vector-not a . rest)
+      ;; GNU Emacs's `bool-vector-not' (`data.c:3877'): "Compute ~A,
+      ;; set complement. If optional second argument B is given, store
+      ;; result into B." The mask drops the bits past LENGTH, which the
+      ;; C's spare mask does.
+      ;;--------------------------------------------------------------
+      (%bool-vector-check a 'bool-vector-not)
+      (let* ((len (%bool-vector-length a))
+             (mask (- (ash 1 len) 1))
+             (result (logand mask (lognot (bool-vector-bits a)))))
+        (if (pair? rest)
+            (let ((b (car rest)))
+              (%bool-vector-check b 'bool-vector-not)
+              (unless (= (%bool-vector-length b) len)
+                (error "Wrong length argument" a b))
+              (set-bool-vector-bits! b result)
+              b)
+            (make-bool-vector-raw result len))))
+
+    (define (bool-vector-count-population a)
+      ;; GNU Emacs's `bool-vector-count-population' (`data.c:3918'):
+      ;; "Count how many elements in A are t."
+      ;;--------------------------------------------------------------
+      (%bool-vector-check a 'bool-vector-count-population)
+      (logcount (bool-vector-bits a)))
+
+    (define (bool-vector-count-consecutive a b i)
+      ;; GNU Emacs's `bool-vector-count-consecutive' (`data.c:3943'):
+      ;; "Count how many consecutive elements in A equal B starting at
+      ;; I." B non-nil counts t elements, nil counts nil elements. I may
+      ;; be one past the end ("Allow one past the end for convenience").
+      ;;--------------------------------------------------------------
+      (%bool-vector-check a 'bool-vector-count-consecutive)
+      (unless (and (exact-integer? i) (>= i 0)
+                   (<= i (%bool-vector-length a)))
+        (error "Args out of range" a i))
+      (let ((wanted (not (%nil? b)))
+            (len (%bool-vector-length a)))
+        (let loop ((pos i) (count 0))
+          (if (or (>= pos len)
+                  (eq? (bool-vector-ref a pos) wanted))
+              (if (>= pos len) count (loop (+ pos 1) (+ count 1)))
+              count))))
 
     ))

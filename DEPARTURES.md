@@ -11061,3 +11061,62 @@ with `(255 255 255)` under the old glyph source); and
 `tty-editor-tests.scm`'s "a blank line's row carries the newline in the
 region's face", which pins the row's first glyph and the fill to the
 window's edge.
+
+# The category table and bool vectors — step 1 of the regexp engine
+# (2026-11-21)
+
+The regexp engine Emacs compiles into `regex-emacs.c` reads the syntax
+table (`\s`, `\w`, `\b`) and the category table (`\c`), and
+`word_boundary_p` (`category.c:376`) reads both the category table and
+the script table. So the full port of the engine starts below it, with
+the two objects that did not exist here: Emacs's **bool vector** and its
+**category table**.
+
+## What landed
+
+- `(schemacs editor data)` now carries `alloc.c`'s `make-bool-vector`
+  (`:2080`) and `bool-vector` (`:2093`) and `data.c`'s predicate and
+  bitwise operations (`:454`, `:3824`-`:3995`): `bool-vector-p`,
+  `bool-vector-ref`/`-set!`, the union/intersection/difference/xor
+  family with the C's optional destination and "the destination if it
+  changed, nil otherwise" answer, `bool-vector-not`, `subsetp`,
+  `count-population` and `count-consecutive`. The C's machine-word
+  `bits_word` implementation is not carried: the bits are one exact
+  integer, bit I being element I. That is the same sequence with the
+  same answers, without a length limit; a Word of `eql` for `equal?` is
+  what `copy-sequence` needs.
+- `(schemacs editor category)` is `category.c` whole - the category set
+  (`make-category-set`), the category (`define-category`,
+  `category-docstring`, `get-unused-category`), the category table
+  (`category-table-p`, `category-table`, `standard-category-table`,
+  `copy-category-table`, `make-category-table`, `set-category-table`,
+  `char-category-set`, `category-set-mnemonics`,
+  `modify-category-entry`) and `word-boundary-p`.
+- `copy-sequence` grew the bool-vector arm `fns.c` has.
+- `category-tests.scm` (20, Emacs 31.1's own answers, measured first)
+  is in `tools/run-suites.py`; all 82 suites pass.
+
+## Departures, all named in `category.scm`
+
+1. **`make-category-table` shares one empty set** across the default and
+   every top-level slot, where the C makes a separate set for each. The
+   sets are immutable in use - `modify-category-entry` copies before
+   changing - so no caller can observe it; only `eq` on two never-written
+   sets could.
+2. **`map-char-table` is not ported**, so `copy-category-table` walks the
+   table's runs with `char-table-ref-and-range` instead of
+   `map_char_table`'s recursion. Same runs, same order.
+3. **`char-script-table` is empty** - `characters.el` fills it and that
+   file is not ported yet. With the default nil every character has the
+   same script, which is Emacs's answer for the ASCII repertoire; the
+   `word-combining-categories`/`word-separating-categories` lists are
+   plain variables with Emacs's nil defaults.
+4. **Errors are templates plus irritants**, as everywhere in this tree:
+   `(error "Undefined category: ~a" c)` carries the C's message text and
+   the character; the reporter formats it. Emacs's printed message also
+   passes through `text-quoting-style`, which this tree does not
+   substitute in `error`.
+5. **A character argument may be a Guile character or its code point**;
+   Emacs's DEFUNs take the code point. Both are accepted because the
+   ported `characters.el` call sites will write character literals and
+   the tests write code points.

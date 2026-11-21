@@ -129,6 +129,7 @@
         (schemacs editor buffer-text)
         (schemacs editor callproc)
         (schemacs editor casefiddle)
+        (schemacs editor category)
         (schemacs editor character)
         (schemacs editor characters)
         (schemacs editor charset)

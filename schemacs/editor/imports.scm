@@ -101,6 +101,7 @@
     (schemacs editor keymap)
     (schemacs editor lisp-mode)
     (schemacs editor theme)
+    (schemacs editor category)
     (schemacs editor chartab)
     (schemacs editor diffseq)
     (schemacs editor data)
@@ -132,6 +133,9 @@
   (export
     %assq
     %blank-line?
+    %bool-vector-bits
+    %bool-vector-copy
+    %bool-vector-length
     %buffer-modtime
     %buffer-modtime-size
     %class-in
@@ -834,6 +838,8 @@
     *window-scroll-function*
     *window-setup-hook*
     *window-system*
+    *word-combining-categories*
+    *word-separating-categories*
     *words-include-escapes*
     *x-pre-popup-menu-hook*
     *x-select-request-type*
@@ -952,6 +958,19 @@
     bobp
     bol
     bolp
+    bool-vector
+    bool-vector-count-consecutive
+    bool-vector-count-population
+    bool-vector-exclusive-or
+    bool-vector-intersection
+    bool-vector-not
+    bool-vector-p
+    bool-vector-ref
+    bool-vector-set!
+    bool-vector-set-difference
+    bool-vector-subsetp
+    bool-vector-union
+    bool-vector?
     buffer-auto-fill-function
     buffer-auto-hscroll-mode
     buffer-beg
@@ -1039,6 +1058,10 @@
     capitalize-word
     casify-region
     casify-word
+    category-docstring
+    category-set-mnemonics
+    category-table
+    category-table-p
     cd
     cd-absolute
     cd-path
@@ -1047,6 +1070,7 @@
     char-alt
     char-before
     char-byte8?
+    char-category-set
     char-ctl
     char-display-cursor-width
     char-display-glyph
@@ -1055,6 +1079,7 @@
     char-equal
     char-hyper
     char-meta
+    char-script-table
     char-shift
     char-super
     char-syntax
@@ -1234,6 +1259,7 @@
     concat
     confirm-nonexistent-file-or-buffer
     constrain-to-field
+    copy-category-table
     copy-char-table
     copy-file
     copy-interval-parent
@@ -1326,6 +1352,7 @@
     default-value
     defface
     define-alias
+    define-category
     define-charset
     define-coding-system-alias
     define-command
@@ -1872,6 +1899,7 @@
     get-selection
     get-specified-cursor-type
     get-text-property
+    get-unused-category
     get-window-cursor-type
     global-buffers-menu-map
     global-font-lock-mode
@@ -2331,7 +2359,10 @@
     ls-lisp-version-lessp
     major-mode
     major-mode-remap
+    make-bool-vector
     make-buffer-string
+    make-category-set
+    make-category-table
     make-char-table
     make-coding-system
     make-ctrl-char
@@ -2529,6 +2560,7 @@
     mode-line-window-selected-p
     mode-name
     modify-all-frames-parameters
+    modify-category-entry
     modify-frame-parameters
     modify-syntax-entry
     modify-text
@@ -3158,6 +3190,7 @@
     set-buffer-local-value!
     set-buffer-major-mode
     set-buffer-modified-p
+    set-category-table
     set-char-table-extra-slot
     set-char-table-parent
     set-char-table-range
@@ -3291,6 +3324,7 @@
     sstring
     sstring-fence
     ssymbol
+    standard-category-table
     standard-syntax-runs
     standard-syntax-table
     start-of-paragraph-text
@@ -3987,6 +4021,7 @@
     with-temp-buffer
     with-temp-file
     without-restriction
+    word-boundary-p
     word-char?
     word-run-end
     word-run-start

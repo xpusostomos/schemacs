@@ -14617,3 +14617,78 @@ restart before looking.
 All 81 suites pass after the change (`tty-editor-tests` 353), and
 `tools/pty-check.py` is **100/100** on this tree, run on its own - the
 `narrow` check (which drives `C-x n n`) among them and green.
+
+# The regexp engine and the C mode — the plan, and step 1 (2026-11-21)
+
+Chris approved a full port of `src/regex-emacs.c` "including categories
+and everything", which is the prerequisite for a faithful `cc-mode`.
+This is the plan, the measurements it rests on, and what has landed.
+
+## Why: the measurements
+
+cc-mode is regexp-pervasive, not a character parser: Emacs 31.1 on
+`src/minibuf.c` (2,761 lines) with `looking-at`/`re-search-*`/`string-match`
+instrumented:
+
+| operation | time | regexp calls |
+|---|---|---|
+| font-lock whole buffer | 0.85 s | 377,768 `looking-at` + 20,014 `re-search-forward` |
+| font-lock 3 lines (a jit-lock keystroke) | 1.6 ms | 107 + 97 |
+| `c-indent-line` (TAB) | 2.1 ms | 485 + 80 |
+
+The constructs the C mode needs that glibc/our translator does not do:
+`\=` (refused today: `(string-match "\\(\\=\\|x\\)" "x")` raises),
+buffer-scoped `` \` ``/`\'` inside searches, and **leftmost-first**
+alternation. Measured in Emacs on "ab" at point 2:
+`(looking-at "\\(\\=\\|b\\)")` matches the empty `\=` branch
+(`match-end` 2), where POSIX ERE takes the longer `b`. `cc-langs.el:1187`'s
+`noncontinued-line-end` and `cc-langs.el:3630`'s
+`c-stmt-block-only-keywords-regexp` put `\=` on the C path.
+
+Guile microbenchmarks that say a Scheme engine is affordable if it is a
+compiled opcode VM over the buffer (not an interpreter over patterns):
+a hand-written symbol scan at every start of a 59-char C line **5.0 µs**
+against **64.2 µs** for glibc `regexp-exec` at every start; one symbol
+match **111 ns** against 903 ns; compiled function call 8 ns, fixnum
+`cond` 5 ns, u32vector scan 3.9 ns/char. Projection: 200-600 regexp
+calls a keystroke × 0.05-1 µs = 0.01-0.6 ms.
+
+## Step 1, landed: bool vectors and the category table
+
+See DEPARTURES.md's 2026-11-21 section. `(schemacs editor data)` has
+`make-bool-vector`/`bool-vector` and data.c's operations over one exact
+integer; `(schemacs editor category)` is `category.c` whole, with
+`word-boundary-p`, the standard table and `char-script-table` (empty
+until characters.el). `category-tests.scm` (20, Emacs's answers) is in
+the runner; all **82 suites** pass.
+
+## What remains, in the order it has to be done
+
+1. **`casetab.sld`** (`src/casetab.c`) - `standard-case-table`,
+   `set-case-table`, the `case-canon`/`case-eqv` extras the engine's
+   `translate` reads (`search.c` passes `BVAR (current_buffer,
+   case_canon_table)` when `case-fold-search`). The tree has no case
+   tables today; casefiddle uses Guile's case conversions.
+2. **`characters.el`'s data**: `char-script-table`, the category table's
+   contents (`define-category`/`modify-category-entry` for the 178
+   entries) and the case tables. Transcribing from a running Emacs is
+   the project's method for data (charset maps, xterm's decode map);
+   the *code* is ported.
+3. **`regex-emacs.sld`** (`src/regex-emacs.c`, 5,790 lines): the opcode
+   enum, `regex-compile` (`:1742`), `re-compile-fastmap`/`analyze-first`
+   (`:2866`-`:3398`), `re-search`/`re-search-2` (`:3422`-`:3680`),
+   `re-match-2`/`re-match-2-internal` (`:4096`-`:5720`) with the
+   memoization layer (`memo_*`, `:4241`-...) and the mutual-exclusion
+   fast paths. Operate on code points, not UTF-8 bytes: the text is a
+   stored u32 code point per position, which removes the C's entire
+   decode layer from the inner loop (named departure).
+4. **Integrate into `(schemacs editor search)`**: `compile-pattern`,
+   `looking-at`, `string-match`, `re-search-*`, `match-data`,
+   `replace-match`, `save-match-data` - the engine replaces glibc and
+   `%emacs-ere`/the 512-char window copies; keep the existing
+   `search-tests.scm` time bounds as the performance gate and extend the
+   500-case differential (`emacs -Q --batch`) to the full dialect.
+5. **Then `cc-mode`**: cc-defs -> cc-vars -> cc-langs -> cc-engine ->
+   cc-fonts -> cc-mode, and cc-cmds/cc-align/cc-styles for indentation.
+   The regexp engine is not an alternative to the 43k-line port; it is
+   its prerequisite.

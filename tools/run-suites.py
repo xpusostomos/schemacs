@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
     'schemacs/editor/character-tests.scm',
+    'schemacs/editor/category-tests.scm',
     'schemacs/editor/chartab-tests.scm',
     'schemacs/editor/syntax-tests.scm',
     'schemacs/editor/narrow-tests.scm',

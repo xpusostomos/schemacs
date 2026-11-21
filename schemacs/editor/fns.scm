@@ -59,6 +59,11 @@
     (only (schemacs editor buffer-text)
           buffer-text-ref buffer-text-base buffer-text-for-each)
     (only (schemacs editor marker) marker-position markerp)
+    ;; `copy-sequence`'s bool-vector arm - the C's `Fcopy_sequence`
+    ;; copies one, and `copy-category-table` (category.c) copies the
+    ;; category sets it walks with it.
+    (only (schemacs editor data)
+          bool-vector? %bool-vector-copy)
     ;; the version comparison `string-version-lessp' is written over -
     ;; gnulib's `lib/filevercmp.c'.
     (only (schemacs editor filevercmp) %filevercmp)
@@ -539,6 +544,9 @@
                 (set!string-intervals val copy)))
           val))
        ((vector? arg) (vector-copy arg))
+       ;; `Fcopy_sequence`'s bool-vector arm (`fns.c`): a new vector with
+       ;; the same elements.
+       ((bool-vector? arg) (%bool-vector-copy arg))
        (else (error "Wrong type argument: sequencep" arg))))
 
     (define (nreverse seq)
