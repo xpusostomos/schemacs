@@ -26,7 +26,7 @@
  (only (schemacs editor buffer) allocate-buffer set-buffer current-buffer
        set-buffer-local-value!)
  (only (schemacs editor editfns) insert goto-char point delete-region
-       buffer-substring-no-properties)
+       point-min point-max buffer-substring-no-properties)
  (only (schemacs editor syntax) set-syntax-table)
  (only (schemacs editor textprop) get-text-property text-property-any)
  (only (schemacs editor cc-defs) c-lang-const *c-buffer-is-cc-mode*
@@ -627,6 +627,179 @@
      (c-invalidate-sws-region-after bp bp 1))
    (test-equal "after-change: a damaged comment opener breaks the ladder"
                #f (in-sws-any 50 81))))
+
+;;----------------------------------------------------------------------
+;; Statement barriers and punctuation (`cc-engine.el:1457'-`:1560')
+;;----------------------------------------------------------------------
+;; Every expectation is Emacs 31.1's answer; the whole-table
+;; differential - `c-punctuation-in' over 98 pairs and
+;; `c-crosses-statement-barrier-p' over eleven ranges of two fixtures -
+;; was identical.
+(c-buffer
+ (lambda ()
+   (define (punct f to) (c-punctuation-in f to))
+   (define (barrier f to)
+     (goto-char f)
+     (*c-maybe-labelp* #f)
+     (list (c-crosses-statement-barrier-p f to) (*c-maybe-labelp*)))
+   (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+     ;; Walk the whole 98-pair table first, as the differential did: the
+     ;; table was identical to Emacs's, and walking it also primes the
+     ;; syntax cache from both directions. The barrier runs below then
+     ;; exercise `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT' in the regexp engine
+     ;; - without it the cache is left with a null interval and a later
+     ;; `\s' search says "Error in syntax_table logic for to-the-end
+     ;; intervals" (this suite has been seen failing that way).
+     (for-each (lambda (f)
+                 (for-each (lambda (to)
+                             (when (< f to) (punct f to)))
+                           '(20 35 55 60 82 96 103)))
+               '(1 4 9 20 27 34 49 55 56 69 81 85 95 96 102))
+     ;; The differential's seven ranges, in its order.
+     (for-each (lambda (pair) (barrier (car pair) (cdr pair)))
+               '((1 . 20) (4 . 20) (20 . 35) (36 . 55) (56 . 82)
+                 (82 . 96) (96 . 103)))
+
+     (test-equal "c-punctuation-in: none between the directive's start and its end"
+                 #f (punct 1 20))
+     (test-equal "c-punctuation-in: the '<' of <stdio.h>" 10 (punct 4 20))
+     (test-equal "c-punctuation-in: the '#' of the second directive" 54
+                 (punct 1 55))
+     (test-equal "c-punctuation-in: an ordinary declaration's ';'" 101
+                 (punct 96 103))
+     (test-equal "c-punctuation-in: nothing after the block comment opens"
+                 #f (punct 95 96))
+     (test-equal "c-punctuation-in: the comment's closing '/' is punctuation"
+                 93 (punct 81 96))
+
+     (test-equal "c-crosses-statement-barrier-p: a directive tail crosses its ';'"
+                 '(54 #f) (barrier 36 55))
+     (test-equal "c-crosses-statement-barrier-p: a comment body crosses nothing"
+                 '(#f #f) (barrier 82 96))
+     (test-equal "c-crosses-statement-barrier-p: the last declaration's ';'"
+                 '(101 #f) (barrier 96 103))
+     (test-equal "c-crosses-statement-barrier-p: nothing before the first ';'"
+                 '(#f #f) (barrier 1 20)))))
+
+;; The label fixture: `c-maybe-labelp' is the *first* `:' that might
+;; start a label, and a `?' clears it.
+(define barrier-label-fixture
+  "foo: bar; while (x) y; a ? b : c;\ncase 1: break;\n")
+
+(c-buffer
+ (lambda ()
+   (delete-region (point-min) (point-max))
+   (insert barrier-label-fixture)
+   (define (barrier f to)
+     (goto-char f)
+     (*c-maybe-labelp* #f)
+     (list (c-crosses-statement-barrier-p f to) (*c-maybe-labelp*)))
+   (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+     (test-equal "a label colon before the first ';' is remembered" '(9 4)
+                 (barrier 1 20))
+     (test-equal "the same range ended before the ';'" '(9 4) (barrier 1 10))
+     (test-equal "a colon after a '?' is not a label" '(22 #f) (barrier 12 25))
+     (test-equal "and a 'case' clause's colon after a '?'" '(33 #f)
+                 (barrier 26 45)))))
+
+;;----------------------------------------------------------------------
+;; Virtual semicolons (`cc-engine.el:14184'-`:14243')
+;;----------------------------------------------------------------------
+;; `Q_FOO (x)' on a line is a virtual semicolon when
+;; `c-macro-with-semi-re' names Q_, at the last non-WS position - and
+;; nowhere else on the line. Emacs 31.1 on this fixture: position 10 is
+;; the only true one.
+(define vsemi-fixture "Q_FOO (x) // comment\n  next;\nint y;\n")
+
+(c-buffer
+ (lambda ()
+   (delete-region (point-min) (point-max))
+   (insert vsemi-fixture)
+   (set!c-macro-with-semi-re "Q_[A-Z]+")
+   (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+     (test-equal "at the last character before the comment" #t
+                 (and (c-at-macro-vsemi-p 10) #t))
+     (test-equal "not at the line's start" #f (c-at-macro-vsemi-p 1))
+     (test-equal "not after the comment starts" #f (c-at-macro-vsemi-p 11))
+     (test-equal "point stands at the tested position" #t
+                 (begin (goto-char 10) (c-at-macro-vsemi-p) (= (point) 10)))
+     (test-equal "the c-mode language names c-at-macro-vsemi-p" #t
+                 (and (c-at-vsemi-p 10) #t))
+     (test-equal "c-vsemi-status-unknown-p names the C function" #t
+                 (c-vsemi-status-unknown-p))
+     (set-buffer-local-value! (current-buffer) 'c-at-vsemi-p-fn
+                              'c-c++-vsemi-p)
+     (test-equal "the c++ language's function is registered too" #t
+                 (and (c-at-vsemi-p 10) #t)))))
+
+;;----------------------------------------------------------------------
+;; Token movement (`cc-engine.el:4947'-`:5191')
+;;----------------------------------------------------------------------
+;; Every row is Emacs 31.1's answer. The whole-fixture differential -
+;; all 102 positions, both directions, the -2 and the -1 pairs - was
+;; identical.
+(c-buffer
+ (lambda ()
+   (define (tok2 p)
+     (at p)
+     (let ((f (c-forward-token-2)) (fp (point)))
+       (at p)
+       (let ((b (c-backward-token-2)) (bp (point)))
+         (list f fp b bp))))
+   (define (tok1 p)
+     (at p)
+     (let ((f (c-forward-token-1)) (fp (point)))
+       (at p)
+       (let ((b (c-backward-token-1)) (bp (point)))
+         (list f fp b bp))))
+   (define (eot p)
+     (at p)
+     (let ((r (c-end-of-token))) (list (and r #t) (point))))
+   (define (eoct p)
+     (at p)
+     (let ((r (c-end-of-current-token))) (list (and r #t) (point))))
+   (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+     (test-equal "c-forward-token-2 from BOB jumps the directive's tokens"
+                 '(0 49 1 1) (tok2 1))
+     (test-equal "c-forward-token-2 inside a symbol moves to its end"
+                 '(0 10 0 1) (tok2 2))
+     (test-equal "c-forward-token-2 from a directive's first line"
+                 '(0 49 1 20) (tok2 20))
+     (test-equal "c-forward-token-2 from the directive's ';' line"
+                 '(0 53 1 49) (tok2 49))
+     (test-equal "c-forward-token-2 from a macro's own line" '(0 85 0 54)
+                 (tok2 55))
+     (test-equal "c-forward-token-2 from inside the macro body" '(0 96 0 68)
+                 (tok2 69))
+     (test-equal "c-forward-token-2 from the comment's second line"
+                 '(0 93 0 54) (tok2 85))
+     (test-equal "c-forward-token-2 from the last comment line" '(0 96 0 54)
+                 (tok2 95))
+     (test-equal "c-forward-token-2 from the last declaration" '(0 100 0 68)
+                 (tok2 96))
+     (test-equal "c-forward-token-2 at the end of the buffer leaves the count"
+                 '(1 101 0 100) (tok2 101))
+     (test-equal "c-forward-token-2 at EOB" '(1 102 0 101) (tok2 102))
+
+     (test-equal "c-forward-token-1 treats '==' as two tokens"
+                 '(0 73 0 71) (tok1 72))
+     (test-equal "c-forward-token-1 from the operator's second character"
+                 '(0 85 0 71) (tok1 73))
+     (test-equal "c-forward-token-1 backward splits '*/'" '(0 94 0 85)
+                 (tok1 93))
+     (test-equal "c-forward-token-1 agrees with -2 where there is no operator"
+                 '(0 49 1 20) (tok1 20))
+
+     (test-equal "c-end-of-token inside '#include's symbol" '(#t 9) (eot 2))
+     (test-equal "c-end-of-token at the beginning of a symbol is a no-op"
+                 '(#f 37) (eot 37))
+     (test-equal "c-end-of-token at the last ';'" '(#t 102) (eot 101))
+     (test-equal "c-end-of-current-token at a token's beginning does not move"
+                 '(#f 2) (eoct 2))
+     (test-equal "c-end-of-current-token inside a symbol moves to its end"
+                 '(#t 9) (eoct 5))
+     (test-equal "c-end-of-current-token inside a comment stays" '(#f 72)
+                 (eoct 72)))))
 
 ;;----------------------------------------------------------------------
 ;; `c-syntactic-content' (`cc-engine.el:530').

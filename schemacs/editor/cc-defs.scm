@@ -89,6 +89,7 @@
    c-emacs-features c-with-syntax-table c-int-to-char c-characterp
    c-register-emacs-variable-reader!
    c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
+   *c-lang-var-overrides*
    c-alpha c-alnum c-digit c-upper c-lower
    c-mode-symbol c-mode-var c-concat-separated c-make-bare-char-alt
    c-make-keywords-re c-lang-constant-documentation c-literal-datum?
@@ -272,13 +273,16 @@
   ;; to the registered Emacs-variable reader (see above), and with
   ;; neither the variable is void, as Emacs's `symbol-value' says.
   (let ((symbol (c-mode-symbol suffix)))
-    (let ((value (buffer-local-value (current-buffer) symbol
-                                     %c-mode-var--absent)))
-      (cond
-       ((not (eq? value %c-mode-var--absent)) value)
-       ((hashq-ref %c-emacs-variable-readers symbol)
-        => (lambda (reader) (reader)))
-       (else (error "Void variable ~a" symbol))))))
+    (let ((override (assq symbol (*c-lang-var-overrides*))))
+      (if override
+          (cdr override)
+          (let ((value (buffer-local-value (current-buffer) symbol
+                                           %c-mode-var--absent)))
+            (cond
+             ((not (eq? value %c-mode-var--absent)) value)
+             ((hashq-ref %c-emacs-variable-readers symbol)
+              => (lambda (reader) (reader)))
+             (else (error "Void variable ~a" symbol))))))))
 
 ;;----------------------------------------------------------------------
 ;; `c-concat-separated', `c-make-bare-char-alt' and `c-make-keywords-re'
@@ -463,6 +467,19 @@
 ;; expander inside that `eval'. (`immediate' is not carried: nothing
 ;; here asks for it.)
 (define *c-lang-const-expansion* (make-parameter 'bake))
+
+;; The dynamic binding of a language variable, which Emacs spells `let'.
+;; A language variable here is a buffer-local slot rather than a symbol
+;; value (`c-mode-var''s note), so Emacs's
+;;
+;;     (let ((c-nonsymbol-token-regexp "\\s."))
+;;       (c-forward-token-2 ...))
+;;
+;; has nothing to bind. This alist of `(SYMBOL . VALUE)' is what those
+;; `let's become; every reader of a language variable consults it first
+;; - `c-mode-var' here and `%c-langvar' in cc-engine. A parameter, per
+;; the convention's rule for a dynamically bound variable.
+(define *c-lang-var-overrides* (make-parameter '()))
 
 ;;----------------------------------------------------------------------
 ;; The registration the macros call, and their helpers

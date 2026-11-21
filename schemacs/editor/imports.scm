@@ -265,11 +265,14 @@
     *c++-font-lock-extra-types*
     *c-asymmetry-fontification-flag*
     *c-buffer-is-cc-mode*
+    *c-commas-bound-stmts*
     *c-font-lock-extra-types*
     *c-lang-const-expansion*
+    *c-lang-var-overrides*
     *c-langs-are-parametric*
     *c-macro-start*
     *c-mark-wrong-style-of-comment*
+    *c-maybe-labelp*
     *c-noise-macro-names*
     *c-noise-macro-with-parens-names*
     *c-report-syntactic-errors*
@@ -1097,15 +1100,20 @@
     c-add-language
     c-alnum
     c-alpha
+    c-at-macro-vsemi-p
+    c-at-vsemi-p
     c-auto-newline
     c-backward-comments
     c-backward-sexp
     c-backward-single-comment
     c-backward-sws
     c-backward-syntactic-ws
+    c-backward-token-1
+    c-backward-token-2
     c-beginning-of-current-token
     c-beginning-of-macro
     c-benign-error
+    c-c++-vsemi-p
     c-cache-to-parse-ps-state
     c-calculate-state
     c-characterp
@@ -1113,6 +1121,7 @@
     c-clear-char-properties
     c-clear-char-property
     c-concat-separated
+    c-crosses-statement-barrier-p
     c-current-comment-prefix
     c-debug-sws-msg
     c-define-lang-constant
@@ -1128,17 +1137,23 @@
     c-electric-flag
     c-emacs-features
     c-enclosing-c++-attribute
+    c-end-of-current-token
     c-end-of-macro
+    c-end-of-token
     c-filter-ops
     c-find-assignment-for-mode
     c-forward-comment-minus-1
     c-forward-comments
     c-forward-over-cpp-define-id
+    c-forward-over-token
+    c-forward-over-token-and-ws
     c-forward-sexp
     c-forward-single-comment
     c-forward-sws
     c-forward-syntactic-ws
     c-forward-to-cpp-define-body
+    c-forward-token-1
+    c-forward-token-2
     c-full-get-near-cache-entry
     c-full-lit-near-cache
     c-full-near-cache-limit
@@ -1164,6 +1179,8 @@
     c-invalidate-sws-region-after-ins
     c-invalidate-sws-region-before
     c-is-escaped
+    c-jump-syntax-balanced
+    c-jump-syntax-unbalanced
     c-keyword-member
     c-keyword-sym
     c-kwds-lang-consts
@@ -1193,6 +1210,7 @@
     c-macro-cache-start-pos
     c-macro-cache-syntactic
     c-macro-is-genuine-p
+    c-macro-vsemi-status-unknown-p
     c-macro-with-semi-re
     c-major-mode-is
     c-make-bare-char-alt
@@ -1215,6 +1233,7 @@
     c-point
     c-previous-single-property-change
     c-ps-state-cache-pos
+    c-punctuation-in
     c-put-c-type-property
     c-put-char-properties
     c-put-char-property
@@ -1255,6 +1274,7 @@
     c-up-list-backward
     c-up-list-forward
     c-upper
+    c-vsemi-status-unknown-p
     c-with-syntax-table
     c-ws*-string-limit-regexp
     cache-long-scans

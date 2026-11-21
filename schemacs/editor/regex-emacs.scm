@@ -2953,7 +2953,14 @@
       ;;
       ;; One attempt: `make-match-attempt' is for a search that will
       ;; try many start positions, which is `re_search_2''s loop.
-      ;;----------------------------------------------------------
+      ;----------------------------------------------------------
+      ;; `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT' (`syntax.c:276', called at
+      ;; `regex-emacs.c:4103'): the syntax cache is primed for THIS
+      ;; object and position before any `SYNTAX(c)' is read. Without it
+      ;; the cache inherits whatever interval the last scan left, and a
+      ;; scan in the other direction then says "Error in syntax_table
+      ;; logic for to-the-end intervals".
+      (when (re-context-buffer? ctx) (%setup-syntax-table))
       ((make-match-attempt bufp text stop ctx) pos regs))
 
     ;;----------------------------------------------------------------
@@ -2974,6 +2981,9 @@
              ;; failure stack are built once, not once per attempt.
              (attempt (make-match-attempt bufp text stop ctx))
              (total len))
+        ;; `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT' (`syntax.c:276', called at
+        ;; `regex-emacs.c:3509'): see `re-match-2'.
+        (when (re-context-buffer? ctx) (%setup-syntax-table))
         (if (or (< startpos 0) (> startpos total))
             -1
             (begin

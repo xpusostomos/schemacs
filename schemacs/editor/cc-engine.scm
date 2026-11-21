@@ -71,11 +71,11 @@
   (import
     (scheme base)
     (only (guile) most-positive-fixnum make-hash-table hash-ref hash-set!
-                  1- logand)
+                  1- logand caddr)
     (only (schemacs editor subr) regexp-unmatchable)
     (only (schemacs editor buffer) current-buffer buffer-local-value
           set-buffer-local-value!)
-    (only (schemacs editor command) prefix-numeric-value)
+    (only (schemacs editor command) prefix-numeric-value quit-condition?)
     (only (schemacs editor cmds) beginning-of-line end-of-line forward-char
           backward-char delete-char)
     (only (schemacs editor editfns) point point-min point-max goto-char
@@ -83,7 +83,7 @@
           line-beginning-position line-end-position forward-line
           save-excursion save-restriction narrow-to-region widen
           insert delete-region message buffer-substring-no-properties)
-    (only (schemacs editor fns) nth nthcdr)
+    (only (schemacs editor fns) nth nthcdr %substring)
     (only (schemacs editor indent) back-to-indentation)
     (only (schemacs editor indentc) current-indentation indent-to)
     (only (schemacs editor search) re-search-forward re-search-backward
@@ -92,7 +92,7 @@
           remove-text-properties text-property-any)
     (only (schemacs editor syntax) skip-chars-backward skip-chars-forward
           skip-syntax-backward skip-syntax-forward forward-comment
-          parse-partial-sexp)
+          parse-partial-sexp scan-sexps)
     (only (schemacs editor subr) regexp-unmatchable last delq copy-tree
           with-silent-modifications)
     (only (schemacs editor cc-defs) c-emacs-features c-save-buffer-state
@@ -101,9 +101,11 @@
           %c-true %c-false c-get-lang-constant *c-buffer-is-cc-mode*
           c-major-mode-is c-safe c-forward-sexp c-backward-sexp
           c-go-list-forward c-go-list-backward c-skip-ws-chars-forward
-          c-skip-ws-chars-backward c-skip-ws-forward c-skip-ws-backward)
+          c-skip-ws-chars-backward c-skip-ws-forward c-skip-ws-backward
+          *c-lang-var-overrides*)
     (only (schemacs editor intervals) get)
     (only (schemacs editor cc-vars) *c-report-syntactic-errors*
+          c-macro-with-semi-re
           c-noise-macro-name-re c-noise-macro-with-parens-name-re))
 
   (export
@@ -157,7 +159,18 @@
    c-literal-limits c-literal-start c-literal-type c-in-literal
    %c-car %c-cdr %c-cadr %c-cddr %c-caddr
    ;; cc-defs.el's, placed here because they call down from Emacs' obarray
-   c-point c-is-escaped c-benign-error)
+   c-point c-is-escaped c-benign-error
+   ;; statement barriers (`cc-engine.el:1457')
+   *c-maybe-labelp* *c-commas-bound-stmts* c-punctuation-in
+   c-crosses-statement-barrier-p
+   ;; token movement (`cc-engine.el:4947')
+   c-jump-syntax-balanced c-jump-syntax-unbalanced
+   c-end-of-token c-end-of-current-token c-forward-over-token
+   c-forward-over-token-and-ws c-forward-token-2 c-backward-token-2
+   c-forward-token-1 c-backward-token-1
+   ;; virtual semicolons (`cc-engine.el:14184')
+   c-at-vsemi-p c-vsemi-status-unknown-p
+   c-c++-vsemi-p c-at-macro-vsemi-p c-macro-vsemi-status-unknown-p)
 
   (begin
 
@@ -189,8 +202,14 @@
       ;; buffer-local slot `c-init-language-vars' fills, keyed by the
       ;; Emacs symbol (see `cc-langs.scm''s representation note). #f
       ;; when the mode has not initialised this buffer, where Emacs's
-      ;; `symbol-value' would say "Void variable".
-      (buffer-local-value (current-buffer) symbol #f))
+      ;; `symbol-value' would say "Void variable". An Emacs `let' of a
+      ;; language variable is `*c-lang-var-overrides*' - the slot has no
+      ;; symbol value for a `let' to bind - so the override comes first,
+      ;; which is where Emacs's dynamic binding would be read too.
+      (let ((override (assq symbol (*c-lang-var-overrides*))))
+        (if override
+            (cdr override)
+            (buffer-local-value (current-buffer) symbol #f))))
 
     (define (c-calculate-state arg prevstate)
       ;; "Calculate the new state of PREVSTATE, t or nil, based on arg.
@@ -1708,6 +1727,143 @@
                   (point)))))
 
     ;;------------------------------------------------------------------
+    ;; Statement barriers (`cc-engine.el:1457'-`:1560')
+    ;;------------------------------------------------------------------
+    ;; `c-maybe-labelp' is a `defvar' that `c-beginning-of-statement-1'
+    ;; `let'-binds around the calls to `c-crosses-statement-barrier-p',
+    ;; which is the convention's test for a parameter; the same goes for
+    ;; `c-commas-bound-stmts'.
+    (define *c-maybe-labelp* (make-parameter #f))
+    (define *c-commas-bound-stmts* (make-parameter #f))
+
+    (define (c-punctuation-in from to)
+      ;; "Return non-nil if there is a non-comment non-macro punctuation
+      ;; character between FROM and TO. FROM must not be in a string or
+      ;; comment. The returned value is the position of the first such
+      ;; character."
+      (save-excursion
+        (goto-char from)
+        (let ((pos (point)))
+          (let loop ()
+            (when (begin
+                    (let ((chars (%c-langvar 'c-symbol-chars)))
+                      (skip-chars-forward (if chars chars "") to))
+                    (c-forward-syntactic-ws to)
+                    (> (point) pos))
+              (set! pos (point))
+              (loop)))
+          (and (< (point) to) (point)))))
+
+    (define (c-crosses-statement-barrier-p from to)
+      ;; "Return non-nil if buffer positions FROM to TO cross one or more
+      ;; statement or declaration boundaries. The returned value is
+      ;; actually the position of the earliest boundary char. FROM must
+      ;; not be within a string or comment.
+      ;;
+      ;; The variable `c-maybe-labelp' is set to the position of the
+      ;; first `:' that might start a label (i.e. not part of `::' and not
+      ;; preceded by `?'). If a single `?' is found, then
+      ;; `c-maybe-labelp' is cleared.
+      ;;
+      ;; For AWK, a statement which is terminated by an EOL (not a ; or
+      ;; a }) is regarded as having a \"virtual semicolon\" immediately
+      ;; after the last token on the line. If this virtual semicolon is
+      ;; _at_ from, the function recognizes it.
+      ;;
+      ;; Note that this function might do hidden buffer changes."
+      (let* ((skip-chars (if (*c-commas-bound-stmts*)
+                             (%c-langvar
+                              'c-stmt-boundary-skip-chars-with-comma)
+                             (%c-langvar 'c-stmt-boundary-skip-chars))) ; "e.g. \"^#;{}?:\""
+             (non-skip-list (if (*c-commas-bound-stmts*)
+                                (%c-langvar
+                                 'c-stmt-boundary-skip-list-with-comma)
+                                (%c-langvar 'c-stmt-boundary-skip-list))) ; "e.g. (?# ?\; ?{ ?} ?? ?:)"
+             (lit-range #f)
+             (lit-start #f)
+             (vsemi-pos #f)
+             (attr-end #f))
+        (save-restriction
+          (widen)
+          (save-excursion
+            (call-with-current-continuation
+             (lambda (done)
+               (goto-char from)
+               (let loop ()
+                 (when (begin
+                         (skip-chars-forward (if skip-chars skip-chars "")
+                                             (min to (c-point 'bonl)))
+                         (< (point) to))
+                   (cond
+                    ;; "Virtual semicolon?"
+                    ((and (bolp)
+                          (save-excursion
+                            (begin
+                              ;; "Have we landed in a string/comment?"
+                              (if (begin
+                                    (set! lit-start (c-literal-start from))
+                                    lit-start)
+                                  (goto-char lit-start))
+                              (c-backward-syntactic-ws (c-point 'bopl))
+                              (set! vsemi-pos (point))
+                              (c-at-vsemi-p))))
+                     (done vsemi-pos))
+                    ;; "Optimize for large blocks of comments."
+                    ((begin (c-forward-syntactic-ws to) (>= (point) to))
+                     (done #f))
+                    ;; "In a string/comment?"
+                    ((begin (set! lit-range (c-literal-limits from)) lit-range)
+                     (goto-char (cdr lit-range)))
+                    ;; "Skip over a C or C++ attribute?"
+                    ((eq? (char-after (point)) #\[)
+                     (if (begin (set! attr-end (c-looking-at-c++-attribute))
+                                attr-end)
+                         (goto-char attr-end)
+                         (forward-char)))
+                    ((eq? (char-after (point)) #\:)
+                     (forward-char)
+                     (if (and (eq? (char-after (point)) #\:)
+                              (< (point) to))
+                         ;; "Ignore scope operators."
+                         (forward-char)
+                         (*c-maybe-labelp* (- (point) 1))))
+                    ((eq? (char-after (point)) #\?)
+                     ;; "A question mark. Can't be a label, so stop
+                     ;; looking for more : and ?."
+                     (*c-maybe-labelp* #f)
+                     (set! skip-chars
+                           (%substring (if (*c-commas-bound-stmts*)
+                                           (%c-langvar
+                                            'c-stmt-delim-chars-with-comma)
+                                           (%c-langvar 'c-stmt-delim-chars))
+                                       0 -2)))
+                    ;; "At a CPP construct or a \"#\" or \"##\" operator?"
+                    ((let ((re (%c-langvar 'c-opt-cpp-symbol)))
+                       (and re (looking-at re)))
+                     (if (save-excursion
+                           (skip-chars-backward " \t")
+                           (and (bolp)
+                                (or (bobp)
+                                    (not (eq? (char-before (- (point) 1))
+                                              #\\)))))
+                         (c-end-of-macro)
+                         (let ((re (%c-langvar 'c-opt-cpp-symbol)))
+                           (skip-chars-forward (if re re "")))))
+                    ((memq (char-after (point)) non-skip-list)
+                     (done (point))))
+                   (loop)))
+               ;; "In trailing space after an as yet undetected virtual
+               ;; semicolon?"
+               (c-backward-syntactic-ws from)
+               (when (and (bolp) (not (bobp))) ; "Can happen in AWK Mode with an
+                                               ; unterminated string/regexp."
+                 (backward-char))
+               (if (and (< (point) to)
+                        (c-at-vsemi-p))
+                   (point)
+                   #f)))))))
+
+    ;;------------------------------------------------------------------
     ;; The syntactic-whitespace change hooks (`cc-engine.el:1947'-`:2125')
     ;;------------------------------------------------------------------
     ;; "The type of literal position `end' is in a `before-change-functions'
@@ -2559,4 +2715,380 @@
           (save-restriction
             (narrow-to-region (or limit (point-min)) (point-max))
             (c-backward-sws)))))
+
+    ;;------------------------------------------------------------------
+    ;; Token movement (`cc-engine.el:4911'-`:5183')
+    ;;------------------------------------------------------------------
+    ;; `c-simple-skip-symbol-backward' and `c-beginning-of-current-token'
+    ;; were ported in an earlier pass and sit above, moved up for
+    ;; `c-backward-sws'. `c-jump-syntax-*' are `defconst's whose XEmacs
+    ;; arm depends on `gen-string-delim', which this Emacs's
+    ;; `c-emacs-features' has.
+    (define c-jump-syntax-balanced "\\w\\|\\s_\\|\\s(\\|\\s)\\|\\s\"\\|\\s|")
+    (define c-jump-syntax-unbalanced "\\w\\|\\s_\\|\\s\"\\|\\s|")
+
+    (define (c-end-of-token . back-limit-args)
+      ;; "Move to the end of the token we're just before or in the middle
+      ;; of. BACK-LIMIT may be used to bound the backward search; if
+      ;; given it's assumed to be at the boundary between two tokens.
+      ;; Return non-nil if the point is moved, nil otherwise."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((back-limit (if (pair? back-limit-args) (car back-limit-args) #f))
+            (start (point)))
+        (cond ((> (skip-syntax-forward "w_") 0) #t)
+              ((< (skip-syntax-backward ".()" back-limit) 0)
+               (let loop ()
+                 (when (< (point) start)
+                   (let ((re (%c-langvar 'c-nonsymbol-token-regexp)))
+                     (if (and re (looking-at re))
+                         (goto-char (match-end 0))
+                         ;; "`c-nonsymbol-token-regexp' should always
+                         ;; match since we've skipped backward over
+                         ;; punctuation or paren syntax, but move forward
+                         ;; in case it doesn't so that we don't leave
+                         ;; point earlier than we started with."
+                         (forward-char)))
+                   (loop))))
+              (else
+               (let ((re (%c-langvar 'c-nonsymbol-token-regexp)))
+                 (when (and re (looking-at re))
+                   (goto-char (match-end 0))))))
+        (> (point) start)))
+
+    (define (c-end-of-current-token . back-limit-args)
+      ;; "Move to the end of the current token. Do not move if not in the
+      ;; middle of one. BACK-LIMIT may be used to bound the backward
+      ;; search; if given it's assumed to be at the boundary between two
+      ;; tokens. Return non-nil if the point is moved, nil otherwise."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((back-limit (if (pair? back-limit-args) (car back-limit-args) #f))
+            (start (point)))
+        (cond ((< (skip-syntax-backward "w_" (- start 1)) 0)
+               (skip-syntax-forward "w_"))
+              ((< (skip-syntax-backward ".()" back-limit) 0)
+               (let loop ()
+                 (when (begin
+                         (let ((re (%c-langvar 'c-nonsymbol-token-regexp)))
+                           (if (and re (looking-at re))
+                               (goto-char (match-end 0))
+                               (forward-char)))
+                         (< (point) start))
+                   (loop)))))
+        (> (point) start)))
+
+    (define (c-forward-over-token . args)
+      ;; "Move forward over a token. Return t if we moved, nil otherwise
+      ;; (i.e. we were at EOB, or a non-token or BALANCED is non-nil and
+      ;; we can't move). If we are at syntactic whitespace, move over this
+      ;; in place of a token.
+      ;;
+      ;; If BALANCED is non-nil move over any balanced parens we are at,
+      ;; and never move out of an enclosing paren. LIMIT is the limit to
+      ;; where we might move to."
+      (let* ((balanced (if (pair? args) (car args) #f))
+             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (jump-syntax (if balanced
+                              c-jump-syntax-balanced
+                              c-jump-syntax-unbalanced))
+             (here (point))
+             (limit (if limit limit (point-max))))
+        (guard (e ((quit-condition? e) (raise e))
+                  (else (goto-char here) #f))
+          (cond
+           ((not (= (point)
+                    (begin (c-forward-syntactic-ws limit) (point))))
+            ;; "If we're at whitespace, count this as the token."
+            #t)
+           ((eobp) #f)
+           ((looking-at jump-syntax)
+            (goto-char (min limit (scan-sexps (point) 1)))
+            #t)
+           ((let ((re (%c-langvar 'c-nonsymbol-token-regexp)))
+              (and re (looking-at re)))
+            (goto-char (min (match-end 0) limit))
+            #t)
+           ((save-restriction
+              (widen)
+              (let ((re (%c-langvar 'c-nonsymbol-token-regexp)))
+                (and re (looking-at re))))
+            #f)
+           (else (forward-char) #t)))))
+
+    (define (c-forward-over-token-and-ws . args)
+      ;; "Move forward over a token and any following whitespace. Return t
+      ;; if we moved, nil otherwise ... This function differs from
+      ;; `c-forward-token-2' in that it will move forward over the final
+      ;; token in a buffer, up to EOB."
+      (let ((balanced (if (pair? args) (car args) #f)))
+        (let ((r (c-forward-over-token balanced)))
+          (c-forward-syntactic-ws)
+          r)))
+
+    (define (c-forward-token-2 . args)
+      ;; "Move forward by tokens. ... Return the number of tokens left to
+      ;; move (positive or negative). ..."
+      ;;
+      ;; "Note that this function might do hidden buffer changes."
+      (let* ((count (if (pair? args) (car args) #f))
+             (balanced (if (and (pair? args) (pair? (cdr args)))
+                           (cadr args) #f))
+             (limit (if (and (pair? args) (pair? (cdr args))
+                             (pair? (cddr args)))
+                        (caddr args) #f))
+             (count (if count count 1)))
+        (if (< count 0)
+            (- (c-backward-token-2 (- count) balanced limit))
+
+            (let ((here (point))
+                  (last (point)))
+              (when (= count 0)
+                ;; "If count is zero we should jump if in the middle of a
+                ;; token."
+                (c-end-of-current-token))
+
+              (save-restriction
+                (if limit (narrow-to-region (point-min) limit))
+                (if (not (= (point)
+                            (begin (c-forward-syntactic-ws) (point))))
+                    ;; "Skip whitespace. Count this as a move if we did in
+                    ;; fact move."
+                    (set! count (max (- count 1) 0)))
+
+                (if (eobp)
+                    ;; "Moved out of bounds. Make sure the returned count
+                    ;; isn't zero."
+                    (begin
+                      (if (= count 0) (set! count 1))
+                      (goto-char here))
+                    (begin
+                      (let loop ()
+                        (when (and (> count 0)
+                                   (c-forward-over-token-and-ws balanced)
+                                   (not (eobp)))
+                          (set! last (point))
+                          (set! count (- count 1))
+                          (loop)))
+                      (if (eobp)
+                          (goto-char last)))))
+              count))))
+
+    (define (c-backward-token-2 . args)
+      ;; "Move backward by tokens. See `c-forward-token-2' for details."
+      (let* ((count (if (pair? args) (car args) #f))
+             (balanced (if (and (pair? args) (pair? (cdr args)))
+                           (cadr args) #f))
+             (limit (if (and (pair? args) (pair? (cdr args))
+                             (pair? (cddr args)))
+                        (caddr args) #f))
+             (count (if count count 1)))
+        (if (< count 0)
+            (- (c-forward-token-2 (- count) balanced limit))
+
+            (begin
+              (if (not limit) (set! limit (point-min)))
+              (let ((jump-syntax (if balanced
+                                     c-jump-syntax-balanced
+                                     c-jump-syntax-unbalanced))
+                    (last (point)))
+
+                (if (= count 0)
+                    ;; "The count is zero so try to skip to the beginning
+                    ;; of the current token."
+                    (if (> (point)
+                           (begin (c-beginning-of-current-token) (point)))
+                        (if (< (point) limit)
+                            ;; "The limit is inside the same token, so
+                            ;; return 1."
+                            (set! count 1)
+                            #f)
+                        ;; "We're not in the middle of a token. If there's
+                        ;; whitespace after the point then we must move
+                        ;; backward, so set count to 1 in that case."
+                        (and (let ((re (%c-langvar 'c-syntactic-ws-start)))
+                               (and re (looking-at re)))
+                             ;; "If we're looking at a '#' that might
+                             ;; start a cpp directive then we have to do a
+                             ;; more elaborate check."
+                             (or (not (= (char-after (point)) #\#))
+                                 (not (%c-langvar 'c-opt-cpp-prefix))
+                                 (save-excursion
+                                   (and (= (point)
+                                           (begin
+                                             (beginning-of-line)
+                                             (looking-at "[ \t]*")
+                                             (match-end 0)))
+                                        (or (bobp)
+                                            (begin
+                                              (backward-char)
+                                              (not (eq? (char-before) #\\)))))))
+                             (begin (set! count 1) count))))
+
+                ;; "Use `condition-case' to avoid having to check for
+                ;; buffer limits in `backward-char', `scan-sexps' and
+                ;; `goto-char' below."
+                (guard (e ((quit-condition? e) (raise e))
+                          (else (goto-char last)))
+                  (let loop ()
+                    (when (and (> count 0)
+                               (begin
+                                 (c-backward-syntactic-ws limit)
+                                 (backward-char)
+                                 (if (looking-at jump-syntax)
+                                     (goto-char (scan-sexps (+ (point) 1) -1))
+                                     ;; "This can be very inefficient if
+                                     ;; there's a long sequence of operator
+                                     ;; tokens without any separation. That
+                                     ;; doesn't happen in practice, anyway."
+                                     (c-beginning-of-current-token))
+                                 (>= (point) limit)))
+                      (set! last (point))
+                      (set! count (- count 1))
+                      (loop))))
+
+                (if (< (point) limit)
+                    (goto-char last))
+
+                count)))))
+
+    (define (c-forward-token-1 . args)
+      ;; "Like `c-forward-token-2' but doesn't treat multicharacter
+      ;; operator tokens like \"==\" as single tokens, i.e. all sequences
+      ;; of symbol characters are jumped over character by character.
+      ;; This function is for compatibility only; it's only a wrapper
+      ;; over `c-forward-token-2'."
+      (parameterize ((*c-lang-var-overrides*
+                      (cons (cons 'c-nonsymbol-token-regexp "\\s.")
+                            (*c-lang-var-overrides*))))
+        (apply c-forward-token-2 args)))
+
+    (define (c-backward-token-1 . args)
+      ;; "Like `c-backward-token-2' but doesn't treat multicharacter
+      ;; operator tokens like \"==\" as single tokens, i.e. all sequences
+      ;; of symbol characters are jumped over character by character.
+      ;; This function is for compatibility only; it's only a wrapper
+      ;; over `c-backward-token-2'."
+      (parameterize ((*c-lang-var-overrides*
+                      (cons (cons 'c-nonsymbol-token-regexp "\\s.")
+                            (*c-lang-var-overrides*))))
+        (apply c-backward-token-2 args)))
+
+    ;;------------------------------------------------------------------
+    ;; Virtual semicolons (`cc-engine.el:14184'-`:14243')
+    ;;------------------------------------------------------------------
+    ;; `c-at-vsemi-p' and `c-vsemi-status-unknown-p' are `cc-defs.el'
+    ;; macros that `funcall' a language variable. A language constant
+    ;; here holds the *symbol* (the data was generated from Emacs), and
+    ;; there is no function obarray, so the symbol is resolved through a
+    ;; registry filled as each function is defined - the tree's stand-in.
+    ;; A name whose function is not ported (awk's two) answers #f where
+    ;; Emacs would signal a void function; awk has no mode here.
+    (define %c-lang-functions (make-hash-table))
+
+    (define (c-register-lang-function! sym proc)
+      ;; Emacs resolves a language's `c-at-vsemi-p-fn' through the
+      ;; obarray; this is the same fact, kept by hand.
+      (hash-set! %c-lang-functions sym proc))
+
+    (define (%c-lang-function sym)
+      (hash-ref %c-lang-functions sym #f))
+
+    (define (c-at-vsemi-p . pos-args)
+      ;; "Is there a virtual semicolon (not a real one or a }) at POS
+      ;; (defaults to point)? Always returns nil for languages which don't
+      ;; have Virtual semicolons."
+      ;;
+      ;; "This macro might do hidden buffer changes."
+      (let* ((fn-sym (%c-langvar 'c-at-vsemi-p-fn))
+             (fn (and fn-sym (%c-lang-function fn-sym))))
+        (if fn
+            (if (pair? pos-args) (fn (car pos-args)) (fn))
+            #f)))
+
+    (define (c-vsemi-status-unknown-p)
+      ;; "Return NIL only if it can be guaranteed that an immediate
+      ;; `(c-at-vsemi-p)' will NOT call `c-beginning-of-statement-1'.
+      ;; Otherwise, return non-nil. (See comments above). The function
+      ;; invoked by this macro MUST NOT UNDER ANY CIRCUMSTANCES itself
+      ;; call `c-beginning-of-statement-1'."
+      (let* ((fn-sym (%c-langvar 'c-vsemi-status-unknown-p-fn))
+             (fn (and fn-sym (%c-lang-function fn-sym))))
+        (if fn (fn) #f)))
+
+    (define (c-c++-vsemi-p . pos-args)
+      ;; "C++ Only - Is there a \"virtual semicolon\" at POS or point?
+      ;; (See cc-defs.el for full details of \"virtual semicolons\".)
+      ;;
+      ;; This is true when point is at the last non syntactic WS position
+      ;; on the line, and there is a \"macro with semicolon\" just before
+      ;; it (see `c-at-macro-vsemi-p')."
+      (apply c-at-macro-vsemi-p pos-args))
+
+    (define (c-at-macro-vsemi-p . pos-args)
+      ;; "Is there a \"virtual semicolon\" at POS or point?
+      ;; (See cc-defs.el for full details of \"virtual semicolons\".)
+      ;;
+      ;; This is true when point is at the last non syntactic WS position
+      ;; on the line, there is a macro call last on the line, and this
+      ;; particular macro's name is defined by the regexp
+      ;; `c-macro-with-semi-re' as not needing a semicolon."
+      (let ((pos (if (pair? pos-args) (car pos-args) #f)))
+        (save-excursion
+          (save-restriction
+            (widen)
+            (if pos
+                (goto-char pos)
+                (set! pos (point)))
+            (and (c-macro-with-semi-re)
+                 (= (skip-chars-backward " \t") 0)
+
+                 ;; "Check we've got nothing after this except comments
+                 ;; and empty lines joined by escaped EOLs."
+                 (skip-chars-forward " \t") ; "always returns non-nil."
+                 (begin
+                   (let loop ()
+                     (when (and (looking-at "\\(\\\\[\n\r][ \t]*\\)*")
+                                (begin (goto-char (match-end 0)) #t)
+                                (cond
+                                 ((let ((re (%c-langvar
+                                             'c-block-comment-start-regexp)))
+                                    (and re (looking-at re)))
+                                  (and (forward-comment 1)
+                                       (skip-chars-forward " \t"))) ; "always returns non-nil"
+                                 ((let ((re (%c-langvar
+                                             'c-line-comment-start-regexp)))
+                                    (and re (looking-at re)))
+                                  (end-of-line)
+                                  #f)
+                                 (else #f)))
+                       (loop)))
+                   (eolp))
+
+                 (goto-char pos)
+                 (begin (c-backward-syntactic-ws)
+                        (= (point) pos))
+
+                 ;; "Check for one of the listed macros being before
+                 ;; point."
+                 (or (not (eq? (char-before) #\)))
+                     (when (c-go-list-backward)
+                       (c-backward-syntactic-ws)
+                       #t))
+                 (c-simple-skip-symbol-backward)
+                 (let ((re (c-macro-with-semi-re)))
+                   (and re (looking-at re)))
+                 (goto-char pos)
+                 (not (c-in-literal))))))) ; "The most expensive check last."
+
+    (define (c-macro-vsemi-status-unknown-p)
+      ;; "See cc-defs.el."
+      #t)
+
+    ;; The three language functions Emacs's constants name, registered
+    ;; where they are defined (the registry is above).
+    (c-register-lang-function! 'c-at-macro-vsemi-p c-at-macro-vsemi-p)
+    (c-register-lang-function! 'c-c++-vsemi-p c-c++-vsemi-p)
+    (c-register-lang-function!
+     'c-macro-vsemi-status-unknown-p c-macro-vsemi-status-unknown-p)
     ))

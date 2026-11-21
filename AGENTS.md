@@ -12,6 +12,8 @@ same file here, generally with the same parameters too. And it should be in the 
 subdirectory too. e.g. emacs lisp/progmodes/cc-engine.el should be in 
 schemacs/progmodes/cc-engine.scm. lisp/font-lock.el should be in schemacs/font-lock.scm
 src/frame.c should be in schemacs/frame.scm ... the lisp/emacs-lisp is mapped to schemacs/core
+the exception is files that are specific to either tty or gtk interfaces
+they will go in either ui/gtk or ui/tty
 We are working on exact emacs replication, right down to the
 exact functionality, messages, layout, everything. So it's important that you
 read emacs source code before implementing, are replicating it as close as possible
@@ -15494,3 +15496,95 @@ pinned in `cc-engine-tests.scm` (178 passes).
 
 **Next**: `c-beginning-of-statement-1` (`cc-engine.el:730'`, with its
 automaton macros), then `c-parse-state` and the declaration machinery.
+
+## cc-mode: token movement, statement barriers and virtual semicolons
+## (2026-11-21)
+
+The layer `c-beginning-of-statement-1` stands on is in: the token
+movers, the statement-barrier walk, and the virtual-semicolon macros -
+plus the two mechanisms that porting them needed (a `let` of a language
+variable, and a registry standing in for the function obarray).
+
+## What landed
+
+- **Token movement** (`cc-engine.el:4947'-`:5191`), at the end of
+  `cc-engine.scm`: `c-jump-syntax-balanced`/`-unbalanced`,
+  `c-end-of-token`, `c-end-of-current-token`, `c-forward-over-token`,
+  `c-forward-over-token-and-ws`, `c-forward-token-2`,
+  `c-backward-token-2`, and the `-1` wrappers.
+- **Statement barriers** (`:1457'-`:1560`): `c-punctuation-in` and
+  `c-crosses-statement-barrier-p`, with `c-maybe-labelp` and
+  `c-commas-bound-stmts` as parameters.
+- **Virtual semicolons** (`:14184'-`:14243`): `c-at-vsemi-p`,
+  `c-vsemi-status-unknown-p`, `c-c++-vsemi-p`, `c-at-macro-vsemi-p`,
+  `c-macro-vsemi-status-unknown-p`.
+
+## The two mechanisms, and why each was needed
+
+**`*c-lang-var-overrides*`** (`cc-defs.scm`, exported; consulted by
+`c-mode-var` and cc-engine's `%c-langvar`). A language variable here is
+a buffer-local slot, not a symbol value, so `c-forward-token-1`'s
+Emacs `(let ((c-nonsymbol-token-regexp "\\s.")) ...)` has nothing to
+bind. The parameter is an alist of `(SYMBOL . VALUE)` that every reader
+consults first - the dynamic binding spelled the only way this tree
+can spell it. It is a parameter because Emacs `let`-binds it.
+
+**`%c-lang-functions`** (`cc-engine.scm`) - a hash from the symbol a
+language constant holds (`'c-at-macro-vsemi-p`) to the procedure, since
+there is no function obarray. `c-register-lang-function!` fills it at
+the end of the vsemi block; `c-at-vsemi-p`/`c-vsemi-status-unknown-p`
+(cc-defs macros in Emacs) look the symbol up. The awk functions are not
+ported (no awk mode here), so a language naming them answers #f where
+Emacs would signal a void function - named in the file.
+
+## The regexp-engine bug this found, and its fix
+
+The first run of the barrier differential died inside a backward
+syntactic-whitespace scan with
+
+    Error in syntax_table logic for to-the-end intervals
+
+`syntax.c`'s `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT` (`:276'`, called from
+`re_search_2'` at `regex-emacs.c:3509'` and `re_match_2'` at `:4103'`)
+was not ported: the regexp engine read `SYNTAX(c)` through whatever
+gl-state cache the last scan left. A backward scan can leave the
+forward interval null, and the next `\s` search in that buffer then
+raises. Both entry points now call `%setup-syntax-table` for a buffer
+context (a string context uses its own table and needs none).
+
+**This was shared**, so the full suite and pty batteries were run. The
+regression is in `cc-engine-tests.scm`'s barrier group: it walks the
+whole 98-pair `c-punctuation-in` table and then the differential's
+seven barrier ranges, and was seen failing with the two setup calls
+removed (`&message: "Error in syntax_table logic for to-the-end
+intervals"`).
+
+## Verification
+
+Every expectation is Emacs 31.1's, and every table was a whole-input
+differential, not a sample:
+
+- token movement: all **102 positions** of the cc fixture, both
+  directions, both the `-2` and the `-1` pairs - identical (`token-2`
+  and `token-1` tables);
+- `c-punctuation-in`: **98 pairs** - identical;
+- `c-crosses-statement-barrier-p`: **7 ranges** of the cc fixture and
+  **4** of a label fixture, recording `c-maybe-labelp` - identical;
+- virtual semicolons: **all 36 positions** of a `Q_FOO (x)` fixture
+  with `c-macro-with-semi-re` set - identical.
+
+`cc-engine-tests.scm` is 220 passes (was 178); the six cc suites pass.
+The harnesses are `/tmp/emacs-tok.el` + `/tmp/tok-diff.scm` and
+`/tmp/emacs-csb2.el` + `/tmp/csb-diff.scm` (they should move into
+`tools/` when next touched).
+
+## Next
+
+`c-at-statement-start-p` (`:1562'`), `c-on-identifier`,
+`c-syntactic-skip-backward`, `c-looking-at-statement-block`,
+`c-looking-at-special-brace-list`, `c-in-method-def-p` and
+`c-looking-at-inexpr-block`, then `c-beginning-of-statement-1` and its
+automaton; after that `c-parse-state` and the declaration machinery.
+The vsemi path still wants `c-make-macro-with-semi-re`
+(`cc-vars.el:1813`) and `c-macro-names-with-semicolon`, which the mode's
+init calls - they come with `cc-mode.el`.

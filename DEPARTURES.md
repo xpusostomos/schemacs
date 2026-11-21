@@ -12587,3 +12587,98 @@ probes.
 Verified on eight regions against Emacs 31.1 (with and without
 PAREN-LEVEL, starting inside a comment, and an empty region):
 identical.
+
+## cc-mode: token movement, barriers and vsemis (2026-11-21)
+
+Ported in `cc-engine.scm`: `c-end-of-token`, `c-end-of-current-token`,
+`c-forward-over-token`, `c-forward-over-token-and-ws`,
+`c-forward-token-2`, `c-backward-token-2`, `c-forward-token-1`,
+`c-backward-token-1` (`cc-engine.el:4947'-`:5191'`); `c-punctuation-in`
+and `c-crosses-statement-barrier-p` (`:1457'-`:1560'`), with
+`*c-maybe-labelp*`/`*c-commas-bound-stmts*` as parameters;
+`c-at-vsemi-p`, `c-vsemi-status-unknown-p`, `c-c++-vsemi-p`,
+`c-at-macro-vsemi-p`, `c-macro-vsemi-status-unknown-p`
+(`:14184'-`:14243'`).
+
+### `*c-lang-var-overrides*`: a `let` of a language variable
+
+Emacs's `c-forward-token-1` is
+
+    (let ((c-nonsymbol-token-regexp "\\s."))
+      (c-forward-token-2 ...))
+
+and `c-nonsymbol-token-regexp` is a `c-lang-defvar` variable. In this
+tree a language variable is a buffer-local slot keyed by the Emacs
+symbol (`c-mode-var`'s note), so there is no symbol value for a `let`
+to bind. `cc-defs.scm`'s `*c-lang-var-overrides*` is an alist of
+`(SYMBOL . VALUE)` consulted by every language-variable reader -
+`c-mode-var` and cc-engine's `%c-langvar` - before the slot. It is a
+parameter because the ported Emacs code dynamically binds it; the
+*callers* in Emacs write a `let`, and the prelude says a dynamically
+bound variable is a parameter.
+
+### `%c-lang-functions`: the obarray stand-in for the vsemi macros
+
+`c-at-vsemi-p`/`c-vsemi-status-unknown-p` are `cc-defs.el` macros that
+`funcall` the value of `c-at-vsemi-p-fn`/`c-vsemi-status-unknown-p-fn`.
+The values in the language data are *symbols* (`'c-at-macro-vsemi-p`,
+`'c-c++-vsemi-p`, ...). Emacs resolves them through the obarray
+(`fboundp`/`funcall`); this tree has none, so `cc-engine.scm` keeps a
+hash from symbol to procedure, filled where each function is defined.
+The two macro ports are procedures, and they live in cc-engine because
+that is where the functions they name are.
+
+A language whose function is not ported (awk's `c-awk-at-vsemi-p`,
+`c-awk-vsemi-status-unknown-p`) answers #f from a registration miss
+where Emacs would signal `void-function`. Awk has no mode here, so the
+difference is unreachable from a real buffer; it is named in the file.
+
+### `c-at-macro-vsemi-p` reads `c-macro-with-semi-re` as the accessor
+
+Emacs's variable is a cc-vars `defvar` with
+`make-variable-buffer-local`; here it is a buffer-local slot behind
+`c-macro-with-semi-re`/`set!c-macro-with-semi-re` (cc-vars.scm). The
+two `(and re (looking-at re))` guards in the port stand in for Emacs
+testing the variable twice; the second read is the same slot.
+
+`c-make-macro-with-semi-re` and `c-macro-names-with-semicolon`
+(`cc-vars.el:1787'-`:1831'`) are **not** ported: they are called by
+the mode's init (`cc-mode.el`), not by cc-engine, and they arrive with
+`cc-mode`. A buffer whose mode has not set the variable answers nil, as
+an Emacs buffer's does before cc-mode's init runs.
+
+### The regexp engine's missing `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT`
+
+Found by the barrier differential: `regex-emacs.scm` read `SYNTAX(c)`
+through gl-state without priming it, where `regex-emacs.c` calls
+`RE_SETUP_SYNTAX_TABLE_FOR_OBJECT` (`syntax.c:276'`) at `re_search_2`
+(`:3509'`) and `re_match_2` (`:4103'`). A backward scan can leave the
+cache's forward interval null, and a later `\s` search in the same
+buffer then raises "Error in syntax_table logic for to-the-end
+intervals" - reproduced with the call removed and gone with it
+restored. `re-search` and `re-match-2` now call
+`%setup-syntax-table` for a buffer context (a string context uses its
+own table and never touches gl-state).
+
+The C's macro also sets `gl_state.b_property = BEG` (the text's
+beginning, not BEGV) before its interval reset; our
+`%setup-syntax-table` is `SETUP_SYNTAX_TABLE`'s spelling (start =
+BEGV, stop = ZV + 1), which is the same reset for a scan, and the
+first `%update-syntax-table` then lands in the interval `pos` is in.
+
+### The two `c-punctuation-in` guards
+
+Emacs reads `c-symbol-chars` straight into `skip-chars-forward`; if the
+language variable is void it signals. Here `%c-langvar` answers #f for
+an uninitialised buffer, so the call passes `""` - skip nothing - in
+that case. Same class as the other cc-engine readers' `(and re ...)`
+guards; reachable only in a buffer no mode has initialised.
+
+## Verified
+
+Every table is a whole-input differential against Emacs 31.1: token
+movement at all 102 positions of the cc fixture, `c-punctuation-in`
+over 98 pairs, the barrier functions over 11 ranges of two fixtures,
+and virtual semicolons at all 36 positions of a `Q_FOO (x)` fixture.
+All identical.
+
