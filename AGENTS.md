@@ -14694,3 +14694,38 @@ expectation Emacs's own, are in the runner; all **83 suites** pass.
    cc-fonts -> cc-mode, and cc-cmds/cc-align/cc-styles for indentation.
    The regexp engine is not an alternative to the 43k-line port; it is
    its prerequisite.
+
+## Step 3, started: `regex-emacs.sld`
+
+The engine's data structures, opcodes, text/context abstraction and
+character-class/charset objects are written in
+`schemacs/editor/regex-emacs.scm` and compile. The library is **not in
+`loadup.scm` or `imports.scm` and is imported by nothing** until the
+compiler, fastmap, searches and matcher are complete - it exports only
+what is defined so far.
+
+The representation decisions, all documented in its header:
+
+- an instruction is a mutable vector `#(OPCODE ARG1 ARG2)`; jumps are
+  **absolute instruction indexes** (the C's byte offsets are relative);
+  `succeed_n`/`jump_n` counters live in the instruction's own vector and
+  are mutated in place, as the C mutates its bytecode;
+- text is code points (`<re-text>`: length + ref), so the C's UTF-8
+  decode layer disappears; `buffer->re-text` takes the hoisted
+  `store gpt gap base z`;
+- a charset is a record of a 256-bit map, an inclusive range vector and
+  the `RECC_*` class bits, tested by `re-charset-member-full?` in the
+  C's order (bitmap, ranges, classes);
+- `<re-context>` carries the syntax table, category table, case
+  translate table, `\=`'s point, whether the text is a buffer (for
+  `` \` ``/`\'` and `\=`), and the buffer position of the text start.
+
+Next, in the C's order: the compile stack and instruction-buffer
+helpers; the first tranche of `regex_compile` (literals, `.`, `^`, `$`,
+groups, alternation, `* + ?` and intervals) together with the matcher
+cases for exactly the opcodes it emits; then the charset/class tranche,
+the syntax/category/word/`\=`/backref tranche, `re_compile_fastmap`,
+`re_search` and the memoization layer, and finally the swap of
+`search.scm` onto the engine. Each tranche's tests are a differential
+against `emacs -Q --batch` (pattern, text, start, `case-fold-search` ->
+match data), the harness `search-tests.scm` already uses.
