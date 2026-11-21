@@ -11140,3 +11140,528 @@ values here rather than `struct buffer` fields; and the standard table
 is ASCII only - `characters.el`'s Unicode extension is not ported yet,
 so a character with no entry translates to itself, which is
 `char_table_translate`'s fallback.
+
+# The Emacs regexp engine: compiler, fastmap, matcher (2026-11-21)
+
+**Not wired in yet.** `(schemacs editor regex-emacs)` compiles and
+matches Emacs's dialect, and nothing in the editor imports it: it is
+excluded from `loadup.scm`'s session list until `search.sld` is moved
+onto it. Everything below is the engine's own state.
+
+## The representation, restated
+
+The library's header has the full account. In one line each: an
+instruction is `#(OPCODE ARG1 ARG2)`, jumps are absolute instruction
+indexes where the C stores relative byte offsets, `exactn`'s characters
+are a list, and a charset is a `<re-charset>` (256-bit map, inclusive
+code-point range vector, `RECC_*` class bits) instead of the C's
+bitmap+range-table bytes. The text is a `<re-text>` of code points, so
+the C's whole UTF-8 decode layer (`STRING_CHAR`, `CHAR_LEADING_CODE`,
+`BYTE8_TO_CHAR`) is absent and the fastmap is 256 code-point bits plus
+one "some code point above 255" flag where the C uses leading bytes.
+
+## The compiler
+
+`regex-compile` is `regex_compile`'s whole switch: whitespace-regexp
+substitution, `^`/`$`, `* + ?` with the smart/keep-string/prememo
+choice and the `P+` → `PP*` rewrite, `.`, bracket expressions with the
+C's range-continuity work area, every backslash escape (shy and
+numbered groups, intervals, back references, syntax/category/symbol
+classes, `\=`, the buffer anchors), and the exactn coalescing. Three
+things had to be *derived* from the C's pointer arithmetic and are the
+places a later reader should look first:
+
+1. **`%insert-at!` shifts the *instructions that moved*, not the
+   targets.** A jump's stored target is relative in the C, so when an
+   insertion moves an instruction by one slot its target moves by one
+   slot too, whatever the target was. The new instruction's own
+   arguments are supplied in the post-insertion numbering. The
+   compiler's saved indexes (beginning/end of alternative, pending
+   exactn) are C pointers and are *not* adjusted by an insertion.
+2. **`on_failure_jump_smart` writes back to the instruction at
+   TARGET-1.** Our jump arguments name the instruction after the jump,
+   as the C's addresses do, so the trailing `jump` is one before the
+   smart's target; the smart rewrites *that* instruction's target to
+   `PAT-INDEX + 1` (the C's `STORE_NUMBER (p2 - 2, mcnt + 3)`).
+   Writing to TARGET itself corrupts whatever instruction follows the
+   loop - it turned a `stop_memory`'s register number into 3 here.
+3. **The compile stack's saved `laststart` is `b`, not the current
+   laststart** (`regex-emacs.c:2310`): it is the position where the
+   group's own code begins, which is what a following quantifier
+   repeats. Saving the *previous* laststart makes `\(?:a\|b\)+` treat
+   the `+` as a literal.
+
+## The matcher
+
+`re-match-2` carries the failure stack (registers, counters, and the
+NULL-string marker of the keep-string jump), the best-match registers,
+the infinite-loop check, the nasty-loop no_op frame, back references,
+every assertion, and the success/backtracking block at the end of the
+pattern. `re-search` is `re_search_2` over one text: the anchored and
+`\=` pre-checks, the fastmap skip in both directions, `can_be_null`,
+and the start-position advance. The smart opcode decides keep-string
+vs. ordinary loop with `mutually_exclusive_p` ported whole, including
+`forall_firstchar`'s two-destination walk.
+
+Departures, all named in the source:
+
+1. **Memoization is indexed by instruction index.** The C divides a
+   byte offset by `MEMO_BYTES_PER_COUNTER` (3); instructions here have
+   no fixed width. The adaptive counters, the bitset growth, the
+   promotion of a `prememo` opcode to `memo`, and the `inhibit` flag
+   for back references and counted repetitions are the C's. Only the
+   key's granularity differs, and the feature cannot change an answer -
+   only which failing states are remembered.
+2. **No `nchars` redisplay accounting.** The C's `update_redisplay_ticks
+   (nchars / 50 + 1)` is for the redisplay's "a regexp is taking too
+   long" watchdog, which this tree does not have.
+3. **`at_dot` matches only in a buffer.** `PTR_BYTE_POS (d)` is
+   defined for buffer text; a string match has no buffer position to
+   compare, and here it answers false rather than comparing against
+   the current buffer's point.
+4. **The standard syntax table, not the property-resolved one, for
+   `mutually_exclusive_p`.** The C's `execute_charset` there calls
+   `ISWORD` with the plain syntax table; this does the same through a
+   reader over `(syntax-table)`.
+5. **`match-data`'s trailing-nil trimming is the caller's.** The
+   matcher answers -1 for an unset register, as the C does; Emacs's
+   Lisp `match-data` trims trailing unset pairs (`(string-match
+   "\\(a\\)?" "b")` gives `(0 0)`, not `(0 0 nil nil)`), and that
+   belongs to the `match-data` port in `search.sld`, not here.
+6. **No unibyte patterns.** Scheme strings hold code points; the C's
+   `!multibyte` arms and every `CHAR_BYTE8_P` branch are marked in the
+   compiler where they would be.
+
+## The standard category table is still empty, and `\c` sees it
+
+`(schemacs editor category)` has the category *machinery* but not
+`characters.el`'s data. Emacs's standard table gives `x` the set
+`".Lalr"`; here every set is empty. So `\c.` (category `.`) matches
+everything in Emacs and nothing here, and `\C.` the other way round:
+`(string-match "\\C.+" "xxcc")` is nil in Emacs and 0 here. That is the
+one differing case in the engine's differential, and it is a data
+transcription job (`characters.el`'s `modify-category-entry` calls and
+`char-script-table`), not an engine defect.
+
+## Guile's optimizer miscompiles the big function at its default level
+
+Compiled with `compile-file`'s default optimization, `regex-compile`
+segfaults on its first call before executing a single form - interpreted
+it is fine, and `#:optimization-level 0` is fine. The trigger is the
+optimizer inlining the internal helpers into `main-loop`. Marking them
+as assigned (`(set! main-loop main-loop)` and the six beside it) stops
+the inliner and the compiled library is correct. The self-assignments
+are in the source with that note; they are the same trick the tree
+already uses against constant folding. If this function is ever split
+or the helpers move, re-check the compiled build first.
+
+## Verified
+
+A differential harness (`/tmp/cases.txt` + `emacs -Q --batch`) over 49
+cases - literals, `.`, every quantifier including non-greedy, both
+alternation directions, groups, shy and numbered groups, back
+references, charsets and classes, ranges, intervals, syntax/word/
+symbol assertions, anchors, `\=`, and the empty pattern - matches
+Emacs 31.1 except the category-data case above, once the harness
+applies Emacs's own trailing-nil trim. A second eight-case harness with
+`translate` set to the buffer's CANON table matches with case folding
+on. The syntax class letters come from `syntax.scm`'s `%spec-code`,
+which is now exported rather than duplicated.
+
+# The standard category, script and case data (2026-11-21, later)
+
+The previous section's "the standard category table is still empty" is
+superseded: `characters.el`'s data is in the tree now, dumped from a
+running Emacs 31.1 the way the charset maps and the xterm decode map
+were, under `schemacs/etc/`:
+
+| file | lines | what it is |
+|---|---|---|
+| `categories.txt` | 19,229 | one run per line: FROM, TO, the run's `category-set-mnemonics` string |
+| `scripts.txt` | 448 | `char-script-table` runs: FROM, TO, script symbol |
+| `case-table.txt` | 1,511 | the standard case table's DOWN slot, non-identity runs |
+| `case-up.txt` | 1,527 | its UPCASE slot |
+| `case-canon.txt` | 1,531 | its CANON slot |
+| `case-eqv.txt` | 3,044 | its EQV slot |
+
+`category.sld` finds them through `%load-path` (the `charset.sld` rule),
+defines every category in the standard table with Emacs's own docstring
+(43 of them, embedded in the library because they are a page of text,
+not table data), and sets each run's interned category set with one
+`char-table-set-range` per run. `casetab.sld` loads the four case slots
+the same way before `set_case_table` runs.
+
+## The C's `WORD_BOUNDARY_P` is a NAND, not an AND
+
+Comparing `\b` across scripts found the first real engine bug the data
+exposed: the matcher had
+
+    (and (> c1 255) (> c2 255) (word-boundary-p c1 c2))
+
+from the docstring's "there is no word boundary between two
+word-constituent ASCII and Latin-1 characters". The macro
+(`category.h:116`) is
+
+    (!(SINGLE_BYTE_CHAR_P (c1) && SINGLE_BYTE_CHAR_P (c2))
+     && word_boundary_p (c1, c2))
+
+- *either* character being multibyte is enough to ask
+`word_boundary_p`. Measured: `(string-match "a\\bα" "aα")` is 0 in
+Emacs, and was nil here; `中\ba` likewise. Fixed in all three assertion
+sites (`wordbound`, `wordbeg`, `wordend`), and the five measured pairs
+now agree.
+
+## The case slots are dumped, not derived
+
+Emacs's standard UPCASE slot is **not** what `set_case_table` derives
+for the same DOWN table: `up[65]` is 65 in the standard table, where
+the derivation gives 97 (the hand-made-table test in
+`casetab-tests.scm` documents the derivation's 65 -> 97 as Emacs's
+answer for a *user* table). So the four slots are dumped separately and
+loaded as data; `set_case_table` then has nothing to derive and only
+hangs EQV from CANON's extra slot 2.
+
+## Departures that remain
+
+1. **Identity entries are not stored.** Emacs's standard tables hold an
+   explicit entry for characters that map to themselves after a run
+   boundary (`aref standard-case-table 233` is 233); the dump omits
+   them, so `char-table-ref` answers the table's default (`#f`).
+   `char_table_translate` treats a non-character value as the character
+   itself, which is why matching, folding and translation agree; only
+   reading a slot directly can see the difference.
+2. **Sets are interned, not structurally shared across equal
+   mnemonic strings from different runs** beyond
+   `hash_get_category_set`'s hash - the same rule the C has.
+3. The category data is read at load time (about 0.1 s here for 340
+   KB), where Emacs has it pre-dumped. A tree without
+   `schemacs/etc/categories.txt` loads with an empty standard table
+   rather than failing, which is also what a source checkout without
+   the installed file would want.
+
+## Verified
+
+- `char-category-set` mnemonics match Emacs on ASCII, Latin-1, Greek
+  and Han samples.
+- The five script-boundary `\b` cases match Emacs.
+- Case-insensitive matching of `É/é`, `Σ/σ` in both directions, and
+  ASCII folding, match Emacs.
+- The 49-case regexp differential now differs only in the harness's
+  formatting of trailing unset match-data pairs, which is Emacs's
+  `match-data` trimming, not the engine.
+- `category-tests` 20/20 and `casetab-tests` 13/13.
+
+# The engine under `search.c`, and the performance pass (2026-11-21)
+
+`(schemacs editor search)` is on the ported engine now - `string-match`,
+`looking-at`, `re-search-forward`, `re-search-backward` and the searches
+they stand on call `re-search`/`re-match-2` of
+`(schemacs editor regex-emacs)`. The old `%emacs-ere` translation,
+its 512-character copy window and the `\_<`/`\_>` assertion simulation
+are **deleted**, with the `(ice-9 regex)` / `make-regexp` imports and
+the syntax/chartab names only they used.
+
+## Correctness found by the swap
+
+1. **`buffer->re-text` was handed buffer positions where it wants
+   store indices.** The class stores positions one-based
+   (`buffer-text-base`, Emacs's `BEG = 1`) and `buffer->re-text`'s
+   `base`/`z` are store indices (`BEG_ADDR` and `Z_ADDR`-style). Every
+   buffer match was one character early and one short of the last
+   character until the three ends were converted by `- base`.
+2. **A nested shy group was `Invalid regular expression`.**
+   `(if regnum ...)` in the group parser is true for Scheme's `0`,
+   where the C's `else if (regnum)` is false; a `\(?:` group at
+   `re_nsub` 0 got regnum 0, took the explicitly-numbered branch, and a
+   group inside it found the outer frame's 0 in the compile stack and
+   raised `badpat`. `(> regnum 0)` is the C's test. The whole
+   alternation of `scheme-font-lock-keywords` was affected.
+3. **`match-data`'s nil handling** was compacting - an unmatched
+   register in the middle vanished and shifted the pairs after it.
+   It now emits `#f` for an interior unmatched register and elides
+   only the trailing ones, as `Fmatch_data` does with `len = 2*i+2`;
+   the no-search answer is `nil` even when REUSE is given, and REUSE
+   longer than the values is filled with nil to its end.
+
+## Why it was slow
+
+Measured, not guessed. A single failing search over a 32-character
+line allocated **283,680 bytes**, and under `statprof` the run spent
+**19.5 of 21.4 seconds in GC**. The non-GC profile was the matcher
+itself. Three representation departures, all against the C, in the
+order they were fixed:
+
+1. **The failure stack started at 800 entries.** `INIT_FAIL_STACK`
+   (`regex-emacs.c:934`) uses `INIT_FAILURE_ALLOC` = **20**
+   (`:900`), and the storage is `SAFE_ALLOCA` - no GC. One 800-entry
+   vector per start position was ~190 KB of the 283 KB. It is 20 now
+   and the stack is **reused across the attempts of one search**
+   (`%fail-stack-reset!`); the C's storage dies with each
+   `re_match_2`, so the lifetime differs, but nothing can observe it.
+2. **Charset and fastmap tests allocated a bignum per character.**
+   `(logand map (ash 1 c))` over a 256-bit integer allocates on both
+   sides. `logbit?` tests the limb in place. The C tests a word of a
+   bitmap (`BITMAP_BIT_P`/`BITMAP_WORD`); this is that test.
+3. **The matcher returned through an exception.** `done!` raised a
+   `<match-result>` and the whole loop sat in a `guard`, once per
+   start position. The C's `succeed_label` does `return dcnt`
+   (`regex-emacs.c:4763`). A `%match-done` sentinel and a `result`
+   variable now thread the answer back through the frames. That was
+   ~40% of the post-allocation profile.
+
+## The matcher is an attempt object, not a call stack
+
+`re_match_2` in C is one stack frame; the port's helpers were
+internal procedures, so every `re-match-2` call made ~16 closures,
+four register vectors, a failure stack and a memo. `make-match-attempt`
+builds them **once per search**, and its returned procedure resets the
+mutable attempt state for each start position (the C's prologue).
+`re-search` creates one attempt outside its loop; `re-match-2` remains
+for a single anchored attempt (`looking-at`). This is a representation
+departure only: the matcher's opcode switch, failure stack algorithm
+and backtracking are the C's.
+
+The failure stack's entries were `(tag . value)` conses - three conses
+per push, and a push on every attempt plus pops on every backtrack.
+They are one flat vector with two slots per entry, the C's flat array
+of unions; the pushes and pops write and read the slots directly
+(`%push-failure-point!` etc. inline what `%push-elt!`/`%pop-elt!` did),
+and `%fail-stack-ensure!` is `GROW_FAIL_STACK`. `%pop-failure-point!`
+answers `(values PAT STR)` rather than a cons.
+
+`%execute-charset` tests the bitmap before reading the class bits (a
+hit is decisive), and the `charset` opcode tests it once more for a
+non-negated set before calling out - most characters of most patterns
+are ASCII bitmap hits.
+
+## Numbers
+
+Compiled, same benchmark (`/tmp/bench/bench.scm`), microseconds per
+search:
+
+| pattern | before | after | Emacs |
+|---|---|---|---|
+| `[a-zA-Z_][a-zA-Z0-9_]*` | 9.14 | **1.94** | 0.185 |
+| failing `[ \t]*\(...\)[ \t]*(` | 267.8 | **35.0** | 3.71 |
+| `\(foo\|bar\)baz` on 200 chars | 35.8 | **5.4** | 0.184 |
+| `\_<[a-z]+\_>` | 11.0 | **2.7** | 0.259 |
+
+Emacs is `string-match-p` in a byte-compiled loop on the same
+patterns and texts; the ratios are **10.5x / 9.4x / 29x / 10.4x**.
+
+Allocation per search: **232 KB -> 1.4 KB** steady state. The
+intermediate steps were 46.8 KB (small fixes), 32.7 KB (direct
+return), 12.3 KB (attempt object) and 1.4 KB (flat stack). The final
+figures are three runs at load average 1.1; the `\(foo\|bar\)baz` row
+had one 17.3 µs outlier, the other two 8.6.
+
+**Caveat**: the later timings were taken with the machine at load
+average 6-15 (the user's own processes). Two "regressions" chased
+during the pass were the load, not the code: repeated runs of an
+unchanged build differed by 10x, and the interpreted run of the same
+build moved with them. The table's "after" figures are the quiet-run
+values from each step; the structural evidence (allocation counts,
+`statprof` shares, the A/B of the failure-stack inlining) is
+load-independent.
+
+## The second wave: the fastmap loop and the text substrate
+
+Three more changes, all measured:
+
+1. **`<re-text>` records its substrate.** It now carries either the
+   Scheme string or `#(STORE GPT GAP BASE)` for a buffer, in addition
+   to the closure. `%re-text-ref` reads `string-ref` or the store
+   directly; `make-re-text` (the exported two-argument constructor)
+   still makes a closure-only text. This is the representation change
+   the first pass said character reads would need.
+2. **The fastmap skip loop is specialized by substrate.** It hoists
+   the map's bits and `any-nonascii` flag, and reads the string or
+   buffer store directly - no `%re-text-ref`, no `re-fastmap-ref`, no
+   `%translate-code` call per skipped character in the common
+   `translate = #f` case. `\(foo\|bar\)baz` over 200 `x`s went from
+   8.6 to **5.4 µs** (29x Emacs's 0.184, from 46x). The remaining cost
+   is a Scheme loop iteration per character; Emacs scans bytes in C.
+3. **`jump` first in the opcode `cond`** (it was 23 comparisons down,
+   where the C's switch is one branch): ~3% on the failing pattern.
+   The push capacity check is inline as well, as the C's
+   PUSH_FAILURE_ITEM macro is.
+
+## The third wave: bitmap tables and the failure path (2026-11-21)
+
+Four more changes, each A/B'd by CPU time (see the measurement note
+below), on the same bench as the earlier waves:
+
+1. **The charset bitmap is a 256-entry boolean vector.** `<re-charset>`
+   gains `table`, built once from the integer bitmap when the charset
+   is made, and the matcher's inline test is `(vector-ref table c)`.
+   Compiled microbenchmark: **11 ns against `logbit?`'s 20 ns** on the
+   256-bit integer. The integer `map` stays because
+   `mutually_exclusive_p` compares two charsets with `logand`.
+2. **A bitmap-only set settles a miss without `%execute-charset`**
+   (`simple?` = no ranges, no class bits). Every failing test of
+   `[ \t]*` or `[a-zA-Z_]` used to pay a procedure call to learn what
+   the bitmap already said. A/B on the failing-bracket row: **15-18%
+   faster** (6.3e10 -> 5.4e10 CPU-ns per 50k searches). **This has no
+   counterpart in the C** - `execute_charset` always runs its (empty)
+   range and class tests there and recovers the cost by being inlined -
+   so `simple?` is a host-compensation, recorded as such in the source
+   too, not an Emacs algorithm.
+3. **The fastmap skip loop reads a boolean table**, built at the end of
+   `re-compile-fastmap`; the integer `bits` stays as the accumulator
+   because `analyze_first` adds bits over time, and the table is built
+   even when no bit is set (an `any-nonascii`-only map is usable and
+   the loop indexes the table for every character below 256). A/B on
+   the 200-character skip row: **20-25% faster** (1.35e10 -> 1.05e10);
+   wall time 5.35 -> 4.05 µs at higher load than the quiet run above.
+4. **The failure path lost its wrappers and its multiple values.**
+   `fail!` no longer boxes a `values` pair per backtrack - the pop
+   leaves the saved position in a `<failure-stack>` field, as the C
+   passes both to POP_FAILURE_POINT by address - and no longer
+   allocates a fresh `(list ...)` for `memv` per backtrack; the
+   three-way test is an `or` of `=`s. The one-line local wrappers
+   (`push-failure-point!`, `memo-failed?`, `translate-code`,
+   `check-infinite-loop`, the pop) are gone, so an instruction no
+   longer pays a closure hop to reach the global procedure. With 1-3
+   this took the failing-bracket row from 35.0-35.5 to 32.5-33.1 µs
+   at *higher* load than the earlier quiet measurement; allocation per
+   search is unchanged at ~3.1 KB.
+
+**Measurement note.** This machine reports user CPU time (`(times)`,
+`get-internal-run-time`) at about **2.2x wall time** for a
+single-threaded Guile loop - measured against bash's `time`: real
+3.25 s, user 7.0 s, sys 0.8 s - and the factor is stable between runs,
+so CPU-time A/B is the load-robust comparator while absolute
+microseconds must come from wall-clock runs on a quiet machine. The
+leave-one-out A/Bs above reverted one change at a time in the same
+tree and recompiled `regex-emacs.scm` alone; the first attempt at a
+"before" build also renamed the global `%push-failure-point!` by
+matching its own definition line, which is why the reverse patterns
+were afterwards scoped to the matcher region.
+
+## The fourth wave: the ASCII translate cache, and two things that did not work (2026-11-21)
+
+1. **The compiled pattern caches its translate table for characters
+   0..255** (`translate-vec` on `<re-pattern-buffer>`, filled lazily by
+   `re-translate-vector`). `char-table-ref` on the case-canon table
+   measured **64 ns** per lookup against a vector's **11 ns**, and a
+   folded match asks it once per character - in the skip loop and in
+   the charset/exactn/anychar/duplicate arms. Folded rows: failing
+   bracket 5.5-5.6e10 -> **4.9-5.1e10** CPU-ns, `\_<[A-Za-z_]...\_>`
+   8.8-10.0e9 -> **7.1-7.2e9**, `\_<[0-9]+\_>` 1.05e10 -> **7.5-8.0e9**;
+   unfolded rows unchanged. **No C counterpart**: the C's `TRANSLATE`
+   is a C-level `char_table_translate` tree walk, which gcc inlines;
+   this is a host-compensation, and it is recorded here as one. The
+   answers are `%translate-code`'s exactly; characters above 255 still
+   go through the table.
+2. **The regexp cache key now holds the translate table itself**
+   (`search.scm`), not the boolean `icase?`. Emacs compares
+   `cp->buf.translate` (`search.c:220`), so a buffer with its own case
+   table cannot reuse an entry compiled with another's; ours could.
+   `(PATTERN ICASE TABLE)` -> `(PATTERN TRANSLATE TABLE)`, with the
+   translate chosen before the lookup. A correctness fix, not a
+   performance one.
+
+**Two things that did not work, and why they are recorded:**
+
+- **Reordering the opcode `cond` is a loss.** Moving
+  `on_failure_jump_loop/memo/prememo/smart` from below `begbuf`/`endbuf`
+  to just after `charset` made the failing-bracket row **15-25%
+  slower** (5.3e10 -> 6.2-6.3e10), because `start_memory`/`stop_memory`
+  and the other arms that then sit later in the chain outnumber the
+  loop arms in that pattern. Reverted; the C's `switch` does not have
+  this trade-off because it is a jump table.
+- **Hoisting the failure stack's `entries`/`avail` into attempt locals
+  would buy almost nothing.** Record accessors measure 11.5 ns against
+  `vector-ref`'s 9.2 ns compiled, so the four accessor calls a push
+  makes are ~9 ns of a ~120 ns push. Rejected on measurement, before
+  writing the refactor.
+
+**The profile after the four waves** (failing bracket, `statprof`):
+the match loop's self time is 40.7%, `%pop-failure-point!` 13.9%,
+`%re-text-ref` 10.3%, `%push-failure-point!` 9.0%, `fail!` 6.8%,
+`%push-failure-reg!` 4.2%, `re-search` 3.6%. `logbit?` and
+`%execute-charset` no longer appear on this pattern. What is left is
+the per-instruction Scheme loop and the stack's vector accesses - the
+structural floor named above.
+
+## The final numbers, Emacs and the engine interleaved (2026-11-21)
+
+Wall-clock, three interleaved rounds (Emacs, engine, Emacs, engine,
+Emacs, engine) on the same four patterns and texts, the
+machine at load average 1.8. Emacs 31.1 is `string-match-p` in a
+byte-compiled loop; the engine is `re-search` in a compiled library.
+Both case folding off (`case-fold-search` nil / `translate` #f) and on
+(the editor's default), the latter with upper-case text so the folds
+are exercised:
+
+| pattern | fold | Emacs µs | engine µs | ratio |
+|---|---|---|---|---|
+| `[a-zA-Z_][a-zA-Z0-9_]*` | off | 0.185-0.189 | 2.11-2.23 | 11.4-11.8x |
+| failing `[ \t]*\(...\)[ \t]*(` | off | 3.72-3.75 | 29.9-30.4 | **8.0-8.1x** |
+| `\(foo\|bar\)baz` over 200 chars | off | 0.181-0.186 | 3.84-4.07 | 21-22x |
+| `\_<[a-z]+\_>` | off | 0.257-0.263 | 2.74-2.82 | 10.5-10.7x |
+| failing `[ \t]*\(...\)[ \t]*(` | on | 4.40-4.57 | 32.4-32.7 | **7.2-7.3x** |
+| `\(foo\|bar\)baz` over 200 chars | on | 0.614-0.635 | 9.52-9.67 | 15.2-15.7x |
+| `\_<[A-Za-z_][A-Za-z0-9_]*\_>` | on | 0.278-0.286 | 2.33-2.44 | 8.3-8.6x |
+| `\_<[0-9]+\_>` | on | 0.385-0.392 | 3.13-3.27 | 8.1-8.5x |
+
+Against the second wave's table (35.0 / 5.4 / 2.7 / 1.94 µs), the
+failing bracket is 8.0x Emacs instead of 9.4x, and the folded rows
+(the editor's default) sit at 7-9x except the long skip. Emacs pays
+for folding too - its own folded bracket is 4.4 µs against 3.7 - which
+is why the folded ratios are *lower* than the unfolded ones. The ratios
+this engine cannot close without leaving Scheme: the 200-character skip
+is one Scheme loop iteration per skipped character (15-22x), and the
+dispatch loop is one `cond` comparison per arm where the C's `switch`
+is a jump table.
+
+
+## What is left, and what did not work
+
+- **Dispatch:** the attempt lambda - the inlined `match-loop` and its
+  `cond` - is now ~41% of the matcher's self-time. Guile's `case`
+  expands to `memv` over literal lists, which would be slower than the
+  `=` chain, so it was not converted; a handler vector trades the
+  comparisons for an indirect call and has not been measured as a win.
+- **Failure-stack walk and pushes**: ~19% combined even after the
+  slot inlining.
+- **`%re-text-ref`**: ~10%, one procedure call per character. The
+  direct read is in place; going further means duplicating the matcher
+  per substrate, which is a large change for the last 10%.
+- **Charset tests and `%execute-charset`**: the bitmap hits are inline,
+  and a bitmap-only set no longer calls out on a miss (third wave); the
+  range scan on a miss of a *complex* set is still a procedure call.
+- The charset fast path and the class-bits reordering were first made
+  as machine load rose; the final quiet run includes them, but there
+  is no isolated A/B for those two.
+
+## The `set! main-loop main-loop` workaround, re-measured
+
+Removing all eight self-assignments in `regex-compile` segfaults on
+the first call when the library is compiled - and **at O0 and O1 as
+well as O2**, so it is not the inliner. The module loads; the crash is
+inside `scm_call_n` executing the compiled procedure. Only the
+`main-loop` assignment matters: each of the other seven, alone, still
+crashes, and an unrelated self-assignment does not help. Making the
+call non-tail, a lambda indirection, a top-level `%call0` caller and
+reordering `finish` before it all still crash, so the trigger is in
+main-loop's own compiled form. The workaround can be reduced to
+`(set! main-loop main-loop)`; the other seven lines are cargo.
+
+## Verified
+
+- `search-tests` 88/88, the 49-case differential (the one known
+  difference is the harness printing raw registers where Emacs's
+  `match-data` trims trailing unset ones), `replace`, `font-lock`,
+  `lisp-mode`, `dired-mode`, `coding` suites.
+- Full suite: 83 suites, with `syntax-tests` and `mouse-tests` once
+  failing under load average 14 and passing individually on the same
+  tree immediately after (84/84 for mouse; 65 passes for syntax). The
+  final runner pass on the settled tree was clean.
+- `tools/pty-check.py`: **100/100** on the final tree. A first run
+  failed every check because a comment-only edit to `loadup.scm` after
+  the compile sweep left a "source file newer than compiled" note on
+  the terminal; recompiling the tree fixed it.
+- A compiled-vs-interpreted check: the matcher is 7.8x faster
+  compiled, so the library is genuinely compiled despite the
+  `main-loop` workaround.

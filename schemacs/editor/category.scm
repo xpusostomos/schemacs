@@ -29,7 +29,9 @@
 
   (import
     (scheme base)
-    (only (guile) make-hash-table hash-table? hash-ref hash-set! hashq-ref hashq-set!)
+    (only (guile) make-hash-table hash-table? hash-ref hash-set! hashq-ref hashq-set!
+          string-split %load-path canonicalize-path caddr)
+    (scheme file)
     ;; The char-table - `chartab.c''s.
     (only (schemacs editor chartab)
           make-char-table char-table-p char-table-subtype
@@ -439,15 +441,92 @@
       ;; for the ASCII repertoire the C mode uses.
       (make-char-table 'char-script-table #f))
 
-    (define *word-combining-categories* #f)
-    ;; ^ `word-combining-categories` (`category.c:442`): "List of pairs
-    ;; (cons cells) of categories to determine word boundary." A
-    ;; `defvar` - nothing `let`-binds it - so a plain variable, and the
-    ;; self-assignment keeps a compiled read from folding it.
+    (define *word-combining-categories*
+      ;; `word-combining-categories` (`category.c:442`): "List of pairs
+      ;; (cons cells) of categories to determine word boundary." The
+      ;; value is Emacs 31.1's, from `characters.el`. A `defvar` -
+      ;; nothing `let`-binds it - so a plain variable, and the
+      ;; self-assignment keeps a compiled read from folding it.
+      '((#f . 94) (94) (67 . 72) (67 . 75)))
     (set! *word-combining-categories* *word-combining-categories*)
 
-    (define *word-separating-categories* #f)
-    ;; ^ `word-separating-categories` (`category.c:487`). As above.
+    (define *word-separating-categories*
+      ;; `word-separating-categories` (`category.c:487`), Emacs 31.1's
+      ;; value.
+      '((72 . 75)))
     (set! *word-separating-categories* *word-separating-categories*)
 
+
+    (define %standard-category-docs
+      ;; Emacs 31.1's `category-docstring` for every category in its
+      ;; standard table, dumped from a running Emacs.
+      '((32 . "space for indent This character counts as a space for indentation purposes.") (46 . "Base Base characters (Unicode General Category L,N,P,S,Zs)") (48 . "consonant") (49 . "base vowel Base (independent) vowel") (50 . "upper diacritic Upper diacritical mark (including upper vowel)") (51 . "lower diacritic Lower diacritical mark (including lower vowel)") (52 . "combining tone Combining tone mark") (53 . "symbol") (54 . "digit") (55 . "vowel diacritic Vowel-modifying diacritical mark") (56 . "vowel-signs") (57 . "semivowel lower") (60 . "Not at eol A character which can't be placed at end of line.") (62 . "Not at bol A character which can't be placed at beginning of line.") (65 . "2-byte alnum Alphanumeric characters of 2-byte character sets") (67 . "2-byte han Chinese (Han) characters of 2-byte character sets") (71 . "2-byte Greek Greek characters of 2-byte character sets") (72 . "2-byte Hiragana Japanese Hiragana characters of 2-byte character sets") (73 . "Indian Glyphs") (75 . "2-byte Katakana Japanese Katakana characters of 2-byte character sets") (76 . "Strong L2R Characters with \"strong\" left-to-right directionality, i.e. with L, LRE, or LRO Unicode bidi character type.") (78 . "2-byte Korean Korean Hangul characters of 2-byte character sets") (82 . "Strong R2L Characters with \"strong\" right-to-left directionality, i.e. with R, AL, RLE, or RLO Unicode bidi character type.") (89 . "2-byte Cyrillic Cyrillic characters of 2-byte character sets") (94 . "Combining Combining diacritic or mark (Unicode General Category M)") (97 . "ASCII ASCII graphic characters 32-126 (ISO646 IRV:1983[4/0])") (98 . "Arabic") (99 . "Chinese") (101 . "Ethiopic Ethiopic (Ge'ez)") (103 . "Greek") (104 . "Korean") (105 . "Indian") (106 . "Japanese") (107 . "Katakana Japanese katakana") (108 . "Latin") (111 . "Lao") (113 . "Tibetan") (114 . "Roman Japanese roman") (116 . "Thai") (118 . "Viet Vietnamese") (119 . "Hebrew") (121 . "Cyrillic") (124 . "line breakable While filling, we can break a line at this character.")))
+
+    (define (%etc-data-file name)
+      ;; A file under `schemacs/etc', found on the load path the way
+      ;; `charset.sld` finds its map directory.
+      ;;--------------------------------------------------------------
+      (let loop ((dirs %load-path))
+        (and (pair? dirs)
+             (let ((path (guard (e (#t #f))
+                           (string-append (canonicalize-path (car dirs))
+                                          "/schemacs/etc/" name))))
+               (if (and path (file-exists? path))
+                   path
+                   (loop (cdr dirs)))))))
+
+    (define (%load-standard-categories!)
+      ;; `characters.el`'s assignment of categories to characters, which
+      ;; Emacs does at dump time. Each run's set is interned, so equal
+      ;; sets remain one object, as `hash_get_category_set` intends.
+      ;;--------------------------------------------------------------
+      (let ((file (%etc-data-file "categories.txt")))
+        (when file
+          (for-each (lambda (entry)
+                      (define-category (car entry) (cdr entry)
+                                       *standard-category-table*))
+                    %standard-category-docs)
+          (let ((port (open-input-file file)))
+            (dynamic-wind
+              (lambda () #f)
+              (lambda ()
+                (let loop ()
+                  (let ((line (read-line port)))
+                    (unless (eof-object? line)
+                      (let ((fields (string-split line #\tab)))
+                        (when (>= (length fields) 3)
+                          (let ((set (hash-get-category-set
+                                      *standard-category-table*
+                                      (make-category-set (caddr fields)))))
+                            (char-table-set-range *standard-category-table*
+                                                  (string->number (car fields))
+                                                  (string->number (cadr fields))
+                                                  set))))
+                      (loop)))))
+              (lambda () (close-input-port port)))))))
+
+    (define (%load-char-scripts!)
+      ;; `characters.el`'s `char-script-table`, a run per line: FROM,
+      ;; TO and the script symbol.
+      ;;--------------------------------------------------------------
+      (let ((file (%etc-data-file "scripts.txt")))
+        (when file
+          (let ((port (open-input-file file)))
+            (dynamic-wind
+              (lambda () #f)
+              (lambda ()
+                (let loop ()
+                  (let ((line (read-line port)))
+                    (unless (eof-object? line)
+                      (let ((fields (string-split line #\tab)))
+                        (when (>= (length fields) 3)
+                          (char-table-set-range char-script-table
+                                                (string->number (car fields))
+                                                (string->number (cadr fields))
+                                                (string->symbol (caddr fields)))))
+                      (loop)))))
+              (lambda () (close-input-port port)))))))
+
+    (%load-standard-categories!)
+    (%load-char-scripts!)
     ))

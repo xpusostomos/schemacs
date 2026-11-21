@@ -105,6 +105,8 @@
    swhitespace spunct sword ssymbol sopen sclose squote sstring smath
    sescape scharquote scomment sendcomment sinherit scomment-fence
    sstring-fence smax
+   ;; the syntax code letters (`syntax_spec_code', `syntax.c:1063')
+   %spec-code
    ;; skip-chars
    skip-chars-forward
    skip-chars-backward

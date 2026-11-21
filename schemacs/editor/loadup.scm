@@ -116,9 +116,19 @@
       ;;   it. It cannot be in the list in any case: it imports every
       ;;   library, and this one is one of them, so the list naming it
       ;;   would be a cycle.
+      ;;   `(schemacs editor regex-emacs)' is the Emacs regexp engine,
+      ;;   and **it stays out on purpose even though `search.scm' now
+      ;;   imports it.** The C engine has no Lisp-visible functions -
+      ;;   `re_search', `re_match_2' and the opcodes are `regex-emacs.c'
+      ;;   internals, reached through `string-match' and friends - so
+      ;;   the user environment should no more expose them than Emacs
+      ;;   exposes `re_match_2_internal'. A session that wants to poke
+      ;;   the engine can still `(import (schemacs editor regex-emacs))'
+      ;;   itself, as it can the toolkits.
       '((schemacs editor loadup)
         (schemacs editor imports)
-        (schemacs editor test-display)))
+        (schemacs editor test-display)
+        (schemacs editor regex-emacs)))
 
     (define %editor-libraries
       ;; Every `(schemacs editor ...)' there is, less the pair above:

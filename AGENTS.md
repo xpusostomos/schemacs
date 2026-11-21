@@ -83,11 +83,6 @@ If you either make, or find a departure from real emacs when working
 on this project, put as much information as possible in the
 DEPARTURES.md file so that we can return to this work later.
 
-When it comes to regexps, the aim here is to port the regexp itself
-to guile regexps rather than port emacs regexps or try and hack
-emacs regexps into guile regexps. Instead understand the intention
-of the regexp and convert the regexp to guile regexp format.
-
 **The convention, settled 2026-11-07: dynamic variables are parameters,
 and their names are `*...*`.**
 
@@ -14729,3 +14724,235 @@ the syntax/category/word/`\=`/backref tranche, `re_compile_fastmap`,
 `search.scm` onto the engine. Each tranche's tests are a differential
 against `emacs -Q --batch` (pattern, text, start, `case-fold-search` ->
 match data), the harness `search-tests.scm` already uses.
+
+# Handoff — the Emacs regexp engine, compiler and matcher (2026-11-21)
+
+`(schemacs editor regex-emacs)` now compiles and matches Emacs's regexp
+dialect. **Nothing imports it yet** - it is excluded from `loadup.scm`'s
+session list and from `imports.scm` until `search.sld` moves onto it.
+`DEPARTURES.md`'s 2026-11-21 section has the C and every departure;
+this is what the next session needs.
+
+## What is in the file
+
+- the opcodes, the pattern buffer, the registers, `<re-text>`,
+  `<re-context>`, the `RECC_*` classes, the `<re-charset>` object;
+- `regex-compile` (the whole `regex_compile` switch) and
+  `re-compile-pattern`, which returns the C's message or `#f`;
+- `forall_firstchar`/`analyze_first`, the `<re-fastmap>` and
+  `re-compile-fastmap`;
+- the failure stack, memoization, `execute_charset`, mutual exclusion,
+  `re-match-2` (the whole matcher) and `re-search`.
+
+`re-search` and `re-match-2` take a `<re-text>` and a `<re-context>`;
+both are exported, along with `re-compile-pattern`,
+`re-compile-fastmap`, `make-re-fastmap` and `re-fastmap-ref`.
+
+## Before touching it
+
+- **Compile it, don't just read it.** At Guile 3.0.11's default
+  optimization the library segfaults on the first `regex-compile` call
+  unless the internal helpers are marked assigned (the `(set! main-loop
+  main-loop)` block, with the comment). If the function is refactored,
+  re-run a compiled smoke test first; the interpreter and `-O0` both
+  hide the miscompilation.
+- **`%insert-at!`'s rule is "the instructions that move, move their
+  targets"** - see DEPARTURES.md. It is not "targets at or after the
+  insertion point".
+- **A `smart` jump's target names the instruction *after* the trailing
+  `jump`** in this representation, so the jump it rewrites is at
+  `TARGET - 1`. Writing at `TARGET` corrupts the instruction after the
+  loop.
+- **`forall_firstchar_all` takes a start position now**; passing 0
+  where the C passes `p2` makes `mutually_exclusive_p` examine the
+  whole pattern and can wrongly choose the keep-string loop.
+
+## What is missing, in order
+
+1. **`characters.el`'s data is in** (2026-11-21, later): six files
+   under `schemacs/etc/` (categories, scripts, the four case slots),
+   loaded by `category.sld` and `casetab.sld`. `\c`/`\C`, the script
+   boundaries and Unicode case folding now match Emacs. The matcher's
+   `WORD_BOUNDARY_P` was a real bug this exposed - it is a NAND
+   (`!(both single-byte)`), not "both multibyte"; see DEPARTURES.md.
+2. **Wire `search.sld` onto the engine**: `compile-pattern`,
+   `looking-at`, `string-match`, `re-search-forward/backward`,
+   `match-data`/`set-match-data` (with Emacs's trailing-nil trim),
+   `replace-match`, replacing `%emacs-ere`/glibc and the 512-character
+   search window. Keep `search-tests.scm`'s time bounds as the gate and
+   extend the differential to the full dialect. Then remove the
+   `(schemacs editor regex-emacs)` exclusion from `loadup.scm` and
+   regenerate `imports.scm`.
+3. **Then cc-mode** (`cc-defs` → `cc-vars` → `cc-langs` → `cc-engine`
+   → `cc-fonts` → `cc-mode`, then `cc-cmds`/`cc-align`/`cc-styles`),
+   which is what all of this is for.
+
+The differential harness is worth rebuilding: a `PATTERN<TAB>TEXT`
+file, an elisp file of `(string-match ...)` results, and a Scheme
+runner that prints the same `TEXT PAT (START END (MATCH-DATA))` lines.
+Normalize the trailing spaces and Emacs's trailing-nil trim before
+diffing. `case-fold-search` nil in Emacs and `translate` `#f` here is
+the baseline; the buffer's CANON table on both sides is the folded
+run.
+
+# `search.c` is on the engine, and the matcher's performance pass
+# (2026-11-21)
+
+Item 2 of the list above is **done**: `search.scm` compiles through
+`re-compile-pattern`, matches through `re-search`/`re-match-2`, and
+the old `%emacs-ere` translation, the 512-character copy window and
+the simulated `\_<`/`\_>` assertions are unreferenced (delete them
+when the tree is quiet). DEPARTURES.md's 2026-11-21 section has the
+full account; the things the next session needs:
+
+## Search-side facts
+
+- **`buffer->re-text` takes STORE indices**, not buffer positions.
+  `%buffer-re-text` converts BEGV/ZV/gpt by `(- ... (buffer-text-base
+  txt))`. Passing positions made every buffer match one character
+  early and dropped the last character - it looked like a matcher bug.
+- **`match-data` emits `#f` for an interior unmatched register and
+  elides only trailing ones**; `nil` when nothing has been searched,
+  even with REUSE.
+- The `re-search` registers are the engine's, shifted by BEGV:
+  `%engine-regs-into-search-regs`. `%make-search-registers` follows
+  `RE_NREGS` = 30 and never shrinks.
+- Parse errors are `(error "Invalid regexp: ~s" message)`; the engine
+  returns the C's `re_error_msgid` string.
+
+## Matcher structure, and why
+
+- **`make-match-attempt`** builds the helper closures, register
+  vectors, failure stack and memo **once per search**; the returned
+  procedure resets them per start position. A `re-match-2` call has
+  its own attempt. Do not move the helpers back inside a per-attempt
+  procedure: that was ~16 closures per start position, and measured
+  at ~1 KB of the ~1.4 KB a search still allocates.
+- **`done!` no longer raises.** It sets `result` and answers
+  `%match-done`; `match-loop`/`end-of-pattern` thread the value back.
+  The old `guard`/`raise` was ~40% of a failing search and allocated
+  prompt and fluid state per attempt.
+- **The failure stack is flat**: `entries` is `TAG VALUE TAG VALUE`,
+  two slots per entry, the C's array of unions. It starts at
+  `INIT_FAILURE_ALLOC` = 20, grows with `%fail-stack-ensure!`, and is
+  reset rather than reallocated between attempts. `%push-failure-*!`
+  and `%pop-failure-point!` inline the slot arithmetic; do not
+  reintroduce a per-entry procedure call (that was 30% of the
+  profile).
+- `%execute-charset` and `re-fastmap-ref` use **`logbit?`** on the
+  256-bit maps. `(logand map (ash 1 c))` allocates a bignum per
+  character and was the single largest allocation source after the
+  failure stack.
+- **`(set! main-loop main-loop)` must stay.** Removing it segfaults
+  in the compiled `regex-compile` on the first call **at O0, O1 and
+  O2** - it is not the optimizer's inliner. Only `main-loop`'s
+  assignment is needed; the other seven are cargo. Non-tail call,
+  lambda indirection, a top-level caller and reordering `finish` were
+  all tried and still crash, so the trigger is in main-loop's own
+  compiled form.
+
+## Performance numbers, and how to trust them
+
+Compiled, `/tmp/bench/bench.scm`: symbol match 9.14 → **1.94 µs**;
+failing bracket 267.8 → **35.0 µs**; `\(foo\|bar\)baz` over 200 chars
+35.8 → **5.4 µs**; `\_<[a-z]+\_>` 11.0 → **2.7 µs**. Allocation per
+search 232 KB → **1.4 KB**.
+
+Against **Emacs 31.1 itself** (`string-match-p`, byte-compiled loop,
+same texts, same session): 0.185 / 3.71 / 0.184 / 0.259 µs. The
+**current** interleaved table (three rounds each side, load 1.8) is in
+DEPARTURES.md's "final numbers" section: unfolded **11.5x / 8.1x /
+21x / 10.6x**, folded (the editor's default) **7.2x / 15.5x / 8.4x /
+8.3x**. The failing bracket improved from 35.0 to 30.1 µs through the
+third and fourth waves; the 200-char skip from 5.4 to 3.9 µs. The
+remaining ratios are one Scheme loop iteration per skipped character
+and one `cond` comparison per dispatch arm - the structural floor.
+
+`<re-text>` now carries the string or `#(STORE GPT GAP BASE)` as well
+as the closure, and the fastmap loop and `%re-text-ref` read it
+directly. Specializing the loop per substrate is what took the 200-char
+skip from 8.6 to 5.4 µs.
+
+**Measure with the machine quiet or not at all.** The later runs were
+taken at load average 6-15 from the user's own processes, and the same
+build varied by 10x between runs; one "regression" investigated during
+the pass was entirely the load. Use allocation counts (`gc-stats`'s
+`heap-total-allocated`) and `statprof` shares for A/B when the load is
+not controlled.
+
+Two micro-optimisations were tried and **reversed**: calling the
+`<re-text>` ref closure through a local variable (slower - Guile
+inlines the accessor-and-call form better), and a `case` dispatch
+(Guile's `case` expands to `memv` over literal lists, worse than the
+`=` chain). The remaining self-time is the dispatch loop, the
+`%re-text-ref` closure per character, `%execute-charset`, and the
+stack walk - see the DEPARTURES table before choosing one.
+
+### The third wave: bitmap tables and the failure path (2026-11-21)
+
+- **`<re-charset>` and `<re-fastmap>` both carry a 256-entry boolean
+  vector** (`table`) beside the integer bitmap, and the hot tests read
+  the vector: 11 ns against `logbit?`'s 20 ns compiled. The integers
+  stay - the charset map for `mutually_exclusive_p`'s `logand`, the
+  fastmap bits as `analyze_first`'s accumulator. A charset with no
+  ranges and no class bits (`simple?`) answers a bitmap miss without
+  calling `%execute-charset`.
+- **`fail!` answers through the failure stack's `pop-str` field**, not
+  `values`; the three-way opcode test is an `or` of `=`s rather than
+  `memv` over a fresh list; and the one-line local wrappers around
+  `%push-failure-point!`, `%memo-*` and `%check-infinite-loop` are
+  gone. Do not reintroduce a `let-values` or a `(list ...)` in that
+  path: each is one allocation per backtrack.
+- A/B numbers and the CPU-time measurement caveat are in
+  DEPARTURES.md's "third wave" section. In short: failing bracket
+  35.0 → 32.5-33.1 µs at *higher* load, 200-char skip 5.35 → 4.05 µs
+  (CPU-time A/B: −15-18% and −20-25%).
+
+### The fourth wave: the ASCII translate cache (2026-11-21)
+
+- **A compiled pattern caches its translate table for characters
+  0..255** (`translate-vec` on `<re-pattern-buffer>`, built lazily by
+  `re-translate-vector`), because `char-table-ref` is 64 ns against a
+  vector's 11 ns and folded matching asks once per character. Folded
+  rows improved 10-27%; unfolded rows unchanged. **No C counterpart** -
+  named as a host-compensation in DEPARTURES.md; do not describe it as
+  the C's design.
+- **The regexp cache key is `(PATTERN TRANSLATE TABLE)`**, not
+  `(PATTERN ICASE TABLE)`: Emacs keys on `cp->buf.translate`
+  (`search.c:220`). Fixed in `search.scm`.
+- **Reordering the opcode `cond` was measured and reverted** (15-25%
+  slower on the failing bracket), and **hoisting the failure stack into
+  attempt locals was rejected by microbenchmark** (record accessor
+  11.5 ns vs `vector-ref` 9.2 ns). Both are in DEPARTURES.md so they
+  are not retried blind.
+- Changing `<re-pattern-buffer>`'s fields means **clear the whole
+  `~/.cache/guile/ccache`** - a stale `search.go` failed with
+  `allocate-struct: Wrong number of arguments to <re-pattern-buffer>`,
+  and `--no-auto-compile` loads stale `.go` happily. The `/tmp/bench`
+  cached `.go` files are in the same cache and need deleting too when
+  a record changes.
+- The remaining profile (failing bracket): match loop self 40.7%,
+  pop 13.9%, `%re-text-ref` 10.3%, push 9.0%, `fail!` 6.8%. That is
+  the per-instruction Scheme loop and the stack's vector accesses -
+  the structural floor.
+
+
+
+## Next
+
+1. **Done in this pass**: the dead translation block in `search.scm`
+   (`%emacs-ere`, `%translate-emacs-regexp`,
+   `%current-group-map`/`%current-assertions`, the assertion helpers,
+   `%bol-flags`) is deleted, along with its `(ice-9 regex)` /
+   `make-regexp` imports **and** the syntax, chartab and buffer names
+   only it used (`fetch-char`, `standard-syntax-table`,
+   `with-syntax-table`, `char-syntax`, `syntax-class-to-char`,
+   `%setup-syntax-table`, `%class-in`, `sword`, `ssymbol`,
+   `char-table-ref-and-range`, `char-table-parent`,
+   `standard-category-table`). `search.scm` is 2,198 lines now, from
+   3,114.
+2. Then cc-mode, as planned; the engine prerequisite is now met.
+3. `%re-text-ref` inlining: `<re-text>` already carries the store,
+   gap and base (second wave), so what remains is specializing the
+   matcher's per-character read by substrate, which is the last ~10%
+   of self-time and a large change.

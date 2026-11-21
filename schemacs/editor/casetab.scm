@@ -41,6 +41,8 @@
           current-buffer buffer-local-value set-buffer-local-value!)
     (only (schemacs editor intervals) put)
     (only (schemacs editor fns) copy-sequence)
+    (only (guile) string-split %load-path canonicalize-path caddr)
+    (scheme file)
     )
 
   (export
@@ -227,8 +229,46 @@
       (%set-case-table table #t))
 
     ;;----------------------------------------------------------------
-    ;; `init_casetab_once` (`casetab.c:242`)
+    ;; `characters.el`'s Unicode case data
     ;;----------------------------------------------------------------
+    (define (%etc-data-file name)
+      ;; A file under `schemacs/etc`, found on the load path the way
+      ;; the charset and category data are.
+      ;;--------------------------------------------------------------
+      (let loop ((dirs %load-path))
+        (and (pair? dirs)
+             (let ((path (guard (e (#t #f))
+                           (string-append (canonicalize-path (car dirs))
+                                          "/schemacs/etc/" name))))
+               (if (and path (file-exists? path))
+                   path
+                   (loop (cdr dirs)))))))
+
+    (define (%load-standard-case-data! table file-name)
+      ;; A run per line: FROM, TO and the mapping, dumped from Emacs
+      ;; 31.1's standard case table. Identity entries are not in the
+      ;; file; their answer is `char_table_translate`'s fallback to the
+      ;; character itself.
+      ;;--------------------------------------------------------------
+      (let ((file (%etc-data-file file-name)))
+        (when file
+          (let ((port (open-input-file file)))
+            (dynamic-wind
+              (lambda () #f)
+              (lambda ()
+                (let loop ()
+                  (let ((line (read-line port)))
+                    (unless (eof-object? line)
+                      (let ((fields (string-split line #\tab)))
+                        (when (>= (length fields) 3)
+                          (char-table-set-range table
+                                                (string->number (car fields))
+                                                (string->number (cadr fields))
+                                                (string->number (caddr fields)))))
+                      (loop)))))
+              (lambda () (close-input-port port)))))))
+
+    ;; `init_casetab_once` (`casetab.c:242`)
 
     (put 'case-table 'char-table-extra-slots 3)
 
@@ -269,6 +309,16 @@
                                 (else i)))
           (loop (+ i 1))))
       (set-char-table-extra-slot down 2 eqv)
+      ;; `characters.el`'s Unicode entries, all four slots from Emacs's
+      ;; own standard table. The extra slots are dumped rather than
+      ;; derived because Emacs's standard UPCASE is not what
+      ;; `set_case_table` would derive for it (`up [65]' is 65, where
+      ;; the derivation gives 97); CANON and EQV are read the same way.
+      (%load-standard-case-data! down "case-table.txt")
+      (%load-standard-case-data! up "case-up.txt")
+      (%load-standard-case-data! (char-table-extra-slot down 1)
+                                 "case-canon.txt")
+      (%load-standard-case-data! eqv "case-eqv.txt")
       ;; "Fill in what isn't filled in." (`casetab.c:284')
       (%set-case-table down #t))
 
