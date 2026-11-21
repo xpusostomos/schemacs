@@ -92,7 +92,7 @@
 
   (export
    user-error
-   assoc-delete-all assq-delete-all delq remq copy-tree
+   assoc-delete-all assq-delete-all delq remq copy-tree last
    add-to-history add-to-list
    ;; string/list helpers `subr.el`'s, for the external packages and
    ;; anything else written in Emacs's idiom
@@ -1498,6 +1498,24 @@
       ;; with the test `eq'.
       ;;--------------------------------------------------------------
       (assoc-delete-all key alist eq?))
+
+    (define (last list . n-args)
+      ;; GNU Emacs's `last' (`subr.el:886'): "Return the last link of
+      ;; LIST. Its car is the last element. If LIST is nil, return nil.
+      ;; If N is non-nil, return the Nth-to-last link of LIST. If N is
+      ;; bigger than the length of LIST, return LIST."
+      ;;
+      ;; Emacs computes the length with `safe-length', whose only
+      ;; difference from `length' is that it stops on a circular list;
+      ;; that arm is not carried - every caller here passes a proper
+      ;; list.
+      (let ((n (if (pair? n-args) (car n-args) #f)))
+        (if (and n (not (null? n)))
+            (and (>= n 0)
+                 (let ((m (length list)))
+                   (if (< n m) (nthcdr (- m n) list) list)))
+            (and (pair? list)
+                 (nthcdr (- (length list) 1) list)))))
 
     (define (copy-tree tree . rest)
       ;; GNU Emacs's `copy-tree' (`subr.el:1002'): "Make a copy of TREE.

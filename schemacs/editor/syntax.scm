@@ -1290,10 +1290,43 @@
                             (and (> nesting 0) (%comstart-first? syntax)))
                         syntax smax)))
           (cond
-           ;; The C enters at `forw_incomment' when it starts with a
-           ;; pending syntax.
+           ;; "Enter the loop in the middle so that we find a 2-char
+           ;; comment ender if we start in the middle of it."
+           ;; (`syntax.c:2327'.) The C's `forw_incomment' label reads
+           ;; the *pending* syntax as the first half of a two-character
+           ;; construct and the character AT FROM as the second, and
+           ;; consumes nothing when it finds the ender. Re-entering the
+           ;; ordinary loop instead (the first version of this port)
+           ;; treated the character at FROM as the first half, so a
+           ;; scan resuming on `*' `/' of a closing `*/' ran on to the
+           ;; end of the buffer still "inside" the comment.
            ((and (not entered) (not (= syntax 0)) (< from stop))
-            (loop from syntax prev nesting #t))
+            (let* ((c1 (char->integer (fetch-char ed from)))
+                   (other (%code-in ed from c1)))
+              (cond
+               ;; A comment end of the same style.
+               ((and (%comend-first? syntax)
+                     (%comend-second? other)
+                     (= (%comment-style syntax other) style)
+                     (if (or (%nested? syntax) (%nested? other))
+                         (> nesting 0)
+                         (< nesting 0)))
+                (set! nesting (- nesting 1))
+                (if (<= nesting 0)
+                    (values #t from nesting smax)
+                    ;; A nested comment continues past its first ender.
+                    (loop (+ from 1) smax smax nesting #t)))
+               ;; A nested comment of the same style.
+               ((and (> nesting 0)
+                     (%comstart-first? syntax)
+                     (= (%comment-style other syntax) style)
+                     (%comstart-second? other)
+                     (or (%nested? syntax) (%nested? other)))
+                (loop (+ from 1) smax smax (+ nesting 1) #t))
+               ;; Neither: the ordinary loop consumes the character at
+               ;; FROM with the pending syntax as its `prev'.
+               (else
+                (loop from syntax syntax nesting #t)))))
            ((= from stop) (failure from))
            (else
             (let* ((c (char->integer (fetch-char ed from)))
@@ -2092,7 +2125,14 @@
              (nofence #f)
              (quit-count 0)
              (from (state-location state))
-             (prev-from from)
+             ;; "Keep one character before FROM" (`syntax.c:3205'):
+             ;; `prev_from = from; if (from != BEGV) dec_both'. A scan
+             ;; that resumes on the *second* character of a two-char
+             ;; comment opener must report the literal's start as that
+             ;; second char minus one, and it reads `prev_from' to do
+             ;; it. With `prev_from' left equal to FROM the start came
+             ;; out one character late.
+             (prev-from (if (> from (buffer-beg ed)) (- from 1) from))
              (prev-syntax (state-prev-syntax state))
              (prev-prev-syntax smax))
 

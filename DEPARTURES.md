@@ -12366,3 +12366,72 @@ property helpers' behaviour including `text-property-any` by value.
 the two pty checks that cover startup and the user environment
 (`imports`, `scratch`) pass - the full battery is not run for cc-only
 changes.
+
+# cc-mode: literal positions, and two more scanner bugs (2026-11-21)
+
+The literal-position machinery (`cc-engine.el:2700'-`:3270') is in:
+`c-parse-ps-state-to-cache`/`-to-parse-ps-state`,
+`c-trim-lit-pos-cache`, `c-parse-ps-state-below`, both near-cache
+families (`c-semi-*`, `c-full-*`), `c-semi-pp-to-literal`,
+`c-full-pp-to-literal`, `c-truncate-lit-pos-cache`, `c-literal-limits`,
+`c-literal-start`, `c-literal-type` and `c-in-literal`. The three caches
+are buffer-local slots behind accessors, as every cc buffer-local is.
+
+## Two `syntax.scm` bugs this found, both measured against Emacs 31.1
+
+1. **A scan's `prev_from` must start one before `from`**
+   (`syntax.c:3205`: `prev_from = from; if (from != BEGV) dec_both`).
+   Ours started it at `from`, so a scan resuming on the *second*
+   character of a two-character comment opener recorded the literal's
+   start one character late (21 rather than 20 for `/*`).
+2. **`forw_comment`'s pending-syntax entry must run the
+   `forw_incomment` tests.** The C is `if (syntax != 0 && from < stop)
+   goto forw_incomment` - the old state's pending syntax is the FIRST
+   half of a two-character ender and the character at FROM the second,
+   and nothing is consumed on a hit. Our first port re-entered the
+   ordinary loop instead, so a scan resuming on the `/` of a closing
+   `*/` treated the `/` as a fresh character and ran on to the end of
+   the buffer "inside" the comment. Both have regression tests in
+   `syntax-tests.scm` (`schemacs_editor_ppss_resume`).
+
+## A test-harness hazard, recorded because it cost an hour
+
+The literal tests failed only when the whole `syntax-tests.scm` ran:
+an earlier group's test created a buffer, and - a buffer's syntax table
+*is* the standard table object until something installs one - its
+`(modify-syntax-entry ?\; "<")`/`(?\\n ">")` wrote into the **global
+standard table**. Every later `copy-syntax-table` then inherited a
+newline that ends comments, and the C-style block comment in the new
+group ended at its first newline. `with-buffer` now calls
+`fresh-syntax-table!` for every test, and the one test outside it that
+builds its own buffers installs a copy too. The file's own comment
+already warned about this; one group was still exposing it.
+
+## Representation departures
+
+- **Nil-safe accessors.** Emacs's `car`/`cdr` of nil are nil, and the
+  literal functions answer *one-element* lists when point is outside a
+  literal, so their callers ask `(cadr ...)` of a one-element list and
+  Emacs answers nil. `%c-car`, `%c-cdr`, `%c-cadr`, `%c-cddr` and
+  `%c-caddr` are that access, exported for cc-fonts. They are used
+  wherever an answer may be nil, and nowhere else.
+- `c-truncate-lit-pos/state-cache` and `c-foreign-*` are **not carried
+  yet**: they also move `c-state-cache-invalid-pos`, which arrives with
+  the paren-state cache. `c-truncate-lit-pos-cache` is ported.
+- `c-block-comment-awkward-chars` holds *code points* (the language
+  data was generated from Emacs, where a character is an integer) while
+  this tree's `char-before` answers a character; `%c-char-before-in?`
+  converts, once, where the C compares its `int`.
+
+## Verification
+
+A differential probes `c-literal-limits`, `c-literal-start`,
+`c-literal-type`, `c-in-literal`, `c-semi-pp-to-literal` and
+`c-full-pp-to-literal` (twice, with and without NEAR) at every position
+1..72 of a fixture with a string, an escaped quote, a multi-line block
+comment, a line comment, a character literal and an unterminated string
+- **504 answered lines, identical to Emacs 31.1** with the fixture's
+syntax-table text properties stripped (this tree has none; c-mode's
+font-lock properties make Emacs 31.1 itself answer differently in the
+middle of a stale-cache window, which is why the comparison strips
+them). `cc-engine-tests.scm` grew 17 assertions, `syntax-tests.scm` 5.

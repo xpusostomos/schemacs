@@ -15376,3 +15376,46 @@ non-LIM arm - `c-full-pp-to-literal` (`:3124'), `c-semi-pp-to-literal'
 `c-looking-at-c++-attribute`, then `c-forward-sws`/`c-backward-sws`
 (`:2127', `:2381') and the `c-invalidate-sws-region-*` hooks with
 `c-before-change`/`c-after-change`.
+
+## cc-mode: literal positions, and two scanner bugs (2026-11-21)
+
+The `c-semi-pp-to-literal`/`c-full-pp-to-literal` machinery is in
+(`cc-engine.el:2700'-`:3270'`), with the three literal caches as
+buffer-local slots, `c-literal-limits`/`-start`/`-type`, `c-in-literal`
+and `c-truncate-lit-pos-cache`. `c-truncate-lit-pos/state-cache` waits
+on the paren-state cache.
+
+**Two `syntax.scm` primitive bugs fixed** (both measured against Emacs
+first, regression-tested in `syntax-tests.scm`'s
+`schemacs_editor_ppss_resume`):
+- `prev_from` starts at `from - 1` (`syntax.c:3205`); starting it at
+  `from` made a scan resuming on the second char of `/*` record the
+  comment's start one late.
+- `forw_comment`'s pending-syntax entry must run the C's
+  `forw_incomment` two-char tests (pending syntax = first half, char at
+  FROM = second, nothing consumed on a hit). Re-entering the loop made
+  a scan resuming on the `/` of `*/` stay in the comment for ever.
+
+**The test-harness hazard, worth remembering**: a buffer's syntax table
+*is* the standard table object until something installs one, so a test
+that does `modify-syntax-entry` without a copy mutates the standard
+table for every later test. `with-buffer` in `syntax-tests.scm` now
+installs a fresh copy for every test; one cache test builds its own
+buffers and had to do the same.
+
+**Nil-safe accessors**: `%c-car`/`%c-cdr`/`%c-cadr`/`%c-cddr`/
+`%c-caddr` (exported) are Emacs's car/cdr of nil, for the one-element
+answers the literal functions give. Use them wherever a literal answer
+may be nil.
+
+Verification: a 504-line per-position differential (seven probes over
+the whole fixture) identical to Emacs 31.1 with syntax-table text
+properties stripped; `cc-engine-tests` 140, `syntax-tests` 70. The full
+88-suite battery and the pty battery were run because `syntax.scm` is a
+shared primitive.
+
+**Next**: `c-looking-at-c++-attribute` (now unblocked), then
+`c-forward-sws`/`c-backward-sws` (`:2127', `:2381') with
+`c-forward-syntactic-ws`/`c-backward-syntactic-ws`, and the
+`c-invalidate-sws-region-*` hooks (they need `c-literal-limits`, now
+here).

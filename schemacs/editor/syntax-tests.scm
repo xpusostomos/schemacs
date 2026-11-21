@@ -46,6 +46,15 @@
     (let ((b (get-buffer-create "*syntax-tests*")))
       (set-buffer b)
       (erase-buffer)
+      ;; **Every test gets its own table.** A buffer's table *is* the
+      ;; standard table object until something installs one, so a
+      ;; `modify-syntax-entry' without a table argument writes into the
+      ;; standard table and every later test (and buffer) sees it - the
+      ;; hazard this file warns about above, which one group was still
+      ;; exposing: it left `;' and newline as comment starter and ender
+      ;; for good, which ended a later group's C block comment at its
+      ;; first newline.
+      (fresh-syntax-table!)
       (thunk b))))
 
 ;; ------------------------------------------------------------------
@@ -402,12 +411,14 @@
           (b (get-buffer-create "*ppss-b*")))
       (set-buffer a)
       (erase-buffer)
+      (fresh-syntax-table!)
       (modify-syntax-entry #\; "<")
       (modify-syntax-entry #\newline ">")
       (insert ";; one\n")
       (syntax-ppss 8)
       (set-buffer b)
       (erase-buffer)
+      (fresh-syntax-table!)
       (insert "xyz\n")
       (let ((st (syntax-ppss 3)))
         (list (list-ref st 0) (list-ref st 3) (list-ref st 8))))))
@@ -428,3 +439,49 @@
          (list (list-ref after 0) (list-ref after 8)))))))
 
 (test-end "schemacs_editor_ppss_cache")
+
+;;----------------------------------------------------------------------
+;; Two scan-resumption bugs found by the cc-engine literal-positions
+;; port (2026-11-21), each measured against Emacs 31.1 first.
+;;
+;; The table is C's `/*' and `*/' the way c-mode spells them: `/` is the
+;; first half of a start and the second of an end, `*' the other way
+;; round, both in style b.
+;;----------------------------------------------------------------------
+(test-begin "schemacs_editor_ppss_resume")
+
+(define (c-ish-table)
+  (let ((tbl (copy-syntax-table (standard-syntax-table))))
+    (modify-syntax-entry #\/ ". 14b" tbl)
+    (modify-syntax-entry #\* ". 23b" tbl)
+    tbl))
+
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert "x = /* c */ y; /* long\n comment */ z\n")
+  (set-syntax-table (c-ish-table))
+
+  ;; The C's `prev_from' starts at FROM - 1, so a scan that resumes on
+  ;; the second character of a two-character comment opener reports the
+  ;; literal's start as that second character minus one.
+  (let* ((s6 (parse-partial-sexp 1 6))
+         (s7 (parse-partial-sexp 6 7 #f #f s6)))
+    (test-equal "a scan through the opener's first char is outside a comment"
+                (list #f #f) (list (list-ref s6 4) (list-ref s6 8)))
+    (test-equal "resuming on the second char opens it at the first" 5
+                (list-ref s7 8)))
+
+  ;; The C enters `forw_comment' at `forw_incomment' with the old
+  ;; state's pending syntax, so a scan resuming on the second character
+  ;; of a two-character ender finds the end.
+  (let* ((s11 (parse-partial-sexp 1 11))
+         (s12 (parse-partial-sexp 11 12 #f #f s11)))
+    (test-equal "a scan through the ender's first char is inside"
+                (list #t 5) (list (list-ref s11 4) (list-ref s11 8)))
+    (test-equal "resuming on the ender's second char ends the comment"
+                (list #f #f) (list (list-ref s12 4) (list-ref s12 8))))
+
+  (test-equal "and a plain rescan inside the multi-line comment" 16
+              (list-ref (parse-partial-sexp 1 30) 8)))
+
+(test-end "schemacs_editor_ppss_resume")

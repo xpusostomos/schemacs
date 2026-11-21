@@ -435,4 +435,71 @@
             "\\`a\\`" c-doc-bright-comment-start-re)
 (test-equal "the line-join end-char list starts nil" #f c-doc-line-join-end-ch)
 
+;;----------------------------------------------------------------------
+;; Literal positions (`c-semi-pp-to-literal', `c-full-pp-to-literal',
+;; `c-literal-limits'/`-start'/`-type', `c-in-literal') and the three
+;; literal caches. Every expectation is Emacs 31.1's, measured on this
+;; fixture with its syntax-table text properties stripped (this tree has
+;; none); a whole-file differential probes seven functions at every
+;; position and is identical.
+;;----------------------------------------------------------------------
+(define literal-fixture
+  "int a = \"str\\\" x\"; /* block\n comment */ b; // line\nchar c = 'q'; \"open\n")
+
+(define (with-literal-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert literal-fixture)
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+    (thunk)))
+
+(with-literal-buffer
+ (lambda ()
+   (define (semi p) (goto-char p) (let ((r (c-semi-pp-to-literal (point))))
+                                    (list (%c-cadr r) (%c-caddr r))))
+   (define (full p) (goto-char p) (let ((r (c-full-pp-to-literal (point))))
+                                    (list (%c-cadr r) (%c-caddr r))))
+   (define (at-lit f p) (goto-char p) (f))
+
+   (test-equal "a state just before the string is outside" '(#f #f)
+               (semi 9))
+   (test-equal "inside the string: its type and start" '(string 9)
+               (semi 10))
+   (test-equal "the string's bounds" '(string (9 . 18))
+               (full 10))
+   (test-equal "inside the block comment: its type and start" '(c 20)
+               (semi 21))
+   (test-equal "an ordinary position after it is outside" '(#f #f)
+               (semi 40))
+
+   (test-equal "c-in-literal: string" 'string (at-lit c-in-literal 10))
+   (test-equal "c-in-literal: comment" 'c (at-lit c-in-literal 21))
+   (test-equal "c-in-literal: neither" #f (at-lit c-in-literal 40))
+   (test-equal "c-in-literal: the second string" 'string
+               (at-lit c-in-literal 67))
+   (test-equal "c-literal-start: string" 9 (at-lit c-literal-start 10))
+   (test-equal "c-literal-start: comment" 20 (at-lit c-literal-start 21))
+   (test-equal "c-literal-start: neither" #f (at-lit c-literal-start 40))
+   (test-equal "c-literal-start: the second string" 66
+               (at-lit c-literal-start 67))
+   (test-equal "c-literal-limits inside the string" '(9 . 18)
+               (at-lit c-literal-limits 10))
+   (test-equal "c-literal-type of the string's range" 'string
+               (c-literal-type (cons 9 18)))
+   (test-equal "c-literal-type of the block comment's range" 'c
+               (c-literal-type (cons 20 34)))
+
+   ;; The regression for the `forw_comment' resumption fix: probe every
+   ;; position in order (filling the near caches), then ask 40 again -
+   ;; before the fix the rescan resumed on the closing `*/''s second
+   ;; character and never left the comment.
+   (let loop ((p 1))
+     (when (<= p 39)
+       (goto-char p) (c-semi-pp-to-literal (point))
+       (loop (+ p 1))))
+   (test-equal "after probing every position, 40 is still outside" '(#f #f)
+               (semi 40))))
+
 (test-end "schemacs_editor_cc_engine")

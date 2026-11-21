@@ -146,6 +146,11 @@
     %bool-vector-length
     %buffer-modtime
     %buffer-modtime-size
+    %c-caddr
+    %c-cadr
+    %c-car
+    %c-cddr
+    %c-cdr
     %c-false
     %c-true
     %class-in
@@ -1099,6 +1104,7 @@
     c-beginning-of-current-token
     c-beginning-of-macro
     c-benign-error
+    c-cache-to-parse-ps-state
     c-calculate-state
     c-characterp
     c-clear-c-type-property
@@ -1128,6 +1134,12 @@
     c-forward-sexp
     c-forward-single-comment
     c-forward-to-cpp-define-body
+    c-full-get-near-cache-entry
+    c-full-lit-near-cache
+    c-full-near-cache-limit
+    c-full-pp-to-literal
+    c-full-put-near-cache-entry
+    c-full-trim-near-cache
     c-get-char-property
     c-get-lang-constant
     c-go-down-list-backward
@@ -1137,6 +1149,7 @@
     c-go-up-list-backward
     c-go-up-list-forward
     c-hungry-delete-key
+    c-in-literal
     c-indentation-style
     c-init-language-vars
     c-int-to-char
@@ -1158,7 +1171,12 @@
     c-lang-set-local!
     c-lang-setvar
     c-lang-var-value
+    c-lit-pos-cache
+    c-lit-pos-cache-limit
     c-literal-datum?
+    c-literal-limits
+    c-literal-start
+    c-literal-type
     c-lower
     c-macro-cache
     c-macro-cache-no-comment
@@ -1180,8 +1198,11 @@
     c-no-comment-end-of-macro
     c-noise-macro-name-re
     c-noise-macro-with-parens-name-re
+    c-parse-ps-state-below
+    c-parse-ps-state-to-cache
     c-parsing-error
     c-point
+    c-ps-state-cache-pos
     c-put-c-type-property
     c-put-char-properties
     c-put-char-property
@@ -1196,15 +1217,24 @@
     c-safe
     c-safe-scan-lists
     c-save-buffer-state
+    c-semi-get-near-cache-entry
+    c-semi-lit-near-cache
+    c-semi-near-cache-limit
+    c-semi-pp-to-literal
+    c-semi-put-near-cache-entry
+    c-semi-trim-near-cache
     c-shift-line-indentation
     c-simple-skip-symbol-backward
     c-skip-ws-chars-backward
     c-skip-ws-chars-forward
+    c-state-nonlit-pos-interval
     c-string-limit-regexp
     c-string-list-p
     c-string-syntax
     c-syntactic-end-of-macro
     c-syntax-table-hwm
+    c-trim-lit-pos-cache
+    c-truncate-lit-pos-cache
     c-up-list-backward
     c-up-list-forward
     c-upper
@@ -2419,6 +2449,7 @@
     kill-visual-line
     kill-word
     know-region-cache
+    last
     lazy-highlight-cleanup
     left-char
     line-beginning-position
@@ -3293,7 +3324,11 @@
     set!c-auto-newline
     set!c-current-comment-prefix
     set!c-electric-flag
+    set!c-full-lit-near-cache
+    set!c-full-near-cache-limit
     set!c-hungry-delete-key
+    set!c-lit-pos-cache
+    set!c-lit-pos-cache-limit
     set!c-macro-cache
     set!c-macro-cache-no-comment
     set!c-macro-cache-start-pos
@@ -3302,6 +3337,8 @@
     set!c-noise-macro-name-re
     set!c-noise-macro-with-parens-name-re
     set!c-parsing-error
+    set!c-semi-lit-near-cache
+    set!c-semi-near-cache-limit
     set!cache-long-scans
     set!cd-path
     set!dired-actual-switches!
