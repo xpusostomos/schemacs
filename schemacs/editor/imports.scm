@@ -64,8 +64,10 @@
     (schemacs editor xfaces)
     (schemacs editor editfns)
     (schemacs editor lisp)
+    (schemacs editor cc-engine)
     (schemacs editor cc-defs)
     (schemacs editor cc-langs)
+    (schemacs editor cc-vars)
     (schemacs editor callproc)
     (schemacs editor casetab)
     (schemacs editor casefiddle)
@@ -73,6 +75,7 @@
     (schemacs editor characters)
     (schemacs editor charset)
     (schemacs editor faces)
+    (schemacs editor cl-seq)
     (schemacs editor coding)
     (schemacs editor startup)
     (except (schemacs editor command)  quit-char *quit-flag* *inhibit-quit* signal-quit maybe-quit)
@@ -95,6 +98,7 @@
     (except (schemacs editor fileio)  directory-name-p expand-file-name file-exists-p file-name-directory-part file-name-nondirectory-part file-writable-p *buffer-visited-file-modtime-function*)
     (schemacs editor image)
     (schemacs editor font)
+    (schemacs editor eval)
     (schemacs editor face-remap)
     (schemacs editor glyph)
     (schemacs editor help-mode)
@@ -131,7 +135,7 @@
     (schemacs editor tooltip)
     (schemacs editor mule-util)
     (schemacs editor tty-colors)
-    (except (schemacs editor subr)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd)
+    (except (schemacs editor subr)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd nthcdr nth)
     (schemacs editor window-x)
     )
   (export
@@ -142,6 +146,8 @@
     %bool-vector-length
     %buffer-modtime
     %buffer-modtime-size
+    %c-false
+    %c-true
     %class-in
     %comend-first?
     %comend-second?
@@ -162,6 +168,7 @@
     %frame-vertical-scroll-bar-type
     %help-arg
     %kill-buffer
+    %length
     %lisp-el-special-forms-and-macros
     %mark-marker
     %marker-charpos
@@ -174,6 +181,7 @@
     %set!keymap-order!
     %setup-syntax-table
     %spec-code
+    %string
     %styleb-bit
     %stylec2
     %substring
@@ -249,7 +257,18 @@
     *buffers-menu-show-status*
     *build-marker-function*
     *byte-count-to-string-function*
+    *c++-font-lock-extra-types*
+    *c-asymmetry-fontification-flag*
     *c-buffer-is-cc-mode*
+    *c-font-lock-extra-types*
+    *c-lang-const-expansion*
+    *c-langs-are-parametric*
+    *c-macro-start*
+    *c-mark-wrong-style-of-comment*
+    *c-report-syntactic-errors*
+    *c-syntactic-indentation*
+    *c-syntactic-indentation-in-macros*
+    *c-warn-ids-with-dollar*
     *calculate-lisp-indent-function*
     *calculate-lisp-indent-last-sexp*
     *called-interactively*
@@ -458,6 +477,7 @@
     *history-delete-duplicates*
     *history-length*
     *icon-preference*
+    *idl-font-lock-extra-types*
     *image-load-path*
     *indent-tabs-mode*
     *inhibit-auto-fill*
@@ -493,6 +513,7 @@
     *isearch-lazy-highlight*
     *iso-2022-charset-list*
     *item-properties*
+    *java-font-lock-extra-types*
     *jit-lock-after-change-extend-region-functions*
     *jit-lock-chunk-size*
     *jit-lock-context-time*
@@ -625,6 +646,7 @@
     *next-error-recenter*
     *next-screen-context-lines*
     *next-selection-coding-system*
+    *objc-font-lock-extra-types*
     *occur--final-pos*
     *occur-excluded-properties*
     *occur-hook*
@@ -645,6 +667,7 @@
     *parse-sexp-lookup-properties*
     *pending-coding-system*
     *pending-undo-list*
+    *pike-font-lock-extra-types*
     *point-before-last-command-or-undo*
     *point-marker-function*
     *popup-menu-function*
@@ -917,6 +940,7 @@
     apply-command
     apply-modifiers
     apply-partially
+    aref
     assign-row
     assoc-default
     assoc-delete-all
@@ -1059,15 +1083,51 @@
     bury-buffer
     byte8-to-char
     bytes-have-null?
+    c--delete-duplicates
+    c--intersection
+    c--mapcan
+    c--set-difference
     c-add-language
+    c-alnum
+    c-alpha
+    c-auto-newline
+    c-backward-single-comment
+    c-beginning-of-macro
+    c-benign-error
+    c-calculate-state
+    c-characterp
+    c-clear-c-type-property
+    c-clear-char-properties
+    c-clear-char-property
     c-concat-separated
+    c-current-comment-prefix
     c-define-lang-constant
     c-define-lang-constant-here
+    c-delq-from-dotted-list
+    c-digit
+    c-echo-parsing-error
+    c-electric-flag
+    c-emacs-features
+    c-end-of-macro
+    c-filter-ops
     c-find-assignment-for-mode
+    c-forward-comment-minus-1
+    c-forward-over-cpp-define-id
+    c-forward-to-cpp-define-body
+    c-get-char-property
     c-get-lang-constant
+    c-hungry-delete-key
+    c-indentation-style
     c-init-language-vars
+    c-int-to-char
+    c-invalidate-macro-cache
+    c-is-escaped
+    c-keyword-member
+    c-keyword-sym
+    c-kwds-lang-consts
     c-lang-const
     c-lang-constant-documentation
+    c-lang-constant-names
     c-lang-defconst
     c-lang-defconst-bindings
     c-lang-defconst-eval-immediately
@@ -1079,12 +1139,42 @@
     c-lang-setvar
     c-lang-var-value
     c-literal-datum?
+    c-lower
+    c-macro-cache
+    c-macro-cache-no-comment
+    c-macro-cache-start-pos
+    c-macro-cache-syntactic
+    c-macro-is-genuine-p
+    c-macro-with-semi-re
+    c-major-mode-is
     c-make-bare-char-alt
     c-make-emacs-variables-local
+    c-make-font-lock-extra-types-blurb
     c-make-init-lang-vars-fun
     c-make-keywords-re
+    c-min-property-position
     c-mode-symbol
     c-mode-var
+    c-next-single-property-change
+    c-no-comment-end-of-macro
+    c-parsing-error
+    c-point
+    c-put-c-type-property
+    c-put-char-properties
+    c-put-char-property
+    c-query-and-set-macro-start
+    c-query-macro-start
+    c-register-emacs-variable-reader!
+    c-save-buffer-state
+    c-shift-line-indentation
+    c-string-limit-regexp
+    c-string-list-p
+    c-string-syntax
+    c-syntactic-end-of-macro
+    c-syntax-table-hwm
+    c-upper
+    c-with-syntax-table
+    c-ws*-string-limit-regexp
     cache-long-scans
     calculate-lisp-indent
     call-interactively
@@ -1124,6 +1214,7 @@
     char-shift
     char-super
     char-syntax
+    char-syntax-in
     char-table-default
     char-table-extra-slot
     char-table-p
@@ -1164,6 +1255,10 @@
     check-face
     choose-completion
     cl--defmethod-doc-pos
+    cl-delete-duplicates
+    cl-intersection
+    cl-member
+    cl-set-difference
     clear-end-of-line!
     clear-frame!
     clear-frame-area!
@@ -1410,6 +1505,7 @@
     del-range-1
     del-range-2
     delay-mode-hooks
+    delete
     delete-all-overlays
     delete-all-space
     delete-and-extract-region
@@ -1619,6 +1715,7 @@
     editor-libraries
     elisp--preceding-sexp
     elisp-mode-syntax-propertize
+    elt
     emacs-lisp-mode
     emacs-lisp-mode-hook
     emacs-lisp-mode-map
@@ -1921,6 +2018,7 @@
     frame-window-change
     frame-windows
     frame?
+    funcall
     funcall-interactively
     function-key-name
     function-key-offset
@@ -2057,6 +2155,7 @@
     icons--merge-spec
     icons--register
     icons--spec
+    identity
     ignore
     image-mask-p
     image-property
@@ -2449,6 +2548,8 @@
     map-keymap
     map-keymap-internal
     map-tty-color
+    mapcan
+    mapcar
     mapconcat
     mark
     mark-active
@@ -3154,6 +3255,16 @@
     set!buffer-truncate-lines
     set!buffer-word-wrap
     set!buffer-zv
+    set!c-auto-newline
+    set!c-current-comment-prefix
+    set!c-electric-flag
+    set!c-hungry-delete-key
+    set!c-macro-cache
+    set!c-macro-cache-no-comment
+    set!c-macro-cache-start-pos
+    set!c-macro-cache-syntactic
+    set!c-macro-with-semi-re
+    set!c-parsing-error
     set!cache-long-scans
     set!cd-path
     set!dired-actual-switches!

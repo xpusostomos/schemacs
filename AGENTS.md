@@ -14528,9 +14528,6 @@ alone** on the same tree - the battery's documented between-key/startup
 race class (each failure's screen showed an editor that had not yet
 processed the key). The region, scroll, save, truecolor,
 completion-window, narrow and resize checks all passed in that run.
-**A running editor keeps the code it started with** - restart before
-looking at any of it.
-
 # Narrowing across windows, `$`, and the first cell of a blank line
 # (2026-11-21, the pass after the region work)
 
@@ -15062,3 +15059,225 @@ syntax-table data lands.
    declaration stub.
 3. Milestone: `c-mode` opens `.c`/`.h` with the right syntax table and
    font-lock faces, compared face-for-face with Emacs.
+
+## cc-mode step 3: the C syntax tables (2026-11-21)
+
+`cc-langs.scm` has `c-populate-syntax-table` and the
+`c-make-mode-syntax-table`/`c-mode-syntax-table` constants; `cc-defs.scm`
+has `c-major-mode-is`; `syntax.scm` exports `char-syntax-in` (table
+explicit, needed because cc-langs is evaluated with no buffer). The
+c-mode syntax table matches Emacs 31.1 **character for character** over
+0..255 (55 runs, pinned in `cc-langs-tests.scm`), and
+`c-make-keywords-re` now reproduces Emacs's operator classification too
+- the step-2 caveat is closed.
+
+The one mechanism to know: `c-major-mode-is` reads
+`*c-langs-are-parametric*`, which the VAL evaluation binds; macro
+expansion inside `eval` sees it, which is how Emacs's
+`c--macroexpand-all` switch is reproduced. Do not expand a VAL with
+that parameter false.
+
+Still not carried from that section: the XEmacs syntax-table arm, and
+`c-make-no-parens-syntax-table`/`c-identifier-syntax-table` (they need
+the `c-recognize-<>-arglists` constants and the `c-mode-syntax-table`
+variable plumbing).
+
+Next: `cc-vars.el`'s defcustoms, then the `c-lang-defconst` language
+data (the `c-<>-*`/operators/keyword tables), then the first `c-mode`
+milestone (syntax table + font-lock faces), with `easy-menu-define`
+still the one missing primitive for its menus.
+
+## cc-mode step 4: the first of cc-vars (2026-11-21)
+
+`schemacs/editor/cc-vars.scm` has the variables the port has needed so
+far (the indentation switches, the five font-lock extra-type lists,
+`c-make-font-lock-extra-types-blurb`, `c-string-list-p`, the buffer-local
+comment-prefix and macro-regexp accessors). `cc-vars-tests.scm` (23) is
+in the runner; the library is in `loadup.scm` and `imports.scm` is
+regenerated. All 86 suites pass.
+
+The file is partial on purpose - the style system comes with
+cc-styles/cc-engine - and the naming rules are in DEPARTURES.md:
+`defcustom` -> starred parameter, plain `setq` variable -> plain define,
+buffer-local variable -> accessor + `set!` setter.
+
+Next: the language data proper. The keyword lists
+(`cc-langs.el:2287-3578`, ~85 `c-lang-defconst`s) are the first
+tranche; `c-keywords` collects every constant whose name ends in
+`-kwds`, so the whole list must be in before it can be compared. Port
+the helpers it needs first (`c--set-difference`, `c--intersection`,
+`c--delete-duplicates`, `c--mapcan`, and `c-make-keywords-re` is
+already there), then each constant with a differential against Emacs -
+the same method as the syntax table.
+
+## cc-mode step 5: the whole of the language data (2026-11-21)
+
+`schemacs/editor/cc-langs.scm` now has **every language constant in
+`cc-langs.el`** - 354 names across all seven languages - and the
+differential against Emacs 31.1 is **2472 of 2478 answers identical,
+the 6 others order-only**. Read DEPARTURES.md's "cc-mode step 5" before
+touching any of it.
+
+## What is where
+
+- `schemacs/editor/cl-seq.scm` (new) - `cl-set-difference`,
+  `cl-intersection`, `cl-delete-duplicates`, `cl-member`: the four
+  `cl-lib` functions the constants are built with, with cl-seq.el's
+  own quirks (default test is `eql`/`eqv?`; the `memq`-except-numbers
+  path; `cl-intersection` answers the reverse of list2's order).
+- `schemacs/editor/eval.scm` (new) - `funcall` (`eval.c:3185`); a
+  function is a procedure here, not a symbol.
+- `schemacs/editor/fns.scm` - `mapcar`, `mapcan`, `elt`, `%length`,
+  `%string`, `identity`, `delete`, and `nth`/`nthcdr` moved here from
+  `subr.scm` (they are fns.c's). `mapcar`/`mapconcat`/`nconc` treat
+  `#f` as nil.
+- `schemacs/editor/data.scm` - `aref`.
+- `schemacs/editor/cc-defs.scm` - `c--mapcan`/`c--set-difference`/
+  `c--intersection`/`c--delete-duplicates` (Emacs's macros, procedures
+  here), `c-emacs-features` (Emacs 31.1's value as a constant),
+  `c-with-syntax-table`, `c-int-to-char`, `c-characterp`, `%c-true` /
+  `%c-false` (Emacs truth for this tree's two nils),
+  `c-lang-constant-names`, `c-register-emacs-variable-reader!`
+  (`c-mode-var`'s bridge to the starred defcustom parameters), and
+  `c-lang-const-expansion`.
+- `schemacs/editor/cc-vars.scm` - registers the six
+  `*-font-lock-extra-types` readers, which is what
+  `c-known-type-key`'s `(boundp ...)` test is here.
+- `schemacs/editor/cc-langs.scm` - `c-filter-ops`, `c-kwds-lang-consts`,
+  the hand-ported six, and the generated data block (its header comment
+  explains the translation rules).
+
+## How to re-run the differential
+
+`tools/cc-langs-diff/` - build both dumps, `python3 compare.py`, exit 0
+when only the known order case remains. **This is the gate for any
+change to the language data**: a regexp-valued constant must stay byte
+for byte, and a list-valued one set for set. The two Emacs traps are in
+its README: a failing constant makes Emacs `makunbound` the symbol and
+poison every later language (the dump reloads cc-langs after an error),
+and list order is obarray order and not comparable.
+
+`tools/cc-langs-gen/` regenerates the block from a `cc-langs.el`; it
+reproduces the checked-in block byte-for-byte from a clean work
+directory, so use it rather than editing the data by hand.
+
+## Not carried, and what each waits on
+
+- **`c-keywords-obarray`** - no obarray here. `c-keyword-sym` and
+  `c-keyword-member` are cc-engine's and can be indexed from
+  `c-keyword-member-alist` when it arrives.
+- **`c-mode-menu`** - `easy-menu-define`, the one primitive cc-mode.el's
+  eight menus still need.
+- The `t` fallback for `c-mode-menu`'s menu entries and the defcustom
+  `:set` calls (already named in earlier handoffs) stand.
+
+## Next, in order
+
+1. **`cc-fonts.el`** (3,591 lines): `c-make-syntactic-matchers`,
+   `c-basic-matchers-before/after`, `c-complex-decl-matchers`, the
+   declaration detection machinery. Everything it reads from cc-langs is
+   now in and exact; `c-keyword-member` needs the obarray replacement
+   (a hash table over `c-keyword-member-alist` is the natural form).
+2. `cc-engine.el` (16,747 lines) - the parser, state cache, `c-parse-state`.
+3. `cc-mode.el` - the mode definitions, `c-init-language-vars` in
+   anger, `easy-menu-define`, `def-edebug-spec`.
+4. The milestone: `c-mode` opening `.c`/`.h` with the syntax table, the
+   faces compared to Emacs, then indentation (cc-align/cc-cmds/
+   cc-styles).
+
+## Verified
+
+All **87 suites** pass (`cc-langs-tests` 37, `cl-seq-tests` 21,
+`cc-defs-tests` 21, `cc-vars-tests` 23, `fns-tests` 41, `subr-tests`
+104, `loadup-tests` 16, `tty-editor-tests` 354), and `tools/pty-check.py
+scratch` passes as a startup smoke test. **The pty battery as a whole
+was not run this pass.** The differential is the language data's real
+gate and it is green (see above).
+
+**A running editor keeps the code it started with** - restart before
+looking at any of it.
+
+# cc-mode step 6: the preprocessor machinery, and two scanner fixes
+# (2026-11-21)
+
+`schemacs/editor/cc-engine.scm` is new, with cc-engine.el's first
+tranche in the file's own order: the internal state variables and
+`c-calculate-state`, the `c-macro-cache` family and every
+preprocessor-directive function from `c-query-and-set-macro-start` to
+`c-forward-to-cpp-define-body`, `c-forward-comment-minus-1` /
+`c-backward-single-comment`, the basic utilities (`c-delq-from-dotted-list`,
+`c-shift-line-indentation`, `c-keyword-sym`/`c-keyword-member`, the
+string-syntax constants, `c-parsing-error`/`c-echo-parsing-error`, the
+c-type property pair), `c-point` and `c-is-escaped`. `cc-defs.scm`
+gained `c-save-buffer-state` and the character-property helpers;
+`cc-vars.scm` gained `*c-report-syntactic-errors*`.
+
+## The two primitive bugs this port found - both in `syntax.scm`
+
+Read them before touching `forward-comment` or `parse-partial-sexp`;
+DEPARTURES.md has the C for each.
+
+1. **`back_comment`'s dispatch must use the merged `code`**, not the
+   character's own class. With `orig-code` the merged `*/` looked like
+   punctuation, `(forward-comment -1)` over a C block comment answered
+   nil and stopped at the comment's last character. `orig-code` survives
+   only for the C's "was it a two-char Sendcomment" test.
+2. **The "ignore comment starters of a different style" test is the
+   C's `else if` after the two-char conversions, so it must not see a
+   `com2start`.** Its style is computed from one half of the pair, so
+   without the guard every `/* ... */` reported lossage backwards.
+3. `parse-partial-sexp`'s element 7 is nil when `comstyle` is 0; a
+   truthiness test there answers 0 (0 is true in Scheme), and
+   `c-end-of-macro`'s block-comment branch then never fires.
+
+## What to know before extending it
+
+- **State variables are buffer-local slots behind accessors**
+  (`c-macro-cache` / `set!c-macro-cache`) and `c-macro-start` is the
+  parameter `*c-macro-start*`; `c-shift-line-indentation`'s
+  self-rebind is a `parameterize`.
+- **`%c-langvar` reads a language variable's slot** (keyed by the Emacs
+  symbol) with #f when the buffer has not initialised the language.
+- **`c-keywords-obarray` is a lazily built hash keyed on the language's
+  `c-keyword-member-alist`**, and the language comes from the buffer's
+  `major-mode` (or `*c-buffer-is-cc-mode*`). A test buffer must set one
+  of them; Emacs's obarray is a language variable and needs neither.
+- **`c-point`'s BOD/EOD/BOSWS/EOSWS arms signal**, naming the helper
+  they wait for (`c-beginning-of-defun-1`, `c-end-of-defun-1`,
+  `c-forward-syntactic-ws`/`c-backward-syntactic-ws`). The other eleven
+  arms are complete and measured.
+- `c-benign-error`'s `(ding)` half is not ported; the message is all.
+
+## The measurement method (the trap is fontification)
+
+Every expectation in `cc-engine-tests.scm` (88) is Emacs 31.1's own,
+measured in `emacs -Q --batch` in a real `c-mode` buffer first. **A
+table that does not reset `c-macro-cache` before each probe is not
+deterministic**: `c-beginning-of-macro` at 82 answered `(nil 82)` in
+one Emacs run and `(t 56)` in another, because the buffer's jit-lock
+fontification probes the same cache. The differential harness
+(`/tmp/cceng-reset.el` / `ours.scm`, the same 55 lines, and a warm-cache
+72-line table) resets explicitly; both are byte-identical.
+
+## Next, in the file's order
+
+1. `c-forward-sws`/`c-backward-sws` (the syntactic-whitespace engine,
+   ~1,600 lines with their caches) and `c-forward-syntactic-ws` /
+   `c-backward-syntactic-ws`, then `c-syntactic-content`, the debug
+   helpers, `c-forward-comments`.
+2. `c-beginning-of-statement-1` (664 lines) and its automaton, then
+   `c-parse-state` and the declaration machinery - the rest of
+   cc-engine.
+3. cc-fonts, whose matchers read `c-keyword-member` (now working) and
+   the parser.
+4. cc-mode itself: the mode definitions, `easy-menu-define`,
+   `def-edebug-spec`, and the first milestone (`.c`/`.h` open in
+   c-mode with the syntax table and faces compared to Emacs).
+
+## Verified
+
+`schemacs/editor/cc-engine-tests.scm` (88) is in `tools/run-suites.py`
+and the tree compiles with no warnings in the touched libraries.
+`imports.scm` is regenerated. The full suite battery is **88/88**
+(`cc-engine-tests` 88) and `tools/pty-check.py` is **100/100** on the
+settled tree.

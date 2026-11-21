@@ -11855,3 +11855,401 @@ redefined, while the constant itself reads the new value.
   including the unmatchable `\(\`a\`\)` for an empty list and the
   `\(\`\)`-wrapped mixed branch; the only unknown is the syntax table
   above.
+
+# cc-mode step 3: the C syntax tables, and `c-make-keywords-re` closed (2026-11-21)
+
+`cc-langs.scm` now has `c-populate-syntax-table`, the
+`c-make-mode-syntax-table` and `c-mode-syntax-table` constants, and the
+per-language `@` entries (`cc-langs.el:331-395`); `cc-defs.scm` has
+`c-major-mode-is` (`:1153`). The step-2 question is closed: with the
+mode's own table, `c-make-keywords-re` reproduces Emacs 31.1's c-mode
+answers exactly, including operator lists (`("++" "->")` is
+non-symbols, where the standard table says symbols).
+
+## Measured
+
+- **The whole c-mode syntax table, character for character.** Emacs
+  31.1's `(char-syntax i)` for 0..255 in a real c-mode buffer, run-length
+  encoded, is identical to ours from the generated table - 55 runs,
+  including the Unicode ranges above 159 that come from the standard
+  table and the `\240` whitespace entry. Pinned in `cc-langs-tests.scm`.
+- `@` is `_` (symbol) in ObjC and Java, `.` in Pike, unchanged
+  punctuation in C - per-language, as `c-make-keywords-re` and the
+  font-lock code expect.
+- `c-make-keywords-re` on six lists (symbol-only, operator-only, mixed,
+  empty, with a nil element, adorn off) matches Emacs's c-mode output
+  to the string.
+
+## How the mode choice is baked
+
+Emacs's VAL for `c-make-mode-syntax-table` splices a
+`(cond ((c-major-mode-is 'objc-mode) '(modify-syntax-entry ?@ "_" table)) ...)`
+at constant-evaluation time, because the returned lambda is called
+later in a buffer of an arbitrary language. Our VAL computes the
+chosen `(char . syntax)` pair at evaluation time and closes over it;
+re-asking `c-major-mode-is` when the lambda runs would read the wrong
+language.
+
+## `c-major-mode-is` and the parametric flag
+
+Porting `c-major-mode-is` needed Emacs's `c-langs-are-parametric`
+switch: inside a `c-lang-defconst` VAL it expands to
+`c-lang-major-mode-is` (which matches fallback modes); outside, to the
+`memq`/`eq` of `c-buffer-is-cc-mode` (which does not). Emacs sets the
+flag around its own recursive expansion of a VAL; here a VAL is source
+evaluated on demand, and macro expansion happens *inside* that `eval`,
+so a parameter (`*c-langs-are-parametric*`, bound by the source thunk)
+is seen by the transformer. That is the same switch, reached through
+Guile's evaluation model rather than through `c--macroexpand-all`.
+
+## New primitive: `char-syntax-in`
+
+`syntax.scm` exports `char-syntax-in TABLE CHARACTER` - `char-syntax`
+with the table explicit. **No Emacs counterpart** (`char_syntax` reads
+the current table only): `c-make-keywords-re` runs while cc-langs is
+being evaluated at compile time, where there is no current buffer to
+hold a syntax table, and it needs the *mode's*. `char-syntax` is now
+one call to it.
+
+## Not carried
+
+- The XEmacs arm of `c-populate-syntax-table` (the 8-bit
+  `c-emacs-features` branch); this editor is Emacs-like, so the 1-bit
+  entries (`. 124b`, `. 23`) are the ones used. Named in the source.
+- `c-make-no-parens-syntax-table` / `c-no-parens-syntax-table` and
+  `c-identifier-syntax-table`: they need `c-recognize-<>-arglists` and
+  its `c-<>-type-kwds`/`c-<>-arglist-kwds` constants, and (for
+  `c-identifier-syntax-table`) the `c-mode-syntax-table` *variable*
+  plumbing that arrives with cc-mode itself.
+
+# cc-mode step 4: the first of cc-vars (2026-11-21)
+
+`schemacs/editor/cc-vars.scm` is the part of `cc-vars.el` the rest of
+the port has needed first: the syntactic-indentation switches, the
+font-lock extra-type lists, `c-make-font-lock-extra-types-blurb`,
+`c-string-list-p`, `c-indentation-style`, and the buffer-local
+`c-current-comment-prefix`/`c-macro-with-semi-re`. `cc-vars-tests.scm`
+(23) pins every default against Emacs 31.1's `(symbol-value V)` and the
+buffer-local behaviour.
+
+**The file is deliberately partial**, and says so: the style system
+(`c-offsets-alist`, `c-hanging-braces-alist`, `defcustom-c-stylevar`
+and its two hundred lines of style data) belongs with `cc-styles` and
+`cc-engine`, which are what read it. Nothing ported so far references
+those variables; cc-langs' only references to cc-vars are two menu
+entries (`c-indentation-style`, `c-syntactic-indentation`), and the
+menu waits on `easy-menu-define`.
+
+## Representation departures
+
+- A `defcustom` is a parameter whose name carries stars
+  (`*c-syntactic-indentation*`), the tree's convention; ported cc code
+  reads it as `(*c-syntactic-indentation*)`.
+- `c-indentation-style` is a **plain variable** (`c-indentation-style`),
+  as in Emacs: it is `setq`-ed by `c-set-style`, never `let`-bound.
+- `c-current-comment-prefix` and `c-macro-with-semi-re` are
+  **buffer-local slots behind accessors of the variable's name**, with
+  `set!`-prefixed setters, because Emacs makes them buffer-local and a
+  parameter (thread-dynamic) is the wrong lifetime.
+- `:safe` is not carried: the tree has no `safe-local-variable`
+  machinery yet, and nothing consults it. The `:type` values are kept
+  as data (they name widgets that are not ported).
+- `c-make-font-lock-extra-types-blurb` is ported and **used** to build
+  the docstrings at load, as Emacs does; the result is the same text.
+
+# cc-mode step 5: the language data, and the primitives under it (2026-11-21)
+
+`schemacs/editor/cc-langs.scm` now carries **every language constant**
+in `cc-langs.el` - 354 names (`c-lang-defconst`, `c-lang-defvar`,
+`c-lang-setvar`), for all seven languages - and the four `cl-lib`
+sequence functions they are built with live in a new
+`schemacs/editor/cl-seq.scm` (`lisp/emacs-lisp/cl-seq.el`).
+`schemacs/editor/eval.scm` is new for `funcall` (`eval.c:3185`).
+`cc-langs-tests.scm` grew a 13-test `language data` group; a full
+differential harness (below) compared **all 2478 (constant, language)
+answers** against Emacs 31.1.
+
+## How the data was ported, and why
+
+`cc-langs.el` is 4722 lines and 572 `c-lang-defconst`/`c-lang-defvar`
+forms, nearly all of them data. They were translated **form for form,
+in file order**, by a script (`tools/cc-langs-gen/`): Elisp's expression
+shapes become Scheme's, and the six forms that are imperative code are
+hand-written in their own place in the file. The generated block is
+merged into `cc-langs.scm` under a header comment that says how to read
+it, and the script is checked in so the transcription can be re-run and
+re-diffed when Emacs's cc-langs changes.
+
+**The verification is a differential, not a spot check.** For every
+constant and each of c, c++, objc, java, idl, pike, awk, the value was
+computed by this tree (`c-get-lang-constant`) and by Emacs 31.1
+(`c-get-lang-constant` in `emacs -Q --batch`), rendered to a canonical
+form (strings as code-point lists, chars and numbers as one integer
+class, dotted pairs included) and compared - 2478 answers.
+**The result: 2472 identical; the 6 remaining are order-only**
+(`c-pre-lambda-tokens`, where the set is equal; see the obarray
+departure). The installed Emacs's own `cc-langs.el.gz` is byte-identical
+to the 32.0.50 tree's file, so this is the same source the running
+Emacs was built from.
+
+## The `nil` convention, and the test that makes it work
+
+Emacs has one nil; this tree has `#f` and `'()`, and Scheme treats
+`'()` as true. The ported VALs therefore use, everywhere Emacs tests a
+value, **`(%c-true X)` / `(%c-false X)`** (in `cc-defs.scm`): true
+exactly when X is neither `#f` nor `'()`. `and`/`or` are rewritten to
+preserve Elisp's value semantics, `not` becomes `(not (%c-true X))`,
+and a place that hands a possibly-nil constant to `append`/`cons`/
+`mapcar` normalises it `(or X '())`. Without this, a constant a
+language does not set (`#f`) and a derived empty list (`'()`) are
+indistinguishable from a true value, and `(when (c-lang-const ...))`
+takes the wrong branch - which is exactly what happened before the
+rule existed.
+
+Correspondingly, **`c-filter-ops`, `c--*` and every list helper accept
+both nils**: `c-filter-ops` treats `#f` as the empty list and treats a
+group whose head is nil (`(cons nil c-after-id-concat-ops)`) as a
+group, because Emacs's `(symbolp nil)` is *true*.
+
+## The order-only departure: `c-kwds-lang-consts`
+
+`c-keywords` is built from `c-kwds-lang-consts`, which Emacs collects by
+walking the `c-lang-constants` **obarray** with `mapatoms`. There is no
+obarray here; the registry answers its names **sorted by name**
+(`c-lang-constant-names`, `cc-defs.scm`). Consequences, all measured:
+
+- `c-keywords`'s *members* are identical; its order, and the order of
+  `c-keyword-member-alist`'s cdr lists and `c-stmt-block-only-keywords`,
+  differ. Every consumer tests membership (`memq`, `assoc`) or builds a
+  regexp with `regexp-opt`, which sorts - so **no regexp or match
+  behaviour changes**; `c-keywords-regexp` is byte-identical to
+  Emacs's.
+- Emacs computes `c-kwds-lang-consts` **where it stands in the file**,
+  so `c-pre-id-bracelist-kwds` (defined later) is *not* in it - 79
+  names. Our registry snapshot is taken at the same point and finds the
+  same 79; `c-pre-id-bracelist-kwds` is registered later and is
+  correctly absent.
+
+## Other representation departures
+
+- **Syntax-table makers are procedures.** `c-make-mode-syntax-table` and
+  `c-make-no-parens-syntax-table` hold a *procedure* here where Emacs's
+  constant holds a quasiquoted `(lambda ...)` list that
+  `c-mode-syntax-table` `funcall`s. Same value, same use; a procedure
+  cannot be compared to Emacs's list, which the differential
+  normalises.
+- **`c-int-to-char` converts.** Emacs's is the identity ("a character
+  is an integer"); here a character is a character object, so the places
+  the C wraps a code point use `integer->char`.
+- **Character literals**: in *expression* position (`(= (elt s 0) ?x)`)
+  they are code points, as Emacs's are; in *quoted data* they are
+  character objects, which is what this tree's character functions
+  (`modify-syntax-entry`, `char-syntax`) take.
+- **`:test 'string-equal` becomes `:test string-equal`** - a symbol is
+  not applicable here, so the ported call hands the procedure. The
+  `cl-seq` functions document that the `:test` value is a procedure.
+- **`append` over a string** (Emacs's `append` spreads any sequence)
+  becomes `string->list` in the two constants that do it
+  (`c-stmt-boundary-skip-list` and `-with-comma`); the elements are
+  character objects, because their consumers compare with `char-after`.
+- **`c-keywords-obarray` is not carried** (no obarray; its readers,
+  `c-keyword-sym`/`c-keyword-member`, arrive with cc-engine and can be
+  indexed from `c-keyword-member-alist`).
+- **`c-mode-menu`** is not carried: its
+  value is a menu definition for `easy-menu-define`, which is still the
+  one missing primitive for cc-mode.el's menus.
+- **`eval-when (expand ...)` registrations.** `cc-langs.scm` registers
+  its `c-lang-defvar`s and `c-kwds-lang-consts` while the file is being
+  *expanded*, because `c-lang-defconst-eval-immediately` evaluates a
+  VAL's quasiquote at macro-expansion time - Emacs defines those in
+  `eval-and-compile` for the same reason. `c-lang-const-expansion` is a
+  new parameter: `'call` while a VAL is evaluated (Emacs's
+  `c-lang-const-expansion 'call`), `'bake` elsewhere.
+- **The error wrapper re-signals without the message.** Emacs first
+  `message`s "Eval error in the `c-lang-defconst' for `%S' in %s:" and
+  then re-signals the original condition; this re-signals the original
+  condition only (writing that message would mean stderr, which the
+  editor owns).
+
+## Primitives that had to be ported, each found by a failing constant
+
+Every one of these was missing or wrong, and the differential is what
+found it - not a test:
+
+- **`c-make-bare-char-alt` was not Emacs's algorithm.** The port escaped
+  characters; Emacs *compresses runs into ranges* (`^!%&(-/:-@[-^`{-~`).
+  Ported step for step; `c-block-prefix-charset` now matches byte for
+  byte.
+- **`nconc` did not treat `#f` as nil** (Emacs's `nil` is both), so a
+  `mapcan` whose function matched nothing produced a dotted pair
+  (`("sizeof" . #f)`), and after the first fix a nil argument in the
+  middle swallowed the rest of the list.
+- **`mapcar`/`mapconcat` refused `#f`** as a sequence; Emacs's `mapcar`
+  over nil is nil.
+- **`length` had no string arm** (Emacs's `length` counts strings,
+  vectors, nil and char-tables) - ported as `%length`.
+- **`string` had no integer argument** (Emacs's `(string 47)` is "47"'s
+  character) - ported as `%string`.
+- **`elt`/`aref`/`identity`/`delete`/`mapcan` did not exist**; `nth` and
+  `nthcdr` lived in `subr.scm` although they are `fns.c`'s and are what
+  `elt` is written on. All are in `fns.scm` now (`aref` in `data.scm`,
+  `identity` and `delete` too), and `subr.scm` imports and re-exports
+  `nth`/`nthcdr`.
+- **`funcall`** is `eval.c`'s; the new `(schemacs editor eval)` library
+  is `eval.c` and holds it.
+- A **Lisp-1 capture in the hand-written `c-nonsymbol-token-char-list`**:
+  `(let ((list ...)) ... (list #\w ...))` applied the variable. The
+  quoted literal Emacs writes is the fix, and the reason is in the
+  source comment.
+
+## The differential harness
+
+`tools/cc-langs-diff/` (checked in) holds the two dumps and the
+comparison: `ccnames.txt` (the constant names our registry knows),
+`emacs-dump.el` (Emacs 31.1's answers; it reloads cc-langs after an
+error, because Emacs's `c-get-lang-constant` `makunbound`s the
+constant's symbol and discards the source definitions of *every*
+language), `ours-dump.scm`, and `compare.py` (recursive, order-
+insensitive list comparison that normalises characters and code points
+to one integer class). `python3 compare.py` prints the differing
+(constant, language) pairs and exits 0 when only the known order case
+remains.
+
+# cc-mode step 6: cc-engine's first tranche, and two scanner bugs under it
+# (2026-11-21)
+
+`schemacs/editor/cc-engine.scm` is new: the first tranche of
+`lisp/progmodes/cc-engine.el`, in the file's own order - the internal
+state variables and `c-calculate-state`, the `c-macro-cache` family and
+every preprocessor-directive function from `c-query-and-set-macro-start`
+to `c-forward-to-cpp-define-body`, `c-forward-comment-minus-1` and
+`c-backward-single-comment` (moved up beside their only caller for this
+tranche), the basic utilities (`c-delq-from-dotted-list`,
+`c-shift-line-indentation`, `c-keyword-sym`/`c-keyword-member`, the
+string-syntax constants, `c-parsing-error`/`c-echo-parsing-error`, the
+c-type property pair), and `c-point`/`c-is-escaped`.
+
+## Two departures in `syntax.scm`, both found by this port
+
+Both are primitive bugs measured against Emacs 31.1's own
+`forward-comment`/`parse-partial-sexp`, and both now match it.
+
+1. **`back_comment` dispatched on the character's own syntax class**
+   where the C switches on `code` *after* the two-character merge
+   (`syntax.c:812`). So a merged comment end (`*/`) still looked like
+   punctuation, `forward-comment` with a negative COUNT left the scan at
+   the comment's last character, and `(forward-comment -1)` over a C
+   block comment answered nil where Emacs answers t and moves to the
+   comment's start. `syntax.scm`'s backward scan now dispatches on the
+   possibly-rewritten `code`; `orig-code` survives only for the C's
+   `SYNTAX (c) != code` two-character test.
+2. **`back_comment`'s "ignore comment starters of a different style"
+   test was applied to two-character starters too.** In the C the test
+   is the `else if` *after* the `if (com2end) ... else if (com2start)
+   ...` chain (`syntax.c:807-811`), so only a single-character
+   `Scomment` reaches it; its style is computed from one half of a pair,
+   and `/*`'s style bits live on the `/`, so the pair's opener was
+   always "a different style" and every backward scan over `/* ... */`
+   reported lossage. The port now excludes `com2start` from that test.
+3. **`parse-partial-sexp`'s element 7 answered 0 for "no comment
+   style".** The C's `state.comstyle ? make_fixnum (state.comstyle) :
+   Qnil` needs a *zero* test in Scheme (`(not 0)` is false, so the
+   truthiness test fell through to `(state-comstyle state)`); element 7
+   answered 0 where Emacs answers nil, and `c-end-of-macro`'s
+   `(not (nth 7 s))` - the test that skips a non-pseudo comment - then
+   never fired, so a multi-line `/* */` in a `#define` made
+   `c-end-of-macro` stop at the first line's end instead of after the
+   comment.
+
+## Placement departures (import graph), named in the source
+
+- `c-point` and `c-is-escaped` are `cc-defs.el`'s, but their BOD/EOD/
+  BOSWS/EOSWS arms call `cc-engine`'s own functions, which Emacs reaches
+  through the obarray; `cc-defs` sits below `cc-engine` here and cannot
+  call up. Both live in `cc-engine.scm`; the four arms whose helpers are
+  not ported yet signal and name what they wait for
+  (`c-beginning-of-defun-1`, `c-end-of-defun-1`,
+  `c-forward-syntactic-ws`/`c-backward-syntactic-ws`).
+- `c-benign-error` is `cc-defs.el`'s macro and needs `message`
+  (`editfns.scm`'s here, above `cc-defs`). It lives in `cc-engine.scm`.
+  Emacs's `(ding)` half is not ported anywhere in this tree yet, so the
+  echo-area message is the whole of it - the same named departure
+  `novice.scm` carries.
+- `c-forward-comment-minus-1` and `c-backward-single-comment` are moved
+  above their file position because `c-beginning-of-macro` stands on
+  them. No caller before this tranche existed.
+
+## Representation departures (the tree's conventions)
+
+- A buffer-local variable is a buffer-local slot behind an accessor of
+  the variable's name and a `set!`-prefixed setter:
+  `c-hungry-delete-key`, `c-electric-flag`, `c-auto-newline`,
+  `c-macro-cache(-start-pos|-syntactic|-no-comment)`, `c-parsing-error`.
+  The accessors answer the variable's *default* when the buffer has no
+  slot, which is what `make-variable-buffer-local` means by sharing the
+  global value until the variable is set.
+- `c-macro-start` is a `defvar` that callers `let`-bind (including
+  `c-shift-line-indentation`'s self-rebind); it is the parameter
+  `*c-macro-start*` here, and the self-rebind is a `parameterize`.
+- A language variable is read with `%c-langvar`, the buffer-local slot
+  `c-init-language-vars` fills, keyed by the Emacs symbol.
+- **`c-keywords-obarray` is not a language variable here.** Emacs builds
+  the obarray per language - the symbols' plists carry the `*-kwds`
+  membership - and `c-keyword-sym`/`c-keyword-member` are `intern-soft`
+  and `get`. There is no obarray and no symbol value here, so the pair
+  builds one hash table from the language's `c-keyword-member-alist` on
+  first use (cached on the alist's identity, which is the per-language
+  value) and `c-keyword-member` looks the constant up there. The
+  language is read from the buffer's `major-mode` (else the
+  `*c-buffer-is-cc-mode*` parameter), so a buffer that has initialised
+  the language but set neither has no keyword table - Emacs's would be a
+  void variable there. `c-keyword-sym` answers an ordinary interned
+  symbol, so two languages' symbols for the same keyword are `eq?` here
+  and are not in Emacs; nothing compares them across languages.
+- The property helpers (`c-put-char-property`, `c-get-char-property`,
+  `c-clear-char-property`, `c-put-char-properties`,
+  `c-clear-char-properties`, `c-min-property-position`,
+  `c-next-single-property-change`) are procedures in `cc-defs.scm` with
+  PROPERTY as an argument, where Emacs's are macros that `eval` it at
+  expansion time. The XEmacs (`c-use-extents`) and Emacs < 21 arms are
+  not carried: `text-property-default-nonsticky` exists
+  (`intervals.scm`), so the Emacs >= 21 arm is the one that applies.
+  `c-syntax-table-hwm` is a plain variable with Emacs's initial value and
+  is moved down on a `syntax-table` write; nothing reads it yet.
+- `c-save-buffer-state` is a `syntax-rules` macro over
+  `with-silent-modifications` (`subr.el`'s), which is Emacs's own Emacs
+  >= 24 branch; the pre-24 fallback is not carried because the primitive
+  exists.
+- `c-echo-parsing-error` formats through `editfns.scm`'s Guile-format
+  `message`, so its string directive is `~a` where Emacs writes `%s`;
+  the message text is the error string either way.
+
+## Not carried (each with what it waits for)
+
+- `c-declare-lang-variables`: Emacs's macro `defvar`s the language
+  variables so its compiler knows them. Here they are buffer slots
+  filled by `c-init-language-vars`; there is nothing to declare.
+- `c-syntactic-content`: it needs `c-forward-syntactic-ws`, which is the
+  `c-forward-sws` engine below it in the file.
+- `c-forward-comments` (`cc-engine.el:1660`) and the debug overlay
+  helpers (`c-debug-add-face`/`c-debug-remove-face`): nothing in this
+  tranche calls them, and the debug pair wants the overlay API this
+  library does not import.
+- The XEmacs `c-use-extents`/`c-use-category` arms wherever a macro has
+  them.
+
+## Verification
+
+Every answer in `cc-engine-tests.scm` (88 passes) is Emacs 31.1's,
+measured in `emacs -Q --batch` in a real `c-mode` buffer on the same
+fixture before the port was written. A whole-fixture differential - 72
+answered lines, the boundary table plus `c-point`, the keyword lookup,
+`c-calculate-state`, `c-delq-from-dotted-list`, `c-is-escaped`, the
+c-type property and `c-shift-line-indentation` - runs both ways and is
+identical, and a second 55-line differential resets the macro cache
+before each probe (the first table showed `c-beginning-of-macro` at 82
+answering `(nil 82)` in one Emacs run and `(t 56)` in another: the
+buffer's jit-lock fontification probes the same cache, so a table that
+does not reset it is measuring fontification timing as well). The
+cache-sequence group pins Emacs's own `(56) -> (56 . 95) -> (56) -> nil`
+walk with explicit resets.
