@@ -3073,7 +3073,11 @@ at point instead."
     ;; \"..\". More precisely, it matches parts of any nonempty string
     ;; except those two."
 
-    (define *delete-by-moving-to-trash* (make-parameter #f))
+    (define-custom *delete-by-moving-to-trash* #f
+      "Specifies whether to use the system’s trash can.\nWhen non-nil, certain file deletion commands use the function\n‘move-file-to-trash’ instead of deleting files outright.\nThis includes interactive calls to ‘delete-file’ and\n‘delete-directory’ and the Dired deletion commands."
+      :type 'boolean
+      :group 'auto-save
+      :version "23.1")
     ;; ^ GNU Emacs's `delete-by-moving-to-trash' (files.el), false by
     ;; default: "Non-nil means `delete-file' and `delete-directory'
     ;; move to the system trash instead of deleting."

@@ -24,6 +24,9 @@
   ;; machinery - is not ported.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     (only (schemacs editor character) char-width)
     
@@ -91,7 +94,10 @@
 
   (begin
 
-    (define *indent-tabs-mode* (make-parameter #t))
+    (define-custom *indent-tabs-mode* #t
+      "Indentation can insert tabs if this is non-nil."
+      :type 'boolean
+      :group 'indent)
     ;; ^ GNU Emacs's `indent-tabs-mode', which the C defines here in
     ;; `indent.c:2579' as a `DEFVAR_BOOL': "Indentation can insert tabs
     ;; if this is non-nil." It is `t` there - `emacs -Q --batch` answers
@@ -532,7 +538,11 @@
          ((< width len) (truncate-line str width))
          (else (string-append str (make-string (- width len) #\space))))))
 
-    (define *truncate-partial-width-windows* (make-parameter 50))
+    (define-custom *truncate-partial-width-windows* 50
+      "Non-nil means truncate lines in windows narrower than the frame.\nFor an integer value, truncate lines in each window narrower than the\nfull frame width, provided the total window width in column units is less\nthan that integer; otherwise, respect the value of ‘truncate-lines’.\nThe total width of the window is as returned by ‘window-total-width’, it\nincludes the fringes, the continuation and truncation glyphs, the\ndisplay margins (if any), and the scroll bar\n\nFor any other non-nil value, truncate lines in all windows that do\nnot span the full frame width.\n\nA value of nil means to respect the value of ‘truncate-lines’.\n\nIf ‘word-wrap’ is enabled, you might want to reduce the value of this.\n\nDon’t set this to a non-nil value when ‘visual-line-mode’ is\nturned on, as it could produce confusing results."
+      :type '(choice (integer :tag "Truncate if narrower than") (const :tag "Respect `truncate-lines'" #f) (other :tag "Truncate if not full-width" #t))
+      :group 'display
+      :version "23.1")
     ;; ^ GNU Emacs's `truncate-partial-width-windows', which `xdisp.c'
     ;; declares and defaults to 50. Non-nil means truncate lines in
     ;; windows narrower than the frame; an *integer* means truncate a

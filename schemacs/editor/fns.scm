@@ -33,6 +33,9 @@
   ;;     exist yet.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     ;; `list-copy` is `(srfi srfi-1)`'s, and `copy-sequence`'s list arm is
     ;; it - as Emacs's list arm is `Fcopy_sequence`'s cons walk.
@@ -1015,7 +1018,11 @@
     ;; `(schemacs editor keyboard)').
     ;;----------------------------------------------------------------
 
-    (define *use-dialog-box* (make-parameter #t))
+    (define-custom *use-dialog-box* #t
+      "Non-nil means mouse commands use dialog boxes to ask questions.\nThis applies to ‘y-or-n-p’ and ‘yes-or-no-p’ questions asked by commands\ninvoked by mouse clicks and mouse menu items.\n\nOn some platforms, file selection dialogs are also enabled if this is\nnon-nil."
+      :type 'boolean
+      :group 'menu
+      :version "21.1")
     ;; ^ GNU Emacs's `use-dialog-box' (`fns.c:6850'): "Non-nil means
     ;; mouse commands use dialog boxes to ask questions. This applies to
     ;; `y-or-n-p' and `yes-or-no-p' questions asked by commands invoked

@@ -194,6 +194,7 @@
         (schemacs editor indentc)
         (schemacs editor insdel)
         (schemacs editor intervals)
+        (schemacs editor symbol-props)
         (schemacs editor isearch)
         (schemacs editor keyboard)
         (schemacs editor keymap)

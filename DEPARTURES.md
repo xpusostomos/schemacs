@@ -12950,3 +12950,76 @@ buffer-locally. Flipping them to Emacs's values means porting those
 four setters first; recorded rather than half-done. There is no
 cc-mode yet, so the cc-engine tests set `parse-sexp-ignore-comments'
 on their fixtures themselves, which is what `cc-mode.el:639' will do.
+
+## A C variable `cus-start.el` makes customizable is a `define-custom` (2026-11-22)
+
+Emacs's `cus-start.el` is the bridge that turns a C `DEFVAR` into a
+user option: each entry gives the variable a `standard-value`, a
+`custom-type`, a group and a version, which is what
+`custom-variable-p`, `M-x customize-option` and `C-h v`'s "you can
+customize this variable" read. Measured on Emacs 31.1:
+`(custom-variable-p 'words-include-escapes)` is `(nil)` - non-nil -
+even though the variable is a `DEFVAR_BOOL` in `syntax.c`.
+
+**The rule for every C variable this tree ports: look the name up in
+`cus-start.el`; if it is there, it is `define-custom`, not
+`make-parameter`.** The audit that found the first one
+(`*words-include-escapes*`) extracted the 208 names from the
+`builtin-cus-vars` list and compared them with every
+`(define *x* (make-parameter ...))` in the tree; 20 were listed there
+and are now `define-custom` declarations with Emacs's own `:type`,
+`:group`, `:version` and docstring:
+
+`*completion-ignored-extensions*`, `*default-frame-alist*`,
+`*delete-by-moving-to-trash*`, `*file-coding-system-alist*`,
+`*frame-inhibit-implied-resize*`, `*indent-tabs-mode*`,
+`*max-mini-window-height*`, `*menu-bar-mode*`, `*message-log-max*`,
+`*next-screen-context-lines*`, `*read-buffer-completion-ignore-case*`,
+`*read-buffer-function*`, `*resize-mini-windows*`, `*tab-width*`,
+`*text-quoting-style*`, `*truncate-partial-width-windows*`,
+`*use-dialog-box*`, `*use-short-answers*`,
+`*window-combination-limit*`, `*window-combination-resize*`
+(plus `*words-include-escapes*`, `*parse-sexp-ignore-comments*` and
+`*open-paren-in-column-0-is-defun-start*`, converted the same day).
+
+**Three variables in this group are *not* customizable in Emacs and
+stay plain parameters**: `parse-sexp-lookup-properties` (`syntax.c`),
+`comment-end-can-be-escaped` (`syntax.c`) and `comment-use-syntax-ppss`
+(`syntax.c`) are absent from `cus-start.el`, so they have no
+`standard-value` and `(custom-variable-p ...)` is nil for each. Being a
+C variable is not the test; being in `cus-start.el` is.
+
+### Why the leaf `(schemacs editor symbol-props)` exists
+
+`custom.el` needs `get` and `put` (the `custom-` properties). Those
+were in `intervals.scm`, which sits above `buffer-text`, `character`
+and `fns` - so `custom` sat above them too, and a variable in one of
+those libraries could not be a `define-custom`: the library would have
+to import `custom` back. That is what blocked `*tab-width*`
+(`character.scm`) and `*use-dialog-box*` (`fns.scm`).
+
+`fns.c`'s `Fget`/`Fput` now live in a leaf library of their own,
+`schemacs/editor/symbol-props.scm`, named as a placement departure
+(`fns.scm` imports `intervals.scm`, so the pair cannot live there).
+`intervals.scm` imports and **re-exports** them, so every existing
+importer is unchanged (measured: Guile re-exports an imported binding
+fine), and `custom.scm` imports the leaf. `custom`'s import closure is
+now that one leaf.
+
+### Two transcription simplifications in the `:type` data
+
+- Emacs's `:type` forms carry widget-internal `\,` escapes for dynamic
+  completion (`:completions (\, frame--special-parameters)`,
+  `:match (\, (lambda ...))`); those are omitted, keeping the
+  structural type.
+- `text-quoting-style`'s `:tag` strings carry `\=` display escapes;
+  those are omitted, keeping the tag text.
+
+They affect only a Customize buffer's widget behaviour, which this tree
+does not have yet. Everything else - types, groups, versions, and the
+docstrings, which are Emacs 31.1's own - is verbatim.
+
+`menu-bar-mode`'s entry carries `:set custom-set-minor-mode`; that
+function is not ported, so `:set` is not carried (named here rather
+than passed as a symbol that would not resolve). The variable is a
+parameter, as the minor-mode machinery expects.

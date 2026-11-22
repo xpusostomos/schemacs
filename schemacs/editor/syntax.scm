@@ -74,6 +74,9 @@
           char-table-parent set-char-table-parent char-table-default
           char-table-subtype copy-char-table char-table-ref-and-range)
     (only (schemacs editor command) maybe-quit rarely-quit)
+    ;; `define-custom' - the three `syntax.c' variables `cus-start.el'
+    ;; makes customizable (see "the variables scan_words reads" below).
+    (only (schemacs editor custom) define-custom)
     ;; `*before-change-functions*' - `insdel.c''s hook list, which is
     ;; what this library flushes its parse-state cache from.
     (only (schemacs editor insdel)
@@ -470,17 +473,41 @@
 
     ;; ---------------------------------------------------------------
     ;; The variables `scan_words' and the scanner read.
+    ;;
+    ;; `cus-start.el' is the bridge that makes a C `DEFVAR' customizable
+    ;; in Emacs: an entry there gives the variable a `standard-value',
+    ;; which is what `custom-variable-p' and Customize read
+    ;; (`(custom-variable-p 'words-include-escapes)' is `(nil)' -
+    ;; non-nil - in Emacs 31.1). Three of the six below are listed
+    ;; (`cus-start.el:621-624', `syntax.c''s three) and are
+    ;; `define-custom' here; the other three are not and stay plain
+    ;; parameters. **That is the rule for every C variable this tree
+    ;; ports: check `cus-start.el' for its name.**
     ;; ---------------------------------------------------------------
-    (define *words-include-escapes* (make-parameter #f))
+    (define-custom *words-include-escapes* #f
+      "Non-nil means `forward-word', etc., should treat escape chars part of words."
+      :type 'boolean
+      :group 'editing-basics)
     ;; **Departure**: Emacs's `parse_sexp_lookup_properties' starts nil
     ;; (`DEFVAR_BOOL', `syntax.c:3772') and `font-lock' and
     ;; `run-mode-hooks' set it buffer-locally (`font-lock.el:1531',
     ;; `subr.el:2779'); ours starts #t because nothing here sets it that
     ;; way yet - see DEPARTURES.md.
     (define *parse-sexp-lookup-properties* (make-parameter #t))
-    (define *parse-sexp-ignore-comments* (make-parameter #t))
+    ;; **Departure**: Emacs's `standard-value' here is nil
+    ;; (`cus-start.el:621'); ours is #t, because the modes that set it
+    ;; buffer-locally (`prog-mode.el:401', `scheme.el:185') are ported
+    ;; but no cc-mode exists yet - see DEPARTURES.md.
+    (define-custom *parse-sexp-ignore-comments* #t
+      "Non-nil means `forward-sexp', etc., should treat comments as whitespace."
+      :type 'boolean
+      :group 'editing-basics)
     (define *comment-end-can-be-escaped* (make-parameter #f))
-    (define *open-paren-in-column-0-is-defun-start* (make-parameter #t))
+    (define-custom *open-paren-in-column-0-is-defun-start* #t
+      "Non-nil means an open paren in column 0 denotes the start of a defun."
+      :type 'boolean
+      :group 'editing-basics
+      :version "21.1")
     (define *comment-use-syntax-ppss* (make-parameter #t))
 
     ;; ---------------------------------------------------------------

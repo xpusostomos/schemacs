@@ -24,6 +24,9 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     (scheme char)
     ;; `split-window-below' and `split-window-right' take an optional
@@ -2804,7 +2807,11 @@ by this function.  This happens in an interactive call."
     ;; `delete-window` (`:4372`), around the resize engine - so it is a
     ;; parameter, and `*...*` because that is what a dynamically bound
     ;; name looks like here.
-    (define *window-combination-resize* (make-parameter #f))
+    (define-custom *window-combination-resize* #f
+      "If t, resize window combinations proportionally.\nIf this variable is nil, splitting a window gets the entire screen space\nfor displaying the new window from the window to split.  Deleting and\nresizing a window preferably resizes one adjacent window only.\n\nIf this variable is t, splitting a window tries to get the space\nproportionally from all windows in the same combination.  This means\nthat one can also split a window that is otherwise too small or of fixed\nsize.  Resizing and deleting a window then proportionally resizes all\nwindows in the same combination.\n\nOther values are reserved for future use.\n\nA specific split operation may ignore the value of this variable if it\nis affected by a non-nil value of ‘window-combination-limit’.  If you\nwant to use a sequence of ‘split-window’ calls to produce a specific,\npredefined layout of windows on a frame, bind this variable temporarily\nto nil."
+      :type 'boolean
+      :group 'windows
+      :version "24.1")
     ;; ^ "If non-nil, `split-window' will try to resize the sibling
     ;; windows of the window it splits to preserve their sizes. If nil,
     ;; it will try to preserve their normal sizes." The parameter exists
@@ -2814,7 +2821,11 @@ by this function.  This happens in an interactive call."
     ;; `window-combination-limit` is `window.c`'s DEFVAR_LISP
     ;; (`:9512`), default `window-size`, and `window--state-put-1` binds
     ;; it (`window.el:6554`), so it is a parameter too.
-    (define *window-combination-limit* (make-parameter 'window-size))
+    (define-custom *window-combination-limit* 'window-size
+      "If non-nil, splitting a window makes a new parent window.\nThe following values are recognized:\n\nnil means splitting a window will create a new parent window only if the\n    window has no parent window or the window shall become part of a\n    combination orthogonal to the one it is part of.\n\n‘window-size’ means that splitting a window for displaying a buffer\n    makes a new parent window provided ‘display-buffer’ is supposed to\n    explicitly set the window’s size due to the presence of a\n    ‘window-height’ or ‘window-width’ entry in the alist used by\n    ‘display-buffer’.  Otherwise, this value is handled like nil.\n\n‘temp-buffer-resize’ means that splitting a window for displaying a\n    temporary buffer via ‘with-temp-buffer-window’ makes a new parent\n    window only if ‘temp-buffer-resize-mode’ is enabled.  Otherwise,\n    this value is handled like nil.\n\n‘temp-buffer’ means that splitting a window for displaying a temporary\n    buffer via ‘with-temp-buffer-window’ always makes a new parent\n    window.  Otherwise, this value is handled like nil.\n\n‘display-buffer’ means that splitting a window for displaying a buffer\n    always makes a new parent window.  Since temporary buffers are\n    displayed by the function ‘display-buffer’, this value is stronger\n    than ‘temp-buffer’.  Splitting a window for other purpose makes a\n    new parent window only if needed.\n\nt means that splitting a window always creates a new parent window.  If\n    all splits behave this way, each frame’s window tree is a binary\n    tree and every window but the frame’s root window has exactly one\n    sibling.\n\nThe default value is ‘window-size’.  Other values are reserved for\nfuture use."
+      :type '(choice (const :tag "Never" :value #f) (const :tag "If requested via buffer display alist" :value window-size) (const :tag "With Temp Buffer Resize mode" :value temp-buffer-resize) (const :tag "For temporary buffers" :value temp-buffer) (const :tag "For buffer display" :value display-buffer) (other :tag "Always" :value #t))
+      :group 'windows
+      :version "26.1")
     ;; ^ "If non-nil, `split-window' makes a new parent window. If the
     ;; value is t, a combination is always created... If it is
     ;; `window-size', a new combination is created if the resulting size

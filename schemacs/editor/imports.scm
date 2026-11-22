@@ -99,6 +99,7 @@
     (schemacs editor image)
     (schemacs editor font)
     (schemacs editor eval)
+    (except (schemacs editor symbol-props)  get put)
     (schemacs editor face-remap)
     (schemacs editor glyph)
     (schemacs editor help-mode)
@@ -1158,6 +1159,9 @@
     c-foreign-truncate-lit-pos-cache
     c-forward-comment-minus-1
     c-forward-comments
+    c-forward-noise-clause
+    c-forward-noise-clause-not-macro-decl
+    c-forward-over-colon-type-list
     c-forward-over-cpp-define-id
     c-forward-over-token
     c-forward-over-token-and-ws

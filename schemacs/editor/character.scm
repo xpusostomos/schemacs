@@ -17,6 +17,9 @@
   ;; because Emacs's do.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     (scheme char)
     ;; the bit arithmetic of the event model, and `filter' for a symbol
@@ -55,7 +58,10 @@
 
   (begin
 
-    (define *tab-width* (make-parameter 8))
+    (define-custom *tab-width* 8
+      "Distance between tab stops (for display of tab characters), in columns.\nThis controls the width of a TAB character on display.\nThe value should be a positive integer.\nNote that this variable doesn’t necessarily affect the size of the\nindentation step.  However, if the major mode’s indentation facility\ninserts one or more TAB characters, this variable will affect the\nindentation step as well, even if ‘indent-tabs-mode’ is non-nil."
+      :type 'integer
+      :group 'editing-basics)
     ;; ^ GNU Emacs's `tab-width'. Emacs defines it in `buffer.c' and
     ;; `CHARACTER_WIDTH' reads it through `SANE_TAB_WIDTH (current_buffer)',
     ;; which is why the default and the tab case of `char-width' below are

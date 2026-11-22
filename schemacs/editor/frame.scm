@@ -20,6 +20,9 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is the first step of.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (only (schemacs editor subr) kbd run-hooks run-hook-with-args
           assq-delete-all)
     (scheme base)
@@ -1693,7 +1696,10 @@
     ;; Frame parameters - `frame.c`'s `param_alist` and its readers
     ;;----------------------------------------------------------------
 
-    (define *default-frame-alist* (make-parameter '()))
+    (define-custom *default-frame-alist* '()
+      "Alist of default values of frame parameters for frame creation.\nThese may be set in your init file, like this:\n  (setq default-frame-alist '((width . 80) (height . 55) (menu-bar-lines . 1)))\n\nThese override values given in window system configuration data,\nincluding X Windows’ defaults database.\n\nNote that many display-related modes (like ‘scroll-bar-mode’ or\n‘menu-bar-mode’) alter ‘default-frame-alist’, so if you set this\nvariable directly, you may be overriding other settings\nunintentionally.  Instead it’s often better to use\n‘modify-all-frames-parameters’ or push new elements to the front of\nthis alist.\n\nFor values specific to the first Emacs frame, see ‘initial-frame-alist’.\n\nFor window-system specific values, see ‘window-system-default-frame-alist’.\n\nFor values specific to the separate minibuffer frame, see\n‘minibuffer-frame-alist’.\n\nSetting this variable does not affect existing frames, only new ones."
+      :type '(repeat (cons :format "%v" (symbol :tag "Parameter") (sexp :tag "Value")))
+      :group 'frames)
     ;; ^ GNU Emacs's `default-frame-alist` (`frame.el:170`): "Alist of
     ;; default values for the parameters of all frames you create."
     ;; A frame's parameters start from this.
@@ -2296,13 +2302,21 @@
             (delete-region (point-min) (point-max))
             (insert text)))))
 
-    (define *resize-mini-windows* (make-parameter 'grow-only))
+    (define-custom *resize-mini-windows* 'grow-only
+      "How to resize mini-windows (the minibuffer and the echo area).\nA value of nil means don’t automatically resize mini-windows.\nA value of t means resize them to fit the text displayed in them.\nA value of ‘grow-only’, the default, means let mini-windows grow only;\nthey return to their normal size when the minibuffer is closed, or the\necho area becomes empty.\n\nThis variable does not affect resizing of the minibuffer window of\nminibuffer-only frames.  These are handled by ‘resize-mini-frames’\nonly."
+      :type '(choice (const :tag "Off" :value #f) (const :tag "Fit" :value #t) (const :tag "Grow only" :value grow-only))
+      :group 'windows
+      :version "25.1")
     ;; ^ GNU Emacs's `resize-mini-windows` (`xdisp.c:39056`): "How to
     ;; resize mini-windows (the minibuffer and the echo area)." Nil never
     ;; resizes; `t' resizes to fit exactly; `grow-only', the default, lets
     ;; a mini-window grow and take it back when the echo area empties.
 
-    (define *max-mini-window-height* (make-parameter 0.25))
+    (define-custom *max-mini-window-height* 0.25
+      "Maximum height for resizing mini-windows (the minibuffer and the echo area).\nIf a float, it specifies the maximum height in units of the\nmini-window frame’s height.\nIf an integer, it specifies the maximum height in units of the\nmini-window frame’s default font’s height."
+      :type '(choice (const :tag "quarter screen" #f) number)
+      :group 'limits
+      :version "23.1")
     ;; ^ GNU Emacs's `max-mini-window-height` (`xdisp.c`): "The maximum
     ;; height of a mini-window. A float specifies a fraction of the
     ;; frame height; an integer specifies the number of lines." A quarter
@@ -3647,7 +3661,11 @@
           (set!window-width mini new-width)
           (set!window-height mini 1))))
 
-    (define *frame-inhibit-implied-resize* (make-parameter #f))
+    (define-custom *frame-inhibit-implied-resize* #f
+      "Whether frames should be resized implicitly.\nIf this option is nil, setting font, menu bar, tool bar, tab bar,\ninternal borders, fringes or scroll bars of a specific frame may resize\nthe frame in order to preserve the number of columns or lines it\ndisplays.\n\nIf this option is t, no such resizing happens once Emacs has agreed with\nthe window manager on the final initial size of a frame.  That size will\nhave taken into account the size of the text area requested by the user\nand the size of all decorations initially present on the frame.\n\nIf this is the symbol ‘force’, no implicit resizing happens even before\na frame has obtained its final initial size.  As a consequence, the\ninitial frame size may not necessarily be the one requested by the user.\nThis value can be useful with tiling window managers where the initial\nsize of a frame is determined by external means.\n\nThe value of this option can be also a list of frame parameters.  In\nthis case, resizing is inhibited once a frame has obtained its final\ninitial size when changing a parameter that appears in that list.  The\nparameters currently handled by this option include ‘font’,\n‘font-backend’, ‘internal-border-width’, ‘menu-bar-lines’,\n‘tool-bar-lines’ and ‘tab-bar-lines’.\n\nChanging any of the parameters ‘scroll-bar-width’, ‘scroll-bar-height’,\n‘vertical-scroll-bars’, ‘horizontal-scroll-bars’, ‘left-fringe’ and\n‘right-fringe’ is handled as if the frame contained just one live\nwindow.  This means, for example, that removing vertical scroll bars on\na frame containing several side by side windows will shrink the frame\nwidth by the width of one scroll bar provided this option is nil and\nkeep it unchanged if this option is either t or a list containing\n‘vertical-scroll-bars’.\n\nIn GTK+ and NS that use the external tool bar, the default value is\n'(tab-bar-lines) which means that adding/removing a tab bar does\nnot change the frame height.  On all other types of GUI frames, the\ndefault value is '(tab-bar-lines tool-bar-lines) which means that\nadding/removing a tool bar or tab bar does not change the frame\nheight.  Otherwise it’s t which means the frame size never changes\nimplicitly when there’s no window system support.\n\nNote that the size of fullscreen and maximized frames, the height of\nfullheight frames and the width of fullwidth frames never change\nimplicitly.  Note also that when a frame is not large enough to\naccommodate a change of any of the parameters listed above, Emacs may\ntry to enlarge the frame even if this option is non-nil."
+      :type '(choice (const :tag "Never" #f) (const :tag "Always" #t) (const :tag "Force" force) (repeat (symbol :tag "Parameter")))
+      :group 'frames
+      :version "31.1")
     ;; ^ GNU Emacs's `frame-inhibit-implied-resize' (`frame.el`): "Non-nil
     ;; means frames will not be resized to keep the same number of lines
     ;; and columns when the font changes." `t' inhibits for every

@@ -15841,3 +15841,70 @@ cc-mode.el. Those five functions are mutually recursive (name calls
 type, type calls name and the arglist, the arglist calls type), so they
 are one tranche with the tree's seam pattern (`*c-forward-type-
 function*' and friends, installed as each definition loads).
+
+# C variables Emacs makes customizable, and the leaf that unblocked them
+# (2026-11-22)
+
+Chris spotted `*words-include-escapes*` written as a plain parameter and
+asked whether it should be `define-custom`, then asked for the rest of
+the tree to be scanned for the same mistake. Both are done; the rule is
+now in DEPARTURES.md and it applies to every C variable this tree
+ports:
+
+**`cus-start.el` is the bridge that makes a C `DEFVAR` a user option.**
+Look the name up there; if it is listed, declare it with
+`define-custom` carrying Emacs's `:type`, `:group`, `:version` and the
+C docstring. Measured basis: `(custom-variable-p 'words-include-escapes)`
+is non-nil in Emacs 31.1 though it is a `DEFVAR_BOOL` in `syntax.c`,
+and `parse-sexp-lookup-properties` (not in cus-start) is nil.
+
+## What landed
+
+- **23 variables converted** to `define-custom`: the 20 the audit found
+  (`*tab-width*`, `*indent-tabs-mode*`, `*truncate-partial-width-windows*`,
+  `*window-combination-limit*`, `*window-combination-resize*`,
+  `*default-frame-alist*`, `*resize-mini-windows*`,
+  `*max-mini-window-height*`, `*frame-inhibit-implied-resize*`,
+  `*read-buffer-function*`, `*read-buffer-completion-ignore-case*`,
+  `*next-screen-context-lines*`, `*message-log-max*`,
+  `*delete-by-moving-to-trash*`, `*text-quoting-style*`,
+  `*file-coding-system-alist*`, `*completion-ignored-extensions*`,
+  `*menu-bar-mode*`, `*use-dialog-box*`, `*use-short-answers*`) plus
+  the three from `syntax.c` (`*words-include-escapes*`,
+  `*parse-sexp-ignore-comments*`, `*open-paren-in-column-0-is-defun-start*`).
+- **`schemacs/editor/symbol-props.scm`** (new leaf): `fns.c`'s
+  `Fget`/`Fput`, moved out of `intervals.scm`, which re-exports them.
+  `custom.scm` imports the leaf, so `custom` now sits below
+  `character` and `fns` - the two libraries whose variables were
+  blocked from being `define-custom` (a library cannot import `custom`
+  back).
+- `imports.scm` regenerated (113 libraries, 4,319 names).
+
+## How to re-run the audit
+
+    emacs -Q --batch --eval '(with-temp-buffer (insert-file-contents
+      "lisp/cus-start.el") (goto-char (point-min))
+      (search-forward "(let* ((quoter") (goto-char (match-beginning 0))
+      (let* ((f (read (current-buffer))) (b (assq (quote builtin-cus-vars) (cadr f))))
+        (dolist (e (cadr (cadr b))) (princ (format "%s\n" (car e))))))'
+
+then compare those 208 names with every `(define *x* (make-parameter`
+in the tree (strip the stars). The same check applies to Lisp
+`defcustom`s, which this pass did not audit: anything the tree ported
+from a `.el` file's `defcustom` should be `define-custom` too.
+
+## Verified
+
+The full battery: **88/88 suites**, tree compiles with no warnings, and
+`tools/pty-check.py` **99/100** with `completion-ui` red - the
+documented between-key race (C-g straight after TAB); it passed 6 of 7
+runs on its own on the same tree, and its failure screen was the known
+"C-g left the minibuffer on the screen".
+
+## Next for the declaration engine
+
+`c-forward-keyword-prefixed-id`/`c-forward-id-comma-list` (Emacs's two
+macros in this region, written as procedures here), then
+`c-forward-<>-arglist` + recur, `c-forward-name`, `c-forward-type` -
+one mutually recursive tranche with the seam pattern
+(`*c-forward-type-function*` and friends).

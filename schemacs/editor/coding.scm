@@ -44,6 +44,9 @@
   ;;     three below.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     (scheme char)
     ;; The codec. `string->bytevector' / `bytevector->string' take the
@@ -1917,31 +1920,32 @@
     ;; editor - the compressed-file entries come from `jka-cmpr-hook' and
     ;; the rest from `mule.el'.
 
-    (define *file-coding-system-alist*
-      (make-parameter
-       (list
-        (cons "\\.tzst\\'" '(no-conversion . no-conversion))
-        (cons "\\.zst\\'" '(no-conversion . no-conversion))
-        (cons "\\.dz\\'" '(no-conversion . no-conversion))
-        (cons "\\.txz\\'" '(no-conversion . no-conversion))
-        (cons "\\.xz\\'" '(no-conversion . no-conversion))
-        (cons "\\.lzma\\'" '(no-conversion . no-conversion))
-        (cons "\\.lz\\'" '(no-conversion . no-conversion))
-        (cons "\\.g?z\\'" '(no-conversion . no-conversion))
-        (cons "\\.\\(?:tgz\\|svgz\\|sifz\\)\\'" '(no-conversion . no-conversion))
-        (cons "\\.tbz2?\\'" '(no-conversion . no-conversion))
-        (cons "\\.bz2\\'" '(no-conversion . no-conversion))
-        (cons "\\.Z\\'" '(no-conversion . no-conversion))
-        (cons "\\.elc\\'" 'utf-8-emacs)
-        (cons "\\.el\\'" 'prefer-utf-8)
-        (cons "\\.utf\\(-8\\)?\\'" 'utf-8)
-        (cons "\\.xml\\'" 'xml-find-file-coding-system)
-        (cons "\\(\\`\\|/\\)loaddefs.el\\'" '(raw-text . raw-text-unix))
-        (cons "\\.tar\\'" '(no-conversion . no-conversion))
-        (cons "\\.po[tx]?\\'\\|\\.po\\." 'po-find-file-coding-system)
-        (cons "\\.\\(tex\\|ltx\\|dtx\\|drv\\)\\'"
-              'latexenc-find-file-coding-system)
-        (cons "" 'undecided))))
+    (define-custom *file-coding-system-alist* (list
+      (cons "\\.tzst\\'" '(no-conversion . no-conversion))
+      (cons "\\.zst\\'" '(no-conversion . no-conversion))
+      (cons "\\.dz\\'" '(no-conversion . no-conversion))
+      (cons "\\.txz\\'" '(no-conversion . no-conversion))
+      (cons "\\.xz\\'" '(no-conversion . no-conversion))
+      (cons "\\.lzma\\'" '(no-conversion . no-conversion))
+      (cons "\\.lz\\'" '(no-conversion . no-conversion))
+      (cons "\\.g?z\\'" '(no-conversion . no-conversion))
+      (cons "\\.\\(?:tgz\\|svgz\\|sifz\\)\\'" '(no-conversion . no-conversion))
+      (cons "\\.tbz2?\\'" '(no-conversion . no-conversion))
+      (cons "\\.bz2\\'" '(no-conversion . no-conversion))
+      (cons "\\.Z\\'" '(no-conversion . no-conversion))
+      (cons "\\.elc\\'" 'utf-8-emacs)
+      (cons "\\.el\\'" 'prefer-utf-8)
+      (cons "\\.utf\\(-8\\)?\\'" 'utf-8)
+      (cons "\\.xml\\'" 'xml-find-file-coding-system)
+      (cons "\\(\\`\\|/\\)loaddefs.el\\'" '(raw-text . raw-text-unix))
+      (cons "\\.tar\\'" '(no-conversion . no-conversion))
+      (cons "\\.po[tx]?\\'\\|\\.po\\." 'po-find-file-coding-system)
+      (cons "\\.\\(tex\\|ltx\\|dtx\\|drv\\)\\'"
+            'latexenc-find-file-coding-system)
+      (cons "" 'undecided))
+      "Alist to decide a coding system to use for a file I/O operation.\nThe format is ((PATTERN . VAL) ...),\nwhere PATTERN is a regular expression matching a file name,\nVAL is a coding system, a cons of coding systems, or a function symbol.\nIf VAL is a coding system, it is used for both decoding and encoding\nthe file contents.\nIf VAL is a cons of coding systems, the car part is used for decoding,\nand the cdr part is used for encoding.\nIf VAL is a function symbol, the function must return a coding system\nor a cons of coding systems which are used as above.  The function is\ncalled with an argument that is a list of the arguments with which\n‘find-operation-coding-system’ was called.  If the function can’t decide\na coding system, it can return ‘undecided’ so that the normal\ncode-detection is performed.\n\nSee also the function ‘find-operation-coding-system’\nand the variable ‘auto-coding-alist’."
+      :type '(alist :key-type (regexp :tag "File regexp") :value-type (choice :value (undecided . undecided) (cons :tag "Encoding/decoding pair" :value (undecided . undecided) (coding-system :tag "Decoding") (coding-system :tag "Encoding")) (coding-system :tag "Single coding system" :value undecided) (function :value ignore)))
+      :group 'mule)
 
     (define (find-operation-coding-system operation target . args)
       ;; GNU Emacs's `find-operation-coding-system' (`coding.c:10763'):

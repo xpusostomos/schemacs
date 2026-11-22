@@ -30,6 +30,9 @@
   ;;     keymap in a weak-keyed hash. The keymap is a function call here.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     (scheme char)
     ;; `string-join' is `mapconcat''s: the answers written out between
@@ -309,7 +312,11 @@
     ;; non-nil, or the function cell of `yes-or-no-p' is set to
     ;; `y-or-n-p'."
 
-    (define *use-short-answers* (make-parameter #f))
+    (define-custom *use-short-answers* #f
+      "Non-nil means ‘yes-or-no-p’ accepts single-key answers \"y\" or \"n\".\nWhen non-nil, ‘yes-or-no-p’ will use ‘y-or-n-p’ to read the answer.\nThis means the user will be able to press just one key to answer, whereas\nby default the user needs to type the full \"yes\" or \"no\" response\nand then press RET.\n\nWe recommend against setting this variable non-nil, because ‘yes-or-no-p’\nis intended to be used when users are expected not to respond too\nquickly, but to take their time and perhaps think about the answer.\nThe same variable also affects the function ‘read-answer’.  See also\n‘yes-or-no-prompt’."
+      :type 'boolean
+      :group 'menu
+      :version "28.1")
     ;; ^ GNU Emacs's `use-short-answers', false by default.
 
     (define (read-answer-short)

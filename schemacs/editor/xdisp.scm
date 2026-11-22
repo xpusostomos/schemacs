@@ -7306,7 +7306,11 @@ buffer size, the line number and the column number."
     ;; ^ GNU Emacs's `messages-buffer-name' (`xdisp.c:38597'): "Name of
     ;; the buffer in which `message' logs its messages."
 
-    (define *message-log-max* (make-parameter 1000))
+    (define-custom *message-log-max* 1000
+      "Maximum number of lines to keep in the message log buffer.\nIf nil, disable message logging.  If t, log messages but don’t truncate\nthe buffer when it becomes large."
+      :type '(choice (const :tag "Disable" #f) (integer :menu-tag "lines" :format "%v") (other :tag "Unlimited" #t))
+      :group 'debug
+      :version "24.3")
     ;; ^ GNU Emacs's `message-log-max' (`xdisp.c:38859'): "Maximum number
     ;; of lines to keep in the `*Messages*' buffer. If nil, disable
     ;; message logging." It was declared in `editfns.scm' until

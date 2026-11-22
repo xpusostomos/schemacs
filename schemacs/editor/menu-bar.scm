@@ -44,6 +44,9 @@
   ;;--------------------------------------------------------------
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     ;; The key sequence a binding is written with, and the map it is
     ;; written into.
@@ -813,7 +816,10 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
     ;; `menu-bar-mode` - `menu-bar.el:2627`
     ;;----------------------------------------------------------------
 
-    (define *menu-bar-mode* (make-parameter #t))
+    (define-custom *menu-bar-mode* #t
+      "Non-nil if Menu-Bar mode is enabled.\nSee the command ‘menu-bar-mode’ for a description of this minor mode.\nSetting this variable directly does not take effect;\neither customize it (see the info node ‘Easy Customization’)\nor call the function ‘menu-bar-mode’."
+      :type 'boolean
+      :group 'frames)
     ;; ^ GNU Emacs's `menu-bar-mode` (`menu-bar.el:2635`): the global
     ;; minor mode's variable, `:init-value t`.
 

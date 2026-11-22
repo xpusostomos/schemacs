@@ -36,6 +36,9 @@
   ;; of.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     (scheme char)
     ;; Guile's hash tables, which is what Emacs's hash-table form is.
@@ -79,13 +82,20 @@
     ;; file is `read-buffer-function' and
     ;; `read-buffer-completion-ignore-case', which are ordinary values.
 
-    (define *read-buffer-function* (make-parameter #f))
+    (define-custom *read-buffer-function* #f
+      "If this is non-nil, ‘read-buffer’ does its work by calling this function.\nThe function is called with the arguments passed to ‘read-buffer’."
+      :type '(choice (const #f) function)
+      :group 'minibuffer)
     ;; ^ GNU Emacs's `read-buffer-function' (`minibuf.c:2544'): "If this is
     ;; non-nil, `read-buffer' does its work by calling this function. The
     ;; function is called with the arguments passed to `read-buffer'." Nil
     ;; by default, so `read-buffer' does the reading itself.
 
-    (define *read-buffer-completion-ignore-case* (make-parameter #f))
+    (define-custom *read-buffer-completion-ignore-case* #f
+      "Non-nil means completion ignores case when reading a buffer name."
+      :type 'boolean
+      :group 'minibuffer
+      :version "23.1")
     ;; ^ GNU Emacs's `read-buffer-completion-ignore-case'
     ;; (`minibuf.c:2559'): "Non-nil means completion ignores case when
     ;; reading a buffer name." False as in Emacs - which is not the same

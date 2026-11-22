@@ -1089,7 +1089,10 @@ just inserts a newline without doing any indentation."
                   (deactivate-mark)
                   (activate-mark))))))
 
-        (define *next-screen-context-lines* (make-parameter 2))
+        (define-custom *next-screen-context-lines* 2
+          "Number of lines of continuity when scrolling by screenfuls."
+          :type 'integer
+          :group 'windows)
     ;; ^ GNU Emacs's `next-screen-context-lines', which `window.c:9300'
     ;; declares as a DEFVAR_INT defaulting to 2: "Number of lines of
     ;; continuity when scrolling by screenfuls". It is what a

@@ -83,8 +83,10 @@
     ;; syntax in form ()" the compiler says when it is missing.
     (only (guile) identifier? quasisyntax syntax syntax->datum syntax-case
           unsyntax unsyntax-splicing)
-    ;; `get' and `put' are `fns.c`'s symbol properties; see the header.
-    (only (schemacs editor intervals) get put))
+    ;; `get' and `put' are `fns.c`'s symbol properties, in their own
+    ;; leaf so that this library can sit below `character' and `fns' -
+    ;; see that library's header.
+    (only (schemacs editor symbol-props) get put))
 
   (export
    define-custom

@@ -18,6 +18,9 @@
   ;; REGION-PLAN.txt for what it is part of.
 
   (import
+    ;; `define-custom' - the C variables `cus-start.el' makes
+    ;; customizable (see the declaration below).
+    (only (schemacs editor custom) define-custom)
     (scheme base)
     ;; `string-upcase' is `%format-integer''s - `%X' and `%B' write the
     ;; digits upper case, as the C's sprintf does.
@@ -2101,7 +2104,10 @@ argument.  To gain access to other portions of the buffer, use
     ;; the version ported here is the one in the Emacs in `../emacs'.
     ;;------------------------------------------------------------------
 
-    (define *text-quoting-style* (make-parameter #f))
+    (define-custom *text-quoting-style* #f
+      "Style to use for single quotes in help and messages.\n\nThe value of this variable determines substitution of grave accents\nand apostrophes in help output (but not for display of Info\nmanuals) and in functions like ‘message’ and ‘format-message’, but not\nin ‘format’.\n\nThe value should be one of these symbols:\n  ‘curve’:    quote with curved single quotes ‘like this’.\n  ‘straight’: quote with straight apostrophes 'like this'.\n  ‘grave’:    quote with grave accent and apostrophe `like this';\n	      i.e., do not alter the original quote marks.\n  nil:        like ‘curve’ if curved single quotes are displayable,\n	      and like ‘grave’ otherwise.  This is the default.\n\nYou should never read the value of this variable directly from a Lisp\nprogram.  Use the function ‘text-quoting-style’ instead, as that will\ncompute the correct value for the current terminal in the nil case."
+      :type '(choice (const :tag "Prefer ‘curved’ quotes, if possible" #f) (const :tag "‘Curved’ quotes" curved) (const :tag "‘Straight’ quotes" straight) (const :tag "‘Grave’ quotes (no translation)" grave))
+      :group 'display)
     ;; ^ GNU Emacs's `text-quoting-style' (doc.c:652). Its default is
     ;; nil: "grave if curved quotes cannot be displayed, otherwise
     ;; curve", which `text-quoting-style' below resolves through
