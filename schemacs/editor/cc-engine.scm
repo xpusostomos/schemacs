@@ -209,6 +209,9 @@
    c-determine-+ve-limit
    ;; `cc-engine.el:13584'
    c-looking-at-special-brace-list
+   ;; `cc-engine.el:8567'-`:8644'
+   c-forward-noise-clause c-forward-noise-clause-not-macro-decl
+   c-forward-over-colon-type-list
    ;; `cc-engine.el:14101'
    c-looking-at-c++-lambda-capture-list
    ;; virtual semicolons (`cc-engine.el:14184')
@@ -5520,6 +5523,74 @@
                   (set! pos (point)))
                 (loop)))
             (point)))))
+
+    ;;------------------------------------------------------------------
+    ;; `cc-engine.el:8567'-`:8644': the helpers the keyword clauses (and
+    ;; the declaration engine) stand on. `c-forward-noise-clause',
+    ;; `c-forward-noise-clause-not-macro-decl' and
+    ;; `c-forward-over-colon-type-list' need nothing unported.
+    ;;
+    ;; Between this region and `c-forward-keyword-clause' (`:8667')
+    ;; Emacs has `c-neutralize-*', `c-depropertize-ml-string' and
+    ;; `c-before-after-change-check-c++-modules', which are not ported
+    ;; (they need cc-mode's `syntax-table' property machinery);
+    ;; `c-forward-keyword-clause' and its two macros need
+    ;; `c-forward-type' and `c-forward-name', the declaration engine.
+    ;;------------------------------------------------------------------
+    (define (c-forward-noise-clause . args)
+      ;; "Point is at a `c-noise-macro-with-parens-names' macro
+      ;; identifier. Go forward over this name, any parenthesis
+      ;; expression which follows it, and any syntactic WS, ending up
+      ;; either at the next token or EOB or (when STOP-AT-END is
+      ;; non-nil) directly after the clause. If there is an unbalanced
+      ;; paren expression, leave point at it. Always Return t."
+      (let ((stop-at-end (if (pair? args) (car args) #f))
+            (pos #f))
+        (or (c-forward-over-token)
+            (goto-char (point-max)))
+        (set! pos (point))
+        (c-forward-syntactic-ws)
+        (when (and (eq? (char-after (point)) #\()
+                   (c-go-list-forward))
+          (set! pos (point)))
+        (goto-char pos)
+        (unless stop-at-end
+          (c-forward-syntactic-ws))
+        #t))
+
+    (define (c-forward-noise-clause-not-macro-decl maybe-parens)
+      ;; "Point is at a noise macro identifier, which, when MAYBE-PARENS
+      ;; is non-nil, optionally takes paren arguments. Go forward over
+      ;; this name, and when there may be optional parens, any
+      ;; parenthesis expression which follows it, but DO NOT go over any
+      ;; macro declaration which may come between them. Always return
+      ;; t."
+      (c-end-of-token)
+      (when maybe-parens
+        (let ((here (point)))
+          (c-forward-comments)
+          (if (not (and (eq? (char-after (point)) #\()
+                        (c-go-list-forward)))
+              (goto-char here))))
+      #t)
+
+    (define (c-forward-over-colon-type-list)
+      ;; "If we're at a sequence of characters which can extend from,
+      ;; e.g., a class name up to a colon introducing an inheritance
+      ;; list, move forward over them, including the colon, and return
+      ;; non-nil. Otherwise return nil, leaving point unmoved."
+      (let ((here (point)) (pos #f))
+        (let loop ()
+          (when (and (let ((re (%c-langvar 'c-sub-colon-type-list-re)))
+                       (and re (re-search-forward re #f #t)))
+                     (not (eq? (char-after (point)) #\:))
+                     (c-major-mode-is 'c++-mode)
+                     (begin (set! pos (c-looking-at-c++-attribute)) pos))
+            (goto-char pos)
+            (loop)))
+        (if (eq? (char-after (point)) #\:)
+            (begin (forward-char) #t)
+            (begin (goto-char here) #f))))
 
     ;;------------------------------------------------------------------
     ;; `c-in-method-def-p' (`cc-engine.el:12171')

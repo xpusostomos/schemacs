@@ -1232,3 +1232,71 @@
     (cap-check 366 #t)			; [=]
     (cap-check 380 #f)))		; s[0]
 (test-end "schemacs_editor_cc_engine_lambda_capture")
+
+;;----------------------------------------------------------------------
+;; The keyword-clause helpers (`cc-engine.el:8567'-`:8644')
+;;----------------------------------------------------------------------
+;; `c-forward-noise-clause', `c-forward-noise-clause-not-macro-decl'
+;; and `c-forward-over-colon-type-list', the three helpers
+;; `c-forward-keyword-clause' stands on that need nothing unported. A
+;; whole-fixture differential against Emacs 31.1 covered every position
+;; of the fixture for all five forms (890 answers, identical); the rows
+;; below pin the interesting ones - the noise macro with and without
+;; parens, the unbalanced case, and the inheritance colon.
+(test-begin "schemacs_editor_cc_engine_kw_helpers")
+(define kw-fixture
+  "NOISE(x) rest;\nNOISE (a, b) after;\nclass A : public B {};\nstruct S final : X::Y {};\nA::B::C c;\nvoid f () { g (); }\ntemplate <class T> T id (T x) { return x; }\nint q = a ? b : c;\n")
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert kw-fixture)
+  (set-buffer-local-value! b 'major-mode 'c++-mode)
+  (c-init-language-vars c++-mode)
+  (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+  (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+  (parameterize ((*c-buffer-is-cc-mode* 'c++-mode))
+    (define (kw-point tag pos thunk want)
+      (goto-char pos)
+      (thunk)
+      (test-equal (list tag pos) want (point)))
+    (define (kw-colon pos want-result want-point)
+      (goto-char pos)
+      (let ((r (c-forward-over-colon-type-list)))
+        (test-equal (list 'colon pos)
+                    (list want-result want-point)
+                    (list r (point)))))
+
+    ;; `c-forward-noise-clause' - over the name, the paren expression
+    ;; and the syntactic whitespace.
+    (kw-point 'noise 1 c-forward-noise-clause 10)
+    (kw-point 'noise 6 c-forward-noise-clause 7)
+    (kw-point 'noise 20 c-forward-noise-clause 29)
+    (kw-point 'noise 22 c-forward-noise-clause 23)
+    (kw-point 'noise 40 c-forward-noise-clause 42)
+
+    ;; ... with STOP-AT-END the trailing whitespace stays.
+    (kw-point 'noise-stop 1 (lambda () (c-forward-noise-clause #t)) 9)
+    (kw-point 'noise-stop 6 (lambda () (c-forward-noise-clause #t)) 7)
+    (kw-point 'noise-stop 20 (lambda () (c-forward-noise-clause #t)) 28)
+    (kw-point 'noise-stop 22 (lambda () (c-forward-noise-clause #t)) 23)
+    (kw-point 'noise-stop 40 (lambda () (c-forward-noise-clause #t)) 41)
+
+    ;; `c-forward-noise-clause-not-macro-decl': MAYBE-PARENS goes over
+    ;; the parens; nil stops after the name.
+    (kw-point 'not-macro 1 (lambda () (c-forward-noise-clause-not-macro-decl #t)) 9)
+    (kw-point 'not-macro 6 (lambda () (c-forward-noise-clause-not-macro-decl #t)) 9)
+    (kw-point 'not-macro 20 (lambda () (c-forward-noise-clause-not-macro-decl #t)) 28)
+    (kw-point 'not-macro 22 (lambda () (c-forward-noise-clause-not-macro-decl #t)) 28)
+    (kw-point 'not-macro 40 (lambda () (c-forward-noise-clause-not-macro-decl #t)) 41)
+    (kw-point 'not-macro-nil 1 (lambda () (c-forward-noise-clause-not-macro-decl #f)) 6)
+    (kw-point 'not-macro-nil 6 (lambda () (c-forward-noise-clause-not-macro-decl #f)) 6)
+    (kw-point 'not-macro-nil 20 (lambda () (c-forward-noise-clause-not-macro-decl #f)) 21)
+    (kw-point 'not-macro-nil 22 (lambda () (c-forward-noise-clause-not-macro-decl #f)) 22)
+    (kw-point 'not-macro-nil 40 (lambda () (c-forward-noise-clause-not-macro-decl #f)) 41)
+
+    ;; `c-forward-over-colon-type-list' - only a C++ inheritance colon.
+    (kw-colon 1 #f 1)
+    (kw-colon 20 #f 20)
+    (kw-colon 35 #t 45)
+    (kw-colon 40 #t 45)
+    (kw-colon 45 #f 45)))
+(test-end "schemacs_editor_cc_engine_kw_helpers")
