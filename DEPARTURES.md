@@ -13156,3 +13156,115 @@ fixes, each needed for the language initialisation to run at all:
 `c-keywords' stands on. `c-known-type-key''s hand port now asks
 `c-mode-var-boundp' before reading the variable, as Emacs's `boundp'
 does.
+
+# cc-mode: the declarator, and four truthiness bugs under it (2026-11-22)
+
+The tranche after the declaration engine: `c-back-over-member-initializer-braces`
+(`cc-engine.el:9855`), `c-forward-class-decl` (`:9964`), the C++20
+constraint machinery (`c-forward-primary-expression` `:9986`,
+`c-forward-constraint-clause` `:10046`,
+`c-forward-c++-requires-clause` `:10072`), `c-in-id-arglist` (`:10081`),
+`c-forward-decl-arglist` (`:10107`) and `c-forward-declarator`
+(`:10161`). `c-back-over-list-of-member-inits` (`:9885`) and
+`c-back-over-member-initializers` (`:9911`) are **not** ported: they
+wait on `c-just-after-func-arglist-p` and `c-at-toplevel-p`, which wait
+on `c-forward-decl-or-cast-1` and `c-search-uplist-for-classkey`.
+`c-do-declarators` (`:10379`) waits on `c-looking-at-statement-block`.
+
+## Verification
+
+A whole-input differential of **eleven probes at every position of three
+fixtures** - C++ (592 positions), the older C++ fixture (456) and C
+(270) - with `c-found-types` cleared before each call: `c-forward-declarator`
+with no arguments and with `(point-max) t t`, `c-forward-decl-arglist`
+with both argument shapes at every `(`, `c-forward-primary-expression`
+with and without `(point-max) t`, `c-forward-constraint-clause`,
+`c-forward-c++-requires-clause`, `c-in-id-arglist`,
+`c-forward-class-decl` and `c-back-over-member-initializer-braces`.
+**14,498 answers, all identical to Emacs 31.1's.**
+
+The old six probes (type, name, keyword clause both ways, `<>` arglist
+both ways) were re-run on their two fixtures after the changes: still
+identical.
+
+## The four truthiness bugs this exposed
+
+Every one is the tree's recurring class - a Scheme construct whose value
+is not Elisp's nil - and every one changes an *answer*, not just a
+return value:
+
+1. **`c-on-identifier`'s operator `cond` had no `else`.** When neither
+   clause matched it answered the unspecified value, which is true, so
+   `c-on-identifier` said "identifier" for anything its first two
+   branches rejected - `c-in-id-arglist` then reported `(32)` in
+   `_BitInt(32)` as an identifier arglist. Emacs's `cond` is nil there.
+   Fixed with `(else #f)`.
+
+2. **`c-backward-token-2` compared a character with `=`** -
+   `(= (char-after) ?\#)`, which is a type error in Scheme. It only
+   fires with COUNT 0 when point is on syntactic whitespace, which the
+   previous differentials never asked for; `c-on-identifier`'s operator
+   branch asks exactly that. It is `char=?`.
+
+3. **`c-forward-syntactic-ws` and `c-backward-syntactic-ws` now answer
+   what Emacs's macros answer.** In `cc-defs.el:739` and `:761` a call
+   with no LIMIT expands to a bare `(c-forward-sws)`, and a call with
+   one to a `when` - nil when its test fails, where this port answered
+   the unspecified value. `c-forward-primary-expression` reads that
+   answer as a loop condition (the C's `(while (cond ...))` whose first
+   clause ends in `(c-forward-syntactic-ws limit)`), so a truthy value
+   ran the loop on where Emacs stops.
+
+4. **`c-forward-sws` and `c-backward-sws` themselves answered the
+   unspecified value** on the early-bail path and where their final
+   `when` tested false. Emacs's answer is nil on every path (the inner
+   `when`'s cond branches all call functions that answer nil); both are
+   spelled out with explicit `#f` forms and a comment.
+
+## Two translation mistakes the differential caught
+
+Both kept the file *balanced*, so neither the reader nor the compiler
+could see them - only the whole-input differential did:
+
+- **`c-forward-decl-arglist`'s `and` closed one paren early**, which
+  made its `if` a two-armed form whose "then" was `(goto-char here)`.
+  The function then answered nil everywhere and never moved. The
+  `let`/`catch`/`when` block had three closers where four were needed
+  and a fourth later, exactly the "compensating close keeps the file
+  balanced" hazard the earlier handoffs record.
+- **`c-forward-declarator`'s outer search loop merged two `and`
+  elements into one `begin`.** The C is
+
+      (while (and (< (point) limit)
+                  (progn (while ...) found)
+                  (when (eq (char-before) ?\[) ...)))
+
+  - when `found` is nil the `and` short-circuits and the `when` is not
+  evaluated. Written as `(begin (let inner ...) (if ...))` the `when`
+  ran anyway, so a `]` in a lambda capture list took the bracket branch
+  and the declarator ran on. Split back into separate `and` elements.
+
+## An Emacs error reproduced on purpose
+
+`c-forward-primary-expression`'s second clause is a bare
+`(looking-at c-opt-identifier-concat-key)`. In C mode that constant is
+nil, so the clause signals `wrong-type-argument`. The port had guarded
+it with `(and re ...)` and answered #t where Emacs signals; the
+differential showed it at 82 positions of the C fixture. The guard is
+gone, with a comment: callers see Emacs's answer, even when that answer
+is an error.
+
+## Tests, and the cache caveat they pin
+
+`cc-engine-tests.scm` gained `schemacs_editor_cc_engine_declarator`
+(44 rows). **Each row probes a fresh buffer**, because cc-mode caches in
+text properties (`c-is-sws`, `c-in-sws`, the `<>`-as-paren markers), so
+an answer can depend on what was probed before it in the same buffer -
+the whole-fixture differential saw the same history on both sides and
+agreed, while a test that probed in one long-lived buffer disagreed
+with the *same* implementation in a fresh one. Every expectation in the
+group was measured on Emacs 31.1 in a fresh buffer, one probe per
+buffer.
+
+`cc-engine-tests.scm` is 469 passes; the six cc suites and `loadup-tests`
+pass; `imports.scm` is regenerated.

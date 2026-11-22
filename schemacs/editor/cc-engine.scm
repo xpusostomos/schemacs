@@ -48,14 +48,21 @@
   ;;     `cc-fonts.el''s and arrives through
   ;;     `*c-fontify-new-found-type-function*', which does nothing until
   ;;     that library lands.
+  ;;   * **the declarator (`:9855'-`:10310')**:
+  ;;     `c-back-over-member-initializer-braces', `c-forward-class-decl',
+  ;;     the C++20 constraint machinery (`c-forward-primary-expression',
+  ;;     `c-forward-constraint-clause',
+  ;;     `c-forward-c++-requires-clause'), `c-in-id-arglist',
+  ;;     `c-forward-decl-arglist' and `c-forward-declarator'.
   ;;
-  ;; Still to come, in the file's order: the declarator machinery
-  ;; (`c-forward-declarator' and `c-forward-decl-or-cast-1'), the
-  ;; member-initializer and statement-block walkers
-  ;; (`c-just-after-func-arglist-p', `c-back-over-member-initializer-
-  ;; braces', `c-looking-at-statement-block'), the debug overlay helpers
-  ;; (they need the overlay API this library does not want), and the
-  ;; rest of the parser.
+  ;; Still to come, in the file's order: `c-do-declarators' (it waits on
+  ;; `c-looking-at-statement-block'), `c-forward-decl-or-cast-1', the
+  ;; member-initializer walkers (`c-back-over-list-of-member-inits' and
+  ;; `c-back-over-member-initializers', which wait on
+  ;; `c-just-after-func-arglist-p' and `c-at-toplevel-p'), the
+  ;; statement-block walkers, the debug overlay helpers (they need the
+  ;; overlay API this library does not want), and the rest of the
+  ;; parser.
   ;;
   ;; **Placement departures**, all forced by the import graph and named
   ;; where each function is defined:
@@ -172,6 +179,12 @@
    c-forward-name c-forward-type c-forward-annotation
    c-forward-over-compound-identifier c-back-over-compound-identifier
    c-check-qualified-type
+   ;; `cc-engine.el:9855'-`:10310': the member-initializer brace walk,
+   ;; the C++20 constraint machinery and the declarator
+   c-back-over-member-initializer-braces c-forward-class-decl
+   c-forward-primary-expression c-forward-constraint-clause
+   c-forward-c++-requires-clause c-in-id-arglist
+   c-forward-decl-arglist c-forward-declarator
    ;; state variables and the mode-line sub-state calculation
    c-hungry-delete-key set!c-hungry-delete-key
    c-electric-flag set!c-electric-flag
@@ -4339,7 +4352,13 @@
             ;; "Make sure that the newly marked `c-in-sws' region doesn't
             ;; connect to another one after the point (which might occur
             ;; when editing inside a comment or macro)."
-            (when (eq? last-put-in-sws-pos (point))
+            ;;
+            ;; Emacs's `(when TEST (cond ...))' is the value of this
+            ;; function, and nil when TEST fails; the `if' answers #f
+            ;; there, and the removal calls answer nil in Emacs where
+            ;; ours answer #t.
+            (if (eq? last-put-in-sws-pos (point))
+              (begin
               (cond ((< last-put-in-sws-pos (point-max))
                      (c-debug-sws-msg
                       "c-forward-sws clearing at ~a for cache separation"
@@ -4356,7 +4375,15 @@
                       "c-forward-sws clearing thoroughly at ~a for cache separation"
                       (- last-put-in-sws-pos 1))
                      (c-remove-is-and-in-sws (- last-put-in-sws-pos 1)
-                                             last-put-in-sws-pos))))))))
+                                             last-put-in-sws-pos)))
+              #f))
+            ;; Emacs's `when's answer nil, and a Scheme `when' answers
+            ;; the unspecified value, which is true - callers read this
+            ;; answer (`c-forward-primary-expression' tests it in a loop
+            ;; condition). Emacs's answer is nil on every path, so the
+            ;; values here and after the outer `when' are spelled out.
+            #f))
+            #f))
     ;;------------------------------------------------------------------
     ;; `c-backward-sws' (`cc-engine.el:2381')
     ;;------------------------------------------------------------------
@@ -4644,7 +4671,8 @@
             ;; "Make sure that the newly marked `c-in-sws' region doesn't
             ;; connect to another one before the point (which might occur
             ;; when editing inside a comment or macro)."
-            (when (eq? last-put-in-sws-pos (point))
+            (if (eq? last-put-in-sws-pos (point))
+              (begin
               (cond ((< (point-min) last-put-in-sws-pos)
                      (c-debug-sws-msg
                       "c-backward-sws clearing at ~a for cache separation"
@@ -4661,7 +4689,11 @@
                       "c-backward-sws clearing thoroughly at ~a for cache separation"
                       last-put-in-sws-pos)
                      (c-remove-is-and-in-sws last-put-in-sws-pos
-                                             (+ last-put-in-sws-pos 1)))))))))
+                                             (+ last-put-in-sws-pos 1))))
+              #f))
+            ;; As `c-forward-sws': Emacs's answer is nil on every path.
+            #f))
+            #f))
 
     ;;------------------------------------------------------------------
     ;; `c-partial-ws-p' (`cc-engine.el:2678')
@@ -4698,19 +4730,33 @@
     ;; Emacs's expansion of an explicit nil does too.
     (define (c-forward-syntactic-ws . limit-args)
       ;; "Forward skip over syntactic whitespace. ..."
+      ;;
+      ;; Emacs's macro (`cc-defs.el:739') expands a call with no LIMIT
+      ;; to a bare `(c-forward-sws)', and a call with a LIMIT to the
+      ;; `when' form - whose value is nil when its test fails, where
+      ;; this port answered the unspecified value. That matters where
+      ;; the value is a loop condition (`c-forward-primary-expression'
+      ;; tests it).
       (let ((limit (if (pair? limit-args) (car limit-args) #f)))
-        (when (< (point) (or limit (point-max)))
-          (save-restriction
-            (narrow-to-region (point-min) (or limit (point-max)))
-            (c-forward-sws)))))
+        (if (not (pair? limit-args))
+            (c-forward-sws)
+            (if (< (point) (or limit (point-max)))
+                (save-restriction
+                  (narrow-to-region (point-min) (or limit (point-max)))
+                  (c-forward-sws))
+                #f))))
 
     (define (c-backward-syntactic-ws . limit-args)
-      ;; "Backward skip over syntactic whitespace. ..."
+      ;; "Backward skip over syntactic whitespace. ..." (`cc-defs.el:761'
+      ;; has the same macro shape as the forward one.)
       (let ((limit (if (pair? limit-args) (car limit-args) #f)))
-        (when (> (point) (or limit (point-min)))
-          (save-restriction
-            (narrow-to-region (or limit (point-min)) (point-max))
-            (c-backward-sws)))))
+        (if (not (pair? limit-args))
+            (c-backward-sws)
+            (if (> (point) (or limit (point-min)))
+                (save-restriction
+                  (narrow-to-region (or limit (point-min)) (point-max))
+                  (c-backward-sws))
+                #f))))
 
     ;;------------------------------------------------------------------
     ;; `c-on-identifier' (`cc-engine.el:4852'-`:4903')
@@ -4769,7 +4815,11 @@
                              (let ((re (%c-langvar
                                         'c-overloadable-operators-regexp)))
                                (and re (looking-at re)))))
-                      (point)))
+                      (point))
+                     ;; Emacs's `cond' is nil when no clause matches;
+                     ;; Scheme's is the unspecified value, which is
+                     ;; true - and this answer decides `c-on-identifier'.
+                     (else #f))
                #f)))))
 
     ;;------------------------------------------------------------------
@@ -4967,7 +5017,7 @@
                              ;; "If we're looking at a '#' that might
                              ;; start a cpp directive then we have to do a
                              ;; more elaborate check."
-                             (or (not (= (char-after (point)) #\#))
+                             (or (not (char=? (char-after (point)) #\#))
                                  (not (%c-langvar 'c-opt-cpp-prefix))
                                  (save-excursion
                                    (and (= (point)
@@ -7535,5 +7585,548 @@
                 (and (hash-ref (c-found-types) compound #f)
                      compound))
               #f))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-back-over-member-initializer-braces' (`cc-engine.el:9855'),
+    ;; `c-forward-class-decl' (`:9964'), the C++20 constraint machinery
+    ;; (`:9986'-`:10078') and the declarator (`:10107'-`:10310')
+    ;;------------------------------------------------------------------
+    ;; Emacs's `c-back-over-list-of-member-inits' (`:9885') and
+    ;; `c-back-over-member-initializers' (`:9911') are not ported: they
+    ;; wait on `c-just-after-func-arglist-p' and `c-at-toplevel-p',
+    ;; which wait on `c-forward-decl-or-cast-1' and
+    ;; `c-search-uplist-for-classkey'. `c-do-declarators' (`:10379')
+    ;; waits on `c-looking-at-statement-block'.
+
+    (define (c-back-over-member-initializer-braces)
+      ;; "Point is just after a closing brace/parenthesis. Try to parse
+      ;; this as a C++ member initializer list, going back to just after
+      ;; the introducing \":\" and returning t. Otherwise return nil,
+      ;; leaving point unchanged."
+      (let ((here (point)))
+        (let ((res (call-with-current-continuation
+                    (lambda (done)
+                      (unless (c-go-list-backward) (done #f))
+                      (c-backward-syntactic-ws)
+                      (unless (c-back-over-compound-identifier) (done #f))
+                      (c-backward-syntactic-ws)
+
+                      (let loop ()
+                        (when (eq? (char-before) #\,)
+                          (backward-char)
+                          (c-backward-syntactic-ws)
+                          (unless (memv (char-before) (list #\) #\}))
+                            (done #f))
+                          (unless (c-go-list-backward) (done #f))
+                          (c-backward-syntactic-ws)
+                          (unless (c-back-over-compound-identifier) (done #f))
+                          (c-backward-syntactic-ws)
+                          (loop)))
+
+                      (eq? (char-before) #\:)))))
+          (unless res (goto-char here))
+          res)))
+
+    (define (c-forward-class-decl)
+      ;; "From the beginning of a struct/union, etc. move forward to
+      ;; after the brace block which defines it, leaving point at the
+      ;; start of the next token and returning point. On failure leave
+      ;; point unchanged and return nil." (`cc-engine.el:9964')
+      (let ((here (point))
+            (class-key (%c-langvar 'c-class-key)))
+        (if (and (and class-key (looking-at class-key))
+                 (= (c-forward-token-2) 0)
+                 (c-on-identifier)
+                 (= (c-forward-token-2) 0)
+                 (eq? (char-after (point)) #\{)
+                 (c-go-list-forward))
+            (begin
+              (c-forward-syntactic-ws)
+              (point))
+            (begin (goto-char here) #f))))
+
+    (define (c-forward-primary-expression . args)
+      ;; "Go over the primary expression (if any) at point, and unless
+      ;; STOP-AT-END is non-nil, move to the next token then return
+      ;; non-nil. If we're not at a primary expression leave point
+      ;; unchanged and return nil." (`cc-engine.el:9986')
+      ;;
+      ;; "Note that this function is incomplete, handling only those
+      ;; cases expected to be common in a C++20 requires clause."
+      ;;
+      ;; The C's `(let ((c-restricted-<>-arglists t)
+      ;; (c-parse-and-markup-<>-arglists nil)) ...)' is a `parameterize'
+      ;; here, the tree's rule for a dynamically bound variable.
+      (let ((limit (if (pair? args) (car args) #f))
+            (stop-at-end (if (and (pair? args) (pair? (cdr args)))
+                             (cadr args) #f)))
+        (let ((here (point)))
+          (parameterize ((*c-restricted-<>-arglists* #t)
+                         (*c-parse-and-markup-<>-arglists* #f))
+            (if (cond
+                 ((let ((re (%c-langvar 'c-constant-key)))
+                    (and re (looking-at re)))
+                  (goto-char (match-end 1))
+                  (unless stop-at-end (c-forward-syntactic-ws limit))
+                  #t)
+                 ((eq? (char-after (point)) #\()
+                  (and (c-go-list-forward (point) limit)
+                       (eq? (char-before) #\))
+                       (begin
+                         (unless stop-at-end
+                           (c-forward-syntactic-ws limit))
+                         #t)))
+                 ((c-forward-over-compound-identifier)
+                  (let ((after-id (point)))
+                    (c-forward-syntactic-ws limit)
+                    ;; `(while (cond ...))' - the cond's value is the
+                    ;; loop's test, and its first clause answers nil
+                    ;; once the arglist has been skipped, which is the
+                    ;; C's own way of stopping after one such round.
+                    (let loop ()
+                      (when (cond
+                             ((and (looking-at "<")
+                                   (and (c-forward-<>-arglist #f)
+                                        (begin
+                                          (set! after-id (point))
+                                          after-id)))
+                              (c-forward-syntactic-ws limit))
+                             ;; Emacs's clause is a bare `(looking-at
+                             ;; c-opt-identifier-concat-key)', which signals
+                             ;; in a mode whose constant is nil (C mode);
+                             ;; kept bare so that callers see Emacs's answer.
+                             ((looking-at (%c-langvar
+                                           'c-opt-identifier-concat-key))
+                              (and (zero? (c-forward-token-2 1 #f limit))
+                                   (let ((id (c-forward-over-compound-identifier)))
+                                     (c-forward-syntactic-ws limit)
+                                     id)))
+                             (else #f))
+                        (loop)))
+                    (goto-char after-id)))
+                 ((let ((re (%c-langvar 'c-fun-name-substitute-key)))
+                    (and re (looking-at re))) ; "requires"
+                  (goto-char (match-end 1))
+                  (c-forward-syntactic-ws limit)
+                  (and
+                   (or (not (eq? (char-after (point)) #\())
+                       (let ((ok (and (c-go-list-forward (point) limit)
+                                      (eq? (char-before) #\)))))
+                         (c-forward-syntactic-ws)
+                         ok))
+                   (eq? (char-after (point)) #\{)
+                   (and (c-go-list-forward (point) limit)
+                        (eq? (char-before) #\}))
+                   (begin
+                     (unless stop-at-end (c-forward-syntactic-ws limit))
+                     #t)))
+                 (else #f))
+                #t
+                (begin (goto-char here) #f))))))
+
+    (define (c-forward-constraint-clause . args)
+      ;; "Point is at the putative start of a constraint clause. Move to
+      ;; its end (when STOP-AT-END is non-zero) or the token after that
+      ;; (otherwise) and return non-nil. Return nil without moving if we
+      ;; fail to find a constraint." (`cc-engine.el:10046')
+      (let ((limit (if (pair? args) (car args) #f))
+            (stop-at-end (if (and (pair? args) (pair? (cdr args)))
+                             (cadr args) #f)))
+        (let ((here (point))
+              (final-point #f))
+          (set! limit (or limit (point-max)))
+          (if (c-forward-primary-expression limit #t)
+              (begin
+                (set! final-point (point))
+                (c-forward-syntactic-ws limit)
+                (let loop ()
+                  (when (and (looking-at "\\(?:&&\\|||\\)")
+                             (<= (match-end 0) limit)
+                             (begin
+                               (goto-char (match-end 0))
+                               (c-forward-syntactic-ws limit)
+                               (<= (point) limit))
+                             (c-forward-primary-expression limit #t)
+                             (begin (set! final-point (point)) final-point))
+                    (loop)))
+                (goto-char final-point)
+                (unless stop-at-end (c-forward-syntactic-ws limit))
+                #t)
+              (begin (goto-char here) #f)))))
+
+    (define (c-forward-c++-requires-clause . args)
+      ;; "Point is at the keyword \"requires\". Move forward over the
+      ;; requires clause to its end (if STOP-AT-END is non-nil) or the
+      ;; next token after it (otherwise) and return non-nil. If there is
+      ;; no valid requires clause at point, leave point unmoved and
+      ;; return nil." (`cc-engine.el:10072')
+      (let ((limit (if (pair? args) (car args) #f))
+            (stop-at-end (if (and (pair? args) (pair? (cdr args)))
+                             (cadr args) #f)))
+        (set! limit (or limit (point-max)))
+        (and (zero? (c-forward-token-2)) ; over "requires".
+             (c-forward-constraint-clause limit stop-at-end))))
+
+    (define (c-in-id-arglist)
+      ;; "If point is inside a paren delimited non-empty arglist, all of
+      ;; whose arguments are identifiers, return a cons of the start and
+      ;; (after) the end of the arglist. Otherwise return nil."
+      ;; (`cc-engine.el:10081')
+      (let* ((paren-state (c-parse-state))
+             (enclosing-paren-pos (c-most-enclosing-brace paren-state)))
+        (save-excursion
+          (and
+           enclosing-paren-pos
+           (eq? (char-after enclosing-paren-pos) #\()
+           (begin
+             (goto-char (+ enclosing-paren-pos 1))
+             (c-forward-syntactic-ws)
+             (call-with-current-continuation
+              (lambda (in-arglist)
+                (let loop ()
+                  (when (and
+                         (c-on-identifier)
+                         (zero? (c-forward-token-2))
+                         (begin
+                           (when (eq? (char-after (point)) #\))
+                             (in-arglist
+                              (cons enclosing-paren-pos (+ (point) 1))))
+                           (eq? (char-after (point)) #\,))
+                         (zero? (c-forward-token-2)))
+                    (loop)))
+                #f)))))))
+
+    (define (c-forward-decl-arglist not-top id-in-parens . limit-args)
+      ;; "Point is at an open parenthesis, assumed to be the arglist of a
+      ;; function declaration. Move over this arglist and following
+      ;; syntactic whitespace, and return non-nil. If the construct
+      ;; isn't such an arglist, leave point unmoved and return nil."
+      ;;
+      ;; "Note that point is assumed to be at a place where an arglist is
+      ;; expected. Only for C++, where there are other possibilities, is
+      ;; any actual processing done. Otherwise, t is simply returned."
+      ;; (`cc-engine.el:10107')
+      (let ((limit (if (pair? limit-args) (car limit-args) #f)))
+        (let ((here (point))
+              (got-type #f))
+          (if (or
+               (not (c-major-mode-is 'c++-mode))
+               (and
+                (or (not not-top)
+                    id-in-parens        ; Id is in parens, etc.
+                    (save-excursion
+                      (forward-char)
+                      (c-forward-syntactic-ws limit)
+                      (looking-at "[*&]")))
+                (save-excursion
+                  ;; Emacs `let'-binds `c-last-identifier-range' here;
+                  ;; it is a parameter.
+                  (parameterize ((*c-last-identifier-range* #f))
+                    (forward-char)
+                    (c-forward-syntactic-ws limit)
+                    (call-with-current-continuation
+                     (lambda (is-function)
+                       (let loop ()
+                         (when
+                          (begin
+                            ;; Go forward one argument at each iteration.
+                            (let skip ()
+                              (when (cond
+                                     ((let ((re (%c-langvar 'c-decl-hangon-key)))
+                                        (and re (looking-at re)))
+                                      (c-forward-keyword-clause 1))
+                                     ((looking-at
+                                       (c-noise-macro-with-parens-name-re))
+                                      (c-forward-noise-clause))
+                                     (else #f))
+                                (skip)))
+                            (when (eq? (char-after (point)) #\))
+                              (forward-char)
+                              (c-forward-syntactic-ws limit)
+                              (is-function #t))
+                            (set! got-type (c-forward-type))
+                            (cond
+                             ((not (%c-true got-type))
+                              (is-function #f))
+                             ((not (eq? got-type 'maybe))
+                              (is-function #t))
+                             (else #f))
+                            (c-forward-declarator limit #t #t)
+                            (eq? (char-after (point)) #\,))
+                           (forward-char)
+                           (c-forward-syntactic-ws)
+                           (loop)))
+                       #t))))))
+               (and (c-go-list-forward (point) limit)
+                    (begin (c-forward-syntactic-ws limit) #t))
+              (begin (goto-char here) #f)))))
+
+    (define (c-forward-declarator . args)
+      ;; "Assuming point is at the start of a declarator, move forward
+      ;; over it, leaving point at the next token after it (e.g. a ) or a
+      ;; ; or a ,), or at LIMIT (or end of buffer) if that comes first."
+      ;; (`cc-engine.el:10161')
+      ;;
+      ;; "Return a list (ID-START ID-END BRACKETS-AFTER-ID GOT-INIT
+      ;; DECORATED ARGLIST), where ID-START and ID-END are the bounds of
+      ;; the declarator's identifier, BRACKETS-AFTER-ID is non-nil if a
+      ;; [...] pair is present after the id, and ARGLIST is non-nil
+      ;; either when an arglist has been moved over, or when we have
+      ;; stopped at an unbalanced open-paren. GOT-INIT is non-nil when
+      ;; the declarator is followed by \"=\" or \"(\", DECORATED is
+      ;; non-nil when the identifier is embellished by an operator, like
+      ;; \"*x\", or \"(*x)\"."
+      ;;
+      ;; "If ACCEPT-ANON is non-nil, move forward over any \"anonymous
+      ;; declarator\", i.e. something like the (*) in int (*), such as
+      ;; might be found in a declaration. In such a case ID-START and
+      ;; ID-END in the return value are both set to nil. A \"null\"
+      ;; \"anonymous declarator\" gives a non-nil result."
+      ;;
+      ;; "If no declarator is found, leave point unmoved and return nil.
+      ;; LIMIT is an optional limit for forward searching."
+      ;;
+      ;; "Note that the global variable `c-last-identifier-range' is
+      ;; written to, so the caller should bind it if necessary."
+      (let ((limit (if (pair? args) (car args) #f))
+            (accept-anon (if (and (pair? args) (pair? (cdr args)))
+                             (cadr args) #f))
+            (not-top (if (and (pair? args) (pair? (cdr args))
+                              (pair? (cddr args)))
+                         (caddr args) #f)))
+        (let ((here (point))
+              (id-start #f) (id-end #f) (brackets-after-id #f) (paren-depth 0)
+              (decorated #f) (got-init #f) (arglist #f) (double-double-quote #f)
+              (pos #f))
+          (set! limit (or limit (point-max)))
+          (if (and
+               (< (point) limit)
+
+               ;; "The following form moves forward over the
+               ;; declarator's identifier (and what precedes it),
+               ;; returning t. If there wasn't one, it returns nil."
+               (let ((got-identifier #f))
+                 (set! paren-depth 0)
+                 ;; "Skip over type decl prefix operators, one for each
+                 ;; iteration of the while."
+                 (let loop ()
+                   (when (cond
+                          ((let ((re (%c-langvar 'c-decl-hangon-key)))
+                             (and re (looking-at re)))
+                           (c-forward-keyword-clause 1))
+                          ((and (%c-true (%c-langvar 'c-opt-cpp-prefix))
+                                (looking-at
+                                 (c-noise-macro-with-parens-name-re)))
+                           (c-forward-noise-clause))
+                          ;; "Special handling for operator<op>."
+                          ((let ((re (%c-langvar 'c-opt-op-identifier-prefix)))
+                             (and re (looking-at re)))
+                           (goto-char (match-end 1))
+                           (c-forward-syntactic-ws limit)
+                           (set! id-start (point))
+                           (if (let ((re (%c-langvar
+                                          'c-overloadable-operators-regexp)))
+                                 (and re (looking-at re)))
+                               (begin
+                                 (when (and (c-major-mode-is 'c++-mode)
+                                            (eq? (char-after (point)) #\")
+                                            (eq? (char-after (+ (point) 1)) #\"))
+                                   (set! double-double-quote #t))
+                                 (goto-char (match-end 0))
+                                 (set! pos (point))
+                                 (c-forward-syntactic-ws limit)
+                                 (set! got-identifier #t)
+                                 #f)
+                               #t))
+                          ((and (let ((re (%c-langvar
+                                           'c-type-decl-prefix-key)))
+                                  (and re (looking-at re)))
+                                (if (and (c-major-mode-is 'c++-mode)
+                                         (match-beginning 4))
+                                    ;; "If the fourth submatch matches in
+                                    ;; C++ then we're looking at an
+                                    ;; identifier that's a prefix only if
+                                    ;; it specifies a member pointer."
+                                    (begin
+                                      (set! id-start (point))
+                                      (if (c-forward-name #t)
+                                          (begin
+                                            (set! pos (point))
+                                            (c-forward-syntactic-ws limit)
+                                            (if (save-match-data
+                                                  (looking-at "\\(::\\)"))
+                                                ;; "We only check for a
+                                                ;; trailing \"::\" and let
+                                                ;; the \"*\" that should
+                                                ;; follow be matched in the
+                                                ;; next round."
+                                                #t
+                                                ;; "It turned out to be the
+                                                ;; real identifier, so flag
+                                                ;; that and stop."
+                                                (begin
+                                                  (set! got-identifier #t)
+                                                  #f)))
+                                          #f))
+                                    #t))
+                           (when (save-match-data
+                                   (let ((re (%c-langvar
+                                              'c-type-decl-operator-prefix-key)))
+                                     (and re (looking-at re))))
+                             (set! decorated #t))
+                           (if (eq? (char-after (point)) #\()
+                               (begin
+                                 (set! paren-depth (+ paren-depth 1))
+                                 (forward-char))
+                               (goto-char (or (match-end 1)
+                                              (match-end 2))))
+                           (c-forward-syntactic-ws)
+                           #t)
+                          (else #f))
+                     (loop)))
+
+                 ;; "If we haven't passed the identifier already, do it
+                 ;; now."
+                 (unless got-identifier
+                   (set! id-start (point)))
+                 (cond
+                  ((or got-identifier
+                       (c-forward-name #t))
+                   (set! id-end
+                         (or pos
+                             (point)))
+                   (c-forward-syntactic-ws limit)
+                   #t)
+                  (accept-anon
+                   (set! id-start #f)
+                   (set! id-end #f)
+                   #t)
+                  (else #f)))
+
+               (begin
+                 (c-forward-syntactic-ws limit)
+                 (when (and double-double-quote ; C++'s operator"" _tag
+                            (c-on-identifier))
+                   (c-forward-token-2 1 #f limit))
+                 #t)
+
+               ;; "Skip out of the parens surrounding the identifier. If
+               ;; closing parens are missing, this form returns nil."
+               (or (= paren-depth 0)
+                   (begin
+                     (let ((ok (c-safe
+                                (goto-char (scan-lists (point) 1 paren-depth)))))
+                       (c-forward-syntactic-ws)
+                       ok)))
+
+               ;; "Skip over any trailing bit, such as
+               ;; \"__attribute__\"."
+               (begin
+                 (let loop ()
+                   (when (cond
+                          ((let ((re (%c-langvar 'c-decl-hangon-key)))
+                             (and re (looking-at re)))
+                           (c-forward-keyword-clause 1))
+                          ((let ((re (%c-langvar 'c-type-decl-suffix-key)))
+                             (and re (looking-at re)))
+                           (cond
+                            ((save-match-data
+                               (let ((re (%c-langvar 'c-requires-clause-key)))
+                                 (and re (looking-at re))))
+                             (c-forward-c++-requires-clause))
+                            ((eq? (char-after (point)) #\()
+                             (if (c-forward-decl-arglist not-top decorated limit)
+                                 (begin
+                                   (set! arglist #t)
+                                   (set! got-init #f)
+                                   #t)
+                                 (if (c-go-list-forward (point) limit)
+                                     #t
+                                     (begin
+                                       ;; For unbalanced (.
+                                       (set! arglist #t)
+                                       #f))))
+                            (else (c-forward-keyword-clause 1))))
+                          ((and (%c-true (%c-langvar 'c-opt-cpp-prefix))
+                                (looking-at
+                                 (c-noise-macro-with-parens-name-re)))
+                           (c-forward-noise-clause))
+                          (else #f))
+                     (loop)))
+                 (<= (point) limit))
+
+               ;; "Search syntactically to the end of the declarator
+               ;; (\";\", \",\", a closing paren, eob etc) or to the
+               ;; beginning of an initializer or function prototype
+               ;; (\"=\" or \"\\s(\"). Note that square brackets are now
+               ;; not also treated as initializers, since this broke when
+               ;; there were also initializing brace lists."
+               (or (eq? (char-after (point)) #\() ; Not an arglist.
+                   (let ((found #f))
+                     (let loop ()
+                       (when (and (< (point) limit)
+                                  (begin
+                                    ;; "In the next loop, we keep searching
+                                    ;; forward whilst we find \":\"s which
+                                    ;; aren't single colons inside C++
+                                    ;; \"for\" statements."
+                                    (let inner ()
+                                      (when (and
+                                             (< (point) limit)
+                                             (begin
+                                               (set! found
+                                                     (c-syntactic-re-search-forward
+                                                      (if (c-major-mode-is 'objc-mode)
+                                                          "\\(?:@end\\)\\|[;:,]\\|\\(=\\|[[(]\\)"
+                                                          "[;:,]\\|\\(=\\|\\s(\\)")
+                                                      limit 'limit #t))
+                                               (set! got-init
+                                                     (and found
+                                                          (match-beginning 1)))
+                                               found)
+                                             (eq? (char-before) #\:)
+                                             (not
+                                              (and (c-major-mode-is
+                                                    '(c++-mode java-mode))
+                                                   (save-excursion
+                                                     (and
+                                                      (c-go-up-list-backward)
+                                                      (eq? (char-after (point)) #\()
+                                                      (begin
+                                                        (c-backward-syntactic-ws)
+                                                        (c-simple-skip-symbol-backward))
+                                                      (let ((re (%c-langvar
+                                                                 'c-paren-stmt-key)))
+                                                        (and re (looking-at re)))))))
+                                             (let ((re (%c-langvar
+                                                        'c-:-op-cont-regexp)))
+                                               (if (and re (looking-at re))
+                                                   (begin
+                                                     (goto-char (match-end 0))
+                                                     #t)
+                                                   ;; "Does this : introduce the
+                                                   ;; class initialization list,
+                                                   ;; or a bitfield?"
+                                                   (not arglist))))
+                                        (inner)))
+                                    found)
+                                  (if (eq? (char-before) #\[)
+                                        (begin
+                                          (set! brackets-after-id #t)
+                                          ;; `(prog1 (c-go-up-list-forward)
+                                          ;; (c-forward-syntactic-ws))'.
+                                          (let ((up (c-go-up-list-forward)))
+                                            (c-forward-syntactic-ws)
+                                            up))
+                                      #f))
+                         (loop)))
+                     (when (and found
+                                (memv (char-before)
+                                      (list #\; #\: #\, #\= #\( #\[ #\{)))
+                       (backward-char))
+                     (<= (point) limit))))
+              (list id-start id-end brackets-after-id got-init decorated arglist)
+              (begin (goto-char here) #f)))))
+
 
 ))

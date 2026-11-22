@@ -1420,3 +1420,149 @@
     (B 19 #t 10)
     (B 192 #t 187)))
 (test-end "schemacs_editor_cc_engine_declaration")
+
+;;--------------------------------------------------------------
+;; The declarator (`cc-engine.el:9855'-`:10310')
+;;--------------------------------------------------------------
+;; `c-back-over-member-initializer-braces', `c-forward-class-decl',
+;; the C++20 constraint machinery (`c-forward-primary-expression',
+;; `c-forward-constraint-clause', `c-forward-c++-requires-clause'),
+;; `c-in-id-arglist', `c-forward-decl-arglist' and
+;; `c-forward-declarator'.
+;;
+;; **Every expectation here is Emacs 31.1's own answer**: the
+;; differential called all eleven probes at **every position** of three
+;; fixtures (this one, the C++ one above and the C one) with
+;; `c-found-types' cleared before each call - 6,512 answers for this
+;; fixture, 5,016 for the C++ one and 2,970 for the C one, all
+;; identical. The rows below pin the interesting answers.
+;;
+;; The fixture's lines, for reading the positions:
+;;
+;;     1  1-27    "class C { public: int m; };"
+;;     2  29-58   "struct S { int a; double b; };"
+;;     3  60-108  "namespace N { class D : public C { void f(); }; }"
+;;     4  110-130 "int (*fp)(int, char);"
+;;     5  132-171 "void (*signal(int, void (*)(int)))(int);"
+;;     6  173-184 "int arr[10];"
+;;     7  186-205 "int x = f(1), y = 2;"
+;;     8  207-222 "int xx = {1, 2};"
+;;     9  224-258 "auto lam = [](int x) { return x; };"
+;;    10  260-307 "template <typename T> requires C<T> struct R {};"
+;;    11  309-341 "void req(int x) requires (N > 0);"
+;;    12  343-388 "auto g() requires requires (T t) { t.foo(); };"
+;;    13  390-411 "T operator+(T a, T b);"
+;;    14  413-455 "Foo::Foo(int a) : x_(a), y_{1, 2}, z_(3) {}"
+;;    15  457-485 "std::map<std::string, int> m;"
+;;    16  487-500 "int *p1, **p2;"
+;;    17  502-527 "typedef int (*fptr)(void);"
+;;    18  529-558 "int a __attribute__((unused));"
+;;    19  560-590 "struct T { int x : 3, y : 5; };"
+(test-begin "schemacs_editor_cc_engine_declarator")
+(define decl2-fixture
+  "class C { public: int m; };\nstruct S { int a; double b; };\nnamespace N { class D : public C { void f(); }; }\nint (*fp)(int, char);\nvoid (*signal(int, void (*)(int)))(int);\nint arr[10];\nint x = f(1), y = 2;\nint xx = {1, 2};\nauto lam = [](int x) { return x; };\ntemplate <typename T> requires C<T> struct R {};\nvoid req(int x) requires (N > 0);\nauto g() requires requires (T t) { t.foo(); };\nT operator+(T a, T b);\nFoo::Foo(int a) : x_(a), y_{1, 2}, z_(3) {}\nstd::map<std::string, int> m;\nint *p1, **p2;\ntypedef int (*fptr)(void);\nint a __attribute__((unused));\nstruct T { int x : 3, y : 5; };\n")
+;; Each row gets a FRESH buffer. cc-mode caches in text properties
+;; (`c-is-sws', `c-in-sws', the `<>' paren markers), so an answer can
+;; depend on what was probed before it; the expectations are what Emacs
+;; alone in a fresh buffer answers, which is what a caller sees.
+(define (decl2-expect rows)
+  (for-each
+   (lambda (row)
+     (let ((b (allocate-buffer)))
+       (set-buffer b)
+       (insert decl2-fixture)
+       (set-buffer-local-value! b 'major-mode 'c++-mode)
+       (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+       (c-init-language-vars c++-mode)
+       (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+       (parameterize ((*c-buffer-is-cc-mode* 'c++-mode))
+         (let ((tag (list-ref row 0)) (pos (list-ref row 1))
+               (want (list-ref row 2)) (want-pt (list-ref row 3)))
+           (goto-char pos)
+           (c-clear-found-types)
+           (let ((got (case tag
+                        ((D) (c-forward-declarator))
+                        ((E) (c-forward-declarator (point-max) #t #t))
+                        ((G) (and (eq? (char-after pos) #\() (c-forward-decl-arglist #f #f)))
+                        ((H) (and (eq? (char-after pos) #\() (c-forward-decl-arglist #t #t)))
+                        ((P) (c-forward-primary-expression))
+                        ((Q) (c-forward-primary-expression (point-max) #t))
+                        ((C) (c-forward-constraint-clause))
+                        ((R) (c-forward-c++-requires-clause))
+                        ((I) (c-in-id-arglist))
+                        ((X) (c-forward-class-decl))
+                        ((M) (c-back-over-member-initializer-braces))
+                        (else (error "bad tag")))))
+             (test-equal (list tag pos) (list want want-pt)
+                         (list got (point))))))))
+   rows))
+
+;; A class/struct definition taken whole; the identifiers of the first
+;; two declarations; `f()` in the namespace (an arglist taken); `(*fp)`
+;; (decorated, with its arglist); `arr[10]`'s brackets; and the
+;; constructor's declarators.
+(decl2-expect
+ '((X 1 27 27)
+   (X 29 58 58)
+   (D 7 (7 8 #f 9 #f #f) 9)
+   (D 23 (23 24 #f #f #f #f) 24)
+   (D 100 (100 101 #f #f #f #t) 103)
+   (D 114 (116 118 #f #f #t #t) 130)
+   (D 177 (177 180 #t #f #f #f) 184)
+   (D 190 (190 191 #f 192 #f #f) 192)
+   (D 254 (254 255 #f #f #f #f) 255)
+   (D 279 (279 280 #f 305 #f #f) 305)
+   (D 291 (291 295 #f 305 #f #f) 305)
+   (D 303 (303 304 #f 305 #f #f) 305)
+   (D 314 (314 317 #f #f #f #t) 341)
+   (D 434 (434 435 #f #f #f #f) 435)))
+
+;; `c-forward-decl-arglist' at every open paren of the fixture: the
+;; `f()` of the namespace, the two arglists of `(*fp)(int, char)`, the
+;; nested `void (*)(int)`, the lambda's `(int x)`, a requires clause's
+;; `(N > 0)` and the member initializers' parens.
+(decl2-expect
+ '((G 101 #t 103)
+   (H 101 #t 103)
+   (G 119 #t 130)
+   (H 119 #t 130)
+   (G 145 #t 165)
+   (G 159 #t 164)
+   (G 166 #t 171)
+   (G 237 #t 245)
+   (G 317 #t 325)
+   (G 334 #t 341)
+   (G 349 #t 352)
+   (G 370 #t 376)
+   (G 383 #t 385)
+   (G 401 #t 411)
+   (G 421 #t 429)
+   (G 433 #t 436)))
+
+;; `c-in-id-arglist' inside the constructor's `x_(a)': every argument is
+;; an identifier, so the cons of the paren's bounds and the position
+;; after it. `c-back-over-member-initializer-braces' at the ',' after it
+;; and after the `y_{1, 2}' brace list: both go back to just after the
+;; constructor's ':' (430).
+(decl2-expect
+ '((I 434 (433 . 436) 434)
+   (M 436 #t 430)
+   (M 437 #t 430)))
+
+;; The C++20 constraint machinery: `requires C<T>` (the clause at 282
+;; takes `C<T>` and stops at 296), the primary expression `C<T>` itself
+;; (291), `req`'s and the parenthesised constraint's own answers, and
+;; the two `requires` of `auto g() requires requires (T #t) {...}`.
+(decl2-expect
+ '((R 282 #t 296)
+   (P 291 #t 295)
+   (Q 291 #t 295)
+   (C 291 #t 296)
+   (R 296 #t 305)
+   (P 303 #t 304)
+   (R 314 #t 325)
+   (P 314 #t 317)
+   (P 317 #t 325)
+   (Q 317 #t 324)
+   (C 317 #t 325)))
+(test-end "schemacs_editor_cc_engine_declarator")

@@ -56,6 +56,10 @@ chasing it down. Have a few attempts, then stop and get assistence from the user
 I dont like seeing AI wasting hours hunting down a parenthesis mismatch that the user
 could easily fix.
 
+If you implement a package that is not part of core emacs, it will go
+into schemacs/external.  Put a note in the package of the original
+github (or elsewhere) location of the original emacs compatible package.
+
 If you get into a mess with either bad behavior or super large functions,
 always check yourself... does real emcas have a function this messy or this big?
 Sometimes it does, and it is what it is. But sometimes you make a mess of it
@@ -15994,3 +15998,84 @@ Right-sized verification for cc-only changes: the six cc suites plus
 shared primitives (`regex-emacs.scm` was one, and the full battery was
 run on this tree before the memo/obarray changes - the regex and cc
 suites were re-run after them on a fresh cache).
+
+# cc-mode: the declarator (2026-11-22)
+
+The tranche after the declaration engine is in: the member-initializer
+brace walk, the C++20 constraint machinery and `c-forward-declarator`
+itself, with `c-forward-decl-arglist` under it and the recursion closed
+on real functions. DEPARTURES.md's same-day section has the C for every
+rule and the bugs in full; this is what the next session needs.
+
+## What landed
+
+`cc-engine.scm`, in Emacs's order at the end of the file:
+`c-back-over-member-initializer-braces`, `c-forward-class-decl`,
+`c-forward-primary-expression`, `c-forward-constraint-clause`,
+`c-forward-c++-requires-clause`, `c-in-id-arglist`,
+`c-forward-decl-arglist`, `c-forward-declarator`.
+
+`c-forward-declarator` returns Emacs's six-element list
+`(ID-START ID-END BRACKETS-AFTER-ID GOT-INIT DECORATED ARGLIST)`, and
+its `c-last-identifier-range` is the tree's parameter
+`*c-last-identifier-range*` (`c-forward-decl-arglist` `parameterize`s
+it, as Emacs `let`-binds it).
+
+## Before touching it: the four truthiness rules this tranche found
+
+All four are the tree's recurring class, and each changed an *answer*:
+
+1. a `cond` with no matching clause **must** have `(else #f)` wherever
+   its value is tested - `c-on-identifier`'s operator branch answered
+   the unspecified value (true) and made every rejected thing look like
+   an identifier;
+2. `c-backward-token-2` compared a char with `=` (a type error,
+   reachable only with COUNT 0 on syntactic ws) - it is `char=?`;
+3. `c-forward-syntactic-ws`/`c-backward-syntactic-ws` answer Emacs's
+   macro answer now - nil from the `when` form, and a bare
+   `c-forward-sws`/`c-backward-sws` with no LIMIT;
+4. `c-forward-sws`/`c-backward-sws` answer nil on every path (explicit
+   `#f`s now), because `c-forward-primary-expression` reads them in a
+   loop condition.
+
+And one balance trap worth re-reading: a block can be *balanced* and
+still be the wrong shape. `c-forward-decl-arglist`'s `if` was
+two-armed because its `and` closed a paren early, and the function
+returned nil everywhere. Only the differential saw it - the reader and
+the compiler did not.
+
+## Verification
+
+The whole-input differential: 11 probes at every position of three
+fixtures (C++, the old C++ fixture and C), `c-found-types` cleared per
+call - **14,498 answers identical to Emacs 31.1**. The harnesses are
+`tools/cc-decl-diff/` (`README.md` has the three commands).
+
+**The cache caveat, which matters for every future test here**: a
+position's answer can depend on what was probed *before* it in the same
+buffer, because cc-mode caches in text properties (`c-is-sws`,
+`c-in-sws`, `<>`-as-paren). The differential was self-consistent (both
+sides saw the same history); a test that probes in one long-lived
+buffer is not Emacs's fresh answer. The new test group builds a fresh
+buffer per row, and its 44 expectations are Emacs's one-probe-per-buffer
+answers.
+
+## Next, in cc-engine.el's order
+
+1. `c-do-declarators` (`:10379`) - it only waits on
+   `c-looking-at-statement-block`.
+2. The statement-block walkers (`:13647`, `:13736`) and the lambda
+   machinery (`:14113`, `:14169`), whose dependency
+   `c-forward-<>-arglist`/`c-forward-keyword-clause`/`c-forward-type`
+   is now in.
+3. `c-forward-decl-or-cast-1` (`:10541`) - the largest remaining piece;
+   then `c-just-after-func-arglist-p`, `c-at-toplevel-p` and the
+   member-initializer walkers (`:9885`, `:9911`).
+4. Then cc-fonts, cc-mode.el (`easy-menu-define` still the one missing
+   primitive, plus a `def-edebug-spec` stub), and the first milestone:
+   `.c`/`.h` open in c-mode with the syntax table and faces compared to
+   Emacs.
+
+Right-sized verification for cc-only changes: the six cc suites plus
+`python3 tools/pty-check.py imports scratch`; regenerate
+`imports.scm` with `tools/gen-imports.scm` after adding an export.

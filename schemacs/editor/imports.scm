@@ -1121,6 +1121,7 @@
     c-at-vsemi-p
     c-auto-newline
     c-back-over-compound-identifier
+    c-back-over-member-initializer-braces
     c-backward-<>-arglist
     c-backward-comments
     c-backward-sexp
@@ -1178,8 +1179,13 @@
     c-forward-<>-arglist-recur
     c-forward-align-clause-throw-if-invalid
     c-forward-annotation
+    c-forward-c++-requires-clause
+    c-forward-class-decl
     c-forward-comment-minus-1
     c-forward-comments
+    c-forward-constraint-clause
+    c-forward-decl-arglist
+    c-forward-declarator
     c-forward-id-comma-list
     c-forward-keyword-clause
     c-forward-keyword-prefixed-id
@@ -1191,6 +1197,7 @@
     c-forward-over-cpp-define-id
     c-forward-over-token
     c-forward-over-token-and-ws
+    c-forward-primary-expression
     c-forward-sexp
     c-forward-single-comment
     c-forward-sws
@@ -1217,6 +1224,7 @@
     c-go-up-list-backward
     c-go-up-list-forward
     c-hungry-delete-key
+    c-in-id-arglist
     c-in-literal
     c-in-method-def-p
     c-indentation-style
