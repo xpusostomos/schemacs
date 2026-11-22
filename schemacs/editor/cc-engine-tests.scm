@@ -1185,3 +1185,50 @@
     (state-row 'wid 120 '((80 . 112) 14) 112 1)
     (state-row 'wid 170 '((80 . 112) 14) 112 1)))
 (test-end "schemacs_editor_cc_engine_state")
+
+;;----------------------------------------------------------------------
+;; `c-looking-at-c++-lambda-capture-list' (`cc-engine.el:14101')
+;;----------------------------------------------------------------------
+;; A whole-fixture differential: the answer at every `[' of the fixture,
+;; Emacs 31.1's own. The true cases are lambda capture lists; the false
+;; ones are the two `[' of a `[[attribute]]' (each rejected through the
+;; character beside it), subscripts after a name (`a[i]'), inner `[' of
+;; two-dimensional subscripts, and a `[' inside a string or a comment.
+(test-begin "schemacs_editor_cc_engine_lambda_capture")
+(define lambda-fixture
+  "auto f = [x] (int y) { return x + y; };\nauto g = [] () { return 1; };\nauto h = [&, x] (auto&& z) { return z; };\nint a[3];\ny = a[i];\nint b[2][3];\nx = b[i][j];\n[[nodiscard]] int fn ();\nauto k = [](int q) { return q; };\nvoid m () { arr[i] = [this] { return v; }; }\nif (x [ 0 ]) ;\nauto n = []{ return 0; };\nconst char *s = \"[x]\";\n// [x] in a comment\n/* [x] */\nauto p = [=] { return s[0]; };\n")
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert lambda-fixture)
+  (set-buffer-local-value! b 'major-mode 'c++-mode)
+  (c-init-language-vars c++-mode)
+  (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+  (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+  (parameterize ((*c-buffer-is-cc-mode* 'c++-mode))
+    (define (cap-check pos want)
+      (goto-char pos)
+      (test-equal (list 'lambda-capture pos)
+                  want
+                  (c-looking-at-c++-lambda-capture-list)))
+    (cap-check 10 #t)			; [x] of a lambda
+    (cap-check 50 #t)			; [] of a lambda
+    (cap-check 80 #t)			; [&, x] of a lambda
+    (cap-check 118 #f)			; a[3] - a subscript after a name
+    (cap-check 128 #f)			; a[i]
+    (cap-check 138 #f)			; b[2][3]
+    (cap-check 141 #f)			; the inner '[' of b[2][3]
+    (cap-check 151 #f)			; b[i][j]
+    (cap-check 154 #f)			; the inner '[' of b[i][j]
+    (cap-check 159 #f)			; the first '[' of [[nodiscard]]
+    (cap-check 160 #f)			; the second '[' of [[nodiscard]]
+    (cap-check 193 #t)			; [](int q)
+    (cap-check 233 #f)			; arr[i]
+    (cap-check 239 #t)			; [this]
+    (cap-check 269 #f)			; x [ 0 ]
+    (cap-check 287 #t)			; []{ return 0; }
+    (cap-check 321 #f)			; the '[' inside "[x]"
+    (cap-check 330 #f)			; the '[' in the line comment
+    (cap-check 350 #f)			; the '[' in the block comment
+    (cap-check 366 #t)			; [=]
+    (cap-check 380 #f)))		; s[0]
+(test-end "schemacs_editor_cc_engine_lambda_capture")

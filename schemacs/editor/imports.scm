@@ -1224,6 +1224,7 @@
     c-literal-start
     c-literal-type
     c-looking-at-c++-attribute
+    c-looking-at-c++-lambda-capture-list
     c-looking-at-inexpr-block
     c-looking-at-special-brace-list
     c-lower

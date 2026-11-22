@@ -209,6 +209,8 @@
    c-determine-+ve-limit
    ;; `cc-engine.el:13584'
    c-looking-at-special-brace-list
+   ;; `cc-engine.el:14101'
+   c-looking-at-c++-lambda-capture-list
    ;; virtual semicolons (`cc-engine.el:14184')
    c-at-vsemi-p c-vsemi-status-unknown-p
    c-c++-vsemi-p c-at-macro-vsemi-p c-macro-vsemi-status-unknown-p
@@ -5782,6 +5784,25 @@
                       (cons 'inexpr-statement (point))))
                  (else #f))
                 res)))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-looking-at-c++-lambda-capture-list' (`cc-engine.el:14101')
+    ;;------------------------------------------------------------------
+    ;; `c-looking-at-c++-lambda-expression' (`:14113') and
+    ;; `c-backward-over-lambda-expression' (`:14171') are not ported yet:
+    ;; they need `c-forward-<>-arglist', `c-forward-keyword-clause' and
+    ;; `c-forward-type' - the C++ declaration engine.
+    (define (c-looking-at-c++-lambda-capture-list)
+      ;; "Return non-nil if we're at the opening \"[\" of the capture
+      ;; list of a C++ lambda function, nil otherwise."
+      (and (eq? (char-after (point)) #\[)
+           (not (eq? (char-before) #\[))
+           (not (eq? (char-after (+ 1 (point))) #\[))
+           (save-excursion
+             (or (= (c-backward-token-2 1) 1)
+                 (let ((re (%c-langvar 'c-pre-lambda-tokens-re)))
+                   (and re (looking-at re)))))
+           (not (c-in-literal))))
 
     ;;------------------------------------------------------------------
     ;; Virtual semicolons (`cc-engine.el:14184'-`:14243')

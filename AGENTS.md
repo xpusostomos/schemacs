@@ -15818,6 +15818,18 @@ tree's are `#t' and the `parse-sexp-lookup-properties' setters
   so `(cons 7 #f)' is a bug that the `pair?' tests hide until a later
   copy.
 
+## `c-looking-at-c++-lambda-capture-list'
+
+The one piece of the lambda machinery that stands on nothing unported
+(`cc-engine.el:14101`) is in, with a whole-fixture differential against
+Emacs 31.1 at every `[' of a C++ fixture (21 rows, all identical -
+lambda captures true; `[[attribute]]`, subscripts, and `[' inside a
+string or comment false). `cc-engine-tests.scm` is 369 passes. The
+`\[[...]` test pins the six-line function; `c-looking-at-c++-
+lambda-expression' and `c-backward-over-lambda-expression' wait on the
+declaration engine (`c-forward-<>-arglist', `c-forward-keyword-clause',
+`c-forward-type').
+
 ## Next
 
 The declaration machinery `c-beginning-of-statement-1''s remaining
@@ -15825,4 +15837,7 @@ callers need - `c-looking-at-statement-block-1'/`-block', which need
 `c-looking-at-c++-lambda-expression', `c-just-after-func-arglist-p',
 `c-back-over-member-initializer-braces', and through them
 `c-forward-type' and `c-forward-<>-arglist'; then cc-fonts and
-cc-mode.el.
+cc-mode.el. Those five functions are mutually recursive (name calls
+type, type calls name and the arglist, the arglist calls type), so they
+are one tranche with the tree's seam pattern (`*c-forward-type-
+function*' and friends, installed as each definition loads).
