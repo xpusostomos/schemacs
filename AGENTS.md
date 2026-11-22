@@ -16079,3 +16079,71 @@ answers.
 Right-sized verification for cc-only changes: the six cc suites plus
 `python3 tools/pty-check.py imports scratch`; regenerate
 `imports.scm` with `tools/gen-imports.scm` after adding an export.
+
+# cc-mode: the declaration decision and the statement block (2026-11-22)
+
+The tranche the previous handoff named: `c-do-declarators`,
+`c-forward-decl-or-cast-1` with its two `c-fdoc-` helpers,
+`c-forward-objc-directive`, `c-at-toplevel-p`,
+`c-just-after-func-arglist-p`, `c-looking-at-decl-block`,
+`c-directly-in-class-called-p`, `c-search-uplist-for-classkey`, the
+statement-block walkers, the C++ lambda machinery and
+`c-back-over-member-initializers`. All of `cc-engine.scm`'s declaration
+half is now in Emacs's file order; DEPARTURES.md's 2026-11-22 section
+has the C for every rule and the four bugs in full.
+
+## Verified
+
+- **0 differences on all three fixtures** - the C fixture (6,480
+  answers), the old C++ fixture (10,944) and `fixture-decl.cpp`
+  (14,208), 25 probes at every position. `tools/cc-decl-diff/README.md`
+  says how to re-run it, and its precondition rule (five functions are
+  probed only at the `{`/`[` their docstrings require).
+- The six cc suites pass; `cc-engine-tests` is 485 (the new
+  `schemacs_editor_cc_engine_declaration_decision` group pins the
+  Emacs-measured answers for the statement block, the declaration
+  decision, the `<>` suppression and the parse-state cache).
+  `python3 tools/pty-check.py imports scratch` passes.
+- `imports.scm` regenerated: 113 libraries, 4,387 names.
+
+## The four bugs, in one line each (all read out of the C)
+
+1. **`c-parse-state`/`c-invalidate-state-cache` had no
+   `c-with-<->-as-parens-suppressed`** - a comment saying "there are no
+   category properties here" was true when it was written and false
+   since the `<>` marking landed, so a marked `template <...>` stayed
+   in the parse state as an open paren.
+2. **`c-looking-at-statement-block` was balanced and wrong**: clause 2
+   one `)` short, the next clause read as its body, and a stray `#t)`
+   keeping the file balanced - so `((eqv? (char-after (point)) #\}))`
+   was applied as a function: `Wrong type to apply: #f`. Fixed by
+   rebuilding the function from the C's `pp` and splicing it whole.
+3. **`c-remove-stale-state-cache-backwards` CASE 3** took its clause on
+   `set!`'s unspecified (true) value and did `(+ 1 #f)`; the C's test is
+   the `setq`'s value.
+4. **`c-forward-decl-or-cast-1` CASE 19**: the `catch` body's last form
+   is a `when`; Elisp's answers nil, Scheme's answers the unspecified
+   value, so every undecided C++ construct became a declaration.
+
+## Before touching it
+
+- **A balanced file can be the wrong shape.** The tell is the *parsed*
+  structure: print each `cond` clause's test and body count and compare
+  with the C's `pp`; a paren counter cannot see a compensated
+  misplacement.
+- `c-forward-decl-or-cast-1` hoists the C's inner `let` into the outer
+  one (the `c-fdoc-` closures must write its bindings); its
+  `c-parse-and-markup-<>-arglists` `parameterize` closes right after
+  the `catch`, where the C's `let` does.
+- The differential's `A`/`O`/`U` probes share `c-parse-state`'s cache:
+  an answer can depend on what was probed before it (both sides see
+  the same history there; the unit tests build a fresh buffer per row).
+
+## Next, in cc-engine.el's order
+
+`c-forward-label`, the K&R/decl-header cluster
+(`c-in-knr-argdecl`, `c-beginning-of-decl-1`, `c-end-of-decl-1`), the
+bracelist machinery (`c-laomib-*`, `c-at-bracelist-p`), then
+`cc-fonts`, `cc-mode.el` (`easy-menu-define` is still the one missing
+primitive) and the first milestone: `.c`/`.h` opening in c-mode with
+the syntax table and faces compared to Emacs.

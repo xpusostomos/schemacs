@@ -13268,3 +13268,222 @@ buffer.
 
 `cc-engine-tests.scm` is 469 passes; the six cc suites and `loadup-tests`
 pass; `imports.scm` is regenerated.
+
+# cc-mode: the declaration decision, the statement block and the lambdas
+# (2026-11-22)
+
+The tranche after the declarator: `c-do-declarators`, the whole of
+`c-forward-decl-or-cast-1`, `c-at-toplevel-p`,
+`c-just-after-func-arglist-p`, `c-looking-at-decl-block`,
+`c-directly-in-class-called-p`, `c-search-uplist-for-classkey`, the
+statement-block walkers, the C++ lambda machinery, and the two
+member-initializer walkers that had been waiting on the declaration
+engine.
+
+## What landed
+
+`cc-engine.scm`, in Emacs's file order:
+
+| Emacs | here |
+|---|---|
+| `c-back-over-list-of-member-inits` (`cc-engine.el:9885`) | the local procedure `back-over-list-of-member-inits` inside `c-back-over-member-initializers` - a macro there because its two `throw`s unwind through the enclosing `catch`es |
+| `c-back-over-member-initializers` (`:9911`) | same name |
+| `c-do-declarators` (`:10379`) | same name |
+| `c-fdoc-shift-type-backward`, `c-fdoc-assymetric-space-about-asterisk` (`:10421`, `:10451`) | local procedures of `c-forward-decl-or-cast-1` |
+| `c-forward-decl-or-cast-1` (`:10541`) | same name |
+| `c-forward-objc-directive` (`:12069`) | same name (its `eval-when-compile` regexps are computed per call) |
+| `c-at-toplevel-p` (`:12202`) | same name |
+| `c-just-after-func-arglist-p` (`:12229`) | same name |
+| `c-looking-at-decl-block` (`:12742`) | same name |
+| `c-pull-open-brace` (`:9768`) | a procedure answering `(BRACE . REST)` where the C macro advances PS destructively |
+| `c-directly-in-class-called-p` (`:12930`), `c-search-uplist-for-classkey` (`:12949`) | same names |
+| `c-looking-at-statement-block-1` (`:13647`), `c-looking-at-statement-block` (`:13736`) | same names |
+| `c-looking-at-c++-lambda-expression` (`:14113`), `c-backward-over-lambda-expression` (`:14169`) | same names |
+
+The inner `let` of `c-forward-decl-or-cast-1`'s type-decl-expression
+block (`cc-engine.el:10962`) is hoisted into the outer `let` in this
+port, with its initial values set at the same place. That is a lexical
+scope change, not a behavioural one: the two `c-fdoc-` macros are
+macros over those variables and a Scheme procedure cannot write another
+function's bindings, so one closure needs them in its own scope. The
+dynamic binding of `c-parse-and-markup-<>-arglists` in that `let` is a
+`parameterize`, and it closes where the C's `let` does - immediately
+after the `(setq at-decl-or-cast (catch ...))`, not at the end of the
+function.
+
+## The truthiness bugs this tranche found, and one new shape
+
+All of the tree's recurring class, and each changed an *answer*:
+
+1. **A `when` in *value* position is true.** `(or (when TEST BODY) ...)`
+   returned the unspecified value when TEST failed, so
+   `c-forward-objc-directive` took its *success* branch at every
+   position (`Args out of range` from `(1- (point))` at position 1
+   where Emacs answers nil), and `c-looking-at-c++-lambda-expression`
+   answered true where Emacs answers nil. Every `when` whose value is
+   read is an `if` with an explicit `#f` now.
+2. **A `when` operand short-circuits an `or`.** In
+   `c-forward-decl-or-cast-1`'s identifier-skipping `or`, the C's
+   `(when (looking-at "[0-9]") (setq got-number t))` answers nil when
+   the test fails, so the C falls through to the `maybe-typeless`
+   branch; a Scheme `when` answers the unspecified value, which is
+   true, so the branch was skipped.
+3. **A `(when ...)` as a whole function body** returns the unspecified
+   value in `c-directly-in-class-called-p` and
+   `c-search-uplist-for-classkey`; both are `if`s with `#f` now.
+
+## The balance trap, again, and the tool that catches it
+
+Three of the new functions came out **balanced and the wrong shape**. The
+compiler found two - `(else #f)` outside its `cond` and `let: bad let` -
+but each error *named the enclosing form*, and the reported position was
+the form that failed to expand, not the misplaced paren. The third
+(`c-looking-at-decl-block`) compiled cleanly with the pike `cond`'s
+single clause swallowing the next two clauses, the `and` gaining three
+operands, and the `if` losing its arms; the compiler only objected once
+the `when`-to-`if` rewrite moved the fault.
+
+The tool that found them: a paren *stack* scanner that prints the
+position of every opener left unclosed at EOF (and every extra closer),
+with a lexer that handles `;` comments, strings with escapes, `#\(`-style
+character literals, and `#{...}#` symbols. On a known-good file it ends
+at depth 0; when it reports exactly `(define ...)` it means "one `)` at
+the end", and when it reports an inner form that is the site. It is in
+`tools/cc-decl-diff/README.md`'s method note; a balanced file passes the
+reader and the compiler either way.
+
+**The tell for the third one**: after the shape was fixed, `(if ...)`
+had 4 elements, `(and ...)` 3, and the `cond` 3 clauses - printed from
+the *read* form by a five-line walker. Printing a function's parsed
+shape and comparing it against the C's `pp` is worth the minute it
+takes on anything this size.
+
+## The verification
+
+The differential (`tools/cc-decl-diff/`) gained fourteen probes -
+`c-forward-decl-or-cast-1` (context `top`), `c-at-toplevel-p`,
+`c-just-after-func-arglist-p`, both lambda functions, both
+statement-block walkers, `c-looking-at-decl-block`,
+`c-directly-in-class-called-p` (with the name "C"),
+`c-search-uplist-for-classkey`, `c-back-over-member-initializers`,
+`c-do-declarators`, `c-forward-objc-directive` - probed at every
+position of the three fixtures beside the eleven declarator probes.
+Results in the section below.
+
+## The results, and the four bugs the C++ fixtures found
+
+All three fixtures are **0 differences** against Emacs 31.1: the C
+fixture (25 probes x 210 positions), the old C++ fixture (25 x 178),
+and `fixture-decl.cpp` (25 x 122) - every probe at every position,
+`c-found-types` cleared per probe, `*c-buffer-is-cc-mode*`
+parameterized, and Emacs's side stripped of the `category`/`syntax-table`
+properties `cc-mode.el` would add. Getting there took four fixes, and
+each is a departure worth keeping in the record.
+
+### 1. `c-parse-state` had no `<>` suppression (a stale comment)
+
+`c-parse-state` and `c-invalidate-state-cache` in Emacs run their work
+inside `c-with-<->-as-parens-suppressed` (`cc-engine.el:4540`-`:4595`):
+the template brackets are marked through the `category` text property,
+and clearing the two category symbols' `syntax-table` property turns
+the marks off for the duration - that is how `c-parse-state` never
+sees an angle bracket as a paren.
+
+The port had a comment saying "There are no category properties here,
+so there is nothing to suppress". That was true when it was written
+and stopped being true when the `<>` marking landed in `cc-defs.scm`;
+`c-suppress-<->-as-parens`/`c-restore-<->-as-parens` were ported and
+unused. The effect: after the `F` probe had parsed a `template <...>`,
+`(c-parse-state)` at position 25 of `fixture.cpp` answered `(24 13)`
+where Emacs answers `(13)`, and `c-at-toplevel-p`,
+`c-search-uplist-for-classkey` and `c-directly-in-class-called-p`
+differed at every inside-a-namespace position (414 of them). Both
+functions now wrap their bodies in the suppression with
+`dynamic-wind` (the C's `unwind-protect`).
+
+**The lesson**: the same one `a comment here used to say` carries
+elsewhere - a note that a facility is absent is not re-checked when
+the facility arrives. `loadup-tests` cannot catch this; reading the C
+did.
+
+### 2. `c-looking-at-statement-block`: balanced, compiled, wrong
+
+The port's inner `cond` had clause 2 one `)` short, so the clause
+`((eqv? (char-after (point)) #\})) #t)` that follows was read as clause
+2's *body* - a form whose operator is the result of `eqv?` - and a
+stray `#t)` at its end kept the whole file balanced. The reader
+accepted it, `tools/syntax-check.scm` accepted it, the compiler
+accepted it, and the file's paren count was zero-sum.
+
+The symptom was `Wrong type to apply: #f`, raised from any `{` whose
+contents left clause 2 true: the body form `((eqv? ...))` applied
+`#f`. It appeared at position 42 of `fixture.cpp` (the `{` of
+`template <class T> class V`) and nowhere obvious; the compiled
+backtrace named a line one clause away because of inlining.
+
+The mis-transcription at the root of it: Emacs's `\}` clause is
+`((eq (char-after) 125))` - a bodyless clause whose true test is its
+value - and the port had added a `#t` body line, which is what made
+the missing `)` and the extra `)` cancel. Fixed by closing clause 2
+and deleting the `#t`; the function was then rebuilt from the C's
+`pp` output and spliced whole, because repeated paren surgery on the
+old text kept moving the fault.
+
+**The tell that found it**: printing the *parsed* function's cond
+clauses (`(car clause)`, `(length (cdr clause))`) showed a clause with
+two body forms - which no cond clause in this function has. A
+balanced file can be structurally wrong, and the parsed shape is what
+shows it.
+
+### 3. `c-remove-stale-state-cache-backwards` CASE 3: `set!` as a clause test
+
+Emacs's clause test is `(setq ren (c-safe ...))`, and the clause is
+taken only when `ren` is non-nil. In Scheme the clause was written
+with the `set!` as the test; `set!` answers the unspecified value,
+which is true, so CASE 3 was taken even when there was no unmatched
+close paren and `ren` was `#f`, and `(+ 1 ren)` raised "Wrong type
+argument in position 1: #f" from inside `c-parse-state`.
+
+This one only appeared after an earlier probe had left the state
+cache needing a *backward* scan (the differential's history, or
+`c-directly-in-class-called-p` followed by `c-parse-state`), which is
+why the failing positions looked arbitrary. Fixed with a `begin` whose
+value is `ren`.
+
+### 4. `c-forward-decl-or-cast-1` CASE 19: the `catch` body's value
+
+The `catch`'s body ends with CASE 19, a `when`:
+
+```elisp
+(when (or (eq context 'decl) (and (c-major-mode-is 'c-mode) ...))
+  (when ... (setq unsafe-maybe t))
+  t)
+```
+
+Elisp's `when` answers nil when the test fails, and that nil is what
+`at-decl-or-cast` becomes when nothing threw. Scheme's `when` answers
+the unspecified value - true - so every C++ construct that reached the
+end of the decision tree without a decision was taken for a
+declaration: `int (*fp)(int, char);` and 20 other positions answered a
+five-element declaration list where Emacs answers nil (118 probe
+differences on `fixture-decl.cpp`). Fixed with an `if` and an explicit
+`#f` - the same shape as the `when`-in-value-position bugs the earlier
+sections record, now at the level of a `catch`'s result.
+
+### Method notes
+
+- **Reading the C found all four.** The differential said *where*
+  (position 42 errors; 414 A/U/O differences), and in each case
+  opening `cc-engine.el` at the function named the rule: the
+  suppression wrapper, the bodyless clause, the `setq` clause value,
+  the `when` at the end of a `catch`.
+- **The instrument that worked on #2** is the parsed-clause dump, not
+  a paren counter: a counter cannot tell a misplaced paren that has
+  been compensated from a correct one, and this file had exactly that.
+- **The `set!`/`when` pair (#3, #4) is the value-position class
+  again**; grep any new port for `(when` and `(set!` in positions whose
+  value is read.
+- The differential harness's probes for `c-looking-at-statement-block`,
+  `c-looking-at-decl-block` and the lambda functions are guarded on the
+  character their docstrings require (a `{` or a `[`) - see
+  `tools/cc-decl-diff/README.md`.

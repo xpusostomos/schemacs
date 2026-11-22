@@ -1566,3 +1566,111 @@
    (Q 317 #t 324)
    (C 317 #t 325)))
 (test-end "schemacs_editor_cc_engine_declarator")
+
+;;----------------------------------------------------------------------
+;; The declaration decision, the statement block and the parse state
+;;----------------------------------------------------------------------
+;; Every expectation below is Emacs 31.1's own answer, measured with
+;; `emacs -Q --batch' on the same fixture in a real c++-mode buffer and
+;; with cc-mode.el's `category' properties stripped (there is no
+;; cc-mode here yet). Each row builds a fresh buffer because cc-mode
+;; caches in text properties - a position's answer can depend on what
+;; was probed before it, and these are the one-probe-per-buffer answers.
+;;
+;; Positions:
+;;   13  `{' of the namespace        15  `template'
+;;   25  `class' inside the template 42  `{' of class V
+;;   43  `}' of class V              46  `}' of the namespace
+;;   48  `int (*fp)(int, char);'     70  `void f()'
+;;   79  `{' of f                    90  `class C'
+;;   98  `{' of C                   115  `}' of C
+(test-begin "schemacs_editor_cc_engine_declaration_decision")
+
+(define dd-fixture
+  (string-append
+   "namespace N { template <class T> class V {}; }\n"
+   "int (*fp)(int, char);\n"
+   "void f() { int x; }\n"
+   "class C { public: int m; };\n"))
+
+(define (dd-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert dd-fixture)
+    (set-buffer-local-value! b 'major-mode 'c++-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (c-init-language-vars c++-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+    (parameterize ((*c-buffer-is-cc-mode* 'c++-mode))
+      (thunk))))
+
+;; `c-looking-at-statement-block'/`-1': t for the namespace's, class V's,
+;; f's and C's braces; `maybe' for -1 at class V's (its contents settle
+;; nothing, its context does).
+(for-each
+ (lambda (row)
+   (dd-buffer
+    (lambda ()
+      (let ((p (car row)))
+        (goto-char p)
+        (test-equal (list 'S p) (cadr row)
+                    (list (c-looking-at-statement-block) (point)))
+        (goto-char p)
+        (test-equal (list 'L p) (caddr row)
+                    (list (c-looking-at-statement-block-1) (point)))))))
+ '((13 (#t 13) (#t 13))
+   (42 (#t 42) (maybe 42))
+   (79 (#t 79) (#t 79))
+   (98 (#t 98) (#t 98))))
+
+;; `c-forward-decl-or-cast-1' with context `top'. The CURIOUS one is
+;; position 48: Emacs *accepts* `int (*fp)(int, char);' as a declaration
+;; here (the preceding `}' is what makes it one) but returns nil for the
+;; same text after `namespace N { ... }' in `fixture-decl.cpp'. That is
+;; the CASE 19 regression: a `when' in value position answered the
+;; unspecified value - true - and made every undecided construct a
+;; declaration. These are the measured answers, not the plausible ones.
+(for-each
+ (lambda (row)
+   (dd-buffer
+    (lambda ()
+      (goto-char (car row))
+      (c-clear-found-types)
+      (test-equal (list 'F (car row)) (cadr row)
+                  (list (c-forward-decl-or-cast-1
+                         (max (point-min) (1- (point))) 'top #f)
+                        (point))))))
+ '((48 ((52 #f #f 48 #t) 68))
+   (70 ((75 #f #f 70 #t) 79))
+   (90 ((96 (#t #f #f) #f 96 #t) 116))))
+
+;; The `<>' suppression: `c-forward-decl-or-cast-1' at `template' marks
+;; `<class T>' with the `category' property that gives it paren syntax,
+;; and `c-parse-state' must ignore it - Emacs's `c-with-<->
+;; -as-parens-suppressed' (`cc-engine.el:4582'). Without it the angle
+;; bracket at 24 is in the parse state and every toplevel question is
+;; wrong. The marks stay after the call (the suppression is restored).
+(dd-buffer
+ (lambda ()
+   (goto-char 15)
+   (c-clear-found-types)
+   (c-forward-decl-or-cast-1 14 'top #f)
+   (test-equal "the template's < is marked" '(4 . 62)
+               (get-text-property 24 'syntax-table))
+   (goto-char 25)
+   (test-equal "the parse state does not contain it" '(13)
+               (c-parse-state))
+   (goto-char 43)
+   (test-equal "and at the class's } only its own brace pair and the namespace"
+               '(42 13) (c-parse-state))
+   (test-equal "a class-qualified name lookup finds the class"
+               (list #f 42) (list (c-directly-in-class-called-p "C") (point)))
+   ;; A backward stale-cache scan (CASE 3 of
+   ;; `c-remove-stale-state-cache-backwards') with no unmatched close
+   ;; paren used to take its clause on `set!'s unspecified value and do
+   ;; `(+ 1 #f)'. Asking again must answer, not raise.
+   (goto-char 43)
+   (test-equal "the parse state survives the backward scan" '(42 13)
+               (c-parse-state))))
+
+(test-end "schemacs_editor_cc_engine_declaration_decision")

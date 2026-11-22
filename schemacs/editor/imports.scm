@@ -1118,12 +1118,15 @@
     c-at-expression-start-p
     c-at-macro-vsemi-p
     c-at-statement-start-p
+    c-at-toplevel-p
     c-at-vsemi-p
     c-auto-newline
     c-back-over-compound-identifier
     c-back-over-member-initializer-braces
+    c-back-over-member-initializers
     c-backward-<>-arglist
     c-backward-comments
+    c-backward-over-lambda-expression
     c-backward-sexp
     c-backward-single-comment
     c-backward-sws
@@ -1159,6 +1162,8 @@
     c-determine-limit-get-base
     c-determine-limit-no-macro
     c-digit
+    c-directly-in-class-called-p
+    c-do-declarators
     c-doc-bright-comment-start-re
     c-doc-line-join-end-ch
     c-doc-line-join-re
@@ -1185,6 +1190,7 @@
     c-forward-comments
     c-forward-constraint-clause
     c-forward-decl-arglist
+    c-forward-decl-or-cast-1
     c-forward-declarator
     c-forward-id-comma-list
     c-forward-keyword-clause
@@ -1192,6 +1198,7 @@
     c-forward-name
     c-forward-noise-clause
     c-forward-noise-clause-not-macro-decl
+    c-forward-objc-directive
     c-forward-over-colon-type-list
     c-forward-over-compound-identifier
     c-forward-over-cpp-define-id
@@ -1240,6 +1247,7 @@
     c-is-escaped
     c-jump-syntax-balanced
     c-jump-syntax-unbalanced
+    c-just-after-func-arglist-p
     c-keyword-member
     c-keyword-sym
     c-kwds-lang-consts
@@ -1265,8 +1273,12 @@
     c-literal-type
     c-looking-at-c++-attribute
     c-looking-at-c++-lambda-capture-list
+    c-looking-at-c++-lambda-expression
+    c-looking-at-decl-block
     c-looking-at-inexpr-block
     c-looking-at-special-brace-list
+    c-looking-at-statement-block
+    c-looking-at-statement-block-1
     c-lower
     c-macro-cache
     c-macro-cache-no-comment
@@ -1307,6 +1319,7 @@
     c-point
     c-previous-single-property-change
     c-ps-state-cache-pos
+    c-pull-open-brace
     c-punctuation-in
     c-put-c-type-property
     c-put-char-properties
@@ -1329,6 +1342,7 @@
     c-safe-position
     c-safe-scan-lists
     c-save-buffer-state
+    c-search-uplist-for-classkey
     c-semi-get-near-cache-entry
     c-semi-lit-near-cache
     c-semi-near-cache-limit

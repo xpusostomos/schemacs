@@ -1,8 +1,8 @@
 (import (scheme base) (scheme file) (scheme write)
         (only (schemacs editor buffer) allocate-buffer set-buffer
               set-buffer-local-value! buffer-local-value current-buffer)
-        (only (schemacs editor editfns) insert goto-char point point-max
-              char-after char-before save-excursion)
+        (only (schemacs editor editfns) insert goto-char point point-min
+              point-max char-after char-before save-excursion)
         (only (schemacs editor search) looking-at)
         (only (schemacs editor syntax) set-syntax-table))
 (import (only (schemacs editor cc-defs) c-lang-const *c-buffer-is-cc-mode*))
@@ -23,6 +23,14 @@
         ((char? x) (number->string (char->integer x)))
         ((integer? x) (number->string x))
         ((symbol? x) (symbol->string x))
+        ((vector? x)
+         (string-append "[" (let loop ((l (vector->list x)) (acc ""))
+                            (if (null? l) acc
+                                (loop (cdr l)
+                                      (string-append acc
+                                                     (if (string=? acc "") "" " ")
+                                                     (emacs-print (car l))))))
+                        "]"))
         ((string? x) (string-append "\"" x "\""))
         ((pair? x)
          (string-append "(" (emacs-print (car x))
@@ -75,7 +83,26 @@
                (cons "R" (lambda () (c-forward-c++-requires-clause)))
                (cons "I" (lambda () (c-in-id-arglist)))
                (cons "X" (lambda () (c-forward-class-decl)))
-               (cons "M" (lambda () (c-back-over-member-initializer-braces)))))
+               (cons "M" (lambda () (c-back-over-member-initializer-braces)))
+               (cons "F" (lambda () (c-forward-decl-or-cast-1
+                                     (max (point-min) (- (point) 1)) 'top #f)))
+               (cons "A" (lambda () (c-at-toplevel-p)))
+               (cons "J" (lambda () (c-just-after-func-arglist-p)))
+               (cons "K" (lambda () (and (eqv? (char-after (point)) #\[)
+                                         (c-looking-at-c++-lambda-expression))))
+               (cons "B" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (c-backward-over-lambda-expression))))
+               (cons "L" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (c-looking-at-statement-block-1))))
+               (cons "S" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (c-looking-at-statement-block))))
+               (cons "N" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (c-looking-at-decl-block #f))))
+               (cons "O" (lambda () (c-directly-in-class-called-p "C")))
+               (cons "U" (lambda () (c-search-uplist-for-classkey (c-parse-state))))
+               (cons "V" (lambda () (c-back-over-member-initializers)))
+               (cons "W" (lambda () (c-do-declarators (point-max) #f #f #f #f)))
+               (cons "Y" (lambda () (c-forward-objc-directive)))))
         (loop (+ pos 1))))))
 
 (call-with-output-file (cadr (command-line))
