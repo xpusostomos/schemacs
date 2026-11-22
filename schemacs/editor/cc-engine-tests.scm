@@ -24,11 +24,12 @@
  (scheme base)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor buffer) allocate-buffer set-buffer current-buffer
-       set-buffer-local-value!)
+       buffer-local-value set-buffer-local-value!)
  (only (schemacs editor editfns) insert goto-char point delete-region
-       point-min point-max buffer-substring-no-properties
-       narrow-to-region widen)
+       point-min point-max buffer-substring-no-properties char-after
+       char-before narrow-to-region widen)
  (only (schemacs editor syntax) set-syntax-table)
+ (only (schemacs editor search) looking-at)
  (only (schemacs editor textprop) get-text-property text-property-any)
  (only (schemacs editor cc-defs) c-lang-const *c-buffer-is-cc-mode*
        c-skip-ws-chars-forward c-skip-ws-chars-backward)
@@ -1300,3 +1301,122 @@
     (kw-colon 40 #t 45)
     (kw-colon 45 #f 45)))
 (test-end "schemacs_editor_cc_engine_kw_helpers")
+
+;;--------------------------------------------------------------
+;; The declaration engine (`cc-engine.el:8424'-`:9860')
+;;--------------------------------------------------------------
+;; `c-forward-keyword-clause' and its two helpers,
+;; `c-forward-<>-arglist' (+ recur, `c-backward-<>-arglist'),
+;; `c-forward-name' and `c-forward-type', over two fixtures.
+;;
+;; **Every expectation here is Emacs 31.1's own answer**, measured with
+;; `emacs -Q --batch' in a real c++-mode/c-mode buffer: for each of the
+;; two fixtures, all five probes (`c-forward-type', `c-forward-name',
+;; `c-forward-keyword-clause' with and without STOP-AT-END, and
+;; `c-forward-<>-arglist'/`c-backward-<>-arglist') at **every position**
+;; with `c-found-types' cleared before each call - 2,280 answers for the
+;; C++ fixture and 1,620 for the C one, all identical. The rows below
+;; pin the interesting ones; the whole-fixture differential (both
+;; fixtures) is what the port was built against.
+;;
+;; The C fixture's positions:
+;;
+;;     1  1-18   "#include <stdio.h>"      (75 ':' at 166? no - see below)
+;;   ...
+;; The tests name positions the way the differential does: the fixture
+;; strings are built here so the arithmetic is visible.
+(test-begin "schemacs_editor_cc_engine_declaration")
+(define decl-cpp-fixture
+  "namespace N { template <class T> class V {}; }\nstd::vector<int> v;\nFoo<Bar<Baz> > x;\nA<B>::C y;\nint z;\nunsigned long long w;\nstatic const char *p;\nstruct s { int m; } q;\nstruct s *r;\ntypedef struct { int a; } anon_t;\nenum { RED, GREEN } colour;\n_BitInt(32) big;\ntypeof (x) tx;\nauto a1 = 1;\ndecltype(v) d;\ntemplate <typename T, int N> struct Arr {};\nV<int> f(V<int> arg);\nx < y > z;\nif (a < b && c > d) {}\nstd::map<std::string, int> m;\nFoo<T>::bar<U> baz;\n")
+(define decl-c-fixture
+  "#include <stdio.h>\nstruct s { int m; };\ntypedef struct s S;\nstatic const char *p;\nunsigned long long w;\nint z = 0;\n_BitInt(32) big;\ntypeof (z) tz;\nregister count;\nextern foo_t my_foo;\nx < y > z;\nint f(int a, char *b);\nunion { int a; } u;\nconst volatile unsigned int q;\n")
+
+;; The mode is a MACRO argument to `c-init-language-vars' and
+;; `c-lang-const', so it must be a literal at the call site: SETUP is a
+;; thunk that does the two initialisations for its own language.
+(define (decl-expect fixture mode setup rows)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert fixture)
+    (set-buffer-local-value! b 'major-mode mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (setup)
+    (parameterize ((*c-buffer-is-cc-mode* mode))
+      (for-each
+      (lambda (row)
+        (let ((tag (list-ref row 0)) (pos (list-ref row 1))
+              (want (list-ref row 2)) (want-pt (list-ref row 3)))
+          (goto-char pos)
+          (c-clear-found-types)
+          (let ((got (case tag
+                       ((T) (c-forward-type))
+                       ((N) (c-forward-name))
+                       ((K) (and (let ((re (buffer-local-value
+                                           (current-buffer)
+                                           'c-keywords-regexp #f)))
+                                   (and re (looking-at re)))
+                                 (c-forward-keyword-clause 1)))
+                       ((L) (and (let ((re (buffer-local-value
+                                           (current-buffer)
+                                           'c-keywords-regexp #f)))
+                                   (and re (looking-at re)))
+                                 (c-forward-keyword-clause 1 #t)))
+                       ((A) (and (eq? (char-after pos) #\<)
+                                 (c-forward-<>-arglist #f)))
+                       ((B) (and (eq? (char-before pos) #\>)
+                                 (c-backward-<>-arglist #f)))
+                       (else (error "bad tag")))))
+            (test-equal (list tag pos) (list want want-pt)
+                        (list got (point))))))
+       rows))))
+
+;; The C++ rows: a `<` at 24 opens the template's arglist (and
+;; `c-forward-type' consumes it); a keyword clause at 15 takes the
+;; arglist with it; a qualified name ending in `<int>` is a 'template;
+;; and the nested `Foo<Bar<Baz> >' parses from either end.
+(decl-expect decl-cpp-fixture 'c++-mode
+  (lambda ()
+    (c-init-language-vars c++-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++))))
+  '((T 24 #t 42)
+    (A 24 #t 33)
+    (B 33 #t 24)
+    (K 15 #t 34)
+    (L 15 #t 33)
+    (N 48 template 65)
+    (T 48 #t 65)
+    (T 59 maybe 66)
+    (N 59 #f 59)
+    (A 59 #t 64)
+    (B 64 #t 59)
+    (N 68 template 83)
+    (T 68 #t 83)
+    (A 71 #t 82)
+    (B 80 #t 75)
+    (B 82 #t 71)
+    (T 75 #f 81)))
+
+;; The C rows: the implicit-int branch ("register count;" is 'no-id),
+;; a known type from `c-known-type-key' ("extern foo_t" is 'known, and
+;; stops after the type), the `#include <stdio.h>' arglist (which the
+;; "import" branch does not take in C - it is an ordinary template
+;; arglist), and `x < y > z' as two arglists read backwards.
+(decl-expect decl-c-fixture 'c-mode
+  (lambda ()
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c))))
+  '((T 49 #t 58)
+    (T 148 no-id 157)
+    (K 148 #t 157)
+    (L 148 #t 156)
+    (T 164 known 177)
+    (T 171 known 177)
+    (N 171 #t 177)
+    (T 175 maybe 177)
+    (T 177 maybe 183)
+    (K 49 #t 56)
+    (L 49 #t 55)
+    (A 10 #t 19)
+    (B 19 #t 10)
+    (B 192 #t 187)))
+(test-end "schemacs_editor_cc_engine_declaration")

@@ -33,12 +33,13 @@
   (import
     (scheme base)
     (only (guile) eval eval-when current-module module-name
-                  syntax with-syntax syntax-case syntax->datum datum->syntax)
+                  syntax with-syntax syntax-case syntax->datum datum->syntax
+                  make-hash-table hash-set!)
     (only (schemacs editor buffer) current-buffer set-buffer-local-value!
           buffer-local-value)
     (only (schemacs editor cc-defs)
           c-lang-const c-lang-defconst c-lang-defconst-eval-immediately
-          c-get-lang-constant c-lang-defconst-eval-now
+          c-get-lang-constant c-lang-defconst-eval-now c-mode-var-boundp
           c-lang-constant-documentation c-literal-datum?
           c-major-mode-is *c-buffer-is-cc-mode*
           c-mode-symbol c-mode-var c-concat-separated c-make-bare-char-alt
@@ -47,9 +48,11 @@
           c-with-syntax-table c-int-to-char c-characterp
           %c-true %c-false
           c-alpha c-alnum c-digit c-upper c-lower)
-    (only (schemacs editor subr) make-syntax-table string-suffix-p
+    (only (schemacs editor subr) make-syntax-table remove
+          string-suffix-p
           delq remq intern regexp-unmatchable)
-    (only (schemacs editor syntax) modify-syntax-entry char-syntax)
+    (only (schemacs editor syntax) modify-syntax-entry char-syntax
+          copy-syntax-table)
     (only (schemacs editor fns) concat %substring %string %length mapcar
           elt identity string-equal delete)
     (only (schemacs editor eval) funcall)
@@ -213,7 +216,15 @@
             (map (lambda (record)
                    (let* ((var (c-lang-var-var record))
                           (value (%c-lang-init-value record mode)))
-                     (if (c-literal-datum? value)
+                     ;; `%c-no-value` - what the guard answers when the
+                     ;; VAL could not be evaluated - is a two-element
+                     ;; list of symbols, which `c-literal-datum?` would
+                     ;; otherwise take for literal data and bake into
+                     ;; the initialisation. It must take the runtime
+                     ;; path instead, where a buffer exists and the
+                     ;; variable can be computed.
+                     (if (and (c-literal-datum? value)
+                              (not (equal? value (%c-no-value))))
                          (list 'c-lang-set-local! (list 'quote var)
                                (list 'quote value))
                          (list 'c-lang-set-local! (list 'quote var)
@@ -293,9 +304,6 @@
       t ((c-lang-const c-make-mode-syntax-table)))
 
 ;;; ------------------------------------------------------------------
-;;; The language data (`cc-langs.el', from `c-mode-menu' to the end)
-;;; ------------------------------------------------------------------
-
     ;;------------------------------------------------------------------
     ;; `c-filter-ops' (`cc-langs.el:214')
     ;;------------------------------------------------------------------
@@ -402,7 +410,7 @@
 (c-lang-defvar c-identifier-syntax-modifications (c-lang-const c-identifier-syntax-modifications))
 
 ;; c-identifier-syntax-table
-(c-lang-defvar c-identifier-syntax-table (let ((table (copy-syntax-table (c-mode-var "mode-syntax-table"))) (mods c-identifier-syntax-modifications) (mod '())) (let %while2 () (if mods (begin (let ((%q0 (car mods))) (set! mod %q0) (let ((%q2 (cdr mods))) (set! mods %q2) %q2)) (modify-syntax-entry (car mod) (cdr mod) table) (%while2)) #f)) table))
+(c-lang-defvar c-identifier-syntax-table (let ((table (copy-syntax-table (c-lang-const c-mode-syntax-table))) (mods (c-lang-const c-identifier-syntax-modifications)) (mod '())) (let %while2 () (if (%c-true mods) (begin (let ((%q0 (car mods))) (set! mod %q0) (let ((%q2 (cdr mods))) (set! mods %q2) %q2)) (modify-syntax-entry (car mod) (cdr mod) table) (%while2)) #f)) table))
 
 ;; c-get-state-before-change-functions
 (c-lang-defconst c-get-state-before-change-functions
@@ -3151,14 +3159,29 @@
                          (inner (cdr ks))))))
                (loop (cdr rest)))))))
 
-;;; `c-lang-defvar c-keywords-obarray' is not carried: it is an Emacs
-;;; *obarray* whose symbols' property lists say which `*-kwds' lists each
-;;; keyword is on, and this tree has no obarray (the command table and
-;;; the coding-system table are the pattern - an index kept beside the
-;;; data). Its readers are `c-keyword-sym' and `c-keyword-member' in
-;;; cc-engine, and they are deferred until cc-engine is ported, when the
-;;; same membership information `c-keyword-member-alist' already carries
-;;; can be indexed a second way.
+;; `c-keywords-obarray' (`cc-langs.el:3663'): Emacs builds an obarray
+;; whose symbols' property lists carry the `*-kwds' membership. There
+;; is no obarray in this tree, so the same information is a hash keyed
+;; by the keyword *string* whose value is the membership list -
+;; `c-keyword-member-alist' indexed the second way, as the note above
+;; planned. `cc-engine.scm''s `c-keyword-sym'/`c-keyword-member' read it.
+;;
+;; **It is a `c-lang-defvar`, as in Emacs, and that is load-bearing.**
+;; Building it evaluates `c-keyword-member-alist', whose evaluation runs
+;; `c-make-keywords-re' - and that calls `string-match' on every
+;; keyword. Done lazily on the first `c-keyword-sym' call it clobbered
+;; the match data of the caller: `c-forward-keyword-clause' reads
+;; `(match-end match)' right after asking `c-keyword-sym', and a
+;; keyword lookup from a `looking-at' context found the match data of
+;; whatever keyword string `c-make-keywords-re' had checked last. Emacs
+;; computes this at language-init time, before any of that.
+(c-lang-defvar c-keywords-obarray
+  (let ((alist (c-lang-const c-keyword-member-alist))
+        (table (make-hash-table)))
+    (for-each (lambda (entry)
+                (hash-set! table (car entry) (cdr entry)))
+              (if (list? alist) alist '()))
+    table))
 
 ;; c-regular-keywords-regexp
 (c-lang-defconst c-regular-keywords-regexp
@@ -3432,18 +3455,20 @@ when placed directly after a brace list starter in a block prefix."
   ;; cc-vars' registration of the variable's reader (see cc-defs'
   ;; `c-register-emacs-variable-reader!'); the `mapcar'/`delq nil' pairs
   ;; are written as the two collection loops they are.
-  (let* ((extra-types (c-mode-var "font-lock-extra-types"))
+  (let* ((extra-types (if (c-mode-var-boundp "font-lock-extra-types")
+                          (c-mode-var "font-lock-extra-types")
+                          '()))
          (regexp-strings
           (let loop ((rest extra-types) (out '()))
             (cond ((null? rest) (reverse out))
-                  ((and (stringp (car rest))
+                  ((and (string? (car rest))
                         (string-match "[][.*+?^$\\\\]" (car rest)))
                    (loop (cdr rest) (cons (car rest) out)))
                   (else (loop (cdr rest) out)))))
          (plain-strings
           (let loop ((rest extra-types) (out '()))
             (cond ((null? rest) (reverse out))
-                  ((and (stringp (car rest))
+                  ((and (string? (car rest))
                         (not (string-match "[][.*+?^$\\\\]" (car rest))))
                    (loop (cdr rest) (cons (car rest) out)))
                   (else (loop (cdr rest) out))))))
@@ -3737,5 +3762,4 @@ when placed directly after a brace list starter in a block prefix."
 
 ;; c-maybe-decl-faces
 (c-lang-defvar c-maybe-decl-faces (c-lang-const c-maybe-decl-faces))
-
     ))

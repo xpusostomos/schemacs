@@ -268,15 +268,23 @@
     *c-buffer-is-cc-mode*
     *c-commas-bound-stmts*
     *c-font-lock-extra-types*
+    *c-fontify-new-found-type-function*
     *c-lang-const-expansion*
     *c-lang-var-overrides*
     *c-langs-are-parametric*
+    *c-last-identifier-range*
     *c-macro-start*
     *c-mark-wrong-style-of-comment*
     *c-maybe-labelp*
     *c-noise-macro-names*
     *c-noise-macro-with-parens-names*
+    *c-parse-and-markup-<>-arglists*
+    *c-promote-possible-types*
+    *c-record-found-types*
+    *c-record-ref-identifiers*
+    *c-record-type-identifiers*
     *c-report-syntactic-errors*
+    *c-restricted-<>-arglists*
     *c-syntactic-indentation*
     *c-syntactic-indentation-in-macros*
     *c-warn-ids-with-dollar*
@@ -1098,7 +1106,11 @@
     c--intersection
     c--mapcan
     c--set-difference
+    c-<-as-paren-syntax
+    c->-as-paren-syntax
     c-add-language
+    c-add-type
+    c-add-type-1
     c-alnum
     c-alpha
     c-append-lower-brace-pair-to-state-cache
@@ -1108,6 +1120,8 @@
     c-at-statement-start-p
     c-at-vsemi-p
     c-auto-newline
+    c-back-over-compound-identifier
+    c-backward-<>-arglist
     c-backward-comments
     c-backward-sexp
     c-backward-single-comment
@@ -1125,9 +1139,12 @@
     c-cache-to-parse-ps-state
     c-calculate-state
     c-characterp
+    c-check-qualified-type
+    c-check-type
     c-clear-c-type-property
     c-clear-char-properties
     c-clear-char-property
+    c-clear-found-types
     c-concat-separated
     c-crosses-statement-barrier-p
     c-current-comment-prefix
@@ -1157,11 +1174,20 @@
     c-find-assignment-for-mode
     c-foreign-init-lit-pos-cache
     c-foreign-truncate-lit-pos-cache
+    c-forward-<>-arglist
+    c-forward-<>-arglist-recur
+    c-forward-align-clause-throw-if-invalid
+    c-forward-annotation
     c-forward-comment-minus-1
     c-forward-comments
+    c-forward-id-comma-list
+    c-forward-keyword-clause
+    c-forward-keyword-prefixed-id
+    c-forward-name
     c-forward-noise-clause
     c-forward-noise-clause-not-macro-decl
     c-forward-over-colon-type-list
+    c-forward-over-compound-identifier
     c-forward-over-cpp-define-id
     c-forward-over-token
     c-forward-over-token-and-ws
@@ -1172,6 +1198,8 @@
     c-forward-to-cpp-define-body
     c-forward-token-1
     c-forward-token-2
+    c-forward-type
+    c-found-types
     c-full-get-near-cache-entry
     c-full-lit-near-cache
     c-full-near-cache-limit
@@ -1246,10 +1274,16 @@
     c-make-init-lang-vars-fun
     c-make-keywords-re
     c-make-noise-macro-regexps
+    c-mark-<-as-paren
+    c-mark->-as-paren
     c-min-property-position
     c-mode-symbol
     c-mode-var
+    c-mode-var-boundp
     c-most-enclosing-brace
+    c-new-id-end
+    c-new-id-is-type
+    c-new-id-start
     c-next-single-property-change
     c-no-comment-end-of-macro
     c-noise-macro-name-re
@@ -1273,6 +1307,8 @@
     c-put-is-sws
     c-query-and-set-macro-start
     c-query-macro-start
+    c-record-ref-id
+    c-record-type-id
     c-register-emacs-variable-reader!
     c-remove-in-sws
     c-remove-is-and-in-sws
@@ -1280,6 +1316,7 @@
     c-remove-stale-state-cache
     c-remove-stale-state-cache-backwards
     c-renarrow-state-cache
+    c-restore-<->-as-parens
     c-safe
     c-safe-position
     c-safe-scan-lists
@@ -1328,6 +1365,7 @@
     c-string-limit-regexp
     c-string-list-p
     c-string-syntax
+    c-suppress-<->-as-parens
     c-sws-lit-limits
     c-sws-lit-type
     c-syntactic-content
@@ -1338,9 +1376,12 @@
     c-trim-lit-pos-cache
     c-truncate-lit-pos-cache
     c-truncate-lit-pos/state-cache
+    c-unfind-type
+    c-unmark-<-or->-as-paren
     c-up-list-backward
     c-up-list-forward
     c-upper
+    c-use-category
     c-vsemi-status-unknown-p
     c-whack-state-after
     c-whack-state-before
@@ -3234,6 +3275,7 @@
     region-limit
     register-command!
     remember-mouse-glyph
+    remove
     remove-hook
     remove-list-of-text-properties
     remove-text-properties
@@ -3431,6 +3473,7 @@
     set!c-current-comment-prefix
     set!c-debug-parse-state
     set!c-electric-flag
+    set!c-found-types
     set!c-full-lit-near-cache
     set!c-full-near-cache-limit
     set!c-hungry-delete-key
@@ -3441,6 +3484,9 @@
     set!c-macro-cache-start-pos
     set!c-macro-cache-syntactic
     set!c-macro-with-semi-re
+    set!c-new-id-end
+    set!c-new-id-is-type
+    set!c-new-id-start
     set!c-noise-macro-name-re
     set!c-noise-macro-with-parens-name-re
     set!c-parsing-error

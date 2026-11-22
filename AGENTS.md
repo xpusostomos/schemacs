@@ -15908,3 +15908,89 @@ macros in this region, written as procedures here), then
 `c-forward-<>-arglist` + recur, `c-forward-name`, `c-forward-type` -
 one mutually recursive tranche with the seam pattern
 (`*c-forward-type-function*` and friends).
+
+# cc-mode: the declaration engine (2026-11-22)
+
+The tranche the previous handoff named is in: the `c-found-types`
+machinery, `c-forward-keyword-clause` with its two helpers,
+`c-forward-<>-arglist` (+ recur and the backward twin), `c-forward-name`
+and `c-forward-type`, plus the `<`/`>` category properties in
+`cc-defs.scm`. DEPARTURES.md's 2026-11-22 section has the C and every
+named departure; this is what the next session needs.
+
+## Verification
+
+The whole-input differential is the gate: both fixtures, every
+position, six probes, `c-found-types` cleared - 2,280 + 1,620 answers
+identical to Emacs 31.1. The harnesses are still in `/tmp/decl/`
+(`emacs-dump.el`, `emacs-dump-c.el`, `ours-dump.scm`,
+`ours-dump-c.scm`, the two fixtures); move them to `tools/` next time
+they are touched. Two things they must do: parameterize
+`*c-buffer-is-cc-mode*`, and strip the `category` property `cc-mode.el`
+puts on `<`/`>` from the Emacs side.
+
+`cc-engine-tests.scm` has the `schemacs_editor_cc_engine_declaration`
+group (31 rows, every interesting answer of the differential); the suite
+is 425 passes. `search-tests.scm` is 93 with the three regexp
+reproducers.
+
+## The trap that cost the most: a cached *script*
+
+`cc-engine-tests` failed `(K 15)` with point 8, deterministically, while
+the same probe in a fresh script passed and the whole-input differential
+was 0. The cause was `~/.cache/guile/ccache/.../cc-engine-tests.scm.go`
+- **Guile caches compiled *scripts* too**, and `--no-auto-compile` loads
+one if it exists, exactly as for libraries. The cached copy predated the
+fix being tested, so the suite ran an old expansion of
+`c-init-language-vars`.
+
+The tell: a suite failure that no fresh script reproduces and that no
+differential sees. `rm -rf ~/.cache/guile/ccache` before trusting a
+direct `guile -s` run, or (better) run the suite the way
+`tools/run-suites.py` does - it points `XDG_CACHE_HOME` at a fresh
+temporary directory, which is why the runner was green while the direct
+run was red.
+
+## The bug the declaration engine exposed
+
+`c-keyword-sym` used to build its keyword table **lazily on first
+lookup**, and that build evaluates `c-keyword-member-alist`, which runs
+`c-make-keywords-re` -> `string-match` over every keyword. Called from
+`c-forward-keyword-clause` - whose caller's `looking-at` match data it
+is about to read - it replaced that match data with the last keyword
+string checked (`co_yield`), and the clause moved point to the wrong
+place. `c-keywords-obarray` is now a `c-lang-defvar` in `cc-langs.scm`,
+built at `c-init-language-vars` time as Emacs does, and
+`c-keyword-sym`/`c-keyword-member` are pure table reads. **The general
+rule**: anything reachable from inside a `looking-at` context must not
+evaluate language data, and Emacs's init-time placement is what
+guarantees it.
+
+## Regexp engine
+
+Three real bugs found and fixed (DEPARTURES has the C):
+`%check-infinite-loop` compared an index with the vector; the loop
+opcode's `!analyze_first` negation was missing; the memoization now has
+the C's two-phase threshold and `prememo`'s one-in-eight fastpath.
+`search-tests.scm` pins `\\(a*\\|c\\)*` on "c" (Emacs: 0, end 0) and
+`\\(a\\|c\\)*` (end 1).
+
+## Next, in cc-engine.el's order
+
+1. `c-forward-declarator` (`:10161'`), whose implicit-int branch
+   `c-forward-type` currently signals an error for.
+2. `c-looking-at-statement-block-1'`/`-block` (`:13647'`, `:13736'`),
+   which need `c-looking-at-c++-lambda-expression',
+   `c-just-after-func-arglist-p' and `c-back-over-member-initializer-braces'
+   - and those call `c-forward-type' back, so the recursion the previous
+   handoff expected now closes on real functions rather than seams.
+3. Then `cc-fonts` (whose matchers can now use `c-keyword-member`),
+   `cc-mode.el` (`easy-menu-define` is still the one missing primitive,
+   plus a `def-edebug-spec` stub), and the first milestone: `.c`/`.h`
+   open in c-mode with the syntax table and faces compared to Emacs.
+
+Right-sized verification for cc-only changes: the six cc suites plus
+`python3 tools/pty-check.py imports scratch`; the full battery is for
+shared primitives (`regex-emacs.scm` was one, and the full battery was
+run on this tree before the memo/obarray changes - the regex and cc
+suites were re-run after them on a fresh cache).

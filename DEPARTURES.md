@@ -13023,3 +13023,136 @@ docstrings, which are Emacs 31.1's own - is verbatim.
 function is not ported, so `:set` is not carried (named here rather
 than passed as a symbol that would not resolve). The variable is a
 parameter, as the minor-mode machinery expects.
+
+# The declaration engine, and the regexp bugs underneath (2026-11-22)
+
+## What landed
+
+`schemacs/editor/cc-engine.scm` has the declaration engine
+(`cc-engine.el:8424'-`:9860'`), in Emacs's order: the `c-found-types`
+machinery (`c-new-id-start'/`-end'/`-is-type'`, the six `c-record-*`
+parameters, `c-add-type'`, `c-unfind-type'`, `c-check-type'`),
+`c-record-type-id'/`c-record-ref-id'`, `c-forward-align-clause-throw-if-invalid`,
+`c-forward-keyword-prefixed-id'`, `c-forward-id-comma-list'`,
+`c-forward-keyword-clause'`, `c-forward-<>-arglist'` and its `-recur'`,
+`c-backward-<>-arglist'`, `c-forward-name'`, `c-forward-type'`,
+`c-forward-over-compound-identifier'`, `c-back-over-compound-identifier'`
+and `c-check-qualified-type'`.
+
+`cc-defs.scm` gained the `<`/`>` category properties and their five
+helpers (`cc-defs.el:1400'-`:1460'`): `c-<-as-paren-syntax`
+(`'(4 . 62)`), `c->-as-paren-syntax` (`'(5 . 60)`), their `put`
+`syntax-table` properties, `c-mark-<-as-paren'`,
+`c-mark->-as-paren'`, `c-unmark-<-or->-as-paren'`,
+`c-suppress-<->-as-parens'` and `c-restore-<->-as-parens'`; and
+`c-mode-var-boundp', Emacs's `(boundp (c-mode-symbol SUFFIX))' test,
+which `c-known-type-key' uses to ask whether the mode set
+`c-font-lock-extra-types' at all.
+
+## Verification
+
+A whole-input differential against Emacs 31.1 at **every position** of
+two fixtures (a 456-character C++ one and a 270-character C one), with
+six probes each - `c-forward-type', `c-forward-name',
+`c-forward-keyword-clause' with and without STOP-AT-END,
+`c-forward-<>-arglist', `c-backward-<>-arglist' - and
+`c-found-types' cleared before every call: **2,280 C++ answers and
+1,620 C answers, all identical** after normalising nil/t.
+
+Two harness facts, both of which changed answers before they were
+handled: `*c-buffer-is-cc-mode*` must be parameterized (`c-major-mode-is'
+has no buffer-local mode here - there is no `c-mode' yet), and on the
+Emacs side the `category' property `cc-mode.el' puts on `<`/`>` must be
+stripped (`syntax-propertize-function' nil, the cache flushed, and
+`remove-text-properties' under `inhibit-modification-hooks'), or the
+two sides are parsing different syntax.
+
+## Departures
+
+- **`c-forward-declarator' (`cc-engine.el:10161') is not ported**, so
+  `c-forward-type''s implicit-int branch (`:9750') signals an error
+  naming it instead of running it. It is the next function in the
+  file's order; everything the declaration engine proper needs is here.
+- **`c-fontify-new-found-type' is a seam**:
+  `*c-fontify-new-found-type-function*` is a do-nothing default, because
+  the function is `cc-fonts.el:2643''s and cc-fonts is not ported. Nothing
+  in the parser reads its answer.
+- **The `catch'/'throw 'type-error' in `c-forward-align-clause-throw-if-invalid'
+  and the arglist escape are continuation procedures** rather than a
+  `catch' tag: Emacs's macro wraps the caller in `(catch 'type-error
+  ...)' and the helper throws to it, so the procedure takes ESCAPE and
+  calls it. One `call-with-current-continuation' per keyword clause with
+  a `<` after it.
+- **`c-keywords-obarray' is a hash, not an obarray** (there is no
+  obarray here): keyed by the keyword *string*, value the membership
+  list `c-keyword-member-alist' already carries. It is a
+  `c-lang-defvar', as in Emacs (`cc-langs.el:3663'), built by
+  `c-init-language-vars'. That placement is load-bearing, not tidiness:
+  building it evaluates `c-keyword-member-alist', whose evaluation runs
+  `c-make-keywords-re' -> `string-match' on every keyword, and building
+  it **lazily inside `c-keyword-sym'** clobbered the match data
+  `c-forward-keyword-clause' was reading - its callers reach it from
+  inside a `looking-at'. Emacs computes the obarray at language-init
+  time for the same reason (and because the lookup must be cheap).
+
+## The regexp-engine bugs this port found
+
+1. **`%check-infinite-loop' compared a saved instruction index with the
+   instruction vector** (`FAILURE_PAT (failure) == pat_cur' at
+   `regex-emacs.c:1068'). Any pattern whose cycle check ran raised `='
+   on a vector. Found by `c-forward-name''s `c-identifier-key'; the
+   reproducers are `\\(\\(a\\)*\\|\\(c\\)\\)*' and `\\(a*\\|c\\)*'.
+
+2. **The loop opcode was chosen with the negation missing.**
+   `regex_compile' (`regex-emacs.c:1963') is
+
+       re_opcode_t ofj = (simple || !analyze_first (bufp, laststart, b, NULL))
+                          ? ON_FAILURE_JUMP_PREMEMO : on_failure_jump_loop;
+
+   and `analyze_first' answers *true when the block can match the empty
+   string* (`:3328'). The port had `(or simple (analyze-first ...))',
+   so a complex loop that can match empty got the memo variant and no
+   cycle check. Measured: `(string-match "\\(a*\\|c\\)*" "c")' is 0 with
+   end 0 in Emacs (the cycle check stops the empty first alternative
+   from being re-entered) and was 0 with end 1 here. `\\(a\\|c\\)*' on
+   "c" is 1 in Emacs and is unchanged - the difference is only for a
+   loop whose body can match empty.
+
+3. **The memoization was recorded at each state's first failure**, where
+   `memo_record_failure' (`:4372') has two phases: a state only counts
+   its failures until `count > memo->max_offset', then allocates its
+   bitset and promotes a `prememo' opcode. And `on_failure_jump_prememo''s
+   failure path (`:5664') hands only **one failure in eight** to
+   `memo_record_failure' (`!(memo.total_failures & 7)'), just counting
+   the others. Both are ported; `<memo-bits>' keeps Emacs's double
+   meaning for `count' (a failure counter before the bitset exists, its
+   capacity after). The departure that remains is the table's index:
+   the C divides a byte offset by `MEMO_BYTES_PER_COUNTER' (3); this
+   engine indexes by instruction index. That changes only how finely
+   the failure counts are kept, and the differential is exact with it.
+
+Tests: `cc-engine-tests.scm''s `schemacs_editor_cc_engine_declaration'
+group pins 31 answers (every interesting row of both differentials);
+`search-tests.scm` has the three reproducers above. The cc suites, the
+search and replace suites and `loadup-tests` all pass.
+
+## The cc-langs generator, repaired (same day)
+
+The generated data block now reproduces Emacs's constants after five
+fixes, each needed for the language initialisation to run at all:
+
+- a pre-pass for `c-lang-defvar' with `(c-lang-const SAME)' as its VAL
+  (the value is the constant, not a reference to a missing variable);
+- `c-lang-const''s name argument is translated as data, not as an
+  expression;
+- `(c-mode-var "mode-syntax-table")' -> `(c-lang-const c-mode-syntax-table)';
+- a generated `while''s condition is wrapped in `%c-true' (an empty list
+  is true in Scheme where Elisp's nil is false);
+- `(no-value)' - the marker `c-make-init-lang-vars-fun' uses when a VAL
+  cannot be evaluated at expansion time - is no longer baked as literal
+  data.
+
+`subr.scm` gained `remove' (`subr.el:1145'), which the generated
+`c-keywords' stands on. `c-known-type-key''s hand port now asks
+`c-mode-var-boundp' before reading the variable, as Emacs's `boundp'
+does.

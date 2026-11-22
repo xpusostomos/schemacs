@@ -91,7 +91,7 @@
    c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
    *c-lang-var-overrides*
    c-alpha c-alnum c-digit c-upper c-lower
-   c-mode-symbol c-mode-var c-concat-separated c-make-bare-char-alt
+   c-mode-symbol c-mode-var c-mode-var-boundp c-concat-separated c-make-bare-char-alt
    c-make-keywords-re c-lang-constant-documentation c-literal-datum?
    c-major-mode-is *c-langs-are-parametric* *c-lang-const-expansion*
    c-save-buffer-state
@@ -99,6 +99,9 @@
    c-put-char-property c-get-char-property c-clear-char-property
    c-put-char-properties c-clear-char-properties c-min-property-position
    c-next-single-property-change c-previous-single-property-change
+   c-<-as-paren-syntax c->-as-paren-syntax c-use-category
+   c-mark-<-as-paren c-mark->-as-paren c-unmark-<-or->-as-paren
+   c-suppress-<->-as-parens c-restore-<->-as-parens
    c-skip-ws-chars-forward c-skip-ws-chars-backward
    c-skip-ws-forward c-skip-ws-backward
    c-safe c-forward-sexp c-backward-sexp c-safe-scan-lists
@@ -264,6 +267,19 @@
   ;; registration's existence.
   (hashq-set! %c-emacs-variable-readers symbol reader)
   symbol)
+
+(define (c-mode-var-boundp suffix)
+  ;; Emacs's `(boundp (c-mode-symbol SUFFIX))' - the test `cc-langs.el'
+  ;; makes around the `*-font-lock-extra-types' variables, one of which
+  ;; (`awk-font-lock-extra-types') no Emacs defines at all, so awk's
+  ;; `c-known-type-key' is built from its primitive types alone.
+  (let ((symbol (c-mode-symbol suffix)))
+    (cond ((assq symbol (*c-lang-var-overrides*)) #t)
+          ((not (eq? (buffer-local-value (current-buffer) symbol
+                                         %c-mode-var--absent)
+                     %c-mode-var--absent))
+           #t)
+          (else (and (hashq-ref %c-emacs-variable-readers symbol) #t)))))
 
 (define (c-mode-var suffix)
   ;; Emacs's `(symbol-value (c-mode-symbol SUFFIX))'. Its language
@@ -928,6 +944,65 @@
           (remove-text-properties ret to (list property #f))
           ret)
         #f)))
+
+;;----------------------------------------------------------------------
+;; The `<'/`>' paren syntax categories (`cc-defs.el:1190'-`:1205')
+;;----------------------------------------------------------------------
+;; On GNU Emacs a marked template bracket's `syntax-table' property is
+;; *indirect*: the character carries a `category' property naming one of
+;; these two symbols, and the symbol's own `syntax-table' property is
+;; the descriptor. That is what lets
+;; `c-suppress-<->-as-parens' toggle every template bracket in every
+;; buffer at once. `intervals.scm''s `lookup-char-property' walks the
+;; same path for `get-text-property', so a category-marked bracket reads
+;; back its descriptor here as it does in Emacs. The values are the C's:
+;; `(4 . ?>)' and `(5 . ?<)'.
+(define c-<-as-paren-syntax '(4 . 62))
+(put 'c-<-as-paren-syntax 'syntax-table c-<-as-paren-syntax)
+(define c->-as-paren-syntax '(5 . 60))
+(put 'c->-as-paren-syntax 'syntax-table c->-as-paren-syntax)
+
+;; "Constant to decide at compilation time whether to use category
+;; properties. Currently (2010-03) they're available only on GNU Emacs."
+;; Emacs probes the running Emacs; here the answer is known.
+(define c-use-category #t)
+
+;; `c-mark-<-as-paren' and its two siblings are macros in `cc-defs.el'
+;; (`:1846'-`:1878') that `eval-when-compile' `c-use-category'; here
+;; they are procedures and the flag is read at run time.
+(define (c-mark-<-as-paren pos)
+  ;; "Mark the \"<\" character at POS as a template opener using the
+  ;; `syntax-table' property either directly (XEmacs) or via a
+  ;; `category' property (GNU Emacs)."
+  ;;
+  ;; "This function does a hidden buffer change. ..."
+  (c-put-char-property pos 'category 'c-<-as-paren-syntax))
+
+(define (c-mark->-as-paren pos)
+  ;; "Mark the \">\" character at POS as an sexp list closer using the
+  ;; `syntax-table' property either directly (XEmacs) or via a
+  ;; `category' property (GNU Emacs)."
+  (c-put-char-property pos 'category 'c->-as-paren-syntax))
+
+(define (c-unmark-<-or->-as-paren pos)
+  ;; "Unmark the \"<\" or \">\" character at POS as an sexp list opener
+  ;; using the `syntax-table' property either directly or indirectly
+  ;; through a `category' text property."
+  ;;
+  ;; "This function does a hidden buffer change. ..."
+  (c-clear-char-property pos 'category))
+
+(define (c-suppress-<->-as-parens)
+  ;; "Suppress the syntactic effect of all marked < and > as parens.
+  ;; Note that this effect is NOT buffer local. ..."
+  (put 'c-<-as-paren-syntax 'syntax-table #f)
+  (put 'c->-as-paren-syntax 'syntax-table #f))
+
+(define (c-restore-<->-as-parens)
+  ;; "Restore the syntactic effect of all marked <s and >s as parens.
+  ;; This has no effect on unmarked <s and >s"
+  (put 'c-<-as-paren-syntax 'syntax-table c-<-as-paren-syntax)
+  (put 'c->-as-paren-syntax 'syntax-table c->-as-paren-syntax))
 
 
 ;;----------------------------------------------------------------------

@@ -659,4 +659,42 @@
        (replace-match "\\2\\1" #t)
        (buffer-substring (point-min) (point-max))))))
 
+;;--------------------------------------------------------------
+;; `%check-infinite-loop' compared a saved instruction *index* with the
+;; instruction *vector* (`regex-emacs.c:1068''s
+;; `FAILURE_PAT (failure) == pat_cur'), so any pattern whose loop
+;; detection was reached raised `=' on a vector. Found by
+;; `c-forward-name''s `c-identifier-key' in the cc-mode port; these two
+;; are the smallest reproducers. The answers are Emacs 31.1's.
+;;--------------------------------------------------------------
+(test-equal "a starred group nested in a starred alternation matches"
+  0
+  (string-match "\\(\\(a\\)*\\|\\(c\\)\\)*" "c"))
+
+;; The loop's cycle check stops the first, empty, alternative from
+;; being re-entered, so the match is empty even though `c' could be
+;; taken.  Emacs 31.1's answers.
+(test-equal "the empty alternative wins in a loop"
+  '(0 0)
+  (let ((r (string-match "\\(\\(a\\)*\\|\\(c\\)\\)*" "ca")))
+    (list r (match-end 0))))
+
+(test-equal "a non-empty first alternative still takes the loop"
+  '(0 2)
+  (let ((r (string-match "\\(\\(a\\)*\\|\\(c\\)\\)*" "aac")))
+    (list r (match-end 0))))
+
+(test-equal "an empty-capable loop gets the cycle check, not the memo"
+  '(0 0)
+  (let ((r (string-match "\\(a*\\|c\\)*" "c")))
+    (list r (match-end 0))))
+
+(test-equal "the C identifier key matches a qualified name"
+  0
+  (string-match (string-append
+                 "\\(\\(\\_<\\(compl\\)\\_>\\|\\(::\\|\\?\\?-\\|~\\)\\)"
+                 "\\(\\s \\|[\n\r]\\)*\\)?"
+                 "\\([[:alpha:]_$][[:alnum:]_$]\\{,1000\\}\\)")
+                "std::vector"))
+
 (test-end)

@@ -92,7 +92,7 @@
 
   (export
    user-error
-   assoc-delete-all assq-delete-all delq remq copy-tree last
+   assoc-delete-all assq-delete-all delq remq remove copy-tree last
    add-to-history add-to-list
    ;; string/list helpers `subr.el`'s, for the external packages and
    ;; anything else written in Emacs's idiom
@@ -1558,6 +1558,20 @@
                       (loop (- i 1))))
                   copy)
                 tree))))
+
+    (define (remove elt seq)
+      ;; GNU Emacs's `remove' (`subr.el:1145'): "Return a copy of SEQ
+      ;; with all occurrences of ELT removed. SEQ must be a list,
+      ;; vector, or string. The comparison is done with `equal'.
+      ;; Contrary to `delete', this does not use side-effects, and the
+      ;; argument SEQ is not modified."
+      ;;
+      ;; Emacs's `(nlistp seq)' guard means `delete' copies a non-list
+      ;; itself, so only a list is copied here.
+      ;;--------------------------------------------------------------
+      (delete elt (if (not (list? seq))
+                      seq
+                      (copy-sequence seq))))
 
     (define (remq elt list)
       ;; GNU Emacs's `remq' (`subr.el:1157'): "Return LIST with all

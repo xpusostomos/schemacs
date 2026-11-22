@@ -310,18 +310,20 @@ KNOWN_TYPE = r'''
   ;; cc-vars' registration of the variable's reader (see cc-defs'
   ;; `c-register-emacs-variable-reader!'); the `mapcar'/`delq nil' pairs
   ;; are written as the two collection loops they are.
-  (let* ((extra-types (c-mode-var "font-lock-extra-types"))
+  (let* ((extra-types (if (c-mode-var-boundp "font-lock-extra-types")
+                          (c-mode-var "font-lock-extra-types")
+                          '()))
          (regexp-strings
           (let loop ((rest extra-types) (out '()))
             (cond ((null? rest) (reverse out))
-                  ((and (stringp (car rest))
+                  ((and (string? (car rest))
                         (string-match "[][.*+?^$\\\\]" (car rest)))
                    (loop (cdr rest) (cons (car rest) out)))
                   (else (loop (cdr rest) out)))))
          (plain-strings
           (let loop ((rest extra-types) (out '()))
             (cond ((null? rest) (reverse out))
-                  ((and (stringp (car rest))
+                  ((and (string? (car rest))
                         (not (string-match "[][.*+?^$\\\\]" (car rest))))
                    (loop (cdr rest) (cons (car rest) out)))
                   (else (loop (cdr rest) out))))))

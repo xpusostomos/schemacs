@@ -1319,9 +1319,20 @@
                                        (simple (let ((skip (%skip-one-char
                                                             st laststart)))
                                                  (and skip (= skip N))))
+                                       ;; `regex-emacs.c:1963': a
+                                       ;; loop that can match the
+                                       ;; empty string and is not
+                                       ;; `simple' gets the cycle
+                                       ;; check (`on_failure_jump_loop');
+                                       ;; the truthiness of
+                                       ;; `analyze_first' is the
+                                       ;; other way round - it
+                                       ;; answers "can be null" - so
+                                       ;; the C's `!analyze_first'
+                                       ;; is a `not' here.
                                        (ofj (if (or simple
-                                                    (%analyze-first
-                                                     (buf) N laststart N #f))
+                                                    (not (%analyze-first
+                                                          (buf) N laststart N #f)))
                                                 op-on-failure-jump-prememo
                                                 op-on-failure-jump-loop))
                                        (startoffset 0))
@@ -2095,9 +2106,18 @@
               (set-failure-stack-pop-str! fs (if (eq? str-tag 'nil) #f str))
               pat-index))))
 
-    (define (%check-infinite-loop fs pat pat-current str-place)
+    (define (%check-infinite-loop fs pat pat-cur str-place)
       ;; CHECK_INFINITE_LOOP: walk the frames above the current one
       ;; whose saved string is STR-PLACE or NULL.
+      ;;
+      ;; PAT is the instruction vector (unused - it is here only because
+      ;; the two callers have it to hand); PAT-CUR is the instruction
+      ;; index the `on_failure_jump' at the top of the walk came from,
+      ;; and the comparison is against a *saved index*. Comparing the
+      ;; saved index with the vector instead - which is what this did
+      ;; before `c-forward-name''s `c-identifier-key' found it - raised
+      ;; `=' on a vector the moment a starred group nested a starred
+      ;; alternation, e.g. `\\(\\(a\\)*\\|\\(c\\)\\)*'.
       ;;----------------------------------------------------------
       (let loop ((failure (failure-stack-frame fs)))
         (cond
@@ -2109,7 +2129,7 @@
             (if (or (eq? str-tag 'nil)
                     (and (eq? str-tag 'pos)
                          (= str str-place)))
-                (if (= pat-saved pat)
+                (if (= pat-saved pat-cur)
                     #t
                     (loop (%entry-value fs (- failure 3))))
                 #f))))))
@@ -2117,6 +2137,13 @@
     ;;----------------------------------------------------------------
     ;; Memoization (`regex-emacs.c:4118'-`:4432')
     ;;----------------------------------------------------------------
+    ;; `regex-emacs.c:4232''s `struct memo_bits' is `{ unsigned char
+    ;; *bytes; int count; }', and `count' has **two meanings**: while
+    ;; `bytes' is still NULL it counts the failures seen at this state
+    ;; (`:4382'), and once `memo_bits ()' allocates, it is the
+    ;; bitset's capacity. The overloading is Emacs's, and so it is
+    ;; kept: `bits' is `bytes' (here one element per text position,
+    ;; not one bit) and `count' means both.
     (define-record-type <memo-bits>
       (make-memo-bits bits count)
       memo-bits?
@@ -2133,23 +2160,33 @@
       (inhibit memo-inhibit set-memo-inhibit!))
 
     (define (%memo-bits-get bs bit)
-      (and bs (< bit (memo-bits-count bs))
-           (vector-ref (memo-bits-bits bs) bit)))
+      (let ((bits (memo-bits-bits bs)))
+        (and bits (< bit (memo-bits-count bs))
+             (vector-ref bits bit))))
 
     (define (%memo-bits-set! bs bit)
-      (let ((bits (memo-bits-bits bs))
-            (count (memo-bits-count bs)))
-        (when (>= bit count)
-          (let* ((new-count (max (+ bit 1) (* 2 count) 16))
+      ;; `memo_bits_set' (`:4271'): grow the store, then set the bit. A
+      ;; `#f' store is the phase-one state - `memo_bits (first)'
+      ;; (`:4288') allocating and seeding in one go.
+      (if (not (memo-bits-bits bs))
+          (let* ((new-count (max (+ bit 1) 16))
                  (new (make-vector new-count #f)))
-            (let loop ((i 0))
-              (when (< i count)
-                (vector-set! new i (vector-ref bits i))
-                (loop (+ i 1))))
+            (vector-set! new bit #t)
             (set-memo-bits-bits! bs new)
-            (set-memo-bits-count! bs new-count)
-            (set! bits new)))
-        (vector-set! (memo-bits-bits bs) bit #t)))
+            (set-memo-bits-count! bs new-count))
+          (let ((bits (memo-bits-bits bs))
+                (count (memo-bits-count bs)))
+            (when (>= bit count)
+              (let* ((new-count (max (+ bit 1) (* 2 count) 16))
+                     (new (make-vector new-count #f)))
+                (let loop ((i 0))
+                  (when (< i count)
+                    (vector-set! new i (vector-ref bits i))
+                    (loop (+ i 1))))
+                (set-memo-bits-bits! bs new)
+                (set-memo-bits-count! bs new-count)
+                (set! bits new)))
+            (vector-set! (memo-bits-bits bs) bit #t))))
 
     (define (%new-memo)
       (make-memo 0 0 #f 0 #f))
@@ -2172,24 +2209,34 @@
                      (memo-max-offset memo))
               (%memo-init-failures! memo buf)))
           (unless (memo-inhibit memo)
+            ;; `memo_record_failure' (`:4372'): two phases. A state
+            ;; only counts its failures until it has failed more times
+            ;; than the furthest string position reached so far; then
+            ;; it allocates its bitset, seeds it with this failure and
+            ;; promotes a `prememo' opcode, so later visits consult it.
+            ;; That threshold is Emacs's ("an arbitrary threshold of 2
+            ;; failures per byte before deciding memoization might be
+            ;; worthwhile", `:4381').
             (let* ((states (memo-state-failures memo))
                    (failures (vector-ref states pat)))
-              (if (not failures)
-                  (let ((bs (make-memo-bits (make-vector 16 #f) 0)))
-                    (set-memo-bits-count! bs 1)
-                    (set-memo-bits-bits! bs (make-vector 16 #f))
-                    (%memo-bits-set! bs strpos)
-                    (vector-set! states pat bs)
-                    ;; Promote a prememo opcode, as the C does: the
-                    ;; next visits of this state consult the bitset.
-                    (when (= (vector-ref (vector-ref (re-pattern-buffer-buffer buf)
-                                                     pat)
-                                         0)
-                             op-on-failure-jump-prememo)
-                      (vector-set! (vector-ref (re-pattern-buffer-buffer buf)
-                                               pat)
-                                   0 op-on-failure-jump-memo)))
-                  (%memo-bits-set! failures strpos))))))
+              (if (and failures (memo-bits-bits failures))
+                  (%memo-bits-set! failures strpos)
+                  (let ((bs failures))
+                    (if (not bs)
+                        (begin
+                          (set! bs (make-memo-bits #f 0))
+                          (vector-set! states pat bs))
+                        #f)
+                    (set-memo-bits-count! bs (+ (memo-bits-count bs) 1))
+                    (when (> (memo-bits-count bs) (memo-max-offset memo))
+                      (%memo-bits-set! bs strpos)
+                      (when (= (vector-ref (vector-ref (re-pattern-buffer-buffer buf)
+                                                       pat)
+                                           0)
+                               op-on-failure-jump-prememo)
+                        (vector-set! (vector-ref (re-pattern-buffer-buffer buf)
+                                                 pat)
+                                     0 op-on-failure-jump-memo)))))))))
 
     (define (%memo-has-failed? memo pat str)
       (if (memo-state-failures memo)
@@ -2529,7 +2576,15 @@
                   (set! p (vector-ref ins 1))
                   #t)
                  ((= op op-on-failure-jump-prememo)
-                  (%memo-record-failure! memo pat-index bufp (- str pos))
+                  ;; `regex-emacs.c:5664': the prememo fastpath. Only
+                  ;; one failure in eight is handed to
+                  ;; `memo_record_failure'; the rest just count, so the
+                  ;; count still rises once per failure while the
+                  ;; per-state accounting is sampled.
+                  (if (not (zero? (logand (memo-total-failures memo) 7)))
+                      (set-memo-total-failures!
+                       memo (+ (memo-total-failures memo) 1))
+                      (%memo-record-failure! memo pat-index bufp (- str pos)))
                   (set! d str)
                   (set! p (vector-ref ins 1))
                   #t)

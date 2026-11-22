@@ -219,6 +219,13 @@ KNOWN_CALLS = {
     'c-alpha', 'c-alnum', 'c-digit', 'c-upper', 'c-lower',
 }
 
+# Language variables whose value is exactly their own constant
+# (`(c-lang-defvar X (c-lang-const X))'). A VAL that reads such a
+# variable - `c-identifier-syntax-table' reads
+# `c-identifier-syntax-modifications' - is translated to the constant,
+# which is the same value reached the way this tree reaches constants.
+CONST_BACKED = set()
+
 EXPR_HEADS_RENAME = {'substring', 'string=', 'eq', 'eql', 'equal', 'string<'}
 
 STRING_ARG_POSITIONS = {'concat': tuple(range(64))}
@@ -267,6 +274,8 @@ def translate_expr(x, indent=0):
             return name
         if name.startswith(':'):
             return "'" + name
+        if name in CONST_BACKED:
+            return '(c-lang-const %s)' % encode_symbol(name)
         return encode_symbol(name)
     if not isinstance(x, list):
         raise Unsupported('atom ' + repr(x))
@@ -331,6 +340,20 @@ def translate_expr(x, indent=0):
         return '(cond %s)' % ' '.join(clauses)
     if isinstance(head, Sym):
         name = str(head)
+        if name == 'c-lang-const':
+            # The arguments are a constant's *name* (and an optional
+            # language), not expressions: translating them as
+            # expressions would rewrite the name itself.
+            return '(c-lang-const %s)' % ' '.join(
+                translate_data(a) for a in x[1:])
+        if (name == 'c-mode-var' and len(x) == 2 and isinstance(x[1], Str)
+                and decode_elisp_string(str(x[1])) == 'mode-syntax-table'):
+            # `(c-mode-var "mode-syntax-table")' reads the mode's
+            # `*-mode-syntax-table' variable, which is defined in
+            # cc-mode.el, not cc-langs.el. Its value is the very
+            # `c-mode-syntax-table' constant (`cc-mode.el:2868' builds
+            # it from `c-make-mode-syntax-table'), which the tree has.
+            return '(c-lang-const c-mode-syntax-table)'
         if name == 'not' and len(x) == 2:
             return '(not (%%c-true %s))' % translate_expr(x[1], indent + 1)
         if name == 'or' and len(x) > 1:
@@ -391,7 +414,10 @@ def translate_expr(x, indent=0):
         if name == 'while':
             loop = '%%while%d' % indent
             body = ' '.join(translate_expr(b, indent + 2) for b in x[2:])
-            return '(let %s () (if %s (begin %s (%s)) #f))' % (
+            # The condition is an Elisp test: `()` is false there and
+            # true in Scheme, so a `(while LIST ...)` would run one
+            # iteration too many and `(car LIST)` would raise.
+            return '(let %s () (if (%%c-true %s) (begin %s (%s)) #f))' % (
                 loop, translate_expr(x[1], indent + 2), body, loop)
         if name == 'progn':
             return '(begin %s)' % ' '.join(
@@ -483,6 +509,14 @@ def form_name(f):
 def main():
     src = open(SRC).read()
     forms = S.parse(src)
+    for f in forms:
+        if (isinstance(f, list) and len(f) >= 3
+                and isinstance(f[0], Sym) and str(f[0]) == 'c-lang-defvar'
+                and isinstance(f[1], Sym) and isinstance(f[2], list)
+                and len(f[2]) == 2
+                and isinstance(f[2][0], Sym) and str(f[2][0]) == 'c-lang-const'
+                and isinstance(f[2][1], Sym) and str(f[2][1]) == str(f[1])):
+            CONST_BACKED.add(str(f[1]))
     ok = []
     bad = []
     for f in forms:
