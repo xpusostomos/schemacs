@@ -68,9 +68,14 @@
   ;;     (`c-looking-at-c++-lambda-expression',
   ;;     `c-backward-over-lambda-expression').
   ;;
-  ;; Still to come, in the file's order: `c-forward-label', the
-  ;; K&R/decl-header cluster (`c-in-knr-argdecl', `c-beginning-of-decl-1',
-  ;; `c-end-of-decl-1' and their helpers), the bracelist machinery
+  ;;   * **the label scan and the K&R/declaration-header cluster
+  ;;     (`:11817'-`:12741')**: `c-forward-label', `c-in-knr-argdecl',
+  ;;     `c-skip-conditional', `c-after-conditional',
+  ;;     `c-after-special-operator-id', the two anchors,
+  ;;     `c-search-decl-header-end', `c-beginning-of-decl-1' and
+  ;;     `c-end-of-decl-1'.
+  ;;
+  ;; Still to come, in the file's order: the bracelist machinery
   ;; (`c-laomib-*' and `c-at-bracelist-p'), the concept walkers, the
   ;; debug overlay helpers (they need the overlay API this library does
   ;; not want), and the rest of the parser.
@@ -121,7 +126,8 @@
   (import
     (scheme base)
     (only (guile) most-positive-fixnum make-hash-table hash-ref hash-set!
-                  hash-for-each hash-remove! 1- logand caddr cdddr cadddr cddddr)
+                  hash-for-each hash-remove! 1- logand caddr cdddr cadddr
+                  cddddr)
     (only (schemacs editor subr) regexp-unmatchable)
     (only (schemacs editor buffer) current-buffer buffer-local-value
           set-buffer-local-value! *case-fold-search*)
@@ -134,7 +140,8 @@
           save-excursion save-restriction narrow-to-region widen
           insert delete-region message format-message buffer-size
           buffer-substring buffer-substring-no-properties)
-    (only (schemacs editor fns) nth nthcdr %substring %count-lines nconc)
+    (only (schemacs editor fns) nth nthcdr %substring %count-lines nconc
+          concat)
     (only (schemacs editor eval) funcall)
     (only (schemacs editor indent) back-to-indentation)
     (only (schemacs editor indentc) current-indentation indent-to)
@@ -319,7 +326,13 @@
    c-looking-at-decl-block c-directly-in-class-called-p
    c-search-uplist-for-classkey
    c-looking-at-statement-block-1 c-looking-at-statement-block
-   c-looking-at-c++-lambda-expression c-backward-over-lambda-expression)
+   c-looking-at-c++-lambda-expression c-backward-over-lambda-expression
+   ;; `cc-engine.el:11817'-`:12741': the label scan, the K&R argument
+   ;; declarations and the declaration header
+   c-forward-label c-in-knr-argdecl c-skip-conditional
+   c-after-conditional c-after-special-operator-id
+   c-backward-to-block-anchor c-backward-to-decl-anchor
+   c-search-decl-header-end c-beginning-of-decl-1 c-end-of-decl-1)
 
   (begin
 
@@ -9643,7 +9656,12 @@
                  ;; "Should be the first type/identifier in a cast
                  ;; paren."
                  (> preceding-token-end (point-min))
-                 (memv (char-before preceding-token-end)
+                 ;; `c-cast-parens' holds the C's characters as
+                 ;; integers (Elisp's `?(\()'), and a character here is
+                 ;; not a number - so convert before comparing. A char
+                 ;; is guaranteed: PRECEDING-TOKEN-END is past
+                 ;; `point-min'.
+                 (memv (char->integer (char-before preceding-token-end))
                        (%c-langvar 'c-cast-parens))
 
                  ;; "The closing paren should follow."
@@ -10524,4 +10542,803 @@
                          here))
               (point)
               (begin (goto-char here) #f)))))
+    ;;------------------------------------------------------------------
+    ;; The label scan, the K&R argument declarations and the declaration
+    ;; header (`cc-engine.el:11817'-`:12741')
+    ;;------------------------------------------------------------------
+    ;; Emacs's file has these between the declaration decision and the
+    ;; language-independent declaration machinery; they are appended
+    ;; here as the tranche that completes it.
+    ;;
+    ;; The truthiness rules are the tree's usual ones and each is
+    ;; load-bearing here: every `cond' whose value is tested ends in
+    ;; `(else #f)', and Elisp's `when' used as a value is an `if' with
+    ;; an explicit `#f' - `c-forward-label''s third clause tests one.
+
+    (define (c-forward-label . args)
+      ;; "Assuming that point is at the beginning of a token, check if it
+      ;; starts a label and if so move over it and return non-nil (t in
+      ;; default situations, specific symbols (see below) for interesting
+      ;; situations), otherwise don't move and return nil.  \"Label\"
+      ;; here means \"most things with a colon\"."
+      ;;
+      ;; "More precisely, a \"label\" is regarded as one of:
+      ;; (i) a goto target like \"foo:\" - returns the symbol `goto-target';
+      ;; (ii) A case label - either the entire construct \"case FOO:\", or
+      ;;   just the bare \"case\", should the colon be missing.  We return t;
+      ;; (iii) a keyword which needs a colon, like \"default:\" or
+      ;;   \"private:\";  We return t;
+      ;; (iv) One of QT's \"extended\" C++ variants of
+      ;;   \"private:\"/\"protected:\"/\"public:\"/\"more:\" looking like
+      ;;   \"public slots:\".  Returns the symbol `qt-2kwds-colon'.
+      ;; (v) QT's construct \"signals:\".  Returns the symbol
+      ;;   `qt-1kwd-colon'.
+      ;; (vi) One of the keywords matched by `c-opt-extra-label-key'
+      ;;   (without any colon). ..."
+      ;;
+      ;; "This function records the ranges of the label symbols on
+      ;; `c-record-ref-identifiers' if `c-record-type-identifiers' (!) is
+      ;; non-nil."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((assume-markup (if (pair? args) (car args) #f))
+            (preceding-token-end (if (and (pair? args) (pair? (cdr args)))
+                                     (cadr args) #f))
+            (limit (if (and (pair? args) (pair? (cdr args))
+                            (pair? (cddr args)))
+                       (caddr args) #f)))
+        (let ((start (point))
+              (label-end #f)
+              (qt-symbol-idx #f)
+              (macro-start #f)          ; "if we're in one."
+              (label-type #f)
+              (kwd #f))
+          (cond
+           ;; "case" or "default" (Doesn't apply to AWK).
+           ((let ((re (%c-langvar 'c-label-kwds-regexp)))
+              (and re (looking-at re)))
+            (let ((kwd-end (match-end 1)))
+              ;; "Record only the keyword itself for fontification, since
+              ;; in case labels the following is a constant expression and
+              ;; not a label."
+              (when (%c-true (*c-record-type-identifiers*))
+                (c-record-ref-id (cons (match-beginning 1) kwd-end)))
+
+              ;; "Find the label end."
+              (goto-char kwd-end)
+              (set! label-type
+                    (if (and (c-syntactic-re-search-forward
+                              ;; "Stop on chars that aren't allowed in
+                              ;; expressions, and on operator chars that
+                              ;; would be meaningless there.  FIXME: This
+                              ;; doesn't cope with ?: operators."
+                              "[;{=,@]\\|\\(\\=\\|[^:]\\):\\([^:]\\|\\'\\)"
+                              limit #t #t #f 1)
+                             (match-beginning 2))
+                        (begin          ; "there's a proper :"
+                          (goto-char (match-beginning 2)) ; "just after the :"
+                          (c-put-c-type-property (1- (point)) 'c-decl-end)
+                          #t)
+
+                        ;; "It's an unfinished label.  We consider the
+                        ;; keyword enough to recognize it as a label, so
+                        ;; that it gets fontified.  Leave the point at the
+                        ;; end of it, but don't put any `c-decl-end'
+                        ;; marker."
+                        (begin (goto-char kwd-end) #t)))))
+
+           ;; "@private", "@protected", "@public", in Objective C, or similar.
+           ((let ((re (%c-langvar 'c-opt-extra-label-key)))
+              (and re (looking-at re)))
+            ;; "For a `c-opt-extra-label-key' match, we record the whole
+            ;; thing for fontification.  That's to get the leading '@' in
+            ;; Objective-C protection labels fontified."
+            (goto-char (match-end 1))
+            (when (%c-true (*c-record-type-identifiers*))
+              (c-record-ref-id (cons (match-beginning 1) (point))))
+            (c-put-c-type-property (1- (point)) 'c-decl-end)
+            (set! label-type #t))
+
+           ;; "All other cases of labels."
+           ((and (%c-langvar 'c-recognize-colon-labels) ; "nil for AWK and IDL, otherwise t."
+
+                 ;; "A colon label must have something before the colon."
+                 (not (eqv? (char-after (point)) #\:))
+
+                 ;; "Check that we're not after a token that can't precede
+                 ;; a label."
+                 (or
+                  ;; "Trivially succeeds when there's no preceding token.
+                  ;; Succeeds when we're at a virtual semicolon."
+                  (if preceding-token-end
+                      (<= preceding-token-end (point-min))
+                      (save-excursion
+                        (c-backward-syntactic-ws)
+                        (set! preceding-token-end (point))
+                        (or (bobp)
+                            (c-at-vsemi-p))))
+
+                  ;; "Check if we're after a label, if we're after a
+                  ;; closing paren that belong to statement, and with
+                  ;; `c-label-prefix-re'.  It's done in different order
+                  ;; depending on `assume-markup' since the checks have
+                  ;; different expensiveness."
+                  (if assume-markup
+                      (or
+                       (eq? (c-get-char-property (1- preceding-token-end)
+                                                 'c-type)
+                            'c-decl-end)
+
+                       (save-excursion
+                         (goto-char (1- preceding-token-end))
+                         (c-beginning-of-current-token)
+                         (or (let ((re (%c-langvar 'c-label-prefix-re)))
+                               (and re (looking-at re)))
+                             (let ((re (%c-langvar 'c-block-stmt-1-key)))
+                               (and re (looking-at re)))))
+
+                       (and (eqv? (char-before preceding-token-end) #\))
+                            (c-after-conditional)))
+
+                      (or
+                       (save-excursion
+                         (goto-char (1- preceding-token-end))
+                         (c-beginning-of-current-token)
+                         (or (let ((re (%c-langvar 'c-label-prefix-re)))
+                               (and re (looking-at re)))
+                             (let ((re (%c-langvar 'c-block-stmt-1-key)))
+                               (and re (looking-at re)))))
+
+                       (cond
+                        ((eqv? (char-before preceding-token-end) #\))
+                         (c-after-conditional))
+
+                        ((eqv? (char-before preceding-token-end) #\:)
+                         ;; "Might be after another label, so check it
+                         ;; recursively."
+                         (save-restriction
+                           (save-excursion
+                             (goto-char (1- preceding-token-end))
+                             ;; "Essentially the same as the
+                             ;; `c-syntactic-re-search-forward' regexp below."
+                             (set! macro-start
+                                   (save-excursion
+                                     (and (c-beginning-of-macro)
+                                          (point))))
+                             (if macro-start
+                                 (narrow-to-region macro-start (point-max)))
+                             (c-syntactic-skip-backward "^-]:?;}=*/%&|,<>!@+"
+                                                        #f #t)
+                             ;; "Note: the following should work instead of
+                             ;; the narrow-to-region above.  Investigate why
+                             ;; not, sometime.  ACM, 2006-03-31."
+                             (let ((pte (point)))
+                               ;; "If the caller turned on recording for us,
+                               ;; it shouldn't apply when we check the
+                               ;; preceding label."
+                               (parameterize ((*c-record-type-identifiers* #f))
+                                 ;; "A label can't start at a cpp directive.
+                                 ;; Check for this, since
+                                 ;; c-forward-syntactic-ws would foul up on
+                                 ;; it."
+                                 (unless (let ((re (%c-langvar 'c-opt-cpp-prefix)))
+                                           (and re (looking-at re)))
+                                   (c-forward-syntactic-ws)
+                                   (c-forward-label #f pte start)))))))
+
+                        (else #f)))))
+
+                 ;; "Point is still at the beginning of the possible label
+                 ;; construct."
+                 ;;
+                 ;; "Check that the next nonsymbol token is \":\", or that
+                 ;; we're in one of QT's \"slots\" declarations.  Allow '('
+                 ;; for the sake of macro arguments.  FIXME: Should build
+                 ;; this regexp from the language constants."
+                 (cond
+                  ;; "public: protected: private:"
+                  ((and
+                    (c-major-mode-is 'c++-mode)
+                    (re-search-forward
+                     "\\=p\\(r\\(ivate\\|otected\\)\\|ublic\\)\\_>" #f #t)
+                    (begin (c-forward-syntactic-ws limit)
+                           (looking-at ":\\([^:]\\|\\'\\)"))) ; "A single colon."
+                   (forward-char)
+                   (set! label-type #t))
+                  ;; "QT double keyword like \"protected slots:\" or goto
+                  ;; target."
+                  ((begin (goto-char start) #f))
+                  ((if (c-syntactic-re-search-forward
+                        "[ \t\n[:?;{=*/%&|,<>!@+-]" limit #t #t) ; "not at EOB"
+                       (begin
+                         (backward-char)
+                         (set! label-end (point))
+                         (set! qt-symbol-idx
+                               (and (c-major-mode-is 'c++-mode)
+                                    (string-match
+                                     "\\(p\\(r\\(ivate\\|otected\\)\\|ublic\\)\\|more\\)\\_>"
+                                     (buffer-substring start (point)))))
+                         (c-forward-syntactic-ws limit)
+                         (cond
+                          ((looking-at ":\\([^:]\\|\\'\\)") ; "A single colon."
+                           (forward-char)
+                           (set! label-type
+                                 (if (or (string=? "signals" ; "Special QT macro"
+                                                   (begin
+                                                     (set! kwd (buffer-substring-no-properties
+                                                                start label-end))
+                                                     kwd))
+                                         (string=? "Q_SIGNALS" kwd))
+                                     'qt-1kwd-colon
+                                     'goto-target)))
+                          ((and qt-symbol-idx
+                                (re-search-forward "\\=\\(slots\\|Q_SLOTS\\)\\_>"
+                                                   limit #t)
+                                (begin (c-forward-syntactic-ws limit)
+                                       (looking-at ":\\([^:]\\|\\'\\)"))) ; "A single colon"
+                           (forward-char)
+                           (set! label-type 'qt-2kwds-colon))
+                          ;; Emacs's `cond' answers nil with no matching
+                          ;; clause, and the `when' that wraps this cond
+                          ;; has its value tested by the enclosing cond -
+                          ;; the unspecified value would be true.
+                          (else #f)))
+                       #f))
+                       ;; Emacs's `cond' answers nil with no matching
+                       ;; clause, and this one's value is the last operand
+                       ;; of the enclosing `and'.
+                       (else #f)))
+
+                 (save-restriction
+                   (narrow-to-region start (point))
+
+                   ;; "Check that `c-nonlabel-token-key' doesn't match
+                   ;; anywhere."
+                   (call-with-current-continuation
+                    (lambda (check-label)
+                      (goto-char start)
+                      (let loop ()
+                        (when (begin
+                                (let ((re (%c-langvar 'c-nonlabel-token-key)))
+                                  (when (and re (looking-at re))
+                                    (goto-char start)
+                                    (set! label-type #f)
+                                    (check-label #f)))
+                                (and (c-safe (c-forward-sexp)
+                                             (c-forward-syntactic-ws)
+                                             #t)
+                                     (not (eobp))))
+                          (loop)))
+
+                      ;; "Record the identifiers in the label for
+                      ;; fontification, unless it begins with
+                      ;; `c-label-kwds' in which case the following
+                      ;; identifiers are part of a (constant) expression
+                      ;; that shouldn't be fontified."
+                      (when (and (%c-true (*c-record-type-identifiers*))
+                                 (begin
+                                   (goto-char start)
+                                   (not (let ((re (%c-langvar 'c-label-kwds-regexp)))
+                                          (and re (looking-at re))))))
+                        (let loop ()
+                          (when (c-syntactic-re-search-forward
+                                 (%c-langvar 'c-symbol-key) #f #t)
+                            (c-record-ref-id (cons (match-beginning 0)
+                                                   (match-end 0)))
+                            (loop))))
+
+                      (c-put-c-type-property (1- (point-max)) 'c-decl-end)
+                      (goto-char (point-max))))))
+
+           (else
+            ;; "Not a label."
+            (goto-char start)))
+          label-type)))
+
+    (define (c-in-knr-argdecl . lim-args)
+      ;; "Return the position of the first argument declaration if point
+      ;; is inside a K&R style argument declaration list, nil otherwise.
+      ;; `c-recognize-knr-p' is not checked.  If LIM is non-nil, it's a
+      ;; position that bounds the backward search for the argument list.
+      ;; This function doesn't move point."
+      ;;
+      ;; "Point must be within a possible K&R region, e.g. just before a
+      ;; top-level \"{\".  It must be outside of parens and brackets.  The
+      ;; test can return false positives otherwise."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((lim (if (pair? lim-args) (car lim-args) #f)))
+        (save-excursion
+          (save-restriction
+            ;; "If we're in a macro, our search range is restricted to it.
+            ;; Narrow to the searchable range."
+            (let* ((macro-start (save-excursion
+                                  (and (c-beginning-of-macro) (point))))
+                   (macro-end (save-excursion
+                                (and macro-start (c-end-of-macro) (point))))
+                   (low-lim (max (or lim (point-min))
+                                 (or macro-start (point-min))))
+                   (before-lparen #f)
+                   (after-rparen #f)
+                   (here (point))
+                   (pp-count-out 20)  ; "Max number of paren/brace constructs
+                                      ; before we give up"
+                   (ids '())          ; "List of identifiers in the
+                                      ; parenthesized list."
+                   (id-start #f)
+                   (after-prec-token #f)
+                   (decl-or-cast #f)
+                   (semi-position+1 #f))
+              (narrow-to-region low-lim (or macro-end (point-max)))
+
+              ;; "Search backwards for the defun's argument list.  We give
+              ;; up if we encounter a \"}\" (end of a previous defun) an
+              ;; \"=\" (which can't be in a knr region) or BOB."
+              ;;
+              ;; "The criterion for a paren structure being the arg list
+              ;; is: ..."
+              (call-with-current-continuation
+               (lambda (knr)
+                 (let loop ()
+                   (when (> pp-count-out 0) ; "go back one paren/bracket pair each time."
+                     (set! pp-count-out (1- pp-count-out))
+                     (c-syntactic-skip-backward "^)]}=")
+                     (cond ((eqv? (char-before) #\))
+                            (set! after-rparen (point)))
+                           ((eqv? (char-before) #\])
+                            (set! after-rparen #f))
+                           (else ; "either } (hit previous defun) or = or no
+                                 ; more parens/brackets."
+                            (knr #f)))
+
+                     (if after-rparen
+                         ;; "We're inside a paren.  Could it be our argument
+                         ;; list....?"
+                         (if (and
+                              (begin
+                                (goto-char after-rparen)
+                                (unless (c-go-list-backward) (knr #f))
+                                ;; "FIXME!!!  What about macros between the
+                                ;; parens?  2007/01/20"
+                                (set! before-lparen (point))
+                                #t)
+
+                              ;; "It can't be the arg list if next token is ;
+                              ;; or {"
+                              (begin (goto-char after-rparen)
+                                     (c-forward-syntactic-ws)
+                                     (not (memv (char-after (point))
+                                                (list #\; #\{ #\=))))
+
+                              ;; "Is the thing preceding the list an
+                              ;; identifier (the function name), or a macro
+                              ;; expansion?"
+                              (begin
+                                (goto-char before-lparen)
+                                (= (c-backward-token-2) 0)
+                                (or (eq? (c-on-identifier) (point))
+                                    (and (eqv? (char-after (point)) #\))
+                                         (c-go-up-list-backward)
+                                         (= (c-backward-token-2) 0)
+                                         (eq? (c-on-identifier) (point)))))
+
+                              ;; "Have we got a non-empty list of
+                              ;; comma-separated identifiers?"
+                              (begin
+                                (goto-char before-lparen)
+                                (and
+                                 (c-forward-over-token-and-ws) ; "to first token inside parens"
+                                 (begin (set! id-start (c-on-identifier))
+                                        id-start) ; "Must be at least one."
+                                 (call-with-current-continuation
+                                  (lambda (id-list)
+                                    (let loop ()
+                                      (when (begin
+                                              (forward-char)
+                                              (c-end-of-current-token)
+                                              (set! ids
+                                                    (cons (buffer-substring-no-properties
+                                                           id-start (point))
+                                                          ids))
+                                              (c-forward-syntactic-ws)
+                                              (eqv? (char-after (point)) #\,))
+                                        (c-forward-over-token-and-ws)
+                                        (unless (begin
+                                                  (set! id-start (c-on-identifier))
+                                                  id-start)
+                                          (id-list #f))
+                                        (loop)))
+                                    (eqv? (char-after (point)) #\))))))
+
+                              ;; "Are all the identifiers in the k&r list up
+                              ;; to the current one also in the argument
+                              ;; list?"
+                              (begin
+                                (forward-char) ; "over the )"
+                                (set! after-prec-token after-rparen)
+                                (c-forward-syntactic-ws)
+                                ;; "Each time around the following checks one
+                                ;; declaration (which may contain several
+                                ;; identifiers)."
+                                (let loop ()
+                                  (when (and
+                                          (not (eqv? (char-after (point)) #\{))
+                                          (or
+                                           (begin
+                                             (set! decl-or-cast
+                                                   (c-forward-decl-or-cast-1
+                                                    after-prec-token
+                                                    #f ; "Or 'arglist ???"
+                                                    #f))
+                                             (pair? decl-or-cast))
+                                           (knr #f))
+                                          (memv (char-after (point)) (list #\; #\,))
+                                          (begin (goto-char (car decl-or-cast)) #t)
+                                          (save-excursion
+                                            (set! semi-position+1
+                                                  (c-syntactic-re-search-forward
+                                                   ";" (+ (point) 1000) #t)))
+                                          (c-do-declarators
+                                           semi-position+1 #t #f #f
+                                           (lambda (id-start id-end _next _not-top
+                                                    _func _init)
+                                             (if (not (member
+                                                       (buffer-substring-no-properties
+                                                        id-start id-end)
+                                                       ids))
+                                                 (knr #f))))
+                                          (begin (forward-char)
+                                                 (<= (point) here))
+                                          (begin (c-forward-syntactic-ws) #t))
+                                    (loop)))
+                                #t))
+                              ;; "Yes.  We've identified the function's
+                              ;; argument list."
+                              (knr (begin (goto-char after-rparen)
+                                          (c-forward-syntactic-ws)
+                                          (point)))
+                           ;; "No.  The current parens aren't the function's
+                           ;; arg list."
+                           (goto-char before-lparen))
+
+                       (or (c-go-list-backward) ; "backwards over [ .... ]"
+                           (knr #f)))
+                     (loop)))
+                 ;; "The catch's value when it falls out of the loop."
+                 #f)))))))
+
+    (define (c-skip-conditional)
+      ;; "skip forward over conditional at point, including any predicate
+      ;; statements in parentheses. No error checking is performed."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (c-forward-sexp (cond
+                       ;; "else if()"
+                       ((looking-at (concat "\\_<else\\_>"
+                                            "\\([ \t\n]\\|\\\\\n\\)+"
+                                            "\\_<if\\_>"))
+                        3)
+                       ;; "do, else, try, finally"
+                       ((looking-at (concat "\\_<\\("
+                                            "do\\|else\\|try\\|finally"
+                                            "\\)\\_>"))
+                        1)
+                       ;; "for, if, while, switch, catch, synchronized, foreach"
+                       (else 2))))
+
+    (define (c-after-conditional . lim-args)
+      ;; "If looking at the token after a conditional then return the
+      ;; position of its start, otherwise return nil."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((lim (if (pair? lim-args) (car lim-args) #f)))
+        (save-excursion
+          (and (= (c-backward-token-2 1 #t lim) 0)
+               (if (let ((re (%c-langvar 'c-block-stmt-hangon-key)))
+                     (and re (looking-at re)))
+                   (= (c-backward-token-2 1 #t lim) 0)
+                   #t)
+               (or (let ((re (%c-langvar 'c-block-stmt-1-key)))
+                     (and re (looking-at re)))
+                   (or
+                    (and
+                     (eqv? (char-after (point)) #\()
+                     (= (c-backward-token-2 1 #t lim) 0)
+                     (if (let ((re (%c-langvar 'c-block-stmt-hangon-key)))
+                           (and re (looking-at re)))
+                         (= (c-backward-token-2 1 #t lim) 0)
+                         #t)
+                     (or (let ((re (%c-langvar 'c-block-stmt-2-key)))
+                           (and re (looking-at re)))
+                         (let ((re (%c-langvar 'c-block-stmt-1-2-key)))
+                           (and re (looking-at re)))))
+                    (and (let ((re (%c-langvar 'c-paren-clause-key)))
+                           (and re (looking-at re)))
+                         (= (c-backward-token-2 1 #t lim) 0)
+                         (if (let ((re (%c-langvar 'c-negation-op-re)))
+                               (and re (looking-at re)))
+                             (= (c-backward-token-2 1 #t lim) 0)
+                             #t)
+                         (let ((re (%c-langvar 'c-block-stmt-with-key)))
+                           (and re (looking-at re))))))
+               (point)))))
+
+    (define (c-after-special-operator-id . lim-args)
+      ;; "If the point is after an operator identifier that isn't handled
+      ;; like an ordinary symbol (i.e. like \"operator =\" in C++) then the
+      ;; position of the start of that identifier is returned.  nil is
+      ;; returned otherwise.  The point may be anywhere in the syntactic
+      ;; whitespace after the last token of the operator identifier."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((lim (if (pair? lim-args) (car lim-args) #f)))
+        (save-excursion
+          (and (%c-langvar 'c-overloadable-operators-regexp)
+               (= (c-backward-token-2 1 #f lim) 0)
+               (let ((re (%c-langvar 'c-overloadable-operators-regexp)))
+                 (and re (looking-at re)))
+               (or (not (%c-langvar 'c-opt-op-identifier-prefix))
+                   (and (= (c-backward-token-2 1 #f lim) 0)
+                        (let ((re (%c-langvar 'c-opt-op-identifier-prefix)))
+                          (and re (looking-at re)))))
+               (point)))))
+
+    (define (c-backward-to-block-anchor . lim-args)
+      ;; "Assuming point is at a brace that opens a statement block of
+      ;; some kind, move to the proper anchor point for that block.  It
+      ;; might need to be adjusted further by c-add-stmt-syntax, but the
+      ;; position at return is suitable as start position for that
+      ;; function."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((lim (if (pair? lim-args) (car lim-args) #f)))
+        (unless (= (point) (c-point 'boi))
+          (let ((start (c-after-conditional lim)))
+            (if start
+                (goto-char start))))))
+
+    (define (c-backward-to-decl-anchor . lim-args)
+      ;; "Assuming point is at a brace that opens the block of a top level
+      ;; declaration of some kind, move to the proper anchor point for
+      ;; that block."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((lim (if (pair? lim-args) (car lim-args) #f)))
+        (unless (= (point) (c-point 'boi))
+          (c-beginning-of-statement-1 lim))))
+
+    (define (c-search-decl-header-end)
+      ;; "Search forward for the end of the \"header\" of the current
+      ;; declaration.  That's the position where the definition body
+      ;; starts, or the first variable initializer, or the ending
+      ;; semicolon.  I.e. search forward for the closest following
+      ;; (syntactically relevant) '{', '=' or ';' token.  Point is left
+      ;; _after_ the first found token, or at point-max if none is found."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((base (point)))
+        (if (c-major-mode-is 'c++-mode)
+
+            ;; "In C++ we need to take special care to handle operator
+            ;; tokens and those pesky template brackets."
+            (let loop ()
+              (when (and
+                     (c-syntactic-re-search-forward "[;{<=]" #f 'move #t #t)
+                     (or
+                      (c-end-of-current-token base)
+                      ;; "Handle operator identifiers, i.e. ignore any
+                      ;; operator token preceded by \"operator\"."
+                      (save-excursion
+                        (and (c-safe (c-backward-sexp) #t)
+                             (let ((re (%c-langvar 'c-opt-op-identifier-prefix)))
+                               (and re (looking-at re)))))
+                      (and (eqv? (char-before) #\<)
+                           (if (c-safe (goto-char (c-up-list-forward (point))))
+                               #t
+                               (begin (goto-char (point-max))
+                                      #f)))))
+                (set! base (point))
+                (loop)))
+
+            (let loop ()
+              (when (and
+                     (c-syntactic-re-search-forward "[;{=]" #f 'move #t #t)
+                     (c-end-of-current-token base))
+                (set! base (point))
+                (loop))))))
+
+    (define (c-beginning-of-decl-1 . lim-args)
+      ;; "Go to the beginning of the current declaration, or the beginning
+      ;; of the previous one if already at the start of it.  Point won't
+      ;; be moved out of any surrounding paren.  Return a cons cell of the
+      ;; form (MOVE . KNR-POS).  MOVE is like the return value from
+      ;; `c-beginning-of-statement-1'.  If point skipped over some K&R
+      ;; style argument declarations (and they are to be recognized) then
+      ;; KNR-POS is set to the start of the first such argument
+      ;; declaration, otherwise KNR-POS is nil.  If LIM is non-nil, it's a
+      ;; position that bounds the backward search."
+      ;;
+      ;; "NB: Cases where the declaration continues after the block, as in
+      ;; \"struct foo { ... } bar;\", are currently recognized as two
+      ;; declarations, e.g. \"struct foo { ... }\" and \"bar;\" in this
+      ;; case."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((lim (if (pair? lim-args) (car lim-args) #f)))
+        (call-with-current-continuation
+         (lambda (return)
+           (let* ((start (point))
+                  (last-stmt-start (point))
+                  (move (c-beginning-of-statement-1 lim #f #t))
+                  (beg #f)
+                  (tentative-move #f))
+
+             ;; "`c-beginning-of-statement-1' stops at a block start, but we
+             ;; want to continue if the block doesn't begin a top level
+             ;; construct, i.e. if it isn't preceded by ';', '}', ':', bob,
+             ;; or an open paren."
+             (begin
+               (set! beg (point))
+               ;; "Go back one \"statement\" each time round the loop until
+               ;; we're just after a ;, }, or :, or at BOB or the start of
+               ;; a macro or start of an ObjC method.  This will move over
+               ;; a multiple declaration whose components are comma
+               ;; separated."
+               (let loop ()
+                 (when (and
+                        ;; "Must check with c-opt-method-key in ObjC mode."
+                        (not (let ((re (%c-langvar 'c-opt-method-key)))
+                               (and re (looking-at re))))
+                        (not (= last-stmt-start (point)))
+                        (begin
+                          (c-backward-syntactic-ws lim)
+                          (not (or (memv (char-before)
+                                         (list #\; #\} #\: #f))
+                                   (c-at-vsemi-p))))
+                        (not (and lim (<= (point) lim)))
+                        (save-excursion
+                          (backward-char)
+                          (not (looking-at "\\s(")))
+                        ;; "Check that we don't move from the first thing
+                        ;; in a macro to its header."
+                        (not (eq? (begin
+                                    (set! tentative-move
+                                          (c-beginning-of-statement-1 lim #f #t))
+                                    tentative-move)
+                                  'macro)))
+                   (set! last-stmt-start beg)
+                   (set! beg (point))
+                   (set! move tentative-move)
+                   (loop)))
+               (goto-char beg))
+
+             (when (%c-langvar 'c-recognize-knr-p)
+               (let ((fallback-pos (point))
+                     (knr-argdecl-start #f))
+                 ;; "Handle K&R argdecls.  Back up after the \"statement\"
+                 ;; jumped over by `c-beginning-of-statement-1', unless it
+                 ;; was the function body, in which case we're sitting on
+                 ;; the opening brace now.  Then test if we're in a K&R
+                 ;; argdecl region and that we started at the other side of
+                 ;; the first argdecl in it."
+                 (unless (eqv? (char-after (point)) #\{)
+                   (goto-char last-stmt-start))
+                 (if (and (begin
+                            (set! knr-argdecl-start (c-in-knr-argdecl lim))
+                            knr-argdecl-start)
+                          (< knr-argdecl-start start)
+                          (begin
+                            (goto-char knr-argdecl-start)
+                            (not (eq? (c-beginning-of-statement-1 lim #f #t)
+                                      'macro))))
+                     (return (cons (if (eqv? (char-after fallback-pos) #\{)
+                                       'previous
+                                       'same)
+                                   knr-argdecl-start))
+                     (goto-char fallback-pos))))
+
+             ;; "`c-beginning-of-statement-1' counts each brace block as a
+             ;; separate statement, so the result will be 'previous if
+             ;; we've moved over any.  So change our result back to 'same
+             ;; if necessary."
+             ;;
+             ;; "If they were brace list initializers we might not have
+             ;; moved over a declaration boundary though, so change it to
+             ;; 'same if we've moved past a '=' before '{', but not ';'.
+             ;; (This ought to be integrated into
+             ;; `c-beginning-of-statement-1', so we avoid this extra pass
+             ;; which potentially can search over a large amount of text.).
+             ;; Take special pains not to get mislead by C++'s
+             ;; \"operator=\", and the like."
+             (if (and (eq? move 'previous)
+                      (save-excursion
+                        (and
+                         (begin
+                           ;; "keep going back to \"[;={\"s until we either
+                           ;; find no more, or get to one which isn't an
+                           ;; \"operator =\""
+                           (let loop ()
+                             (when (and (c-syntactic-re-search-forward
+                                         "[;={]" start #t #t #t)
+                                        (eqv? (char-before) #\=)
+                                        (%c-langvar 'c-overloadable-operators-regexp)
+                                        (%c-langvar 'c-opt-op-identifier-prefix)
+                                        (save-excursion
+                                          (= (c-backward-token-2) 0)
+                                          (let ((re (%c-langvar 'c-overloadable-operators-regexp)))
+                                            (and re (looking-at re)))
+                                          (= (c-backward-token-2) 0)
+                                          (let ((re (%c-langvar 'c-opt-op-identifier-prefix)))
+                                            (and re (looking-at re)))))
+                               (loop)))
+                           (eqv? (char-before) #\=))
+                         (c-syntactic-re-search-forward "[;{]" start #t #t)
+                         (eqv? (char-before) #\{)
+                         (c-safe (goto-char (c-up-list-forward (point))) #t)
+                         (not (c-syntactic-re-search-forward
+                               ";" start #t #t)))))
+                 (cons 'same #f)
+                 (cons move #f)))))))
+
+    (define (c-end-of-decl-1)
+      ;; "Assuming point is at the start of a declaration (as detected by
+      ;; e.g. `c-beginning-of-decl-1'), go to the end of it.  Unlike
+      ;; `c-beginning-of-decl-1', this function handles the case when a
+      ;; block is followed by identifiers in e.g. struct declarations in C
+      ;; or C++.  If a proper end was found then t is returned, otherwise
+      ;; point is moved as far as possible within the current sexp and nil
+      ;; is returned.  This function doesn't handle macros; use
+      ;; `c-end-of-macro' instead in those cases."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((start (point)))
+        (call-with-current-continuation
+         (lambda (return)
+           (c-search-decl-header-end)
+
+           (when (and (%c-langvar 'c-recognize-knr-p)
+                      (eqv? (char-before) #\;)
+                      (c-in-knr-argdecl start))
+             ;; "Stopped at the ';' in a K&R argdecl section which is
+             ;; detected using the same criteria as in
+             ;; `c-beginning-of-decl-1'.  Move to the following block
+             ;; start."
+             (c-syntactic-re-search-forward "{" #f 'move #t))
+
+           (when (eqv? (char-before) #\{)
+             ;; "Encountered a block in the declaration.  Jump over it."
+             (guard (e (else (goto-char (point-max))
+                             (return #f)))
+               (goto-char (c-up-list-forward (point))))
+             (if (or (not (%c-langvar 'c-opt-block-decls-with-vars-key))
+                     (save-excursion
+                       (let ((lim (point)))
+                         (goto-char start)
+                         (not (and
+                               ;; "Check for
+                               ;; `c-opt-block-decls-with-vars-key' before
+                               ;; the first paren."
+                               (c-syntactic-re-search-forward
+                                (concat "[;=([{]\\|\\("
+                                        (%c-langvar 'c-opt-block-decls-with-vars-key)
+                                        "\\)")
+                                lim #t #t #t)
+                               (match-beginning 1)
+                               (not (eqv? (char-before) #\_))
+                               ;; "Check that the first following paren is
+                               ;; the block."
+                               (c-syntactic-re-search-forward
+                                "[;=([{]" lim #t #t #t)
+                               (eqv? (char-before) #\{))))))
+                 ;; "The declaration doesn't have any of the
+                 ;; `c-opt-block-decls-with-vars' keywords in the
+                 ;; beginning, so it ends here at the end of the block."
+                 (return #t)))
+
+           (let loop ()
+             (if (eqv? (char-before) #\;)
+                 (return #t))
+             (when (c-syntactic-re-search-forward ";" #f 'move #t)
+               (loop)))
+           #f))))
 ))

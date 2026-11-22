@@ -13487,3 +13487,116 @@ sections record, now at the level of a `catch`'s result.
   `c-looking-at-decl-block` and the lambda functions are guarded on the
   character their docstrings require (a `{` or a `[`) - see
   `tools/cc-decl-diff/README.md`.
+
+# cc-mode: the label scan, the K&R declarations and the declaration
+# header (2026-11-22)
+
+`c-forward-label`, `c-in-knr-argdecl`, `c-skip-conditional`,
+`c-after-conditional`, `c-after-special-operator-id`,
+`c-backward-to-block-anchor`, `c-backward-to-decl-anchor`,
+`c-search-decl-header-end`, `c-beginning-of-decl-1` and
+`c-end-of-decl-1` complete `cc-engine.el`'s declaration half
+(`:11817`-`:12741`). Verified at every position of five fixtures with
+35 probes per position - 59,220 answers identical to Emacs 31.1 (see
+`tools/cc-decl-diff/README.md`).
+
+## The representation departure this tranche exposed: character constants
+
+`c-cast-parens` is Emacs's list of characters written as Elisp character
+literals - `(?\()` - so the dump of it that this tree carries holds the
+*integer* 40. The function compared it with `(char-before
+preceding-token-end)`, which answers a **character** here, and
+`(memv #\( '(40))` is false: every cast in a C buffer was rejected, so
+`c-forward-decl-or-cast-1` answered a declaration where Emacs answers
+`cast`, and `c-just-after-func-arglist-p` (which runs the same call)
+stopped moving over `(*(* yuk) (void))`-shaped declarators.
+
+Fixed at the comparison, `(memv (char->integer (char-before ...))
+...)`, with a comment naming the reason. **This is the general rule for
+any language constant transcribed from Elisp that holds characters**:
+the data is integers, this tree's characters are not, and the
+comparison site has to convert. `c-cast-parens` is the only such
+constant in cc-langs' data today.
+
+## The port bug: `begin` where the C has `and`
+
+`c-in-knr-argdecl`'s inner loop is
+
+```elisp
+(while (and op1 op2 op3 op4 op5
+            (progn (forward-char) (<= (point) here))
+            (progn (c-forward-syntactic-ws) t))
+  t)
+```
+
+The port wrote `(when (begin op1 ... op8) (loop))`. A `begin` evaluates
+every form and answers its *last* - `(begin (c-forward-syntactic-ws)
+#t)` is always true - so the eighth operand was the test and the
+seventh and eighth ran as body forms: the drain operand's `#f` never
+stopped the loop, and the scan walked past the function body into the
+next declaration and gave up (`c-in-knr-argdecl` answered nil where
+Emacs answers the first argument declaration's position).
+
+The trap generalises: **a C `while (and ...)` is a Scheme `and`, not a
+`begin`**, even when each operand is itself a `progn` that ends in a
+literal. The last operand's `t` is exactly what makes the `and` answer
+true; with `begin` it makes the whole test true.
+
+## `c-make-macro-with-semi-re` was the missing half of the vsemi machinery
+
+The Qt label fixture turned up a second, unrelated gap: `c-forward-label`
+at `public slots:` answers `qt-2kwds-colon` in Emacs but nil here, and
+the cause was one level down - Emacs's `(c-at-vsemi-p)` is true at the
+`Q_OBJECT` line end (a macro invocation with no semicolon is a virtual
+semicolon), while ours was false everywhere because
+`c-macro-with-semi-re` is never built.
+
+`c-make-macro-with-semi-re` (`cc-vars.el:1813`) is called from each
+mode's initialisation in `cc-mode.el` - which is not ported - so the
+vsemi machinery had only ever worked in tests that set
+`c-macro-with-semi-re` by hand. It is ported into `cc-vars.scm` now,
+with `c-macro-names-with-semicolon` (Emacs's default
+`("Q_OBJECT" "Q_PROPERTY" "Q_DECLARE" "Q_ENUMS")`), and the
+differential harnesses call it after `c-init-language-vars` as the
+mode's init does. Its output is byte for byte Emacs's, including
+`regexp-opt`'s shared-prefix factoring:
+`"\\_<\\(Q_\\(?:DECLARE\\|ENUMS\\|OBJECT\\|PROPERTY\\)\\)\\_>"`.
+
+**A history-dependent answer hid it.** Emacs's `c-forward-label` at
+`public slots:` answers `qt-2kwds-colon` in a pristine buffer but nil
+after some earlier cc-mode calls, because the vsemi path depends on
+text properties those calls leave. The differential's long-lived buffer
+masked the departure in both directions; the fresh-buffer unit tests
+(in `cc-engine-tests.scm`) and the Qt fixture are what pin it.
+
+## Truthiness rules met again
+
+- The middle `cond` of `c-forward-label` (the `public:`/QT selector) is
+  the last operand of an `and`, and its last clause's test is a `when`.
+  A Scheme `cond` with no matching clause answers the unspecified
+  value - true - so both the `when`'s translation and the `cond` itself
+  needed explicit `#f`s. Without them `c-forward-label` moved point to
+  the next token and reported nil where Emacs restores point and
+  reports nil (128 differences on `fixture-label.c`).
+- `c-beginning-of-decl-1`'s `(memq (char-before) '(?\; ?} ?: nil))` is
+  `(memv (char-before) (list #\; #\} #\: #f))`: Elisp's nil element
+  compares against `char-before`'s nil at BOB.
+
+## Method notes
+
+- **The failing function was found by a depth/printable-shape dump of
+  the parsed form**, not by reading the text: the `and`'s arity in the
+  walk (`and (6)` where the C has 8 operands) named the extra close
+  immediately.
+- **An instrumented copy of the function, loaded from a scratch file,
+  is the cheap way to find which operand fails** - replacing operands
+  with `(begin ... (say ...) ...)` keeps the parens unchanged, and the
+  copy runs interpreted in the same library environment.
+- **A stale `.go` makes the differential lie**: the first `(else #f)`
+  fix appeared to do nothing because `--no-auto-compile` loaded the
+  previous compile of `cc-engine.scm`. Compile after every edit before
+  reading a diff (the tree's oldest measurement warning).
+- The K&R fixture's `int (*(* yuk) (void)) (void);` is the shape that
+  exposed the cast bug; a plain `int (*fp)(int, char);` had passed in
+  the earlier fixtures because the `<>`/paren path never consulted
+  `c-cast-parens`.

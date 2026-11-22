@@ -7,6 +7,8 @@
  (scheme base)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor buffer) allocate-buffer set-buffer)
+ (schemacs editor cc-defs)
+ (schemacs editor cc-langs)
  (schemacs editor cc-vars))
 
 (test-begin "schemacs_editor_cc_vars")
@@ -109,5 +111,43 @@
               (c-noise-macro-name-re)))
 
 (test-end "schemacs_editor_cc_vars_noise")
+
+(test-begin "schemacs_editor_cc_vars_macro_with_semi")
+
+;; `c-make-macro-with-semi-re' (`cc-vars.el:1813'), which the mode
+;; initialisation calls. Every expected value here is Emacs 31.1's own,
+;; measured in a real `c++-mode' buffer.
+(define (semi-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (c-init-language-vars c++-mode)
+    (thunk)))
+
+(semi-buffer
+ (lambda ()
+   (test-equal "the macro-with-semicolon names are Emacs's default"
+               '("Q_OBJECT" "Q_PROPERTY" "Q_DECLARE" "Q_ENUMS")
+               (c-macro-names-with-semicolon))
+   (c-make-macro-with-semi-re)
+   (test-equal "the maker builds regexp-opt's symbols form"
+               "\\_<\\(Q_\\(?:DECLARE\\|ENUMS\\|OBJECT\\|PROPERTY\\)\\)\\_>"
+               (c-macro-with-semi-re))))
+
+(semi-buffer
+ (lambda ()
+   (set!c-macro-names-with-semicolon '("FOO" "BAR_BAZ"))
+   (c-make-macro-with-semi-re)
+   (test-equal "two names, sorted by regexp-opt"
+               "\\_<\\(BAR_BAZ\\|FOO\\)\\_>"
+               (c-macro-with-semi-re))))
+
+(semi-buffer
+ (lambda ()
+   (set!c-macro-names-with-semicolon "MY_RE")
+   (c-make-macro-with-semi-re)
+   (test-equal "a string is copied as it stands" "MY_RE"
+               (c-macro-with-semi-re))))
+
+(test-end "schemacs_editor_cc_vars_macro_with_semi")
 
 (test-end "schemacs_editor_cc_vars")

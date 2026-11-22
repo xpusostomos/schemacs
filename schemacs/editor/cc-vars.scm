@@ -38,6 +38,8 @@
           c-indentation-style
           c-current-comment-prefix set!c-current-comment-prefix
           c-macro-with-semi-re set!c-macro-with-semi-re
+          c-macro-names-with-semicolon set!c-macro-names-with-semicolon
+          c-make-macro-with-semi-re
           *c-report-syntactic-errors*
           c-noise-macro-name-re set!c-noise-macro-name-re
           c-noise-macro-with-parens-name-re set!c-noise-macro-with-parens-name-re
@@ -241,6 +243,39 @@ names)."))
 
     (define (set!c-macro-with-semi-re value)
       (set-buffer-local-value! (current-buffer) 'c-macro-with-semi-re value))
+
+    (define (c-macro-names-with-semicolon)
+      ;; "List of #defined symbols whose expansion ends with a semicolon.
+      ;; Alternatively it can be a string, a regular expression which
+      ;; matches all such symbols." Buffer-local in Emacs (and readable
+      ;; from a file's local variables), so a buffer-local slot here with
+      ;; the defvar's default.
+      (buffer-local-value (current-buffer) 'c-macro-names-with-semicolon
+                          '("Q_OBJECT" "Q_PROPERTY" "Q_DECLARE" "Q_ENUMS")))
+
+    (define (set!c-macro-names-with-semicolon value)
+      (set-buffer-local-value! (current-buffer) 'c-macro-names-with-semicolon
+                               value))
+
+    (define (c-make-macro-with-semi-re)
+      ;; "Convert `c-macro-names-with-semicolon' into the regexp
+      ;; `c-macro-with-semi-re' (or just copy it if it's already a re)."
+      ;;
+      ;; Emacs guards on `(boundp 'c-opt-cpp-macro-define)' - the
+      ;; language variable is set by `c-init-language-vars' - and here a
+      ;; language variable is a buffer-local slot, so the guard is the
+      ;; slot's presence.
+      (set!c-macro-with-semi-re
+       (let ((define-re (buffer-local-value (current-buffer)
+                                            'c-opt-cpp-macro-define #f))
+             (names (c-macro-names-with-semicolon)))
+         (and define-re
+              (cond ((string? names) (string-copy names))
+                    ((pair? names) (regexp-opt names 'symbols))
+                    ((or (not names) (null? names)) #f)
+                    (else
+                     (error "c-make-macro-with-semi-re: Invalid c-macro-names-with-semicolon: ~a"
+                            names)))))))
 
     ;;------------------------------------------------------------------
     ;; Parsing errors (`cc-vars.el:460')

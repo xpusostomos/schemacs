@@ -1674,3 +1674,189 @@
                (c-parse-state))))
 
 (test-end "schemacs_editor_cc_engine_declaration_decision")
+
+(test-begin "schemacs_editor_cc_engine_label_knr")
+
+;; The label scan, the K&R argument declarations and the declaration
+;; header (`cc-engine.el:11817'-`:12741'). Every expectation here is
+;; Emacs 31.1's own answer, measured on the same fixture text in a real
+;; `c-mode'/`c++-mode' buffer one probe per fresh buffer - cc-mode
+;; caches in text properties, so a long-lived buffer is not Emacs's
+;; fresh answer. The probes that normalize a value the function does
+;; not document end in `#f' on both sides (Elisp's nil).
+
+(define (lk-buffer-cpp text thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert text)
+    (set-buffer-local-value! b 'major-mode 'c++-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (c-init-language-vars c++-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+    (c-make-macro-with-semi-re)
+    (parameterize ((*c-buffer-is-cc-mode* 'c++-mode))
+      (thunk))))
+
+(define (lk-buffer-c text thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert text)
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+    (c-make-macro-with-semi-re)
+    (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+      (thunk))))
+
+(define lk-cpp
+  (string-append
+   "class C { public: int m; };\n"
+   "int h(int x) {\n"
+   "  switch (x) { case 1: break; default: break; }\n"
+   "goto-target:\n"
+   "  return x;\n"
+   "}\n"))
+
+(define lk-lbl "int q(void)\n{\ndone:\n  return 1;\n}\n")
+
+;; `c-forward-label': `public:' and the case labels answer t, the bare
+;; goto target answers `goto-target', and `return' in a statement is
+;; not a label (point unmoved).
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp lk-cpp
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'label (car row)) (cadr row)
+                  (list (c-forward-label) (point))))))
+ '((11 (#t 18))
+   (59 (#t 66))
+   (74 (#t 82))
+   (107 (#f 107))))
+
+(lk-buffer-c lk-lbl
+ (lambda ()
+   (goto-char 15)
+   (test-equal "a goto target answers the symbol" '(goto-target 20)
+               (list (c-forward-label) (point)))))
+
+(define lk-knr
+  (string-append
+   "int foo (bar, baz, yuk)\n"
+   "     int bar [];\n"
+   "     int (*baz) (my_type);\n"
+   "     int (*(* yuk) (void)) (void);\n"
+   "{\n"
+   "  return bar[baz] + yuk;\n"
+   "}\n"))
+
+;; `c-in-knr-argdecl' answers the first argument declaration's start and
+;; does not move point.
+(for-each
+ (lambda (row)
+   (lk-buffer-c lk-knr
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'knr (car row)) (cadr row)
+                  (list (c-in-knr-argdecl) (point))))))
+ '((24 (30 24))
+   (30 (30 30))))
+
+;; `c-beginning-of-decl-1' answers (MOVE . KNR-POS); the second row is
+;; inside the K&R declarations, so KNR-POS is the first one's start.
+(for-each
+ (lambda (row)
+   (lk-buffer-c lk-knr
+    (lambda ()
+      (goto-char (car row))
+      (let ((r (c-beginning-of-decl-1)))
+        (test-equal (list 'bod (car row)) (cadr row)
+                    (list (car r) (cdr r) (point)))))))
+ '((1 (same #f 1))
+   (47 (same 30 1))))
+
+;; `c-end-of-decl-1' skips the K&R declarations and the body block.
+(lk-buffer-c lk-knr
+ (lambda ()
+   (goto-char 1)
+   (test-equal "c-end-of-decl-1 reaches past the body" '(#t 132)
+               (list (c-end-of-decl-1) (point)))))
+
+(define lk-stmt
+  (string-append
+   "int f(int x)\n"
+   "{\n"
+   "  if (x) x = 1;\n"
+   "  else if (x) x = 2;\n"
+   "  do x--; while (x);\n"
+   "  return x;\n"
+   "}\n"))
+
+;; `c-after-conditional' answers the start of the conditional it is
+;; after, and nil when the point is not after one.
+(for-each
+ (lambda (row)
+   (lk-buffer-c lk-stmt
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'cond (car row)) (cadr row)
+                  (list (c-after-conditional) (point))))))
+ '((25 (18 25))
+   (46 (39 46))))
+
+;; `c-skip-conditional' moves over the conditional and its parenthesized
+;; predicate. Its value is not part of the contract, so the probe ends
+;; in #f on both sides.
+(for-each
+ (lambda (row)
+   (lk-buffer-c lk-stmt
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'skip (car row)) (cadr row)
+                  (list (begin (c-skip-conditional) #f) (point))))))
+ '((18 (#f 24))
+   (34 (#f 45))
+   (55 (#f 57))))
+
+(lk-buffer-cpp "void f() { try { g(); } catch (...) { } }\n"
+ (lambda ()
+   (goto-char 12)
+   (test-equal "c-skip-conditional over try" '(#f 15)
+               (list (begin (c-skip-conditional) #f) (point)))))
+
+;; The two anchors: at a brace that is already at the beginning of its
+;; indentation neither moves.
+(lk-buffer-c lk-stmt
+ (lambda ()
+   (goto-char 14)
+   (test-equal "c-backward-to-block-anchor at boi"
+               (list #f 14)
+               (list (begin (c-backward-to-block-anchor) #f) (point)))))
+
+(lk-buffer-c lk-stmt
+ (lambda ()
+   (goto-char 14)
+   (test-equal "c-backward-to-decl-anchor at boi"
+               (list #f 14)
+               (list (begin (c-backward-to-decl-anchor) #f) (point)))))
+
+;; `c-search-decl-header-end' stops after the `='/`{'/`;' it finds.
+(lk-buffer-c "int x = 5;\nstruct s { int a; } sv;\n"
+ (lambda ()
+   (goto-char 1)
+   (test-equal "c-search-decl-header-end stops after the =" '(#f 8)
+               (list (begin (c-search-decl-header-end) #f) (point)))
+   (goto-char 12)
+   (test-equal "and after the block's opening brace" '(#f 22)
+               (list (begin (c-search-decl-header-end) #f) (point)))))
+
+;; `c-after-special-operator-id' answers the start of `operator==' from
+;; the `(' that follows it.
+(lk-buffer-cpp "struct S { bool operator==(const S& o) const; };\n"
+ (lambda ()
+   (goto-char 27)
+   (test-equal "c-after-special-operator-id" '(17 27)
+               (list (c-after-special-operator-id) (point)))))
+
+(test-end "schemacs_editor_cc_engine_label_knr")

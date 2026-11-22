@@ -16147,3 +16147,85 @@ bracelist machinery (`c-laomib-*`, `c-at-bracelist-p`), then
 `cc-fonts`, `cc-mode.el` (`easy-menu-define` is still the one missing
 primitive) and the first milestone: `.c`/`.h` opening in c-mode with
 the syntax table and faces compared to Emacs.
+
+# Handoff — cc-mode: the label scan, the K&R declarations and the
+# declaration header (2026-11-22)
+
+The tranche after the declaration decision: `c-forward-label`,
+`c-in-knr-argdecl`, `c-skip-conditional`, `c-after-conditional`,
+`c-after-special-operator-id`, `c-backward-to-block-anchor`,
+`c-backward-to-decl-anchor`, `c-search-decl-header-end`,
+`c-beginning-of-decl-1` and `c-end-of-decl-1`
+(`cc-engine.el:11817'-`:12741'`). All of `cc-engine.scm`'s declaration
+half is now in; DEPARTURES.md's 2026-11-22 section has the C for every
+rule and both bugs in full.
+
+## Verified
+
+- **0 differences on all five fixtures** with 35 probes at every
+  position: the C fixture (9,450 answers), the old C++ fixture
+  (15,960), `fixture-decl.cpp` (20,720), the new `fixture-label.c`
+  (5,530) and the new `fixture-knr.c` (7,560) - 59,220 in all.
+  `tools/cc-decl-diff/README.md` has the five commands and the
+  precondition rule (the two anchors join the `{`/`[`-guarded probes).
+- The six cc suites pass; `cc-engine-tests` is 506 (the new
+  `schemacs_editor_cc_engine_label_knr` group pins the Emacs-measured
+  answers for every new function). `python3 tools/pty-check.py imports
+  scratch` passes. `imports.scm` regenerated (4,397 names).
+
+## The two bugs
+
+1. **`c-cast-parens` holds Elisp characters as integers.** The tree's
+   dump has `(40)`, `char-before` answers a character, so
+   `(memv #\( '(40))` was false and every C cast was rejected -
+   `c-forward-decl-or-cast-1` answered a declaration where Emacs
+   answers `cast`, and `c-just-after-func-arglist-p` stopped moving.
+   Fixed with `char->integer` at the one comparison. Any future
+   language constant transcribed from Elisp character literals needs
+   the same conversion.
+2. **`(when (begin op1 ... op8) (loop))` where the C has
+   `(while (and op1 ... op8) t)`.** The `begin`'s last operand
+   (`(begin (c-forward-syntactic-ws) #t)`) is always true, so the
+   drain operand's `#f` never stopped `c-in-knr-argdecl`'s loop and it
+   walked past the body into the next declaration.
+
+## Also landed: `c-make-macro-with-semi-re`
+
+The Qt fixture exposed that the vsemi machinery had no mode-side
+initialisation: `c-make-macro-with-semi-re` (`cc-vars.el:1813`, called
+from each mode in `cc-mode.el`) was unported, so `c-macro-with-semi-re`
+was nil and `c-at-vsemi-p` false on every `Q_OBJECT`-style line. It is
+in `cc-vars.scm` now with `c-macro-names-with-semicolon`, its output
+byte for byte Emacs's (including regexp-opt's shared-prefix form), and
+the differential harnesses and the cc-engine test helpers call it after
+`c-init-language-vars`, as a mode's init does. `cc-vars-tests` is 32.
+
+## Before touching it
+
+- **A `cond` with no matching clause must `(else #f)` wherever its
+  value is tested**, and Elisp's `when` used as a value must be an
+  `if` with an explicit `#f`. `c-forward-label` needs both in two
+  nested places (the QT selector and its `when`).
+- **The differential is the gate**: `tools/cc-decl-diff/README.md`.
+  Its fixtures now include labels and K&R declarations; the harnesses
+  (`emacs-decl*.el`, `ours-decl*.scm`) have 35 probes each. The
+  printer treats a cons whose cdr is `#f` as a proper list, because
+  that is Emacs's nil.
+- **Compile after every edit before believing a diff** - a stale
+  `cc-engine.scm.go` made the first `(else #f)` fix look like it did
+  nothing (the documented trap, and it cost a round here).
+- To find which operand of a failed `and` misbehaved, load an
+  instrumented copy of the function from a scratch file (replace
+  operands with `(begin ... (display ...) ...)`); the parens do not
+  change and it runs in the same library environment.
+
+## Next, in cc-engine.el's order
+
+The bracelist machinery (`c-laomib-loop`, the cache functions,
+`c-at-bracelist-p`), then `c-most-enclosing-decl-block`,
+`c-cheap-inside-bracelist-p`, `c-backward-typed-enum-colon`,
+`c-backward-over-enum-header` and `c-at-enum-brace`, the concept
+walkers, then `cc-fonts`, `cc-mode.el` (`easy-menu-define` is still the
+one missing primitive, plus a `def-edebug-spec` stub) and the first
+milestone: `.c`/`.h` opening in c-mode with the syntax table and faces
+compared to Emacs.

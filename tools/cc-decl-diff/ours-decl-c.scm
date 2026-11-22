@@ -36,6 +36,9 @@
          (string-append "(" (emacs-print (car x))
                         (let loop ((d (cdr x)))
                           (cond ((null? d) ")")
+                                ;; A cons whose cdr is #f is Elisp's proper
+                                ;; list, so it prints the same way.
+                                ((eq? d #f) ")")
                                 ((pair? d)
                                  (string-append " " (emacs-print (car d))
                                                 (loop (cdr d))))
@@ -49,6 +52,9 @@
 (set-buffer-local-value! b 'major-mode 'c-mode)
 (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
 (c-init-language-vars c-mode)
+;; As the mode's own init does, so `c-at-vsemi-p' works on
+;; macro-with-semicolon lines.
+(c-make-macro-with-semi-re)
 (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
 
 (define (probe pos thunk)
@@ -102,7 +108,21 @@
                (cons "U" (lambda () (c-search-uplist-for-classkey (c-parse-state))))
                (cons "V" (lambda () (c-back-over-member-initializers)))
                (cons "W" (lambda () (c-do-declarators (point-max) #f #f #f #f)))
-               (cons "Y" (lambda () (c-forward-objc-directive)))))
+               (cons "Y" (lambda () (c-forward-objc-directive)))
+               (cons "a" (lambda () (c-forward-label)))
+               (cons "b" (lambda () (c-in-knr-argdecl)))
+               (cons "c" (lambda () (begin (c-skip-conditional) #f)))
+               (cons "d" (lambda () (c-after-conditional)))
+               (cons "e" (lambda () (c-after-special-operator-id)))
+               (cons "f" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (begin (c-backward-to-block-anchor) #f))))
+               (cons "g" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (begin (c-backward-to-decl-anchor) #f))))
+               (cons "h" (lambda () (begin (c-search-decl-header-end) #f)))
+               (cons "i" (lambda () (c-beginning-of-decl-1)))
+               (cons "j" (lambda () (c-end-of-decl-1)))
+               (cons "k" (lambda () (c-forward-decl-or-cast-1
+                                     (c-point 'bosws) 'top #f)))))
         (loop (+ pos 1))))))
 
 (call-with-output-file (cadr (command-line))

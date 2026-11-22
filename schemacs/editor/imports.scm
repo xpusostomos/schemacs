@@ -1111,6 +1111,8 @@
     c-add-language
     c-add-type
     c-add-type-1
+    c-after-conditional
+    c-after-special-operator-id
     c-alnum
     c-alpha
     c-append-lower-brace-pair-to-state-cache
@@ -1131,9 +1133,12 @@
     c-backward-single-comment
     c-backward-sws
     c-backward-syntactic-ws
+    c-backward-to-block-anchor
+    c-backward-to-decl-anchor
     c-backward-token-1
     c-backward-token-2
     c-beginning-of-current-token
+    c-beginning-of-decl-1
     c-beginning-of-defun-1
     c-beginning-of-macro
     c-beginning-of-statement-1
@@ -1174,6 +1179,7 @@
     c-emacs-features
     c-enclosing-c++-attribute
     c-end-of-current-token
+    c-end-of-decl-1
     c-end-of-macro
     c-end-of-token
     c-filter-ops
@@ -1195,6 +1201,7 @@
     c-forward-id-comma-list
     c-forward-keyword-clause
     c-forward-keyword-prefixed-id
+    c-forward-label
     c-forward-name
     c-forward-noise-clause
     c-forward-noise-clause-not-macro-decl
@@ -1232,6 +1239,7 @@
     c-go-up-list-forward
     c-hungry-delete-key
     c-in-id-arglist
+    c-in-knr-argdecl
     c-in-literal
     c-in-method-def-p
     c-indentation-style
@@ -1285,6 +1293,7 @@
     c-macro-cache-start-pos
     c-macro-cache-syntactic
     c-macro-is-genuine-p
+    c-macro-names-with-semicolon
     c-macro-vsemi-status-unknown-p
     c-macro-with-semi-re
     c-major-mode-is
@@ -1293,6 +1302,7 @@
     c-make-font-lock-extra-types-blurb
     c-make-init-lang-vars-fun
     c-make-keywords-re
+    c-make-macro-with-semi-re
     c-make-noise-macro-regexps
     c-mark-<-as-paren
     c-mark->-as-paren
@@ -1342,6 +1352,7 @@
     c-safe-position
     c-safe-scan-lists
     c-save-buffer-state
+    c-search-decl-header-end
     c-search-uplist-for-classkey
     c-semi-get-near-cache-entry
     c-semi-lit-near-cache
@@ -1351,6 +1362,7 @@
     c-semi-trim-near-cache
     c-shift-line-indentation
     c-simple-skip-symbol-backward
+    c-skip-conditional
     c-skip-ws-backward
     c-skip-ws-chars-backward
     c-skip-ws-chars-forward
@@ -3505,6 +3517,7 @@
     set!c-macro-cache-no-comment
     set!c-macro-cache-start-pos
     set!c-macro-cache-syntactic
+    set!c-macro-names-with-semicolon
     set!c-macro-with-semi-re
     set!c-new-id-end
     set!c-new-id-is-type
