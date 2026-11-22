@@ -472,6 +472,11 @@
     ;; The variables `scan_words' and the scanner read.
     ;; ---------------------------------------------------------------
     (define *words-include-escapes* (make-parameter #f))
+    ;; **Departure**: Emacs's `parse_sexp_lookup_properties' starts nil
+    ;; (`DEFVAR_BOOL', `syntax.c:3772') and `font-lock' and
+    ;; `run-mode-hooks' set it buffer-locally (`font-lock.el:1531',
+    ;; `subr.el:2779'); ours starts #t because nothing here sets it that
+    ;; way yet - see DEPARTURES.md.
     (define *parse-sexp-lookup-properties* (make-parameter #t))
     (define *parse-sexp-ignore-comments* (make-parameter #t))
     (define *comment-end-can-be-escaped* (make-parameter #f))
@@ -1404,9 +1409,20 @@
 
     (define (%parse-sexp-ignore-comments?)
       ;; `parse_sexp_ignore_comments' (`syntax.c:139'), the buffer-local
-      ;; the scans read.
+      ;; the scans read. A buffer that has not set it reads the
+      ;; *global's* value, as a buffer-local does in Emacs - before the
+      ;; state-cache port this answered `#f' unconditionally, so a scan
+      ;; saw the braces inside comments.
+      ;;
+      ;; **Departure**: the global's default here is `#t' where Emacs's
+      ;; starts nil (`DEFVAR_BOOL', `syntax.c:3769') and the modes that
+      ;; want it set it buffer-locally (`prog-mode.el:401',
+      ;; `scheme.el:185', `cc-mode.el:639'). Ours relies on the global
+      ;; because there is no cc-mode yet and the other modes' local
+      ;; settings are in; see DEPARTURES.md.
       ;;--------------------------------------------------------------
-      (buffer-local-value (current-buffer) 'parse-sexp-ignore-comments #f))
+      (buffer-local-value (current-buffer) 'parse-sexp-ignore-comments
+                          (*parse-sexp-ignore-comments*)))
 
     ;; ---------------------------------------------------------------
     ;; `scan-error' - `xsignal3 (Qscan_error, ...)'.

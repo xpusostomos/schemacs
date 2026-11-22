@@ -26,7 +26,8 @@
  (only (schemacs editor buffer) allocate-buffer set-buffer current-buffer
        set-buffer-local-value!)
  (only (schemacs editor editfns) insert goto-char point delete-region
-       point-min point-max buffer-substring-no-properties)
+       point-min point-max buffer-substring-no-properties
+       narrow-to-region widen)
  (only (schemacs editor syntax) set-syntax-table)
  (only (schemacs editor textprop) get-text-property text-property-any)
  (only (schemacs editor cc-defs) c-lang-const *c-buffer-is-cc-mode*
@@ -48,6 +49,9 @@
     (set-buffer b)
     (insert c-fixture)
     (set-buffer-local-value! b 'major-mode 'c-mode)
+    ;; `cc-mode.el:639' sets this buffer-locally; there is no
+    ;; cc-mode yet, so the buffer does here what the mode will.
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
     (c-init-language-vars c-mode)
     (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
     (thunk)))
@@ -315,6 +319,9 @@
     (set-buffer b)
     (insert ws-fixture)
     (set-buffer-local-value! b 'major-mode 'c-mode)
+    ;; `cc-mode.el:639' sets this buffer-locally; there is no
+    ;; cc-mode yet, so the buffer does here what the mode will.
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
     (c-init-language-vars c-mode)
     (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
     (thunk)))
@@ -383,6 +390,9 @@
   (set-buffer b)
   (insert token-fixture)
   (set-buffer-local-value! b 'major-mode 'c-mode)
+  ;; `cc-mode.el:639' sets this buffer-locally; there is no
+  ;; cc-mode yet, so the buffer does here what the mode will.
+  (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
   (c-init-language-vars c-mode)
   (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
 
@@ -451,6 +461,9 @@
     (set-buffer b)
     (insert literal-fixture)
     (set-buffer-local-value! b 'major-mode 'c-mode)
+    ;; `cc-mode.el:639' sets this buffer-locally; there is no
+    ;; cc-mode yet, so the buffer does here what the mode will.
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
     (c-init-language-vars c-mode)
     (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
     (thunk)))
@@ -555,6 +568,9 @@
     (set-buffer b)
     (insert attr-fixture)
     (set-buffer-local-value! b 'major-mode 'c-mode)
+    ;; `cc-mode.el:639' sets this buffer-locally; there is no
+    ;; cc-mode yet, so the buffer does here what the mode will.
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
     (c-init-language-vars c-mode)
     (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
     (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
@@ -814,6 +830,9 @@
     (set-buffer b)
     (insert syntactic-fixture)
     (set-buffer-local-value! b 'major-mode 'c-mode)
+    ;; `cc-mode.el:639' sets this buffer-locally; there is no
+    ;; cc-mode yet, so the buffer does here what the mode will.
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
     (c-init-language-vars c-mode)
     (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
     (thunk)))
@@ -857,6 +876,9 @@
     (set-buffer b)
     (insert stmt-fixture)
     (set-buffer-local-value! b 'major-mode 'c-mode)
+    ;; `cc-mode.el:639' sets this buffer-locally; there is no
+    ;; cc-mode yet, so the buffer does here what the mode will.
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
     (c-init-language-vars c-mode)
     (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
     (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
@@ -935,6 +957,9 @@
   (set-buffer b)
   (insert pike-brace-fixture)
   (set-buffer-local-value! b 'major-mode 'pike-mode)
+  ;; `cc-mode.el:639' sets this buffer-locally; there is no
+  ;; cc-mode yet, so the buffer does here what the mode will.
+  (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
   (c-init-language-vars pike-mode)
   (set-syntax-table ((c-lang-const c-make-mode-syntax-table pike)))
   (parameterize ((*c-buffer-is-cc-mode* 'pike-mode))
@@ -968,6 +993,9 @@
   (set-buffer b)
   (insert bos-fixture)
   (set-buffer-local-value! b 'major-mode 'c-mode)
+  ;; `cc-mode.el:639' sets this buffer-locally; there is no
+  ;; cc-mode yet, so the buffer does here what the mode will.
+  (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
   (c-init-language-vars c-mode)
   (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
   (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
@@ -1054,3 +1082,106 @@
     (bos-check 297 #f #f #t #f 1 'same 296) ; HIT-LIM
 ))
 (test-end "schemacs_editor_cc_engine_bos")
+
+;;----------------------------------------------------------------------
+;; The state cache (`cc-engine.el:3250'-`:4850')
+;;----------------------------------------------------------------------
+;; Two whole-input differentials against Emacs 31.1 are identical: the
+;; forward scan at every position of the fixture (210 rows) and the
+;; `ins'/`del'/`nar'/`wid' table that edits, invalidates and narrows it
+;; (18 rows). The rows below pin the branches a regression takes out
+;; first: the brace-pair cons elements that make the cache worth
+;; having, the invalidation that must keep a *lower* brace pair
+;; (`(46 . 66)', found by scanning back from the cache's top), and the
+;; narrowing that has `c-parse-state' discover elements below
+;; `point-min'.
+(test-begin "schemacs_editor_cc_engine_state")
+(define state-fixture
+  "int f (void)\n{\n  if (a) {\n    b ();\n  } else {\n    c (d (e));\n  }\n  switch (x) {\n  case 1: {\n    break;\n  }\n  }\n  char *s = \"a { b\";\n  /* comment { */\n  // line {\n  g ();\n#if 0\n  junk ( { [ ;\n#endif\n  h ();\n}\n")
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert state-fixture)
+  (set-buffer-local-value! b 'major-mode 'c-mode)
+  ;; `cc-mode.el:639' sets this buffer-locally; there is no
+  ;; cc-mode yet, so the buffer does here what the mode will.
+  (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+  (c-init-language-vars c-mode)
+  (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+    (define (state-row tag pos want-cache want-good want-min)
+      (goto-char (min pos (point-max)))
+      (test-equal (list tag pos)
+                  (list want-cache want-good want-min)
+                  (list (c-parse-state) (c-state-cache-good-pos)
+                        (c-state-min-scan-pos))))
+
+    ;; The forward scan - the warm-up and the rows in one walk, as the
+    ;; differential measured them.
+    (c-state-cache-init)
+    (do ((p (point-min) (+ p 1))) ((> p (point-max)))
+      (goto-char p)
+      (c-parse-state)
+      (cond
+       ((= p 8)
+        (test-equal 'forward-8 (list '(7) 1 1)
+                    (list (c-state-cache) (c-state-cache-good-pos)
+                          (c-state-min-scan-pos))))
+       ((= p 100)
+        (test-equal 'forward-100 (list '(92 80 (46 . 66) 14) 93 1)
+                    (list (c-state-cache) (c-state-cache-good-pos)
+                          (c-state-min-scan-pos))))
+       ((= p 108)
+        (test-equal 'forward-108 (list '((92 . 108) 80 (46 . 66) 14) 108 1)
+                    (list (c-state-cache) (c-state-cache-good-pos)
+                          (c-state-min-scan-pos))))
+       ((= p 205)
+        (test-equal 'forward-205
+                    (list '(204 189 187 185 (80 . 112) 14) 190 1)
+                    (list (c-state-cache) (c-state-cache-good-pos)
+                          (c-state-min-scan-pos))))
+       ((= p 209)
+        (test-equal 'forward-209 (list '(187 185 (80 . 112) 14) 209 1)
+                    (list (c-state-cache) (c-state-cache-good-pos)
+                          (c-state-min-scan-pos))))))
+
+    ;; An insertion at 100 above the cache's lower brace pair, then the
+    ;; invalidation wrapper. `c-remove-stale-state-cache-backwards'
+    ;; returns `(81 80 t)' and the append of the lower brace pair is
+    ;; what puts `(46 . 66)' back.
+    (goto-char 100)
+    (c-truncate-lit-pos/state-cache 100)
+    (insert "{")
+    (c-invalidate-state-cache)
+    (state-row 'ins 100 '(92 80 (46 . 66) 14) 93 1)
+    (state-row 'ins 101 '(100 92 80 (46 . 66) 14) 93 1)
+    (state-row 'ins 110 '((100 . 109) 92 80 (46 . 66) 14) 109 1)
+    (state-row 'ins 150 '((92 . 113) 80 (46 . 66) 14) 113 1)
+    (state-row 'ins 200 '(190 188 186 (92 . 113) 80 (46 . 66) 14) 191 1)
+
+    ;; Delete it again.
+    (goto-char 100)
+    (c-truncate-lit-pos/state-cache 100)
+    (delete-region 100 101)
+    (c-invalidate-state-cache)
+    (state-row 'del 100 '(92 80 (46 . 66) 14) 93 1)
+    (state-row 'del 110 '((92 . 108) 80 (46 . 66) 14) 108 1)
+    (state-row 'del 150 '((80 . 112) 14) 112 1)
+    (state-row 'del 200 '(189 187 185 (80 . 112) 14) 190 1)
+
+    ;; Narrowing: the cache starts empty at the new `point-min', and the
+    ;; forward scans find the brace pairs below it.
+    (narrow-to-region 30 180)
+    (c-state-cache-init)
+    (state-row 'nar 30 '() 30 30)
+    (state-row 'nar 40 '() 35 30)
+    (state-row 'nar 80 '((46 . 66)) 66 30)
+    (state-row 'nar 120 '((80 . 112)) 112 30)
+    (state-row 'nar 170 '((80 . 112)) 112 30)
+    (state-row 'nar 180 '((80 . 112)) 170 30)
+
+    ;; Widening again.
+    (widen)
+    (state-row 'wid 80 '((46 . 66) 14) 66 1)
+    (state-row 'wid 120 '((80 . 112) 14) 112 1)
+    (state-row 'wid 170 '((80 . 112) 14) 112 1)))
+(test-end "schemacs_editor_cc_engine_state")

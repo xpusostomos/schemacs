@@ -6,7 +6,7 @@
   (only (schemacs editor command) *quit-flag* quit-condition?)
   (only (schemacs editor buffer)
         *current-buffer* allocate-buffer get-buffer-create set-buffer
-        erase-buffer buffer-z set-point buffer-pt)
+        erase-buffer buffer-z set-point buffer-pt set-buffer-local-value!)
   (only (schemacs editor editfns)
         insert point-max save-restriction narrow-to-region)
   (only (schemacs editor frame) *current-frame* new-frame)
@@ -14,7 +14,8 @@
         char-syntax string-to-syntax matching-paren modify-syntax-entry
         parse-partial-sexp syntax-ppss syntax-table standard-syntax-table
         copy-syntax-table set-syntax-table with-syntax-table
-        forward-word-position backward-word-position scan-sexps)
+        forward-word-position backward-word-position scan-sexps scan-lists
+        *parse-sexp-ignore-comments*)
   (only (schemacs editor font-lock)
         font-lock-set-defaults font-lock-fontify-buffer set!font-lock-defaults!)
   (only (schemacs editor textprop) get-text-property put-text-property))
@@ -485,3 +486,44 @@
               (list-ref (parse-partial-sexp 1 30) 8)))
 
 (test-end "schemacs_editor_ppss_resume")
+
+;;----------------------------------------------------------------------
+;; `parse_sexp_ignore_comments' (`syntax.c:139') is buffer-local here,
+;; as Emacs's is: a buffer that has not set it falls back to the global
+;; variable. That fallback was `#f' before the state-cache port - the
+;; reader ignored the global entirely - which made every scan see the
+;; braces inside comments. Emacs's *global* default is nil
+;; (`DEFVAR_BOOL', `syntax.c:3769'; measured `(default-value ...)' ->
+;; nil) and each mode that wants it sets it buffer-locally -
+;; `prog-mode.el:401', `scheme.el:185', `cc-mode.el:639' - so this
+;; group parameterizes the global rather than relying on its default,
+;; and the local-wins rows pin the reader itself. Every answer below is
+;; Emacs 31.1's own, measured with `emacs -Q --batch' on the same
+;; buffer.
+;;----------------------------------------------------------------------
+(test-begin "schemacs_editor_parse_sexp_ignore_comments")
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (set-syntax-table (copy-syntax-table (standard-syntax-table)))
+  (modify-syntax-entry #\; "<")
+  (modify-syntax-entry #\newline ">")
+  (insert "; { x\n(y) [z]\n")
+  (test-equal "unset local, global on: the brace inside the comment is skipped"
+              8
+              (parameterize ((*parse-sexp-ignore-comments* #t))
+                (scan-lists 1 1 -1)))
+  (test-equal "unset local, global off: the comment's brace is a brace"
+              4
+              (parameterize ((*parse-sexp-ignore-comments* #f))
+                (scan-lists 1 1 -1)))
+  (set-buffer-local-value! b 'parse-sexp-ignore-comments #f)
+  (test-equal "a buffer-local off wins over the global on"
+              4
+              (parameterize ((*parse-sexp-ignore-comments* #t))
+                (scan-lists 1 1 -1)))
+  (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+  (test-equal "a buffer-local on wins over the global off"
+              8
+              (parameterize ((*parse-sexp-ignore-comments* #f))
+                (scan-lists 1 1 -1))))
+(test-end "schemacs_editor_parse_sexp_ignore_comments")

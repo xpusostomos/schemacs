@@ -12848,3 +12848,105 @@ c-has-compound-literals (save-excursion (goto-char block-follows) (not
 `c-looking-at-statement-block`, which is not ported (it needs the C++
 declaration engine). No ported caller reaches it: `c-beginning-of-
 statement-1` passes a nil CONTAINING-SEXP, and the arm requires one.
+
+## cc-mode: the state cache (2026-11-22)
+
+`c-parse-state' and everything it stands on (`cc-engine.el:3260'-`:4850')
+is ported: the caches, `c-remove-stale-state-cache' and its backwards
+twin, `c-append-to-state-cache' and
+`c-append-lower-brace-pair-to-state-cache', the narrowing adjustment,
+`c-invalidate-state-cache' and the enclosing-brace queries.
+
+### Representations
+
+- **The cache is `'()` when empty, not `#f`.** An entry is a fixnum or
+  a cons, and the conses go *into* the list, so `(cons 7 #f)` would be
+  improper: every reader tests with `pair?` and the cons helpers
+  (`c--cdr`, `c--copy-list`) answer `'()` for a non-pair. This is the
+  tree's standing nil-vs-`'()` rule.
+- **Each `c-state-*` variable is a buffer-local slot behind an
+  accessor and a `set!'-prefixed setter**, as in the rest of the
+  library; `c-state-old-cpp-beg'/`-end' hold markers, and the two
+  `-marker' slots exist because `c-state-maybe-marker' (a macro in
+  Emacs) is a procedure here that reuses the caller's marker.
+- **`c-state-pos-of'** is the C's marker-or-fixnum coercion
+  (`marker_position' when `markerp'), used where the C compares a
+  position that may be a marker.
+- **`c-sc-scan-lists'/`c-sc-parse-partial-sexp' are the identity
+  wrappers.** In GNU Emacs the `c-use-category' build makes them the
+  category-aware primitives; this tree has no cc-mode category
+  properties, so they call `scan-lists'/`parse-partial-sexp' and that is
+  what the C's Emacs build does.
+- **`c-beginning-of-defun-1' is here and calls `beginning-of-defun' and
+  `forward-sexp' from `(schemacs editor lisp)'** - Emacs has them in
+  `lisp.el', which is above `cc-engine' in this tree's graph; the
+  import is the placement departure.
+
+### The three translation bugs the differentials found
+
+Each is a different Elisp-to-Scheme shape, and each made a *loop* do
+the wrong number of iterations - which is why the symptom was a
+plausible but wrong cache rather than an error:
+
+1. **The C's `while' whose condition is a `progn'.** The brace-pair
+   scan (`cc-engine.el:3897') is
+
+   ```elisp
+   (while
+       (progn
+         (c-safe (while ...))          ; nil
+         (and ce (< ce bra)))          ; the condition
+     (setq bra ce))                    ; the body
+   ```
+
+   The port had `(and ce (< ce bra))` and `(loop)` as two *body forms*
+   of a `when`, with `(set! bra ce)` after the `let` - so the loop
+   stopped when the inner scan errored instead of checking the
+   condition, and never assigned `bra := ce` between iterations. It
+   found a brace pair at the top of the file (1 . 80) where Emacs
+   finds the one under the insertion (46 . 66). Now `(when (begin A B)
+   (set! bra ce) (loop))`.
+2. **`(and (goto-char bra) (c-beginning-of-macro) (< (point) ...))'
+   written as `(begin ...)`.** A `begin` evaluates every form; the C's
+   `and` stops when `c-beginning-of-macro' answers nil. With point left
+   at BRA (not in a macro), `(< (point) macro-start-or-from)' is true,
+   so the loop kept walking past the brace pair it wanted. The `and'
+   gates it.
+3. **The loop-control *value* of the C's `if' else branch.** In
+   `c-append-to-state-cache' (`:3967'; the loop-control line is `:4033') the else is
+
+   ```elisp
+   (c-safe (setq ren+1 (c-sc-scan-lists ren+1 1 1))) ; acts as loop control.
+   ```
+
+   - the value of the `setq`, i.e. the next unmatched close's position,
+   or nil when the scan signals. The port forced `#f', so the loop
+   stopped after the first unmatched close instead of continuing to the
+   next one; under a narrowing that meant no brace pair was found at
+   all. `(c-safe (begin (set! ren+1 ...) ren+1))` is the exact value.
+
+### `parse-sexp-ignore-comments` and the scans that read it
+
+The state-cache differential first saw braces *inside comments* in the
+cache. The cause was one level down: `syntax.scm`'s
+`%parse-sexp-ignore-comments?` answered the buffer-local with a `#f'
+default, ignoring the global parameter entirely. Emacs's
+`BVAR (current_buffer, parse_sexp_ignore_comments)' *is* the
+buffer-local, whose value a buffer that has not set it inherits from
+the global, so the reader now falls back to
+`(*parse-sexp-ignore-comments*)'. Regression rows: `syntax-tests.scm`'s
+`schemacs_editor_parse_sexp_ignore_comments' group (the four
+local/global combinations, Emacs 31.1's answers).
+
+**Two named departures remain in the defaults**, measured
+(`emacs -Q --batch`): Emacs's globals are nil for both
+`parse-sexp-ignore-comments' (`syntax.c:3769') and
+`parse-sexp-lookup-properties' (`:3772'), and the modes that want them
+set them buffer-locally - `prog-mode.el:401' and `scheme.el:185' for
+the first, `cc-mode.el:639' for cc-mode, `font-lock.el:1531' and
+`subr.el:2779' (`run-mode-hooks') for the second. This tree's globals
+are `#t' and nothing sets `parse-sexp-lookup-properties'
+buffer-locally. Flipping them to Emacs's values means porting those
+four setters first; recorded rather than half-done. There is no
+cc-mode yet, so the cc-engine tests set `parse-sexp-ignore-comments'
+on their fixtures themselves, which is what `cc-mode.el:639' will do.

@@ -15744,3 +15744,85 @@ The six cc suites pass (`cc-engine-tests` 325, 64 of them the new
 `c-beginning-of-statement-1` group with every expectation Emacs 31.1's
 own), and `pty-check.py imports scratch` is 2/2. `imports.scm` is
 regenerated (112 libraries, 4,249 names).
+
+# cc-mode: `c-parse-state' and the state cache (2026-11-22)
+
+The state cache (`cc-engine.el:3260'-`:4850') is in `cc-engine.scm`:
+`c-parse-state' and `c-parse-state-1', the two stale-entry removers,
+`c-append-to-state-cache', `c-append-lower-brace-pair-to-state-cache',
+`c-state-push-any-brace-pair', the strategy function, the narrowing
+adjustment (`c-renarrow-state-cache'), the invalidation wrapper, the
+brace/paren queries (`c-most-enclosing-brace', `c-least-enclosing-brace',
+`c-safe-position', `c-whack-state-before'/`-after') and
+`c-beginning-of-syntax'. DEPARTURES.md's 2026-11-22 section has the
+representation notes and the three translation bugs.
+
+## Verified
+
+Two whole-input differentials against Emacs 31.1, both identical:
+
+- the **forward scan**: `c-parse-state' at every one of the fixture's
+  210 positions, recording the cache, `c-state-cache-good-pos' and
+  `c-state-min-scan-pos';
+- the **edit/invalidate/narrow table** (18 rows): an insertion at 100
+  and the invalidation, a delete and the invalidation, six positions
+  under a narrowing to [30, 180) after `c-state-cache-init', and three
+  after widening.
+
+The fixture and harnesses are `/tmp/state-fixture.c',
+`/tmp/state-diff.scm' + `/tmp/emacs-state.el' (forward) and
+`/tmp/state-diff2.scm' + `/tmp/emacs-state2.el' (the table). They
+should move into `tools/' when next touched.
+
+`cc-engine-tests.scm` is 348 passes: the new
+`schemacs_editor_cc_engine_state' group pins five forward rows and all
+18 table rows, each Emacs 31.1's own. `syntax-tests.scm` is 74, with
+the `schemacs_editor_parse_sexp_ignore_comments' group for the reader
+fix below. Full battery: **88/88 suites**, pty **100/100** (the latter
+run alone).
+
+## The bug that was one library down
+
+The first difference the differential showed was braces *inside
+comments* in the cache. `syntax.scm`'s `%parse-sexp-ignore-comments?'
+answered the buffer-local with a literal `#f' default instead of the
+global parameter, so every scan in a buffer that had not set the
+variable saw comments as code - and cc-mode, which sets it
+buffer-locally (`cc-mode.el:639'), never got there because there is no
+cc-mode yet. The reader now falls back to
+`(*parse-sexp-ignore-comments*)', which is what a buffer-local in Emacs
+does. **Two defaults remain different from Emacs and are named in
+DEPARTURES.md**: Emacs's globals start nil and are set by modes; this
+tree's are `#t' and the `parse-sexp-lookup-properties' setters
+(`font-lock.el:1531', `subr.el:2779') are not ported.
+
+## Traps worth carrying into the declaration machinery
+
+- **A C `while` whose condition is a `progn' must be a `when' whose
+  test is the `begin' and whose body holds the assignments**, or the
+  loop's iteration count is wrong with no error. The brace-pair scan
+  and `c-append-to-state-cache' both had variants of this.
+- **The value of the C's `(setq x ...)' in loop-control position is
+  the new value.** Guile's `set!' answers the unspecified value, and a
+  port that forces `#f' after it stops a loop the C continues. Write
+  `(c-safe (begin (set! x ...) x))' where the C's value is the
+  setq's.
+- **`(and (goto-char p) (c-beginning-of-macro) TEST)' is not
+  `(begin (goto-char p) (c-beginning-of-macro) TEST)'**: the `and'
+  skips TEST when not in a macro; the `begin' evaluates it at `p',
+  which is usually below the macro start and therefore true.
+- The C's `c-state-maybe-marker' is a macro that *returns* the marker;
+  here it is a procedure taking PLACE and MARKER and answering the
+  marker, and the caller stores it.
+- An empty cache is `'()'; the cons elements are proper-list members,
+  so `(cons 7 #f)' is a bug that the `pair?' tests hide until a later
+  copy.
+
+## Next
+
+The declaration machinery `c-beginning-of-statement-1''s remaining
+callers need - `c-looking-at-statement-block-1'/`-block', which need
+`c-looking-at-c++-lambda-expression', `c-just-after-func-arglist-p',
+`c-back-over-member-initializer-braces', and through them
+`c-forward-type' and `c-forward-<>-arglist'; then cc-fonts and
+cc-mode.el.

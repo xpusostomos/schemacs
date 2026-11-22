@@ -1100,6 +1100,8 @@
     c-add-language
     c-alnum
     c-alpha
+    c-append-lower-brace-pair-to-state-cache
+    c-append-to-state-cache
     c-at-expression-start-p
     c-at-macro-vsemi-p
     c-at-statement-start-p
@@ -1113,8 +1115,10 @@
     c-backward-token-1
     c-backward-token-2
     c-beginning-of-current-token
+    c-beginning-of-defun-1
     c-beginning-of-macro
     c-beginning-of-statement-1
+    c-beginning-of-syntax
     c-benign-error
     c-c++-vsemi-p
     c-cache-to-parse-ps-state
@@ -1126,6 +1130,7 @@
     c-concat-separated
     c-crosses-statement-barrier-p
     c-current-comment-prefix
+    c-debug-parse-state
     c-debug-sws-msg
     c-define-lang-constant
     c-define-lang-constant-here
@@ -1149,6 +1154,8 @@
     c-end-of-token
     c-filter-ops
     c-find-assignment-for-mode
+    c-foreign-init-lit-pos-cache
+    c-foreign-truncate-lit-pos-cache
     c-forward-comment-minus-1
     c-forward-comments
     c-forward-over-cpp-define-id
@@ -1167,7 +1174,9 @@
     c-full-pp-to-literal
     c-full-put-near-cache-entry
     c-full-trim-near-cache
+    c-get-cache-scan-pos
     c-get-char-property
+    c-get-fallback-scan-pos
     c-get-lang-constant
     c-go-down-list-backward
     c-go-down-list-forward
@@ -1182,6 +1191,8 @@
     c-init-language-vars
     c-int-to-char
     c-invalidate-macro-cache
+    c-invalidate-state-cache
+    c-invalidate-state-cache-1
     c-invalidate-sws-region-after
     c-invalidate-sws-region-after-del
     c-invalidate-sws-region-after-ins
@@ -1205,6 +1216,7 @@
     c-lang-set-local!
     c-lang-setvar
     c-lang-var-value
+    c-least-enclosing-brace
     c-lit-pos-cache
     c-lit-pos-cache-limit
     c-literal-datum?
@@ -1232,6 +1244,7 @@
     c-min-property-position
     c-mode-symbol
     c-mode-var
+    c-most-enclosing-brace
     c-next-single-property-change
     c-no-comment-end-of-macro
     c-noise-macro-name-re
@@ -1239,6 +1252,9 @@
     c-on-identifier
     c-parse-ps-state-below
     c-parse-ps-state-to-cache
+    c-parse-state
+    c-parse-state-1
+    c-parse-state-get-strategy
     c-parsing-error
     c-partial-ws-p
     c-point
@@ -1256,7 +1272,11 @@
     c-remove-in-sws
     c-remove-is-and-in-sws
     c-remove-is-sws
+    c-remove-stale-state-cache
+    c-remove-stale-state-cache-backwards
+    c-renarrow-state-cache
     c-safe
+    c-safe-position
     c-safe-scan-lists
     c-save-buffer-state
     c-semi-get-near-cache-entry
@@ -1271,7 +1291,35 @@
     c-skip-ws-chars-backward
     c-skip-ws-chars-forward
     c-skip-ws-forward
+    c-state-balance-parens-backwards
+    c-state-brace-pair-desert
+    c-state-cache
+    c-state-cache-after-top-paren
+    c-state-cache-good-pos
+    c-state-cache-init
+    c-state-cache-invalid-pos
+    c-state-cache-lower-good-pos
+    c-state-cache-too-far
+    c-state-cache-top-lparen
+    c-state-cache-top-paren
+    c-state-get-min-scan-pos
+    c-state-lit-beg
+    c-state-literal-at
+    c-state-mark-point-min-literal
+    c-state-min-scan-pos
+    c-state-nonlit-pos-cache
+    c-state-nonlit-pos-cache-limit
     c-state-nonlit-pos-interval
+    c-state-old-cpp-beg
+    c-state-old-cpp-beg-marker
+    c-state-old-cpp-end
+    c-state-old-cpp-end-marker
+    c-state-point-min
+    c-state-point-min-lit-start
+    c-state-point-min-lit-type
+    c-state-pp-to-literal
+    c-state-push-any-brace-pair
+    c-state-safe-place
     c-string-limit-regexp
     c-string-list-p
     c-string-syntax
@@ -1284,10 +1332,13 @@
     c-syntax-table-hwm
     c-trim-lit-pos-cache
     c-truncate-lit-pos-cache
+    c-truncate-lit-pos/state-cache
     c-up-list-backward
     c-up-list-forward
     c-upper
     c-vsemi-status-unknown-p
+    c-whack-state-after
+    c-whack-state-before
     c-with-syntax-table
     c-ws*-string-limit-regexp
     cache-long-scans
@@ -3373,6 +3424,7 @@
     set!buffer-zv
     set!c-auto-newline
     set!c-current-comment-prefix
+    set!c-debug-parse-state
     set!c-electric-flag
     set!c-full-lit-near-cache
     set!c-full-near-cache-limit
@@ -3389,6 +3441,20 @@
     set!c-parsing-error
     set!c-semi-lit-near-cache
     set!c-semi-near-cache-limit
+    set!c-state-brace-pair-desert
+    set!c-state-cache
+    set!c-state-cache-good-pos
+    set!c-state-cache-invalid-pos
+    set!c-state-min-scan-pos
+    set!c-state-nonlit-pos-cache
+    set!c-state-nonlit-pos-cache-limit
+    set!c-state-old-cpp-beg
+    set!c-state-old-cpp-beg-marker
+    set!c-state-old-cpp-end
+    set!c-state-old-cpp-end-marker
+    set!c-state-point-min
+    set!c-state-point-min-lit-start
+    set!c-state-point-min-lit-type
     set!cache-long-scans
     set!cd-path
     set!dired-actual-switches!
