@@ -126,7 +126,7 @@
   (import
     (scheme base)
     (only (guile) most-positive-fixnum make-hash-table hash-ref hash-set!
-                  hash-for-each hash-remove! 1- logand caddr cdddr cadddr
+                  hash-for-each hash-remove! 1- 1+ logand caddr cdddr cadddr
                   cddddr)
     (only (schemacs editor subr) regexp-unmatchable)
     (only (schemacs editor buffer) current-buffer buffer-local-value
@@ -155,7 +155,7 @@
           parse-partial-sexp scan-sexps scan-lists char-syntax
           *open-paren-in-column-0-is-defun-start*)
     (only (schemacs editor subr) regexp-unmatchable last delq copy-tree
-          intern with-silent-modifications remq)
+          intern with-silent-modifications remq butlast)
     (only (schemacs editor cc-defs) c-emacs-features c-save-buffer-state
           c-put-char-property c-clear-char-property c-get-char-property
           c-next-single-property-change c-previous-single-property-change
@@ -332,7 +332,18 @@
    c-forward-label c-in-knr-argdecl c-skip-conditional
    c-after-conditional c-after-special-operator-id
    c-backward-to-block-anchor c-backward-to-decl-anchor
-   c-search-decl-header-end c-beginning-of-decl-1 c-end-of-decl-1)
+   c-search-decl-header-end c-beginning-of-decl-1 c-end-of-decl-1
+   ;; `cc-engine.el:12966'-`:13582': the declaration-block queries and
+   ;; the brace list
+   c-most-enclosing-decl-block c-cheap-inside-bracelist-p
+   c-backward-typed-enum-colon c-backward-over-enum-header
+   c-at-enum-brace c-laomib-loop
+   c-laomib-cache set!c-laomib-cache
+   c-laomib-get-cache c-laomib-put-cache c-laomib-fix-elt
+   c-laomib-invalidate-cache
+   c-looking-at-or-maybe-in-bracelist
+   c-no-bracelist-cache set!c-no-bracelist-cache
+   c-strip-conses c-at-bracelist-p)
 
   (begin
 
@@ -3147,9 +3158,12 @@
                         (set! saved-pos (cdr (car stack)))
                         (set! pre-stmt-found (not (pair? (cdr stack))))
                         ;; "Throw nil if stack is empty, else throw
-                        ;; non-nil."
+                        ;; non-nil." The thrown value is the *new*
+                        ;; stack, and an empty Scheme list is true -
+                        ;; so it has to be #f when the stack empties, or
+                        ;; the driver's loop never ends.
                         (set! stack (cdr stack))
-                        stack)))))
+                        (if (pair? stack) stack #f))))))
                  (c-bos-save-pos
                   (syntax-rules ()
                     ((_) (set! saved-pos (vector pos tok ptok pptok)))))
@@ -3524,7 +3538,7 @@
                                                              (c-forward-syntactic-ws)
                                                              (or
                                                               (not (let ((re (%c-langvar
-                                                                              '|c-non-after-{}-ops-re|)))
+                                                                              '#{c-non-after-{}-ops-re}#)))
                                                                      (and re (looking-at re))))
                                                               (let ((bad-op-len
                                                                      (- (match-end 0)
@@ -3550,7 +3564,6 @@
                                                   ;; sort?"
                                                   (else (c-crosses-statement-barrier-p
                                                          (point) maybe-after-boundary-pos))))
-
                                            (when boundary-pos
                                              (set! pptok ptok)
                                              (set! ptok tok)
@@ -8425,6 +8438,7 @@
     ;; at the same place) so one closure can serve every call site,
     ;; including the SHORT one after the inner block.
 
+
     (define (c-forward-decl-or-cast-1 preceding-token-end context
                                       last-cast-end . inside-macro-args)
       ;; "Move forward over a declaration or a cast if at the start of
@@ -8939,16 +8953,22 @@
                     #f)
                 (and maybe-typeless
                      (or (eq? at-type 'maybe)
-                         (when (eq? at-type 'found)
-                           ;; "Remove the ostensible type from the found
-                           ;; types list."
-                           (when type-start
-                             (let ((discard-t (assq type-start
-                                                    found-type-list)))
-                               (when discard-t
-                                 (set! found-type-list
-                                       (remq discard-t found-type-list)))))
-                           #t))
+                         ;; Emacs's `when' answers nil when AT-TYPE is
+                         ;; not `found'; a Scheme `when' answers the
+                         ;; unspecified value, which is true, and that
+                         ;; made this branch fire for every type.
+                         (if (eq? at-type 'found)
+                             (begin
+                               ;; "Remove the ostensible type from the
+                               ;; found types list."
+                               (when type-start
+                                 (let ((discard-t (assq type-start
+                                                        found-type-list)))
+                                   (when discard-t
+                                     (set! found-type-list
+                                           (remq discard-t found-type-list)))))
+                               #t)
+                             #f))
                      ;; "The token which we assumed to be a type is
                      ;; actually the identifier, and we have no explicit
                      ;; type."
@@ -11341,4 +11361,729 @@
              (when (c-syntactic-re-search-forward ";" #f 'move #t)
                (loop)))
            #f))))
+    ;;------------------------------------------------------------------
+    ;; The declaration-block queries and the brace list
+    ;; (`cc-engine.el:12966'-`:13582')
+    ;;------------------------------------------------------------------
+    ;; Emacs's file has these just before `c-looking-at-special-brace-list'
+    ;; (`:13584'), which is already ported; they are appended here as the
+    ;; tranche that follows it.
+    ;;
+    ;; The value-position rules apply throughout: every `when'/`unless'
+    ;; whose value is read ends in an explicit `#f', and the two buffer
+    ;; variables are slots behind accessors.
+
+    (define (c-most-enclosing-decl-block paren-state)
+      ;; "Return the buffer position of the most enclosing decl-block
+      ;; brace (in the sense of c-looking-at-decl-block) in the
+      ;; PAREN-STATE structure, or nil if none was found."
+      ;; "Emacs's `c-pull-open-brace' is a macro that advances PS; this
+      ;; tree's procedure answers (BRACE . REST), so each pull rebinds."
+      (let* ((pull1 (c-pull-open-brace paren-state))
+             (open-brace (car pull1))
+             (ps1 (cdr pull1))
+             (pull2 (c-pull-open-brace ps1))
+             (next-open-brace (car pull2))
+             (ps2 (cdr pull2)))
+        (let loop ()
+          (when (and open-brace
+                     (save-excursion
+                       (goto-char open-brace)
+                       (not (c-looking-at-decl-block #f))))
+            (set! open-brace next-open-brace)
+            (let ((pull (c-pull-open-brace ps2)))
+              (set! next-open-brace (car pull))
+              (set! ps2 (cdr pull)))
+            (loop)))
+        open-brace))
+
+    (define (c-cheap-inside-bracelist-p paren-state)
+      ;; "Return the position of the L-brace if point is inside a brace
+      ;; list initialization of an array, etc.  This is an approximate
+      ;; function, designed for speed over accuracy. ... We simply search
+      ;; for \"= {\" (naturally with syntactic whitespace allowed).
+      ;; PAREN-STATE is the normal thing that it is everywhere else."
+      (let ((b-pos #f)
+            (ps paren-state))
+        (save-excursion
+          (let loop ()
+            (when (begin
+                    (let ((pull (c-pull-open-brace ps)))
+                      (set! b-pos (car pull))
+                      (set! ps (cdr pull)))
+                    (and b-pos
+                         (begin
+                           (goto-char b-pos)
+                           (c-backward-sws)
+                           (c-backward-token-2)
+                           (not (looking-at "=")))))
+              (loop)))
+          b-pos)))
+
+    (define (c-backward-typed-enum-colon)
+      ;; "We're at a \"{\" which might be the opening brace of an enum
+      ;; which is strongly typed (by a \":\" followed by a type).  If this
+      ;; is the case, leave point before the colon and return t.
+      ;; Otherwise leave point unchanged and return nil.  Match data will
+      ;; be clobbered."
+      (let ((here (point))
+            (colon-pos #f))
+        (save-excursion
+          (let loop ()
+            (when (and (= (c-backward-token-2) 0)
+                       (or (not (looking-at "\\s)"))
+                           (c-go-up-list-backward))
+                       (cond
+                        ((looking-at "::")
+                         #t)
+                        ((and (eqv? (char-after (point)) #\:)
+                              (save-excursion
+                                (c-backward-syntactic-ws)
+                                (or (c-on-identifier)
+                                    (begin
+                                      (c-backward-token-2)
+                                      (let ((re (%c-langvar 'c-enum-list-key)))
+                                        (and re (looking-at re)))))))
+                         (set! colon-pos (point))
+                         (forward-char)
+                         (c-forward-syntactic-ws)
+                         (or (and (c-forward-type)
+                                  (begin (c-forward-syntactic-ws)
+                                         (eqv? (point) here)))
+                             (set! colon-pos #f))
+                         #f)
+                        ((eqv? (char-after (point)) #\()
+                         #t)
+                        ((let ((re (%c-langvar 'c-symbol-key)))
+                           (and re (looking-at re)))
+                         #t)
+                        (else #f)))
+              (loop))))
+        ;; Emacs's `(when colon-pos (goto-char colon-pos) t)' is outside
+        ;; the `save-excursion' - the move to the colon is the function's
+        ;; point movement, and putting it inside made the `goto-char' be
+        ;; undone on the way out.
+        (if colon-pos
+            (begin (goto-char colon-pos) #t)
+            #f)))
+
+    (define (c-backward-over-enum-header)
+      ;; "We're at a \"{\".  Move back to the enum-like keyword that starts
+      ;; this declaration and return t, otherwise don't move and return
+      ;; nil."
+      (let ((here (point))
+            (before-identifier #f))
+        (when (%c-langvar 'c-recognize-post-brace-list-type-p)
+          (c-backward-typed-enum-colon))
+        (let loop ()
+          (when (and
+                 (= (c-backward-token-2) 0)
+                 (or (not (looking-at "\\s)"))
+                     (c-go-up-list-backward))
+                 (cond
+                  ((and (let ((re (%c-langvar 'c-symbol-key)))
+                          (and re (looking-at re)))
+                        (c-on-identifier)
+                        (not before-identifier))
+                   (set! before-identifier #t))
+                  ((and before-identifier
+                        (or (eqv? (char-after (point)) #\,)
+                            (let ((re (%c-langvar 'c-postfix-decl-spec-key)))
+                              (and re (looking-at re)))))
+                   (set! before-identifier #f)
+                   #t)
+                  ((let ((re (%c-langvar 'c-after-enum-list-key)))
+                     (and re (looking-at re)))
+                   #t)
+                  ((let ((re (%c-langvar 'c-enum-list-key)))
+                     (and re (looking-at re)))
+                   #f)
+                  ((eqv? (char-after (point)) #\()
+                   (and (= (c-backward-token-2) 0)
+                        (or (let ((re (%c-langvar 'c-decl-hangon-key)))
+                              (and re (looking-at re)))
+                            (and (%c-langvar 'c-opt-cpp-prefix)
+                                 (let ((re (c-noise-macro-with-parens-name-re)))
+                                   (and re (looking-at re)))))))
+                  ((and (%c-langvar 'c-recognize-<>-arglists)
+                        (eqv? (char-after (point)) #\<)
+                        (looking-at "\\s("))
+                   #t)
+                  (else #f)))
+            (loop)))
+        (or (let ((re (%c-langvar 'c-enum-list-key)))
+              (and re (looking-at re)))
+            (begin (goto-char here) #f))))
+
+    (define (c-at-enum-brace . pos-args)
+      ;; "Return the position of the enum-like keyword introducing the
+      ;; brace at POS (default point), or nil if we're not at such a
+      ;; construct."
+      (let ((pos (if (pair? pos-args) (car pos-args) #f)))
+        (save-excursion
+          (if pos
+              (goto-char pos)
+              (set! pos (point)))
+          (and (c-backward-over-enum-header)
+               (point)))))
+
+    (define (c-laomib-loop lim)
+      ;; "The \"expensive\" loop from `c-looking-at-or-maybe-in-bracelist'.
+      ;; Move backwards over comma separated sexps as far as possible, but
+      ;; no further than LIM, which may be nil, meaning no limit.  Return
+      ;; the final value of `braceassignp', which is t if we encountered
+      ;; \"= {\", usually nil otherwise."
+      (let ((braceassignp 'dontknow)
+            (class-key
+             ;; "Pike can have class definitions anywhere, so we must check
+             ;; for the class key here."
+             (and (c-major-mode-is 'pike-mode)
+                  (%c-langvar 'c-decl-block-key))))
+        (let loop ()
+          (when (eq? braceassignp 'dontknow)
+            (cond
+             ((or (eqv? (char-after (point)) #\;)
+                  (save-excursion
+                    (c-backward-syntactic-ws)
+                    (c-at-vsemi-p)))
+              (set! braceassignp #f))
+             ((and class-key
+                   (let ((re class-key)) (and re (looking-at re))))
+              (set! braceassignp #f))
+             ((and (%c-langvar 'c-has-compound-literals)
+                   (let ((re (%c-langvar 'c-return-key)))
+                     (and re (looking-at re))))
+              (set! braceassignp #t))
+             ((eqv? (char-after (point)) #\=)
+              ;; "We've seen a =, but must check earlier tokens so that it
+              ;; isn't something that should be ignored."
+              (set! braceassignp 'maybe)
+              (let inner ()
+                (when (and (eq? braceassignp 'maybe)
+                           (= (c-backward-token-2 1 #t lim) 0))
+                  (set! braceassignp
+                        (cond
+                         ;; "Check for operator ="
+                         ((and (%c-langvar 'c-opt-op-identifier-prefix)
+                               (let ((re (%c-langvar 'c-opt-op-identifier-prefix)))
+                                 (and re (looking-at re))))
+                          #f)
+                         ;; "Check for `<opchar>= in Pike."
+                         ((and (c-major-mode-is 'pike-mode)
+                               (or (eqv? (char-after (point)) #\`)
+                                   ;; "Special case for Pikes `[]=, since '['
+                                   ;; is not in the punctuation class."
+                                   (and (eqv? (char-after (point)) #\[)
+                                        (eqv? (char-before) #\`))))
+                          #f)
+                         ((looking-at "\\s.") 'maybe)
+                         ;; "make sure we're not in a C++ template argument
+                         ;; assignment"
+                         ((and
+                           (c-major-mode-is 'c++-mode)
+                           (save-excursion
+                             (let ((here (point))
+                                   (pos< (begin
+                                           (skip-chars-backward "^<>")
+                                           (point))))
+                               (and (eqv? (char-before) #\<)
+                                    (not (c-crosses-statement-barrier-p
+                                          pos< here))
+                                    (not (c-in-literal))))))
+                          #f)
+                         (else #t)))
+                  (inner))))
+             ((and
+               (c-major-mode-is 'c++-mode)
+               (eqv? (char-after (point)) #\[)
+               ;; "Be careful of \"operator []\""
+               (not (save-excursion
+                      (c-backward-token-2 1 #f lim)
+                      (let ((re (%c-langvar 'c-opt-op-identifier-prefix)))
+                        (and re (looking-at re))))))
+              (set! braceassignp #t)))
+            (when (eq? braceassignp 'dontknow)
+              (cond ((and
+                      (not (eqv? (char-after (point)) #\,))
+                      (save-excursion
+                        (c-backward-syntactic-ws)
+                        (eqv? (char-before) #\})))
+                     (set! braceassignp #f))
+                    ((not (= (c-backward-token-2 1 #t lim) 0))
+                     (if (save-excursion
+                           (and (%c-langvar 'c-has-compound-literals)
+                                (= (c-backward-token-2 1 #f lim) 0)
+                                (eqv? (char-after (point)) #\()))
+                         (set! braceassignp #t)
+                         (set! braceassignp #f)))))
+            (loop)))
+        braceassignp))
+
+    ;; "The following variable is a cache of up to four entries, each entry
+    ;; of which is a list representing a call to c-laomib-loop."
+    (define (c-laomib-cache)
+      (buffer-local-value (current-buffer) 'c-laomib-cache '()))
+    (define (set!c-laomib-cache value)
+      (set-buffer-local-value! (current-buffer) 'c-laomib-cache value))
+
+    (define (c-laomib-get-cache containing-sexp start)
+      ;; "Get an element from `c-laomib-cache' matching CONTAINING-SEXP,
+      ;; and which is suitable for start position START.  Return that
+      ;; element or nil if one wasn't found."
+      (let ((ptr (c-laomib-cache))
+            (elt #f))
+        (let loop ()
+          (when (and (begin (set! elt (assv containing-sexp ptr)) elt)
+                     (< start (car (cddr elt))))
+            (set! ptr (cdr (memv elt ptr)))
+            (loop)))
+        (if elt
+            (begin
+              ;; "Move the fetched `elt' to the front of the cache."
+              (set!c-laomib-cache (remq elt (c-laomib-cache)))
+              (set!c-laomib-cache (cons elt (c-laomib-cache)))
+              elt)
+            #f)))
+
+    (define (c-laomib-put-cache lim start end result)
+      ;; "Insert a new element into `c-laomib-cache', removing another
+      ;; element to make room, if necessary. ..."
+      (if lim
+          (begin
+            (let ((old-elt #f)
+                  (new-elt (list lim start end result))
+                  (cur-ptr (c-laomib-cache))
+                  (size 0))
+              ;; "If there is an elt which overlaps with the new element,
+              ;; remove it."
+              (let loop ()
+                (when (begin
+                        (set! old-elt (assv lim cur-ptr))
+                        (and old-elt
+                             (not (and (> start (car (cddr old-elt)))
+                                       (<= start (cadr old-elt))))))
+                  (set! cur-ptr (cdr (memv old-elt cur-ptr)))
+                  (loop)))
+              (when (and cur-ptr old-elt)
+                (set!c-laomib-cache (remq old-elt (c-laomib-cache))))
+
+              ;; "Don't let the cache grow indefinitely." Emacs prefers
+              ;; `ntake' (>= 29.1) and falls back on `butlast'; this tree
+              ;; has no `ntake', so the fallback is the one path.
+              (set! size (length (c-laomib-cache)))
+              (when (>= size 50)
+                (set!c-laomib-cache (butlast (c-laomib-cache) (- size 49))))
+              (set!c-laomib-cache (cons new-elt (c-laomib-cache)))
+              (c-laomib-cache))
+          #f)))
+
+    (define (c-laomib-fix-elt lwm elt paren-state)
+      ;; "Correct a c-laomib-cache entry ELT with respect to buffer
+      ;; changes, either doing nothing, signaling it is to be deleted, or
+      ;; replacing its start point with one lower in the buffer than LWM.
+      ;; PAREN-STATE is the paren state at LWM.  Return the corrected
+      ;; entry, or nil (if it needs deleting). ..."
+      (cond
+       ((or (not lwm) (> lwm (cadr elt)))
+        elt)
+       ((<= lwm (nth 2 elt))
+        #f)
+       (else
+        ;; "Search for the last brace in `paren-state' before (car
+        ;; `lim').  This brace will become our new 2nd element of `elt'."
+        (let loop ()
+          ;; "Search one brace level per iteration."
+          (when (and paren-state
+                     (begin
+                       ;; "Go past non-brace levels, one per iteration."
+                       (let inner ()
+                         (when (and paren-state
+                                    (not (eqv? (char-after
+                                                (c-state-cache-top-lparen paren-state))
+                                               #\{)))
+                           (set! paren-state (cdr paren-state))
+                           (inner)))
+                       (cadr paren-state))
+                     (> (c-state-cache-top-lparen (cdr paren-state))
+                        (car elt)))
+            (set! paren-state (cdr paren-state))
+            (loop)))
+        (if (cadr paren-state)
+            (begin
+              (set-car! (cdr elt) (c-state-cache-top-lparen paren-state))
+              elt)
+            #f))))
+
+    (define (c-laomib-invalidate-cache beg _end)
+      ;; "Called from late in c-before-change.  Amend `c-laomib-cache' to
+      ;; remove details pertaining to the buffer after position BEG."
+      (save-excursion
+        (goto-char beg)
+        (let ((paren-state (c-parse-state)))
+          (for-each (lambda (elt)
+                      (when (not (c-laomib-fix-elt beg elt paren-state))
+                        (set!c-laomib-cache (remq elt (c-laomib-cache)))))
+                    (c-laomib-cache)))))
+
+    (define (c-looking-at-or-maybe-in-bracelist . args)
+      ;; "Point is at an open brace.  If this starts a brace list, return
+      ;; a cons whose car is the buffer position of the start of the
+      ;; construct which introduces the list, and whose cdr is the symbol
+      ;; `in-paren' if the brace is directly enclosed in a parenthesis
+      ;; form (i.e. an arglist), t if we have parsed a keyword matching
+      ;; `c-opt-inexpr-brace-list-key' (e.g. Java's \"new\"), nil
+      ;; otherwise.  Otherwise, if point might be inside an enclosing
+      ;; brace list, return t.  If point is definitely neither at nor in
+      ;; a brace list, return nil.
+      ;;
+      ;; CONTAINING-SEXP is the position of the brace/paren/bracket
+      ;; enclosing POINT, or nil if there is no such position, or we do
+      ;; not know it.  LIM is a backward search limit.
+      ;;
+      ;; Here, \"brace list\" does not include the body of an enum."
+      (let ((containing-sexp (if (pair? args) (car args) #f))
+            (lim (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+        (save-excursion
+          (if (and (c-major-mode-is 'c++-mode)
+                   (c-backward-over-lambda-expression lim))
+              #f
+              (let ((start (point))
+                    (braceassignp 'dontknow)
+                    (inexpr-brace-list #f)
+                    (bufpos #f)
+                    (macro-start #f)
+                    (res #f)
+                    (pos #f)
+                    (after-type-id-pos #f)
+                    (pos2 #f)
+                    (in-paren #f)
+                    (paren-state #f)
+                    (paren-pos #f))
+                ;; Elisp's `(char-after POS)' with POS nil means the
+                ;; character at point; the tree's `char-after' wants a
+                ;; position, so spell the nil case out.
+                (define (char-at p)
+                  (if p (char-after p) (char-after (point))))
+
+                (set! res
+                      (or (begin (c-backward-syntactic-ws)
+                                 (c-back-over-compound-identifier))
+                          (c-backward-token-2 1 #t lim)))
+                ;; "Checks to do only on the first sexp before the brace.
+                ;; Have we a C++ initialization, without an \"=\"?"
+                (if (and (c-major-mode-is 'c++-mode)
+                         (cond
+                          ((and (or (not (memv res (list #t 0)))
+                                    (eqv? (char-after (point)) #\,))
+                                (begin (set! paren-state (c-parse-state))
+                                       (pair? paren-state))
+                                (begin
+                                  (let ((pull (c-pull-open-brace paren-state)))
+                                    (set! paren-pos (car pull))
+                                    (set! paren-state (cdr pull)))
+                                  paren-pos)
+                                (eqv? (char-at paren-pos) #\())
+                           (when paren-pos (goto-char paren-pos))
+                           (set! braceassignp 'c++-noassign)
+                           (set! in-paren 'in-paren))
+                          ((let ((re (%c-langvar 'c-pre-brace-non-bracelist-key)))
+                             (and re (looking-at re)))
+                           (set! braceassignp #f)
+                           #f)
+                          ((let ((re (%c-langvar 'c-fun-name-substitute-key)))
+                             (and re (looking-at re)))
+                           (set! braceassignp #f)
+                           #f)
+                          ((let ((re (%c-langvar 'c-return-key)))
+                             (and re (looking-at re))))
+                          ((and (let ((re (%c-langvar 'c-symbol-start)))
+                                  (and re (looking-at re)))
+                                (not (let ((re (%c-langvar 'c-keywords-regexp)))
+                                       (and re (looking-at re)))))
+                           (if (save-excursion
+                                 (and (= (c-backward-token-2 1 #t lim) 0)
+                                      (let ((re (%c-langvar 'c-pre-id-bracelist-key)))
+                                        (and re (looking-at re)))))
+                               (set! braceassignp 'c++-noassign)
+                               (set! after-type-id-pos (point))))
+                          ((eqv? (char-after (point)) #\()
+                           ;; "Have we a requires with a parenthesis list?"
+                           (when (save-excursion
+                                   (and (= (c-backward-token-2 1 #f lim) 0)
+                                        (let ((re (%c-langvar 'c-fun-name-substitute-key)))
+                                          (and re (looking-at re)))))
+                             (set! braceassignp #f))
+                           #f)
+                          (else #f))
+                         (save-excursion
+                           (cond
+                            ((or (not (memv res (list #t 0)))
+                                 (eqv? (char-after (point)) #\,))
+                             (begin (set! paren-state (c-parse-state))
+                                    (pair? paren-state))
+                             (begin
+                               (let ((pull (c-pull-open-brace paren-state)))
+                                 (set! paren-pos (car pull))
+                                 (set! paren-state (cdr pull)))
+                               paren-pos)
+                             (eqv? (char-at paren-pos) #\()
+                             (set! in-paren 'in-paren)
+                             (when paren-pos (goto-char paren-pos))
+                             #t)
+                            ((let ((re (%c-langvar 'c-pre-brace-non-bracelist-key)))
+                               (and re (looking-at re))))
+                            ((let ((re (%c-langvar 'c-return-key)))
+                               (and re (looking-at re))))
+                            ((and (let ((re (%c-langvar 'c-symbol-start)))
+                                    (and re (looking-at re)))
+                                  (not (let ((re (%c-langvar 'c-keywords-regexp)))
+                                         (and re (looking-at re))))
+                                  (save-excursion
+                                    (and (= (c-backward-token-2 1 #t lim) 0)
+                                         (let ((re (%c-langvar 'c-pre-id-bracelist-key)))
+                                           (and re (looking-at re)))))))
+                            (else (set! after-type-id-pos (point))
+                                  #f))))
+                    (set! braceassignp 'c++-noassign))
+
+                (when (and (%c-langvar 'c-opt-inexpr-brace-list-key)
+                           (eqv? (char-after (point)) #\[))
+                  ;; "In Java, an initialization brace list may follow
+                  ;; directly after \"new Foo[]\", so check for a \"new\"
+                  ;; earlier."
+                  (let loop ()
+                    (when (eq? braceassignp 'dontknow)
+                      (set! braceassignp
+                            (cond ((not (= (c-backward-token-2 1 #t lim) 0)) #f)
+                                  ((let ((re (%c-langvar 'c-opt-inexpr-brace-list-key)))
+                                     (and re (looking-at re)))
+                                   (set! inexpr-brace-list #t)
+                                   #t)
+                                  ((looking-at "\\sw\\|\\s_\\|[.[]")
+                                   ;; "Carry on looking if this is an
+                                   ;; identifier (may contain \".\" in Java)
+                                   ;; or another \"[]\" sexp."
+                                   'dontknow)
+                                  (else #f)))
+                      (loop))))
+
+                (set! pos (point))
+                (cond
+                 ((not braceassignp)
+                  #f)
+                 ((and after-type-id-pos
+                       (begin (goto-char after-type-id-pos) #t)
+                       (begin (set! res (c-back-over-member-initializers)) res)
+                       (begin (goto-char res) #t)
+                       (eq? (car (c-beginning-of-decl-1 lim)) 'same))
+                  (cons (point) #f)) ; "Return value."
+                 ((and after-type-id-pos
+                       (begin
+                         (c-backward-syntactic-ws)
+                         (eqv? (char-before) #\()))
+                  ;; "Single identifier between '(' and '{'.  We have a
+                  ;; bracelist."
+                  (cons after-type-id-pos 'in-paren))
+                 (else
+                  (goto-char pos)
+                  (when (eq? braceassignp 'dontknow)
+                    (let* ((cache-entry (and containing-sexp
+                                             (c-laomib-get-cache containing-sexp pos)))
+                           (lim2 (or (and cache-entry (cadr cache-entry)) lim))
+                           (sub-bassign-p #f))
+                      (if cache-entry
+                          (cond
+                           ((<= (point) (cadr cache-entry))
+                            ;; "We're inside the region we've already scanned
+                            ;; over, so just go to that scan's end position."
+                            (goto-char (nth 2 cache-entry))
+                            (set! braceassignp (nth 3 cache-entry)))
+                           ((> (point) (cadr cache-entry))
+                            ;; "We're beyond the previous scan region, so just
+                            ;; scan as far as the end of that region."
+                            (set! sub-bassign-p (c-laomib-loop lim2))
+                            (if (<= (point) (cadr cache-entry))
+                                (begin
+                                  (set-car! (cdr cache-entry) start)
+                                  (set! braceassignp (nth 3 cache-entry))
+                                  (goto-char (nth 2 cache-entry)))
+                                (begin
+                                  (c-laomib-put-cache containing-sexp
+                                                       start (point) sub-bassign-p)
+                                  (set! braceassignp sub-bassign-p))))
+                           (else #f))
+                          (begin
+                            (set! braceassignp (c-laomib-loop lim))
+                            (when lim
+                              (c-laomib-put-cache lim start (point)
+                                                  braceassignp))))))
+
+                  (cond
+                   (braceassignp
+                    ;; "We've hit the beginning of the aggregate list."
+                    (set! pos2 (point))
+                    (cons
+                     (if (eq? (c-beginning-of-statement-1 containing-sexp) 'same)
+                         (point)
+                         pos2)
+                     (or in-paren inexpr-brace-list)))
+                   ((and after-type-id-pos
+                         (save-excursion
+                           (when (eqv? (char-after (point)) #\;)
+                             (c-forward-over-token-and-ws #t))
+                           (set! bufpos (point))
+                           (when (let ((re (%c-langvar 'c-opt-<>-sexp-key)))
+                                   (and re (looking-at re)))
+                             (c-forward-over-token-and-ws)
+                             (when (and (eqv? (char-after (point)) #\<)
+                                        (c-get-char-property (point) 'syntax-table))
+                               (c-go-list-forward #f after-type-id-pos)
+                               (c-forward-syntactic-ws)))
+                           (if (and (not (eqv? (point) after-type-id-pos))
+                                    (or (not (let ((re (%c-langvar 'c-class-key)))
+                                               (and re (looking-at re))))
+                                        (save-excursion
+                                          (goto-char (match-end 1))
+                                          (c-forward-syntactic-ws)
+                                          (not (eqv? (point) after-type-id-pos)))))
+                               (begin
+                                 (set! res
+                                       (c-forward-decl-or-cast-1 (c-point 'bosws)
+                                                                 #f #f))
+                                 (and (pair? res)
+                                      (cond
+                                       ((eqv? (car res) after-type-id-pos)
+                                        #t)
+                                       ((> (car res) after-type-id-pos)
+                                        #f)
+                                       (else
+                                        (call-with-current-continuation
+                                         (lambda (find-decl)
+                                           (save-excursion
+                                             (goto-char (car res))
+                                             (c-do-declarators
+                                              (point-max) #t #f #f
+                                              (lambda (id-start _id-end _tok
+                                                       _not-top _func _init)
+                                                (cond
+                                                 ((> id-start after-type-id-pos)
+                                                  (find-decl #f))
+                                                 ((eqv? id-start after-type-id-pos)
+                                                  (find-decl #t)))))
+                                           #f)))))))
+                               (save-excursion
+                                 (goto-char start)
+                                 (not (c-looking-at-statement-block))))))
+                    (cons bufpos (or in-paren inexpr-brace-list)))
+                   ((or (eqv? (char-after (point)) #\;)
+                        ;; "Brace lists can't contain a semicolon, so we're
+                        ;; done."
+                        (save-excursion
+                          (c-backward-syntactic-ws)
+                          (eqv? (char-before) #\})))
+                    ;; "They also can't contain a bare }, which is probably
+                    ;; the end of a function."
+                    #f)
+                   ((and (begin (set! macro-start (point)) macro-start)
+                         (c-forward-to-cpp-define-body)
+                         (eqv? (point) start))
+                    ;; "We've a macro whose expansion starts with the '{'.
+                    ;; Heuristically, if we have a ';' in it we've not got a
+                    ;; brace list, otherwise we have."
+                    (let ((macro-end (begin (c-end-of-macro) (point))))
+                      (goto-char start)
+                      (forward-char)
+                      (if (and (c-syntactic-re-search-forward "[;,]" macro-end #t #t)
+                               (eqv? (char-before) #\;))
+                          #f
+                          (cons macro-start #f))))
+                   (else #t)))))))))
+
+
+    ;; "A list of the form returned by `c-parse-state', but without conses.
+    ;; Each opening brace in it is not the brace of a brace list."
+    (define (c-no-bracelist-cache)
+      (buffer-local-value (current-buffer) 'c-no-bracelist-cache '()))
+    (define (set!c-no-bracelist-cache value)
+      (set-buffer-local-value! (current-buffer) 'c-no-bracelist-cache value))
+
+    (define (c-strip-conses liszt)
+      ;; "Make a copy of the list LISZT, removing conses from the copy.
+      ;; Return the result."
+      (let ((ptr liszt)
+            (new '()))
+        (let loop ()
+          (when (pair? ptr)
+            (when (not (pair? (car ptr)))
+              (set! new (cons (car ptr) new)))
+            (set! ptr (cdr ptr))
+            (loop)))
+        (reverse new)))
+
+    (define (c-at-bracelist-p containing-sexp paren-state)
+      ;; "Try to return the buffer position of the beginning of the brace
+      ;; list statement whose brace block begins at CONTAINING-SEXP,
+      ;; otherwise return nil.  If the code cannot determine whether we're
+      ;; at a brace block, return nil. ..."
+      (save-excursion
+        (let ((bufpos #t)
+              (next-containing #f)
+              (non-brace-pos #f)
+              (whole-paren-state (cons containing-sexp paren-state))
+              (current-brace containing-sexp))
+          (let loop ()
+            (when (and (eq? bufpos #t)
+                       current-brace
+                       (not (memv current-brace (c-no-bracelist-cache))))
+              (set! next-containing
+                    (and paren-state
+                         (let ((pull (c-pull-open-brace paren-state)))
+                           (set! paren-state (cdr pull))
+                           (car pull))))
+              (goto-char current-brace)
+              (cond
+               ((c-looking-at-inexpr-block next-containing next-containing)
+                ;; "We're in an in-expression block of some kind.  Do not
+                ;; check nesting. ..."
+                (set! bufpos #f))
+               ((not (eqv? (char-after (point)) #\{))
+                (set! non-brace-pos (point))
+                (set! bufpos #f))
+               ((eq? (begin
+                       (set! bufpos (c-looking-at-or-maybe-in-bracelist
+                                     next-containing next-containing))
+                       bufpos)
+                     #t)
+                (set! current-brace next-containing)))
+              (loop)))
+          (cond
+           ((pair? bufpos)
+            (and (not (eq? (cdr bufpos) 'in-paren))
+                 (car bufpos)))
+           (non-brace-pos
+            ;; "We've encountered a ( or a [.  Remove the \"middle part\"
+            ;; of paren-state, the part that isn't non-brace-list braces,
+            ;; to get the new value of `c-no-bracelist-cache'."
+            (set! whole-paren-state
+                  ;; "`c-whack-state-before' makes a copy of
+                  ;; `whole-paren-state'."
+                  (c-whack-state-before (1+ non-brace-pos) whole-paren-state))
+            (let loop ()
+              (when (and next-containing
+                         (not (memv next-containing (c-no-bracelist-cache))))
+                (let ((pull (c-pull-open-brace paren-state)))
+                  (set! next-containing (car pull))
+                  (set! paren-state (cdr pull)))
+                (loop)))
+            (set!c-no-bracelist-cache
+             (nconc (c-strip-conses whole-paren-state)
+                    (and next-containing (list next-containing))
+                    paren-state))
+            #f)
+           ((not (memv containing-sexp (c-no-bracelist-cache)))
+            ;; "Update `c-no-bracelist-cache'"
+            (set!c-no-bracelist-cache (c-strip-conses whole-paren-state))
+            #f)
+           ;; Emacs's `cond' answers nil with no matching clause.
+           (else #f)))))
 ))

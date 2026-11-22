@@ -58,8 +58,13 @@
     (only (schemacs editor keyboard)
           *last-nonmenu-event* *last-read-event*)
     ;; `use-dialog-box` and `use-file-dialog` are `fns.c`'s switches;
-    ;; `use-dialog-box-override` is `subr.el`'s.
-    (only (schemacs editor fns) *use-dialog-box* use-file-dialog)
+    ;; `use-dialog-box-override` is `subr.el`'s. `mapconcat` and
+    ;; `identity` are `fns.c`'s too, and `save-some-buffers` reads both.
+    (only (schemacs editor fns) *use-dialog-box* use-file-dialog
+          mapconcat identity)
+    ;; `funcall` is `eval.c`'s; `save-some-buffers` calls it over
+    ;; `save-some-buffers-functions`.
+    (only (schemacs editor eval) funcall)
     ;; The display hole the graphical chooser is reached through; its
     ;; Gtk method is `(schemacs ui gtk pgtk)`'s.
     (only (schemacs editor dispnew) x-file-dialog window-system-display?)

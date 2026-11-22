@@ -25,7 +25,7 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor buffer) allocate-buffer set-buffer current-buffer
        buffer-local-value set-buffer-local-value!)
- (only (schemacs editor editfns) insert goto-char point delete-region
+ (only (schemacs editor editfns) insert goto-char point delete-region save-excursion
        point-min point-max buffer-substring-no-properties char-after
        char-before narrow-to-region widen)
  (only (schemacs editor syntax) set-syntax-table)
@@ -1692,6 +1692,9 @@
     (set-buffer-local-value! b 'major-mode 'c++-mode)
     (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
     (c-init-language-vars c++-mode)
+    ;; As `c-basic-common-init' does in a real mode buffer: several of
+    ;; the declaration functions read the type hash.
+    (c-clear-found-types)
     (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
     (c-make-macro-with-semi-re)
     (parameterize ((*c-buffer-is-cc-mode* 'c++-mode))
@@ -1704,6 +1707,7 @@
     (set-buffer-local-value! b 'major-mode 'c-mode)
     (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
     (c-init-language-vars c-mode)
+    (c-clear-found-types)
     (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
     (c-make-macro-with-semi-re)
     (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
@@ -1860,3 +1864,170 @@
                (list (c-after-special-operator-id) (point)))))
 
 (test-end "schemacs_editor_cc_engine_label_knr")
+
+(test-begin "schemacs_editor_cc_engine_bracelist")
+
+;; The bracelist machinery (`cc-engine.el:12966'-`:13582'): the
+;; enclosing-decl-block lookup, the typed-enum colon and header scans,
+;; the laomib cache loop, `c-looking-at-or-maybe-in-bracelist' and
+;; `c-at-bracelist-p'. Every expectation is Emacs 31.1's own answer,
+;; measured one probe per fresh buffer - cc-mode caches in text
+;; properties (`c-is-sws', `c-in-sws'), so a long-lived buffer is not
+;; Emacs's fresh answer.
+;;
+;; The fixture, for reading the positions:
+;;
+;;     line 1   1..28   "struct Point { int x, y; };"   newline 28
+;;     line 2  29..43   "Point p{1, 2};"                newline 43
+;;     line 3  44..65   "enum class E { A, B };"        newline 65
+;;     line 4  66..95   "enum struct F : int { C, D };" newline 95
+;;     line 5  96..113  "int a[] = {1, 2};"             newline 113
+
+(define bl-fixture
+  (string-append
+   "struct Point { int x, y; };\n"
+   "Point p{1, 2};\n"
+   "enum class E { A, B };\n"
+   "enum struct F : int { C, D };\n"
+   "int a[] = {1, 2};\n"))
+
+;; `c-looking-at-or-maybe-in-bracelist': `t' when point may be inside a
+;; bracelist, a cons (START . IN-PAREN) when it starts one, nil when it
+;; is neither.
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (let ((r (c-looking-at-or-maybe-in-bracelist)))
+        (test-equal (list 'lamib (car row)) (cadr row)
+                    (if (pair? r)
+                        (list (car r) (cdr r) (point))
+                        (list r (point))))))))
+ '((14 (#t 14))
+   (36 (29 #f 36))
+   (57 (44 #f 57))
+   (87 (#f 87))
+   (107 (97 #f 107))))
+
+;; `c-backward-typed-enum-colon' leaves point before the colon of a
+;; strongly-typed enum and answers t; on `enum class E' (no colon) it
+;; answers nil and stays.
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'enum-colon (car row)) (cadr row)
+                  (list (c-backward-typed-enum-colon) (point))))))
+ '((87 (#t 81))
+   (57 (#f 57))))
+
+;; `c-backward-over-enum-header' moves to the enum-like keyword and
+;; answers t, in both enum spellings.
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'enum-header (car row)) (cadr row)
+                  (list (c-backward-over-enum-header) (point))))))
+ '((87 (#t 67))
+   (57 (#t 44))))
+
+;; `c-at-enum-brace' answers the keyword's position.
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'enum-brace (car row)) (cadr row)
+                  (list (c-at-enum-brace) (point))))))
+ '((87 (67 87))
+   (57 (44 57))))
+
+;; `c-laomib-loop' walks back to the `='; from the `{' inside the
+;; initializer it leaves point before that brace.
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'laomib (car row)) (cadr row)
+                  (list (c-laomib-loop #f) (point))))))
+ '((107 (#t 102))
+   (106 (#t 102))
+   (14 (#f 1))))
+
+;; The enclosing declaration block.
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'mebd (car row)) (cadr row)
+                  (list (c-most-enclosing-decl-block (c-parse-state))
+                        (point))))))
+ '((20 (14 20))
+   (40 (#f 40))))
+
+;; `c-cheap-inside-bracelist-p' at the same positions.
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'cibp (car row)) (cadr row)
+                  (list (c-cheap-inside-bracelist-p (c-parse-state))
+                        (point))))))
+ '((20 (#f 20))
+   (40 (#f 40))))
+
+;; `c-at-bracelist-p' with the enclosing brace `c-parse-state' finds -
+;; Emacs's own harness shape, and the answers of the same shape in
+;; `tools/cc-decl-diff'.
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (let* ((paren-state (c-parse-state))
+             (brace (c-most-enclosing-brace paren-state)))
+        (test-equal (list 'at-bracelist (car row)) (cadr row)
+                    (list brace
+                          (and brace
+                               (save-excursion (goto-char brace)
+                                               (eqv? (char-after (point)) #\{))
+                               (c-at-bracelist-p brace paren-state))))))))
+ '((20 (14 #f))
+   (40 (36 35))
+   (60 (57 44))
+   (90 (87 #f))
+   (110 (107 97))))
+
+;; `c-strip-conses' drops the conses and keeps the atoms, in order.
+(lk-buffer-cpp "\n"
+ (lambda ()
+   (test-equal "c-strip-conses" '(1 6)
+               (c-strip-conses (list 1 (cons 2 3) (cons 4 5) 6)))))
+
+;; The declaration decision over the enum spellings. `enum class E'
+;; answers E (not `class') as the declarator: the `maybe-typeless'
+;; branch runs only when `at-type' is `maybe' or `found', and a
+;; `when'-as-value that answers the unspecified (true) value ran it for
+;; every type (see DEPARTURES.md).
+(for-each
+ (lambda (row)
+   (lk-buffer-cpp bl-fixture
+    (lambda ()
+      (goto-char (car row))
+      (test-equal (list 'decl (car row)) (cadr row)
+                  (list (c-forward-decl-or-cast-1
+                         (max (point-min) (- (point) 1)) 'top #f)
+                        (point))))))
+ '((1 ((8 (#t #f #f) #f 8 #t) 27))
+   (29 ((35 #f #f 29 #t) 36))
+   (67 ((79 (#t #f #f) #f 79 #t) 81))
+   (97 ((101 #f #f 97 #t) 105))))
+
+(test-end "schemacs_editor_cc_engine_bracelist")

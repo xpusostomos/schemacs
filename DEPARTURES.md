@@ -13600,3 +13600,112 @@ masked the departure in both directions; the fresh-buffer unit tests
   exposed the cast bug; a plain `int (*fp)(int, char);` had passed in
   the earlier fixtures because the `<>`/paren path never consulted
   `c-cast-parens`.
+
+# cc-mode: the bracelist machinery (2026-11-22)
+
+`cc-engine.scm` now carries `cc-engine.el:12966'-`:13582': the
+enclosing-decl-block lookup, the enum scans, the laomib cache and
+`c-looking-at-or-maybe-in-bracelist`/`c-at-bracelist-p`. The
+whole-input differential is 0 on all eight fixtures (100,672 answers);
+`cc-engine-tests.scm` gained the `schemacs_editor_cc_engine_bracelist`
+group (28 assertions, every expectation Emacs 31.1's on a fresh buffer
+per probe).
+
+## The five bugs this tranche found, and where each came from
+
+1. **`'|c-non-after-{}-ops-re|` is not the symbol Guile reads for
+   `c-non-after-{}-ops-re`.** Guile's default reader has no vertical-bar
+   symbol syntax (unlike R6RS): `|x|` reads as a symbol whose *name*
+   contains the bars. The bracelist function looked the constant up by
+   the bar-quoted spelling, got `#f`, and the branch's operator test was
+   `(not (looking-at #f))` - always true - so `{1, 2}` at the top level
+   of a C initializer was taken for a brace block and
+   `c-beginning-of-statement-1` answered `previous` where Emacs answers
+   `same` (the `i 74` line of `fixture-brace.c`). The `#{...}#` spelling
+   is Guile's (the tree already uses it in `cc-langs.scm`); the bars are
+   only how the dump printer would write the name.
+
+2. **A missing close, compensated elsewhere.** Our first port of
+   `c-looking-at-or-maybe-in-bracelist` was one `)` short inside the
+   `(cond ...)` of the `and (pair? res)` test: the `if`'s ELSE
+   `save-excursion` became a second form of the `begin`, the `(cons
+   bufpos ...)` became a third conjunct of the clause's `and`, and a
+   stray `#t)` at the end kept the file balanced. The function then
+   answered `(1 . #f)` at every `struct X {`. The tell was a structural
+   dump of the parsed form (the `and` had 3 conjuncts where the C has
+   2); the cure was rewriting the whole function from the C and
+   re-checking the parsed shape before splicing.
+
+3. **`c-backward-typed-enum-colon`'s `goto-char` was inside the
+   `save-excursion`.** Emacs's `(when colon-pos (goto-char colon-pos)
+   t)` is outside it; ours was inside, so the move was undone on the way
+   out and the function answered `t` with point unchanged - which
+   cascaded into `c-backward-over-enum-header`/`c-at-enum-brace`
+   failing on every strongly-typed enum (`fixture-brace.cpp`,
+   positions 213/239).
+
+4. **`(when (eq at-type 'found) ... t)` as the second operand of an
+   `or`.** In `c-forward-decl-or-cast-1`'s "try to skip over an
+   identifier" section the `maybe-typeless` branch runs only when
+   `at-type` is `maybe` or `found`; our `when` answered the unspecified
+   value (true) when it was neither, so the branch ran for every type,
+   set `at-type` to nil, and `enum class E { ... }` answered `class`
+   (175) as the declarator where Emacs answers `E` (181). This one was
+   **pre-existing** - `HEAD` has it too, and the new `fixture-brace.cpp`
+   is what exposed it; the enum-class case had no fixture before.
+
+5. **Two functions whose answers are *preconditions* for the
+   differential to be meaningful.** `c-looking-at-or-maybe-in-bracelist`
+   and `c-at-bracelist-p` each read `c-laomib-cache` and (in Emacs) the
+   `<>`-as-paren text properties, so the answers depend on what was
+   probed before them in the same buffer. The differential's long-lived
+   buffer is self-consistent (both sides see the same history); the
+   unit tests build a fresh buffer per row, which is Emacs's from-cold
+   answer.
+
+## The `maybe-typeless` truthiness rule, spelled out
+
+Emacs:
+
+```elisp
+(and maybe-typeless
+     (or (eq at-type 'maybe)
+         (when (eq at-type 'found)
+           ... t))
+     ...)
+```
+
+A Scheme `when` whose test fails answers the *unspecified* value, which
+`or` treats as true. The faithful translation is
+
+```scheme
+(or (eq? at-type 'maybe)
+    (if (eq? at-type 'found)
+        (begin ... #t)
+        #f))
+```
+
+This is the tree's oldest trap in its `or` spelling: whenever a `when`
+sits in a position where its *value* is read, it must be an `if` with
+an explicit `#f`.
+
+## Method notes
+
+- **The parsed shape is the check, not the paren count.** Two of the
+  five bugs above were balanced files with the wrong shape; a
+  structural dump (`cond` clause counts, `and` operand counts, body
+  heads) named both. The reader, the compiler and the suite's other
+  tests all passed on the mis-shaped function.
+- **A pre-existing difference must be established as pre-existing.**
+  `HEAD` in a scratch worktree answered 175 too; without that check the
+  c-fdoc bug would have been blamed on this tranche (or worse, guessed
+  at).
+- **A test helper must reproduce the mode's init, not just the syntax
+  table.** `c-found-types` is a buffer hash a real mode initialises;
+  without `(c-clear-found-types)` the test crashed inside `hash-ref` at
+  the first `Point p{` probe, which reads as a bracelist bug and is not
+  one. `c-basic-common-init` is the Emacs function that sets it.
+- **The `t`/`nil` of an Emacs-measured expectation must be rewritten as
+  `#t`/`#f`**, and a multi-value answer needs its wrapping list - both
+  are `srfi 64` traps this tree has recorded before, and both cost a
+  round here.

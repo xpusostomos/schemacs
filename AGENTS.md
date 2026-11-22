@@ -16229,3 +16229,77 @@ walkers, then `cc-fonts`, `cc-mode.el` (`easy-menu-define` is still the
 one missing primitive, plus a `def-edebug-spec` stub) and the first
 milestone: `.c`/`.h` opening in c-mode with the syntax table and faces
 compared to Emacs.
+
+# Handoff — cc-mode: the bracelist machinery (2026-11-22)
+
+The tranche the previous handoff named is in: `c-most-enclosing-decl-block`,
+`c-cheap-inside-bracelist-p`, `c-backward-typed-enum-colon`,
+`c-backward-over-enum-header`, `c-at-enum-brace`, `c-laomib-loop` with
+its cache family, `c-looking-at-or-maybe-in-bracelist`,
+`c-no-bracelist-cache`, `c-strip-conses` and `c-at-bracelist-p`
+(`cc-engine.el:12966'-`:13582'`), plus `butlast` (`subr.el`, in
+`subr.scm`). DEPARTURES.md's 2026-11-22 section has the C and the five
+bugs in full.
+
+## Verified
+
+- **0 differences on all eight fixtures** with 35 probes at every
+  position: the C fixture (11,880 answers), the old C++ fixture
+  (20,064), `fixture-decl.cpp` (26,048), `fixture-label.c` (6,952),
+  `fixture-knr.c` (9,504), `fixture-qt.cpp` (4,708), the new
+  `fixture-brace.c` (10,472) and the new `fixture-brace.cpp` (11,044) -
+  100,672 in all. `tools/cc-decl-diff/README.md` has the eight
+  commands and the precondition rule.
+- The six cc suites pass; `cc-engine-tests` is 534 (the new
+  `schemacs_editor_cc_engine_bracelist` group has 28 assertions, every
+  expectation Emacs 31.1's on a fresh buffer per probe - cc-mode
+  caches in text properties). `python3 tools/pty-check.py imports
+  scratch` passes. `imports.scm` regenerated.
+
+## The five bugs, in one line each (read DEPARTURES for the C)
+
+1. **`'|c-non-after-{}-ops-re|` is not the symbol.** Guile's default
+   reader has no `|...|` symbol syntax; `|x|` names a symbol with bars
+   in it. The lookup got `#f`, `(not (looking-at #f))` was always
+   true, and `{1, 2}` read as a brace block - the `i 74` line of
+   `fixture-brace.c`. Use `#{...}#`.
+2. **`c-looking-at-or-maybe-in-bracelist` was one `)` short**, with a
+   stray close keeping the file balanced: the `if`'s ELSE became a
+   second `begin` form and the `(cons bufpos ...)` became a third
+   conjunct of the `and`. Rewritten whole from the C, then
+   structure-checked before splicing.
+3. **`c-backward-typed-enum-colon`'s `goto-char` was inside its
+   `save-excursion`** - Emacs's is outside. It answered `t` without
+   moving, so every strongly-typed enum failed.
+4. **`(when (eq at-type 'found) ... t)` in a value position** of
+   `c-forward-decl-or-cast-1`'s `maybe-typeless` branch: the
+   unspecified value is true, the branch ran for every type, and
+   `enum class E` answered `class` as the declarator. **Pre-existing**
+   - `HEAD` has it; the new C++ brace fixture is what exposed it.
+5. **The test helper must reproduce the mode's init**: without
+   `(c-clear-found-types)` the suite died in `hash-ref` at the first
+   `Point p{` - a test harness gap, not a cc-mode bug.
+
+## Before touching it
+
+- **The parsed shape is the check.** Two of the five were balanced
+  files with the wrong shape; a structural dump (cond clause counts,
+  `and` operand counts) named both. The reader and the compiler passed
+  on them.
+- **A pre-existing difference must be shown pre-existing**: `HEAD` in
+  a scratch worktree answered 175 too.
+- **Compile after every edit before believing a diff**, and remember
+  `--no-auto-compile` still loads a stale `.go` - clear
+  `~/.cache/guile/ccache` when a record changes.
+- The differential's long-lived buffer is self-consistent but not
+  Emacs's fresh answer; unit tests build a fresh buffer per probe.
+
+## Next, in cc-engine.el's order
+
+The declaration-property and syntax machinery between the bracelist
+tranche and `cc-fonts`: `c-at-vsemi-p`'s neighbours, the `c-parse-state`
+consumers that remain, then `cc-fonts.el` (whose matchers can now use
+`c-keyword-member` and the bracelist functions), `cc-mode.el`
+(`easy-menu-define` is still the one missing primitive, plus a
+`def-edebug-spec` stub) and the first milestone: `.c`/`.h` opening in
+c-mode with the syntax table and faces compared to Emacs.

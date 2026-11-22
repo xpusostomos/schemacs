@@ -55,7 +55,27 @@
                    ("i" (lambda () (c-beginning-of-decl-1)))
                    ("j" (lambda () (c-end-of-decl-1)))
                    ("k" (lambda () (c-forward-decl-or-cast-1
-                                    (c-point 'bosws) 'top nil)))))
+                                    (c-point 'bosws) 'top nil)))
+                   ("m" (lambda () (c-most-enclosing-decl-block (c-parse-state))))
+                   ("n" (lambda () (c-cheap-inside-bracelist-p (c-parse-state))))
+                   ("o" (lambda () (and (eq (char-after) ?{)
+                                        (c-backward-typed-enum-colon))))
+                   ("p" (lambda () (and (eq (char-after) ?{)
+                                        (c-backward-over-enum-header))))
+                   ("q" (lambda () (and (eq (char-after) ?{)
+                                        (c-at-enum-brace))))
+                   ("r" (lambda () (c-laomib-loop nil)))
+                   ("s" (lambda () (and (eq (char-after) ?{)
+                                        (c-looking-at-or-maybe-in-bracelist))))
+                   ("t" (lambda ()
+                          (let ((paren-state (c-parse-state)))
+                            (let ((brace (c-most-enclosing-brace paren-state)))
+                              (and brace
+                                   (save-excursion
+                                     (goto-char brace)
+                                     (eq (char-after) ?{))
+                                   (c-at-bracelist-p brace paren-state))))))
+                   ("u" (lambda () (c-strip-conses (c-parse-state))))))
           (let* ((tag (car spec))
                  (r (probe pos (cadr spec))))
             (setq out (cons (format "%s %d %s %d" tag pos

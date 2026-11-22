@@ -1100,6 +1100,7 @@
     bufferp
     build-marker
     bury-buffer
+    butlast
     byte8-to-char
     bytes-have-null?
     c--delete-duplicates
@@ -1117,6 +1118,8 @@
     c-alpha
     c-append-lower-brace-pair-to-state-cache
     c-append-to-state-cache
+    c-at-bracelist-p
+    c-at-enum-brace
     c-at-expression-start-p
     c-at-macro-vsemi-p
     c-at-statement-start-p
@@ -1128,6 +1131,7 @@
     c-back-over-member-initializers
     c-backward-<>-arglist
     c-backward-comments
+    c-backward-over-enum-header
     c-backward-over-lambda-expression
     c-backward-sexp
     c-backward-single-comment
@@ -1137,6 +1141,7 @@
     c-backward-to-decl-anchor
     c-backward-token-1
     c-backward-token-2
+    c-backward-typed-enum-colon
     c-beginning-of-current-token
     c-beginning-of-decl-1
     c-beginning-of-defun-1
@@ -1148,6 +1153,7 @@
     c-cache-to-parse-ps-state
     c-calculate-state
     c-characterp
+    c-cheap-inside-bracelist-p
     c-check-qualified-type
     c-check-type
     c-clear-c-type-property
@@ -1272,6 +1278,12 @@
     c-lang-set-local!
     c-lang-setvar
     c-lang-var-value
+    c-laomib-cache
+    c-laomib-fix-elt
+    c-laomib-get-cache
+    c-laomib-invalidate-cache
+    c-laomib-loop
+    c-laomib-put-cache
     c-least-enclosing-brace
     c-lit-pos-cache
     c-lit-pos-cache-limit
@@ -1284,6 +1296,7 @@
     c-looking-at-c++-lambda-expression
     c-looking-at-decl-block
     c-looking-at-inexpr-block
+    c-looking-at-or-maybe-in-bracelist
     c-looking-at-special-brace-list
     c-looking-at-statement-block
     c-looking-at-statement-block-1
@@ -1311,10 +1324,12 @@
     c-mode-var
     c-mode-var-boundp
     c-most-enclosing-brace
+    c-most-enclosing-decl-block
     c-new-id-end
     c-new-id-is-type
     c-new-id-start
     c-next-single-property-change
+    c-no-bracelist-cache
     c-no-comment-end-of-macro
     c-noise-macro-name-re
     c-noise-macro-with-parens-name-re
@@ -1399,6 +1414,7 @@
     c-string-limit-regexp
     c-string-list-p
     c-string-syntax
+    c-strip-conses
     c-suppress-<->-as-parens
     c-sws-lit-limits
     c-sws-lit-type
@@ -3511,6 +3527,7 @@
     set!c-full-lit-near-cache
     set!c-full-near-cache-limit
     set!c-hungry-delete-key
+    set!c-laomib-cache
     set!c-lit-pos-cache
     set!c-lit-pos-cache-limit
     set!c-macro-cache
@@ -3522,6 +3539,7 @@
     set!c-new-id-end
     set!c-new-id-is-type
     set!c-new-id-start
+    set!c-no-bracelist-cache
     set!c-noise-macro-name-re
     set!c-noise-macro-with-parens-name-re
     set!c-parsing-error

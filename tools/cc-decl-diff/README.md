@@ -1,7 +1,7 @@
 # The cc-engine differential
 
 Compares the ported tranches of `schemacs/editor/cc-engine.scm` with
-Emacs 31.1 at every position of five fixtures.
+Emacs 31.1 at every position of seven fixtures.
 
     # C++ (the older fixture, the requires/lambda one), in C++ mode
     emacs -Q --batch -l tools/cc-decl-diff/emacs-decl.el \
@@ -38,6 +38,17 @@ Emacs 31.1 at every position of five fixtures.
     guile --no-auto-compile -L . -L "${XDG_DATA_HOME:-$HOME/.local/share}/guile/site/3.0" \
         -s tools/cc-decl-diff/ours-decl.scm ours-qt.cpp.out tools/cc-decl-diff/fixture-qt.cpp
 
+    # brace lists and enums, both languages
+    emacs -Q --batch -l tools/cc-decl-diff/emacs-decl-c.el \
+        emacs-brace.c.out tools/cc-decl-diff/fixture-brace.c
+    guile --no-auto-compile -L . -L "${XDG_DATA_HOME:-$HOME/.local/share}/guile/site/3.0" \
+        -s tools/cc-decl-diff/ours-decl-c.scm ours-brace.c.out tools/cc-decl-diff/fixture-brace.c
+
+    emacs -Q --batch -l tools/cc-decl-diff/emacs-decl.el \
+        emacs-brace.cpp.out tools/cc-decl-diff/fixture-brace.cpp
+    guile --no-auto-compile -L . -L "${XDG_DATA_HOME:-$HOME/.local/share}/guile/site/3.0" \
+        -s tools/cc-decl-diff/ours-decl.scm ours-brace.cpp.out tools/cc-decl-diff/fixture-brace.cpp
+
 Thirty-five probes per position, `c-found-types` cleared before each:
 the eleven declarator probes (`c-forward-declarator` with no arguments
 and with `(point-max) t t`, `c-forward-decl-arglist` with both argument
@@ -61,7 +72,13 @@ from the label/K&R tranche: `c-forward-label`, `c-in-knr-argdecl`,
 `c-beginning-of-decl-1` and `c-end-of-decl-1` - plus
 `c-forward-decl-or-cast-1` again with PRECEDING-TOKEN-END
 `(c-point 'bosws)`, which is the call `c-just-after-func-arglist-p`
-makes.
+makes - and nine from the bracelist tranche, the enum probes guarded on
+a `{` as their docstrings require: `c-most-enclosing-decl-block`,
+`c-cheap-inside-bracelist-p`, `c-backward-typed-enum-colon`,
+`c-backward-over-enum-header`, `c-at-enum-brace`, `c-laomib-loop`,
+`c-looking-at-or-maybe-in-bracelist`, `c-strip-conses` (of
+`(c-parse-state)`) and `c-at-bracelist-p` at the brace
+`c-most-enclosing-brace` finds.
 
 **The probes whose functions document a precondition are guarded on
 it**, on both sides and in the same way: `c-looking-at-statement-
@@ -85,11 +102,12 @@ Each line is `TAG POS RESULT POINT`. The dumps agree **byte for byte**
 with no normalisation: the Scheme printer renders `#t` as `t`, `#f` and
 `'()` as `nil`, characters as their code points, and a cons whose cdr is
 `#f` as Elisp's proper list (`(cons 'same #f)` prints `(same)`), which
-is how Elisp's `prin1` renders them. Current result: all six fixtures
-identical - 9,450 answers for the C fixture, 15,960 for the old C++
-fixture, 20,720 for `fixture-decl.cpp`, 5,530 for `fixture-label.c`,
-7,560 for `fixture-knr.c` and 3,745 for `fixture-qt.cpp`, 62,965 in
-all.
+is how Elisp's `prin1` renders them. Current result: all eight
+fixtures identical - 11,880 answers for the C fixture, 20,064 for the
+old C++ fixture, 26,048 for `fixture-decl.cpp`, 6,952 for
+`fixture-label.c`, 9,504 for `fixture-knr.c`, 4,708 for
+`fixture-qt.cpp`, 10,472 for `fixture-brace.c` and 11,044 for
+`fixture-brace.cpp`, 100,672 in all.
 
 **A test that probes one long-lived buffer is not measuring this.**
 cc-mode caches in text properties (`c-is-sws`, `c-in-sws`, the

@@ -93,6 +93,7 @@
   (export
    user-error
    assoc-delete-all assq-delete-all delq remq remove copy-tree last
+   butlast
    add-to-history add-to-list
    ;; string/list helpers `subr.el`'s, for the external packages and
    ;; anything else written in Emacs's idiom
@@ -1516,6 +1517,25 @@
                    (if (< n m) (nthcdr (- m n) list) list)))
             (and (pair? list)
                  (nthcdr (- (length list) 1) list)))))
+
+    (define (butlast list . n-args)
+      ;; GNU Emacs's `butlast' (`subr.el:900'): "Return a copy of LIST
+      ;; with the last N elements removed. If N is omitted or nil, return
+      ;; a copy of LIST without its last element. If N is zero or
+      ;; negative, return LIST."
+      ;;
+      ;; Emacs's body is `(take (- (length list) n) list)', and `take' is
+      ;; seq.el's; the copy is written out here rather than importing a
+      ;; second library for four lines.
+      (let ((n (if (pair? n-args) (car n-args) #f)))
+        (unless n (set! n 1))
+        (if (<= n 0)
+            list
+            (let ((k (- (length list) n)))
+              (let loop ((l list) (k k) (acc '()))
+                (if (or (<= k 0) (null? l))
+                    (reverse acc)
+                    (loop (cdr l) (- k 1) (cons (car l) acc))))))))
 
     (define (copy-tree tree . rest)
       ;; GNU Emacs's `copy-tree' (`subr.el:1002'): "Make a copy of TREE.

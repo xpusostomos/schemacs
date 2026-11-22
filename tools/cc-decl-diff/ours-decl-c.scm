@@ -122,7 +122,27 @@
                (cons "i" (lambda () (c-beginning-of-decl-1)))
                (cons "j" (lambda () (c-end-of-decl-1)))
                (cons "k" (lambda () (c-forward-decl-or-cast-1
-                                     (c-point 'bosws) 'top #f)))))
+                                     (c-point 'bosws) 'top #f)))
+               (cons "m" (lambda () (c-most-enclosing-decl-block (c-parse-state))))
+               (cons "n" (lambda () (c-cheap-inside-bracelist-p (c-parse-state))))
+               (cons "o" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (c-backward-typed-enum-colon))))
+               (cons "p" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (c-backward-over-enum-header))))
+               (cons "q" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (c-at-enum-brace))))
+               (cons "r" (lambda () (c-laomib-loop #f)))
+               (cons "s" (lambda () (and (eqv? (char-after (point)) #\{)
+                                         (c-looking-at-or-maybe-in-bracelist))))
+               (cons "t" (lambda ()
+                           (let ((paren-state (c-parse-state)))
+                             (let ((brace (c-most-enclosing-brace paren-state)))
+                               (and brace
+                                    (save-excursion
+                                      (goto-char brace)
+                                      (eqv? (char-after (point)) #\{))
+                                    (c-at-bracelist-p brace paren-state))))))
+               (cons "u" (lambda () (c-strip-conses (c-parse-state))))))
         (loop (+ pos 1))))))
 
 (call-with-output-file (cadr (command-line))
