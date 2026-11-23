@@ -243,6 +243,9 @@
    %c-langvar
    c-get-ml-closer c-ml-string-opener-around-point
    c-maybe-re-mark-ml-string c-propertize-ml-string-id c-propertize-ml-string-opener
+   c-clear-syntax-table-properties-trim-caches
+   c-depropertize-ml-string-delims c-ml-string-opener-intersects-region
+   c-ml-string-delims-around-point c-position-wrt-ml-delims
    c-find-decl-syntactic-pos set!c-find-decl-syntactic-pos
    c-find-decl-match-pos set!c-find-decl-match-pos
    c-invalidate-find-decl-cache c-debug-put-decl-spot-faces
@@ -2543,6 +2546,14 @@
       ;; from the first position, if any, where a property was removed."
       (let ((first (c-clear-char-property-with-value-on-char
                     from to 'syntax-table value char)))
+        (when first
+          (c-truncate-lit-pos/state-cache first))))
+
+    (define (c-clear-syntax-table-properties-trim-caches from to)
+      ;; "Remove all occurrences of the 'syntax-table property in (FROM
+      ;; TO) and invalidate the four caches from the first position from
+      ;; which the property was removed, if any."
+      (let ((first (c-clear-char-properties from to 'syntax-table)))
         (when first
           (c-truncate-lit-pos/state-cache first))))
 
@@ -14079,6 +14090,16 @@
     ;; check-ml-strings' and `c-after-change-unmark-ml-strings') waits on
     ;; `cc-mode.el''s change hooks, which are not ported.
 
+    (define (c-depropertize-ml-string-delims string-delims)
+      ;; "Remove any syntax-table text properties from the multi-line
+      ;; string delimiters specified by STRING-DELIMS, the output of
+      ;; `c-ml-string-delims-around-point'."
+      (c-clear-syntax-table-properties-trim-caches
+       (car (car string-delims)) (car (cdr (car string-delims))))
+      (when (cdr string-delims)
+        (c-clear-syntax-table-properties-trim-caches
+         (car (cdr string-delims)) (car (cdr (cdr string-delims))))))
+
     (define (c-get-ml-closer open-delim)
       ;; "Return the closer, a three element dotted list of the closer's
       ;; start, its end and the position of the double quote, matching the
@@ -14156,6 +14177,178 @@
                  (cons (match-beginning 1)
                        (cons (match-end 1) (match-beginning 2))))
           (goto-char here))))
+
+    (define (c-ml-string-opener-intersects-region . args)
+      ;; "If any part of the region [START FINISH] is inside an ml-string
+      ;; opener, return a dotted list of the start, end and double-quote
+      ;; position of the first such opener. ... Both START and FINISH
+      ;; default to point. FINISH may not be at an earlier buffer
+      ;; position than START."
+      (let ((start (if (pair? args) (car args) #f))
+            (finish (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+            (here (point))
+            (found #f))
+        (unless finish (set! finish (point)))
+        (unless start (set! start (point)))
+        (goto-char (max (- start (- (%c-langvar 'c-ml-string-max-opener-len) 1))
+                        (point-min)))
+        (let loop ()
+          (when (begin
+                  (set! found (re-search-forward
+                               (%c-langvar 'c-ml-string-opener-re)
+                               (min (+ finish
+                                       (- (%c-langvar 'c-ml-string-max-opener-len) 1))
+                                    (point-max))
+                               'bound))
+                  (and found (<= (match-end 1) start)))
+            (loop)))
+        (prog1
+            (and found
+                 (< (match-beginning 1) finish)
+                 (cons (match-beginning 1)
+                       (cons (match-end 1) (match-beginning 2))))
+          (goto-char here))))
+
+    (define (c-ml-string-delims-around-point)
+      ;; "Get POINT's relationship to any containing multi-line string or
+      ;; such a multi-line string which point is at the end of. ...
+      ;; Return ... (OPENER . CLOSER), where each of OPENER and CLOSER is
+      ;; a dotted list of the form (START-DELIM END-DELIM .
+      ;; QUOTE-POSITION). ... If the ml-string is not validly terminated,
+      ;; CLOSER is instead nil."
+      (let ((here (point))
+            (state (c-semi-pp-to-literal (point)))
+            (open-dlist #f) (close-dlist #f) (ret #f) (found #f) (opener #f))
+        (cond
+         ((or
+           ;; "Is HERE between the start of an opener and the \"?"
+           (and (or (not (%c-cadr state)) (null? (%c-cadr state)))
+                (begin
+                  ;; "Search for the start of the opener."
+                  (goto-char (max (- (point)
+                                     (- (%c-langvar 'c-ml-string-max-opener-len) 1))
+                                  (point-min)))
+                  (set! found #f)
+                  ;; "In the next loop, skip over any complete ml strings,
+                  ;; or an ml string opener which is in a macro not
+                  ;; containing HERE, or an apparent \"opener\" which is
+                  ;; in a comment or string."
+                  (let loop ()
+                    (when (and
+                            ;; Emacs's first conjunct is the search
+                            ;; itself, so a failed search ends the loop
+                            ;; before the stale match data is read.
+                            (re-search-forward
+                             (%c-langvar 'c-ml-string-opener-re)
+                             (+ here
+                                (- (%c-langvar 'c-ml-string-max-opener-len) 1))
+                             #t)
+                            (< (match-beginning 1) here)
+                            (or
+                                  (save-excursion
+                                    (goto-char (match-beginning 1))
+                                    (or (c-in-literal)
+                                        (and (c-beginning-of-macro)
+                                             (begin
+                                               (c-end-of-macro)
+                                               (< (point) here)))))
+                                  (and
+                                   (begin
+                                     (set! found (match-beginning 1))
+                                     found)
+                                   (<= (point) here)
+                                   (save-match-data
+                                     (re-search-forward
+                                      ((%c-lang-function
+                                        (%c-langvar 'c-make-ml-string-closer-re-function))
+                                       (match-string-no-properties 1))
+                                      here #t))
+                                   (<= (point) here))))
+                      (set! found #f)
+                      (loop)))
+                  found))
+           ;; "Is HERE after the \"?"
+           (and (eq? (%c-cadr state) 'string)
+                (goto-char (%c-caddr state))
+                (c-ml-string-opener-at-or-around-point)))
+          (set! open-dlist (cons (match-beginning 1)
+                                 (cons (match-end 1) (match-beginning 2))))
+          (goto-char (car (cdr open-dlist)))
+          (set! ret
+                (cons open-dlist
+                      (if (re-search-forward
+                           ((%c-lang-function
+                             (%c-langvar 'c-make-ml-string-closer-re-function))
+                            (match-string-no-properties 1))
+                           #f #t)
+                          (cons (match-beginning 1)
+                                (cons (match-end 1) (match-beginning 2)))
+                          #f)))
+          (goto-char here)
+          ret)
+         ;; "Is HERE between the \" and the end of the closer?"
+         ((and (or (not (%c-cadr state)) (null? (%c-cadr state)))
+               (begin
+                 (if (not (%c-langvar 'c-ml-string-back-closer-re))
+                     (goto-char (max (- here
+                                        (- (%c-langvar 'c-ml-string-max-closer-len) 1))
+                                     (point-min)))
+                     (begin
+                       (goto-char here)
+                       (re-search-backward
+                        (%c-langvar 'c-ml-string-back-closer-re) #f #t)))
+                 (re-search-forward
+                  (%c-langvar 'c-ml-string-any-closer-re)
+                  (+ here -1 (%c-langvar 'c-ml-string-max-closer-len-no-leader))
+                  #t))
+               (>= (match-end 1) here)
+               (<= (match-end 2) here)
+               (begin
+                 (set! close-dlist (cons (match-beginning 1)
+                                         (cons (match-end 1) (match-beginning 2))))
+                 #t)
+               (goto-char (car close-dlist))
+               (begin
+                 (set! state (c-semi-pp-to-literal (point)))
+                 #t)
+               (eq? (%c-cadr state) 'string)
+               (goto-char (%c-caddr state))
+               (begin
+                 (set! opener (c-ml-string-opener-around-point))
+                 #t)
+               (goto-char (car (cdr opener)))
+               (begin
+                 (set! open-dlist (cons (match-beginning 1)
+                                        (cons (match-end 1) (match-beginning 2))))
+                 #t)
+               (re-search-forward
+                ((%c-lang-function
+                  (%c-langvar 'c-make-ml-string-closer-re-function))
+                 (match-string-no-properties 1))
+                #f #t))
+          (goto-char here)
+          (cons open-dlist close-dlist))
+         (else
+          (goto-char here)
+          #f))))
+
+    (define (c-position-wrt-ml-delims ml-string-delims)
+      ;; "Given ML-STRING-DELIMS, a structure produced by
+      ;; `c-ml-string-delims-around-point' called at point, return one of
+      ;; the following indicating where POINT is with respect to the
+      ;; multi-line string: nil (not in the string); open-delim; 
+      ;; close-delim; after-close; string."
+      (cond
+       ((or (not ml-string-delims) (null? ml-string-delims))
+        #f)
+       ((< (point) (car (cdr (car ml-string-delims))))
+        'open-delim)
+       ((or (not (cdr ml-string-delims)) (null? (cdr ml-string-delims))
+            (<= (point) (car (cdr ml-string-delims))))
+        'string)
+       ((eqv? (point) (car (cdr (cdr ml-string-delims))))
+        'after-close)
+       (else 'close-delim)))
 
 ;;----------------------------------------------------------------------
 ;; The indentation analysis (`cc-engine.el:14252'-`:14764')

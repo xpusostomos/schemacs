@@ -17394,10 +17394,20 @@ it, as that library's header explains.
    differential. Its `(search-forward ... 'limit)` exposed the
    NOERROR rule now fixed in `search.scm` (point moves to the limit for
    any non-nil NOERROR but `t`).
-   Next: the ml-string change machinery
-   (`c-before-change-check-ml-strings`,
-   `c-after-change-unmark-ml-strings`, `c-depropertize-ml-string` -
-   `cc-engine.el:8260`-`:8460`), then `c-depropertize-CPP`,
+   **Half the ml-string machinery is in** (`cc-engine.el:7549`-`:7862`:
+   `c-depropertize-ml-string-delims`, `c-ml-string-opener-intersects-region`,
+   `c-ml-string-delims-around-point`, `c-position-wrt-ml-delims`, and the
+   `c-clear-syntax-table-properties-trim-caches` wrapper; group
+   `schemacs_editor_cc_engine_ml_delims`, 8). Two traps are in
+   DEPARTURES.md: `(null? #f)` is false (use `(or (not X) (null? X))`),
+   and a while's *search conjunct* must not be stored in the loop
+   variable or a failed search re-reads stale match data and spins.
+   Next: `c-before-change-check-ml-strings`,
+   `c-after-change-unmark-ml-strings` (needs a seam for
+   `c-clear-syn-tab-properties`, since `c-clear-syn-tab` and the
+   markers live in cc-mode, above cc-engine), `c-depropertize-ml-string`,
+   `c-depropertize-ml-strings-in-region`,
+   `c-before-after-change-check-c++-modules`, then `c-depropertize-CPP`,
    `c-neutralize-syntax-in-CPP`, `c-change-expand-fl-region`,
    `c-called-from-text-property-change-p`, and
    `c-before-change`/`c-after-change` themselves.

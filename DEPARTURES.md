@@ -15671,3 +15671,68 @@ family, `cc-engine.el:8260`-`:8460`), `c-depropertize-CPP`,
 `c-neutralize-syntax-in-CPP`, `c-extend-font-lock-region-for-macros`,
 `c-change-expand-fl-region`, `c-called-from-text-property-change-p`,
 then the two change functions themselves and the mode definitions.
+
+# cc-mode: the ml-string delimiter machinery, first half (2026-11-24)
+
+The foundation of `cc-engine.el`'s multi-line-string change machinery is
+in: `c-clear-syntax-table-properties-trim-caches` (the one
+`*-trim-caches` wrapper the earlier passes had not needed),
+`c-depropertize-ml-string-delims`, `c-ml-string-opener-intersects-region`,
+`c-ml-string-delims-around-point` and `c-position-wrt-ml-delims`.
+
+## Two translation traps this found
+
+Both are the `'()`-truthiness class, and both were caught by the
+all-position differential against a C++ raw string:
+
+1. **`(null (cadr state))` when `cadr` is `#f`.** `c-semi-pp-to-literal`
+   answers a one-element list outside a literal, so Emacs's `cadr` is
+   nil and `(null ...)` is true. Ours uses `%c-cadr`, which answers
+   `#f`, and `(null? #f)` is false - so the "between the opener's start
+   and the quote" arm never fired. The tests are `(or (not X) (null? X))`
+   now (same for `(cdr ml-string-delims)` when the closer is nil).
+2. **A search's value stored in a loop variable.** The
+   `delims-around-point` walk is
+
+       (while (and (re-search-forward OPENER-RE BOUND t)
+                   (< (match-beginning 1) here)
+                   (or ... (and (setq found (match-beginning 1)) ...)))
+         (setq found nil))
+
+   - the first conjunct is the *search itself*, and its nil-ness must
+   short-circuit or the stale match data from an earlier iteration is
+   re-read. Written as `(begin (set! found (re-search-forward ...))
+   (and (< (match-beginning 1) here) ...))` the search's result is
+   discarded, stale match data passes the test, and the loop spins
+   forever after the last opener - a hang, not a wrong answer. It is
+   `(and (re-search-forward ...) (< ...) (or ...))` now.
+
+## Verification
+
+One fixture (`auto s = R"delim(abc)delim";`), both sides wiped of the
+mode's initial properties and then run through
+`c-maybe-re-mark-ml-string` at the same position: `c-ml-string-delims-around-point`
+answers `((10 18 . 11) 21 28 . 27)` from positions 11 through 27 -
+`open-delim` in the opener, `string` inside, `close-delim` in the
+closer, `after-close` at 28, nil outside - and
+`c-ml-string-opener-intersects-region` answers `(10 18 . 11)` for the
+whole buffer and for [13,15], all identical to Emacs.
+
+`cc-engine-test.scm`'s `schemacs_editor_cc_engine_ml_delims` group pins
+eight rows.
+
+**Note for the next session**: Emacs's `c++.mode` initialisation
+propertizes raw strings itself; this tree's does not yet, so any
+differential must create the same starting state explicitly (the tests
+do). The propertization for this fixture is *empty* - nothing in
+`R"delim(...` needs marking - which is correct and was confusing at
+first.
+
+## What is left of the ml-string machinery
+
+`c-before-change-check-ml-strings`,
+`c-after-change-unmark-ml-strings` (which needs
+`c-clear-syn-tab-properties`, and so a seam to cc-mode's
+`c-clear-syn-tab`/the two markers), `c-depropertize-ml-string`,
+`c-depropertize-ml-strings-in-region` and
+`c-before-after-change-check-c++-modules`.

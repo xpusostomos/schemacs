@@ -33,7 +33,7 @@
  (only (schemacs search) looking-at)
  (only (schemacs textprop) get-text-property text-property-any)
  (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*
-       c-skip-ws-chars-forward c-skip-ws-chars-backward)
+       c-skip-ws-chars-forward c-skip-ws-chars-backward c-clear-char-property)
  (only (schemacs cmds) beginning-of-line)
  (schemacs progmodes cc-langs)
  (schemacs progmodes cc-vars)
@@ -2280,3 +2280,52 @@
                (c-get-syntactic-indentation '((statement 38))))))
 
 (test-end "schemacs_editor_cc_engine_offsets")
+
+
+;;--------------------------------------------------------------
+;; The multi-line string delimiter machinery (`cc-engine.el:7549'-`:7862')
+;;--------------------------------------------------------------
+;; Emacs 31.1's answers on a C++ raw string, measured with the same
+;; calls (`/tmp/ml-em.el'); the mode's own initial propertization was
+;; wiped on the Emacs side and is absent here, then both call
+;; `c-maybe-re-mark-ml-string' at the same position.
+(test-begin "schemacs_editor_cc_engine_ml_delims")
+
+(define (cpp-raw-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "auto s = R\"delim(abc)delim\";\nint b;\n")
+    (set-buffer-local-value! b 'major-mode 'c++-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (c-init-language-vars c++-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+    (let loop ((p 1))
+      (when (<= p (1- (point-max)))
+        (c-clear-char-property p 'syntax-table)
+        (c-clear-char-property p 'c-fl-syn-tab)
+        (loop (+ p 1))))
+    (goto-char 12)
+    (c-maybe-re-mark-ml-string)
+    (thunk)))
+
+(cpp-raw-buffer
+ (lambda ()
+   (define (delims-at p) (goto-char p) (c-ml-string-delims-around-point))
+   (test-equal "inside the opener the delimiters are found"
+     '((10 18 . 11) 21 28 . 27) (delims-at 11))
+   (test-equal "... and point is in the opener"
+     'open-delim (c-position-wrt-ml-delims (delims-at 12)))
+   (test-equal "inside the string"
+     'string (c-position-wrt-ml-delims (delims-at 18)))
+   (test-equal "in the closer"
+     'close-delim (c-position-wrt-ml-delims (delims-at 25)))
+   (test-equal "just after the closer"
+     'after-close (c-position-wrt-ml-delims (delims-at 28)))
+   (test-equal "outside the string nothing is found"
+     #f (delims-at 9))
+   (test-equal "an opener intersecting the region is reported"
+     '(10 18 . 11) (c-ml-string-opener-intersects-region 1 (point-max)))
+   (test-equal "... for an inner region too"
+     '(10 18 . 11) (c-ml-string-opener-intersects-region 13 15))))
+
+(test-end "schemacs_editor_cc_engine_ml_delims")

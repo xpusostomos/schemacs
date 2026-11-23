@@ -1306,6 +1306,7 @@
     c-clear-found-types
     c-clear-string-fences
     c-clear-syn-tab
+    c-clear-syntax-table-properties-trim-caches
     c-clear-syntax-table-trim-caches
     c-clear-syntax-table-with-value-on-char-trim-caches
     c-clear-syntax-table-with-value-trim-caches
@@ -1328,6 +1329,7 @@
     c-delete-backslashes-forward
     c-delete-overlay
     c-delq-from-dotted-list
+    c-depropertize-ml-string-delims
     c-determine-+ve-limit
     c-determine-limit
     c-determine-limit-get-base
@@ -1631,9 +1633,11 @@
     c-maybe-stale-found-type
     c-min-property-position
     c-min-syn-tab-mkr
+    c-ml-string-delims-around-point
     c-ml-string-make-closer-re
     c-ml-string-opener-around-point
     c-ml-string-opener-at-or-around-point
+    c-ml-string-opener-intersects-region
     c-mode-symbol
     c-mode-var
     c-mode-var-boundp
@@ -1667,6 +1671,7 @@
     c-parsing-error
     c-partial-ws-p
     c-point
+    c-position-wrt-ml-delims
     c-pps-to-string-delim
     c-preprocessor-face-name
     c-previous-single-property-change
