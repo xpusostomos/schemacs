@@ -1659,6 +1659,8 @@
     c-override-default-keywords
     c-parse-ps-state-below
     c-parse-ps-state-to-cache
+    c-parse-quotes-after-change
+    c-parse-quotes-before-change
     c-parse-state
     c-parse-state-1
     c-parse-state-get-strategy
@@ -1693,6 +1695,9 @@
     c-put-syntax-table-trim-caches
     c-query-and-set-macro-start
     c-query-macro-start
+    c-quoted-number-head-before-point
+    c-quoted-number-straddling-point
+    c-quoted-number-tail-after-point
     c-re-redisplay-timer
     c-read-offset
     c-read-offset-history

@@ -17,7 +17,9 @@
   ;; (`c-unescaped-nls-in-string-p',
   ;; `c-multiline-string-start-is-being-detached',
   ;; `c-pps-to-string-delim', `c-bc-changed-stringiness' and
-  ;; `c-open-string-opener').
+  ;; `c-open-string-opener'), the `#include' bracket and comment-escape
+  ;; pairs, and the quote parsing (`c-quoted-number-*' and
+  ;; `c-parse-quotes-before/after-change').
   ;;
   ;; **Not carried yet**, and the reason this library is partial:
   ;;
@@ -26,11 +28,7 @@
   ;;     `c-depropertize-ml-string' family). The propertization itself
   ;;     (`c-maybe-re-mark-ml-string') is in cc-engine and is what
   ;;     `c-after-change-mark-abnormal-strings' calls for C++;
-  ;;   * the quote parsing (`c-quoted-number-*', `c-parse-quotes-before-change',
-  ;;     `c-parse-quotes-after-change');
   ;;   * `c-depropertize-CPP', `c-neutralize-syntax-in-CPP',
-  ;;     `c-before/after-change-fix-comment-escapes',
-  ;;     `c-before/after-change-include-<>',
   ;;     `c-extend-font-lock-region-for-macros',
   ;;     `c-change-expand-fl-region', and `c-called-from-text-property-change-p';
   ;;   * `c-before-change' and `c-after-change' themselves, which call
@@ -51,16 +49,16 @@
     (only (guile) logand caddr while)
     (only (schemacs core syntax-macros) when-e while-e setq)
     (only (schemacs buffer) current-buffer buffer-local-value
-          set-buffer-local-value!)
+          set-buffer-local-value! *case-fold-search*)
     (only (schemacs marker) copy-marker set-marker marker-position)
     (only (schemacs editfns) point point-max point-min goto-char
           bobp eobp char-before char-after buffer-substring-no-properties
           save-excursion forward-line narrow-to-region save-restriction)
     (only (schemacs search) looking-at match-end match-beginning
           re-search-forward search-forward save-match-data)
-    (only (schemacs syntax) skip-syntax-backward skip-chars-backward
+    (only (schemacs syntax) skip-syntax-backward skip-chars-backward skip-chars-forward
           parse-partial-sexp)
-    (only (schemacs cmds) backward-char forward-char end-of-line)
+    (only (schemacs cmds) backward-char forward-char end-of-line beginning-of-line)
     (only (schemacs progmodes cc-defs)
           c-search-forward-non-nil-char-property
           c-search-forward-char-property c-search-backward-char-property
@@ -69,6 +67,8 @@
           c-search-backward-char-property-with-value-on-char
           c-clear-char-property c-get-char-property c-put-char-property
           c-clear-char-properties c-clear-char-property-with-value
+          c-clear-char-property-with-value-on-char
+          c-put-char-properties-on-char
           c-min-property-position c-next-single-property-change
           c-previous-single-property-change
           c-<-as-paren-syntax c->-as-paren-syntax
@@ -96,6 +96,8 @@
           c-maybe-re-mark-ml-string
           c-truncate-lit-pos/state-cache
           c-put-syntax-table-trim-caches c-clear-syntax-table-trim-caches
+          c-clear-syntax-table-with-value-on-char-trim-caches
+          c-put-syntax-table-properties-on-char-trim-caches
           c-put-string-fence-trim-caches
           ;; The buffer-local flags already live in cc-engine (a named
           ;; placement there, because the found-type table reads them).
@@ -123,6 +125,9 @@
    c-after-change-escape-NL-in-string
    c-before-change-include-<> c-after-change-include-<>
    c-before-change-fix-comment-escapes c-after-change-fix-comment-escapes
+   c-quoted-number-head-before-point c-quoted-number-tail-after-point
+   c-quoted-number-straddling-point
+   c-parse-quotes-before-change c-parse-quotes-after-change
    c-bc-changed-stringiness set!c-bc-changed-stringiness
    c-open-string-opener set!c-open-string-opener)
 
@@ -876,6 +881,212 @@
                  'syntax-table '(15) #\" lim)
             (c-remove-string-fences end)
             (c-remove-string-fences (- (point) 1))))))
+
+    ;; ---------------------------------------------------------------
+    ;; The quote parsing (`cc-mode.el:1785'-`:2020')
+    ;;--------------------------------------------------------------
+    ;; "Valid digit separators in numbers will get the syntax-table
+    ;; "punctuation" property, '(1), and also the text property
+    ;; `c-digit-separator' value t." The three regexps are `defconst's in
+    ;; Emacs - plain variables here.
+    (define c-maybe-quoted-number-head
+      "\\(0\\([Xx]\\([[:xdigit:]]\\('?[[:xdigit:]]\\)*\\)?\\|[Bb]\\([01]\\('?[01]\\)*\\)?\\|\\('?[0-7]\\)*\\)\\|[1-9]\\('?[0-9]\\)*\\)")
+
+    (define (c-quoted-number-head-before-point)
+      ;; "Return non-nil when the head of a possibly quoted number is
+      ;; found immediately before point. The value returned in this case
+      ;; is the buffer position of the start of the head. That position
+      ;; is also in (match-beginning 0)."
+      (when-e (%c-true (%c-langvar 'c-has-quoted-numbers))
+        (save-excursion
+          (let ((here (point))
+                (found #f))
+            (skip-chars-backward "[:xdigit:]'")
+            (if (and (memv (char-before) (list #\x #\X))
+                     (eqv? (char-before (- (point) 1)) #\0))
+                (backward-char 2))
+            (let loop ()
+              (when (begin
+                      (set! found
+                            (re-search-forward c-maybe-quoted-number-head here #t))
+                      (and found (< found here)))
+                (loop)))
+            (and (eqv? found here) (match-beginning 0))))))
+
+    (define c-maybe-quoted-number-tail
+      "\\(\\([xX']?[[:xdigit:]]\\('?[[:xdigit:]]\\)*\\)\\|\\([bB']?[01]\\('?[01]\\)*\\)\\|\\('?[0-9]\\)+\\)")
+
+    (define (c-quoted-number-tail-after-point)
+      ;; "Return non-nil when a proper tail of a possibly quoted number
+      ;; is found immediately after point. The value returned in this
+      ;; case is the buffer position of the end of the tail. That
+      ;; position is also in (match-end 0)."
+      (when-e (%c-true (%c-langvar 'c-has-quoted-numbers))
+        (and (looking-at c-maybe-quoted-number-tail)
+             (match-end 0))))
+
+    (define c-maybe-quoted-number
+      "\\(0\\(\\([Xx][[:xdigit:]]\\('?[[:xdigit:]]\\)*\\)\\|\\([Bb][01]\\('?[01]\\)*\\)\\|\\('?[0-7]\\)*\\)\\|[1-9]\\('?[0-9]\\)*\\)")
+
+    (define (c-quoted-number-straddling-point)
+      ;; "Return non-nil if a definitely quoted number starts before
+      ;; point and ends after point. In this case the number is bounded
+      ;; by (match-beginning 0) and (match-end 0)."
+      (when-e (%c-true (%c-langvar 'c-has-quoted-numbers))
+        (save-excursion
+          (let ((here (point))
+                (bound (begin (skip-chars-forward "[:xdigit:]'") (point))))
+            (goto-char here)
+            (when-e (< (skip-chars-backward "[:xdigit:]'") 0)
+              (if (and (memv (char-before) (list #\x #\X))
+                       (eqv? (char-before (- (point) 1)) #\0))
+                  (backward-char 2))
+              (let loop ()
+                (when (and (re-search-forward c-maybe-quoted-number bound #t)
+                           (<= (match-end 0) here))
+                  (loop)))
+              (and (< (match-beginning 0) here)
+                   (> (match-end 0) here)
+                   (save-match-data
+                     (goto-char (match-beginning 0))
+                     (save-excursion
+                       (search-forward "'" (match-end 0) #t)))))))))
+
+    (define (c-parse-quotes-before-change beg end)
+      ;; "This function analyzes 's near the region (c-new-BEG
+      ;; c-new-END), amending those two variables as needed to include
+      ;; 's into that region when they might be syntactically relevant to
+      ;; the change in progress.
+      ;;
+      ;; Having amended that region, the function removes pertinent text
+      ;; properties (syntax-table properties with value '(1) and
+      ;; c-digit-separator props with value t) from 's in it. This
+      ;; operation is performed even within strings and comments."
+      ;;
+      ;; BEG and END are unused, as in Emacs.
+      (parameterize ((*case-fold-search* #f))
+        (c-save-buffer-state ()
+          (goto-char (c-new-BEG))
+          ;; "We need to scan for 's from the BO (logical) line."
+          (beginning-of-line)
+          (let lines ()
+            (when (eqv? (char-before (- (point) 1)) #\\)
+              (beginning-of-line 0)
+              (lines)))
+          (while (and (< (point) (c-new-BEG))
+                      (search-forward "'" (c-new-BEG) #t))
+            (cond
+             ((c-quoted-number-straddling-point)
+              (goto-char (match-end 0))
+              (if (> (match-end 0) (c-new-BEG))
+                  (set!c-new-BEG (match-beginning 0))))
+             ((c-quoted-number-head-before-point)
+              (if (>= (point) (c-new-BEG))
+                  (set!c-new-BEG (match-beginning 0))))
+             ((looking-at "\\([^'\\]\\|\\\\\\([0-7]\\{1,3\\}\\|[xuU][[:xdigit:]]+\\|.\\)\\)'")
+              (goto-char (match-end 0))
+              (if (> (match-end 0) (c-new-BEG))
+                  (set!c-new-BEG (- (match-beginning 0) 1))))
+             ((looking-at "\\\\'")
+              (set!c-new-BEG (min (c-new-BEG) (- (point) 1)))
+              (goto-char (match-end 0)))
+             ((save-excursion
+                (not (search-forward "'" (c-new-BEG) #t)))
+              (set!c-new-BEG (min (c-new-BEG) (- (point) 1))))
+             (else #f)))
+
+          (goto-char (c-new-END))
+          ;; "We will scan from the BO (logical) line."
+          (beginning-of-line)
+          (let lines ()
+            (when (eqv? (char-before (- (point) 1)) #\\)
+              (beginning-of-line 0)
+              (lines)))
+          (while (and (< (point) (c-new-END))
+                      (search-forward "'" (c-new-END) #t))
+            (cond
+             ((c-quoted-number-straddling-point)
+              (goto-char (match-end 0))
+              (if (> (match-end 0) (c-new-END))
+                  (set!c-new-END (match-end 0))))
+             ((c-quoted-number-tail-after-point)
+              (goto-char (match-end 0))
+              (if (> (match-end 0) (c-new-END))
+                  (set!c-new-END (match-end 0))))
+             ((looking-at "\\([^'\\]\\|\\\\\\([0-7]\\{1,3\\}\\|[xuU][[:xdigit:]]+\\|.\\)\\)'")
+              (goto-char (match-end 0))
+              (if (> (match-end 0) (c-new-END))
+                  (set!c-new-END (match-end 0))))
+             ((looking-at "\\\\'")
+              (goto-char (match-end 0))
+              (set!c-new-END (max (c-new-END) (point))))
+             ((equal? (c-get-char-property (- (point) 1) 'syntax-table) '(1))
+              (when (c-search-forward-char-property-with-value-on-char
+                     'syntax-table '(1) #\' (c-point 'eoll))
+                (set!c-new-END (max (point) (c-new-END)))))
+             (else #f)))
+
+          ;; "Having reached c-new-END, handle any 's after it whose
+          ;; context may be changed by the current buffer change. The
+          ;; idea is to catch monstrosities like ',',',',',' changing
+          ;; "polarity"."
+          (goto-char (c-new-END))
+          (cond
+           ((c-quoted-number-tail-after-point)
+            (set!c-new-END (match-end 0)))
+           ((looking-at "\\(\\\\\\([0-7]\\{1,3\\}\\|[xuU][[:xdigit:]]+\\|.\\)\\|.\\)?\\('\\([^'\\]\\|\\\\\\([0-7]\\{1,3\\}\\|[xuU][[:xdigit:]]+\\|.\\)\\)\\)*'")
+            (set!c-new-END (match-end 0))))
+
+          ;; "Remove the '(1) syntax-table property from any \"'\"s
+          ;; within (c-new-BEG c-new-END)."
+          (goto-char (c-new-BEG))
+          (when (c-search-forward-char-property-with-value-on-char
+                 'syntax-table '(1) #\' (c-new-END))
+            (c-clear-syntax-table-with-value-on-char-trim-caches
+             (- (point) 1) (c-new-END) '(1) #\')
+            ;; "Remove the c-digit-separator text property from the same
+            ;; \"'\"s."
+            (when (%c-true (%c-langvar 'c-has-quoted-numbers))
+              (c-clear-char-property-with-value-on-char
+               (- (point) 1) (c-new-END)
+               'c-digit-separator #t #\'))))))
+
+    (define (c-parse-quotes-after-change beg end old-len)
+      ;; "This function applies syntax-table properties (value '(1)) and
+      ;; c-digit-separator properties as needed to 's within the range
+      ;; (c-new-BEG c-new-END). This operation is performed even within
+      ;; strings and comments."
+      (parameterize ((*case-fold-search* #f))
+        (c-save-buffer-state
+            ((num-beg #f) (num-end #f))
+          ;; "Apply the needed syntax-table and c-digit-separator text
+          ;; properties to quotes."
+          (save-restriction
+            (goto-char (c-new-BEG))
+            (while (and (< (point) (c-new-END))
+                        (search-forward "'" (c-new-END) 'limit))
+              (cond
+               ((c-is-escaped (- (point) 1))
+                #t)                         ; "not a real '."
+               ((c-quoted-number-straddling-point)
+                (set! num-beg (match-beginning 0))
+                (set! num-end (match-end 0))
+                (c-put-syntax-table-properties-on-char-trim-caches
+                 num-beg num-end '(1) #\')
+                (c-put-char-properties-on-char num-beg num-end
+                                               'c-digit-separator #t #\')
+                (goto-char num-end))
+               ((looking-at "\\([^\\']\\|\\\\\\([0-7]\\{1,3\\}\\|[xuU][[:xdigit:]]+\\|.\\)\\)'")         ; "balanced quoted expression"
+                (goto-char (match-end 0)))
+               ((looking-at "\\\\'")        ; "Anomalous construct"
+                (c-truncate-lit-pos/state-cache (- (point) 1))
+                (c-put-syntax-table-properties-on-char-trim-caches
+                 (- (point) 1) (+ (point) 2) '(1) #\'))
+               (else
+                (c-put-syntax-table-trim-caches (- (point) 1) '(1))))
+              ;; "Prevent the next `c-quoted-number-straddling-point'
+              ;; getting confused by already processed single quotes."
+              (narrow-to-region (point) (point-max)))))))
 
     ;; ---------------------------------------------------------------
     ;; `c-before-change-include-<>' and `c-after-change-include-<>'

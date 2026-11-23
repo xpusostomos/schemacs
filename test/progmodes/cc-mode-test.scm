@@ -22,17 +22,20 @@
  (only (schemacs buffer) allocate-buffer set-buffer current-buffer buffer-local-value
        set-buffer-local-value! buffer-z)
  (only (schemacs editfns) insert goto-char point point-min point-max)
+ (only (schemacs search) match-beginning match-end)
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs marker) marker-position)
  (only (schemacs textprop) get-text-property)
  (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*
-       c-clear-char-property c-mark-<-as-paren c-mark->-as-paren)
+       c-clear-char-property c-mark-<-as-paren c-mark->-as-paren
+       c-clear-char-property-with-value-on-char)
  (schemacs progmodes cc-langs)
  (only (schemacs progmodes cc-styles) c-set-style)
  (only (schemacs progmodes cc-engine) c-found-types c-add-type-1 c-clear-found-types
        c-new-id-start c-new-id-end c-new-id-is-type
        c-new-BEG set!c-new-BEG c-new-END set!c-new-END
-       c-put-syntax-table-trim-caches)
+       c-put-syntax-table-trim-caches
+       c-clear-syntax-table-with-value-on-char-trim-caches)
  (only (schemacs progmodes cc-mode)
        c-unfind-enclosing-token c-unfind-coalesced-tokens c-update-new-id
        c-put-syn-tab c-clear-syn-tab c-clear-string-fences
@@ -44,7 +47,10 @@
        c-after-change-escape-NL-in-string
        c-open-string-opener
        c-before-change-include-<> c-after-change-include-<>
-       c-before-change-fix-comment-escapes c-after-change-fix-comment-escapes))
+       c-before-change-fix-comment-escapes c-after-change-fix-comment-escapes
+       c-quoted-number-head-before-point c-quoted-number-tail-after-point
+       c-quoted-number-straddling-point
+       c-parse-quotes-before-change c-parse-quotes-after-change))
 
 (test-begin "schemacs_editor_cc_mode")
 
@@ -380,3 +386,72 @@
 (test-equal "before the change it is cleared again" '() (fences))
 
 (test-end "schemacs_editor_cc_mode_include_comment_escapes")
+
+
+;;--------------------------------------------------------------
+;; The quote parsing (`cc-mode.el:1785'-`:2020')
+;;--------------------------------------------------------------
+;; Every expectation is Emacs 31.1's. The query functions were
+;; differentialled at every position of the fixture to build these rows.
+(test-begin "schemacs_editor_cc_mode_quotes")
+
+(define quote-fixture
+  "int a = 4'294'967'295;\nint h = 0x1'2'3;\nint b = 1'2;\nchar c = 'x'; char d = '\\n'; int e = 1;\n")
+
+(define (quote-row at)
+  ;; The five values of one position: straddling (flag, start, end),
+  ;; the tail after point, and the head before point.
+  (goto-char at)
+  (let ((st (c-quoted-number-straddling-point)))
+    (list (if st #t #f)
+          (and st (match-beginning 0))
+          (and st (match-end 0))
+          (c-quoted-number-tail-after-point)
+          (c-quoted-number-head-before-point))))
+
+(define (quote-props)
+  (let loop ((p 1) (acc '()))
+    (if (> p (point-max)) (reverse acc)
+        (let ((st (get-text-property p 'syntax-table))
+              (ds (get-text-property p 'c-digit-separator)))
+          (if (or st ds)
+              (loop (+ p 1) (cons (list p st ds) acc))
+              (loop (+ p 1) acc))))))
+
+(fresh quote-fixture)
+(test-equal "on a digit separator the number straddles point"
+  '(#t 9 22 22 9) (quote-row 10))
+(test-equal "inside a quoted run the straddled number is the same"
+  '(#t 9 22 22 9) (quote-row 12))
+(test-equal "on a number's first digit nothing straddles"
+  '(#f #f #f 22 #f) (quote-row 9))
+(test-equal "a hex number quoted the same way"
+  '(#t 32 39 39 32) (quote-row 35))
+(test-equal "a two-digit quoted number"
+  '(#t 49 52 52 49) (quote-row 50))
+(test-equal "... and just after its separator no head precedes it"
+  '(#t 49 52 52 #f) (quote-row 51))
+(test-equal "a character literal is not a quoted number"
+  '(#f #f #f #f #f) (quote-row 58))
+
+;; The after-change parse marks every separator and nothing else.
+(fresh quote-fixture)
+(c-clear-syntax-table-with-value-on-char-trim-caches 1 (point-max) '(1) #\')
+(c-clear-char-property-with-value-on-char 1 (point-max) 'c-digit-separator #t #\')
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-parse-quotes-after-change 1 (point-max) 0)
+(test-equal "after a change the separators are punctuation and digit separators"
+  (list (list 10 '(1) #t) (list 14 '(1) #t) (list 18 '(1) #t)
+        (list 35 '(1) #t) (list 37 '(1) #t) (list 50 '(1) #t))
+  (quote-props))
+(test-equal "... and the region is unchanged" (list 1 94)
+  (list (c-new-BEG) (c-new-END)))
+
+;; The before-change parse strips them again.
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-parse-quotes-before-change 1 (point-max))
+(test-equal "before a change the properties are removed" '() (quote-props))
+(test-equal "... and the region is unchanged" (list 1 94)
+  (list (c-new-BEG) (c-new-END)))
+
+(test-end "schemacs_editor_cc_mode_quotes")

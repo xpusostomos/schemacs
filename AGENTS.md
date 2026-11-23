@@ -17388,13 +17388,19 @@ it, as that library's header explains.
    `schemacs_editor_cc_mode_include_comment_escapes` (9). The dumps
    differ only where Emacs's mode initialisation has already marked
    things, which this tree has no counterpart for yet.
-   Next: the quote parsing (`c-quoted-number-*`,
-   `c-parse-quotes-before/after-change`), the ml-string change
-   machinery (`c-before-change-check-ml-strings`,
-   `c-after-change-unmark-ml-strings`, `c-depropertize-ml-string`),
-   then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`,
-   `c-change-expand-fl-region`, `c-called-from-text-property-change-p`,
-   and `c-before-change`/`c-after-change` themselves.
+   **The quote parsing is in too** (`c-quoted-number-*`,
+   `c-parse-quotes-before/after-change`; the group is
+   `schemacs_editor_cc_mode_quotes`, 11), verified by an all-position
+   differential. Its `(search-forward ... 'limit)` exposed the
+   NOERROR rule now fixed in `search.scm` (point moves to the limit for
+   any non-nil NOERROR but `t`).
+   Next: the ml-string change machinery
+   (`c-before-change-check-ml-strings`,
+   `c-after-change-unmark-ml-strings`, `c-depropertize-ml-string` -
+   `cc-engine.el:8260`-`:8460`), then `c-depropertize-CPP`,
+   `c-neutralize-syntax-in-CPP`, `c-change-expand-fl-region`,
+   `c-called-from-text-property-change-p`, and
+   `c-before-change`/`c-after-change` themselves.
 2. Then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`, the
    comment-escape pair, `c-parse-quotes-after-change`,
    `c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,

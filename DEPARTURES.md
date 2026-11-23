@@ -15616,3 +15616,58 @@ already had the distinction, the string pair did not. Fixed in
 point at 1/6, `'limit` moves it to 7/2 on the same fixture). The change
 only affects callers that pass something other than `#t`/`#f`; cc-mode's
 `'limit`/`'bound` arms are the ones that do.
+
+# cc-mode: the quote parsing (2026-11-24)
+
+`cc-mode.el:1785`-`:2020` is in: `c-quoted-number-head-before-point`,
+`-tail-after-point`, `-straddling-point`, `c-parse-quotes-before-change`
+and `c-parse-quotes-after-change`, with the three `defconst` regexps
+(`c-maybe-quoted-number-head`, `-tail`, and `-number`). A digit
+separator inside a number (`4'294'967'295`) gets the `'(1)` punctuation
+`syntax-table` property and `c-digit-separator t`; a `'` that is not
+part of a quoted number or a balanced character literal gets `'(1)`
+too.
+
+## Representation notes
+
+- The three regexps are `defconst`s in Emacs and plain variables here;
+  their literals are byte-for-byte Emacs 31.1's, extracted with a hex
+  dump rather than retyped (the `[:xdigit:]` classes and the
+  alternation's backslash depth make transcription slips invisible).
+- `(c-save-buffer-state (case-fold-search) ...)` binds a *special*
+  variable to nil: it is `(parameterize ((*case-fold-search* #f)) ...)`
+  wrapped around the `c-save-buffer-state` body here, because the
+  macro's binding list is a `let*` and cannot bind a parameter.
+- The query functions answer with `when-e`, not `when`: their answers
+  are cond tests in the parse functions, and Scheme's `when` on the
+  failing arm answers the unspecified value, which is true.
+- `(search-forward "'" c-new-END 'limit)` relies on the NOERROR rule
+  fixed in `search.scm` in the same pass (see the note above).
+- Both parse functions bind `case-fold-search` nil because the regexps
+  must not fold; the buffer-local parameter form is the same.
+
+## Verification
+
+Both levels:
+
+- The three query functions were differentialled at **every position**
+  of a fixture with `4'294'967'295`, `0x1'2'3`, `1'2`, `'x'`, `'\n'`
+  and a plain number - 94 positions, five values each, identical to
+  Emacs 31.1.
+- `c-parse-quotes-after-change` over the whole buffer marks exactly
+  positions 10/14/18, 35/37 and 50 with `(1)`/`c-digit-separator t`,
+  and nothing inside the character literals; `c-parse-quotes-before-
+  change` then removes every property it put there. Both match.
+
+`cc-mode-test.scm`'s `schemacs_editor_cc_mode_quotes` group pins seven
+query rows (chosen from the all-position table) and both parse
+directions (11 assertions; 67 in the file).
+
+## What is left before `c-before-change`/`c-after-change`
+
+The ml-string change machinery (`c-before-change-check-ml-strings`,
+`c-after-change-unmark-ml-strings` and the `c-depropertize-ml-string`
+family, `cc-engine.el:8260`-`:8460`), `c-depropertize-CPP`,
+`c-neutralize-syntax-in-CPP`, `c-extend-font-lock-region-for-macros`,
+`c-change-expand-fl-region`, `c-called-from-text-property-change-p`,
+then the two change functions themselves and the mode definitions.
