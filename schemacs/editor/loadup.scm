@@ -141,6 +141,7 @@
         (schemacs editor casefiddle)
         (schemacs editor casetab)
         (schemacs editor category)
+        (schemacs editor cc-align)
         (schemacs editor cc-defs)
         (schemacs editor cc-engine)
         (schemacs editor cc-fonts)

@@ -67,6 +67,7 @@
     (schemacs editor cc-engine)
     (schemacs editor cc-defs)
     (schemacs editor cc-langs)
+    (schemacs editor cc-align)
     (schemacs editor cc-vars)
     (schemacs editor cc-fonts)
     (schemacs editor cc-styles)
@@ -129,7 +130,7 @@
     (schemacs editor select)
     (schemacs editor seq)
     (schemacs editor help)
-    (except (schemacs editor syntax)  word-char? forward-word-position backward-word-position word-run-end word-run-start)
+    (except (schemacs editor syntax)  word-char? forward-word forward-word-position backward-word-position word-run-end word-run-start)
     (schemacs editor tab-bar)
     (schemacs editor tab-line)
     (schemacs editor tabulated-list)
@@ -299,6 +300,9 @@
     *c-maybe-labelp*
     *c-noise-macro-names*
     *c-noise-macro-with-parens-names*
+    *c-objc-method-arg-min-delta-to-bracket*
+    *c-objc-method-arg-unfinished-offset*
+    *c-objc-method-parameter-offset*
     *c-offsets-alist*
     *c-old-style-variable-behavior*
     *c-parse-and-markup-<>-arglists*
@@ -376,6 +380,7 @@
     *confirm-kill-emacs*
     *confirm-kill-processes*
     *confirm-nonexistent-file-or-buffer*
+    *constrain-to-field-function*
     *current-buffer*
     *current-editor-function*
     *current-frame*
@@ -476,6 +481,7 @@
     *fill-separate-heterogeneous-words-with-space*
     *find-directory-functions*
     *find-file-run-dired*
+    *find-word-boundary-function-table*
     *font-lock-comment-end-skip*
     *font-lock-comment-start-skip*
     *font-lock-defaults*
@@ -1036,6 +1042,7 @@
     backward-up-list
     backward-word
     backward-word-position
+    backward-word-strictly
     balance-an-interval
     balance-intervals
     balance-possible-root-interval
@@ -1220,6 +1227,7 @@
     c-benign-error
     c-block-comment-flag
     c-block-comment-prefix
+    c-block-in-arglist-dwim
     c-brace-anchor-point
     c-brace-stack-at
     c-bs-at-toplevel-p
@@ -1385,6 +1393,7 @@
     c-get-offset
     c-get-style-variables
     c-get-syntactic-indentation
+    c-gnu-impose-minimum
     c-go-down-list-backward
     c-go-down-list-forward
     c-go-list-backward
@@ -1398,6 +1407,7 @@
     c-hanging-colons-alist
     c-hanging-semi&comma-criteria
     c-hungry-delete-key
+    c-in-gcc-asm-p
     c-in-id-arglist
     c-in-knr-argdecl
     c-in-literal
@@ -1405,10 +1415,13 @@
     c-in-requires-or-at-end-of-clause
     c-indent-comment-alist
     c-indent-comments-syntactically-p
+    c-indent-multi-line-block
+    c-indent-one-line-block
     c-indentation-style
     c-init-bs-cache
     c-init-language-vars
     c-initialize-builtin-style
+    c-inside-block-syms
     c-int-to-char
     c-intersect-lists
     c-invalidate-find-decl-cache
@@ -1452,8 +1465,52 @@
     c-laomib-invalidate-cache
     c-laomib-loop
     c-laomib-put-cache
+    c-last-command-char
     c-least-enclosing-brace
+    c-lineup-2nd-brace-entry-in-arglist
+    c-lineup-C-comments
+    c-lineup-ObjC-method-args
+    c-lineup-ObjC-method-args-2
+    c-lineup-ObjC-method-call
+    c-lineup-ObjC-method-call-colons
+    c-lineup-after-whitesmith-blocks
+    c-lineup-argcont
+    c-lineup-argcont-+
+    c-lineup-argcont-1
+    c-lineup-argcont-scan
+    c-lineup-arglist
+    c-lineup-arglist-close-under-paren
+    c-lineup-arglist-intro-after-paren
+    c-lineup-arglist-operators
+    c-lineup-assignments
+    c-lineup-cascaded-calls
+    c-lineup-class-decl-init-+
+    c-lineup-class-decl-init-after-brace
+    c-lineup-class-field-cont
+    c-lineup-close-paren
+    c-lineup-comment
+    c-lineup-cpp-define
+    c-lineup-dont-change
     c-lineup-function
+    c-lineup-gcc-asm-reg
+    c-lineup-gnu-DEFUN-intro-cont
+    c-lineup-inexpr-block
+    c-lineup-item-after-paren-at-boi
+    c-lineup-java-inher
+    c-lineup-java-throws
+    c-lineup-knr-region-comment
+    c-lineup-math
+    c-lineup-multi-inher
+    c-lineup-respect-col-0
+    c-lineup-runin-statements
+    c-lineup-streamop
+    c-lineup-string-cont
+    c-lineup-template-args
+    c-lineup-template-args-indented-from-margin
+    c-lineup-ternary-bodies
+    c-lineup-topmost-intro-cont
+    c-lineup-under-anchor
+    c-lineup-whitesmith-in-block
     c-list-found-types
     c-lit-pos-cache
     c-lit-pos-cache-limit
@@ -1559,6 +1616,7 @@
     c-reference-face-name
     c-register-emacs-variable-reader!
     c-register-lineup-function!
+    c-register-offset-function-name!
     c-remove-font-lock-face
     c-remove-in-sws
     c-remove-is-and-in-sws
@@ -1580,6 +1638,9 @@
     c-search-forward-char-property-without-value-on-char
     c-search-forward-non-nil-char-property
     c-search-uplist-for-classkey
+    c-semi&comma-inside-parenlist
+    c-semi&comma-no-newlines-before-nonblanks
+    c-semi&comma-no-newlines-for-oneline-inliners
     c-semi-get-near-cache-entry
     c-semi-lit-near-cache
     c-semi-near-cache-limit
@@ -1606,6 +1667,8 @@
     c-skip-ws-chars-backward
     c-skip-ws-chars-forward
     c-skip-ws-forward
+    c-snug-1line-defun-close
+    c-snug-do-while
     c-special-indent-hook
     c-state-balance-parens-backwards
     c-state-brace-pair-desert
@@ -2490,6 +2553,7 @@
     forward-sexp-default-function
     forward-word
     forward-word-position
+    forward-word-strictly
     frame-change-stamp
     frame-char-height
     frame-char-size

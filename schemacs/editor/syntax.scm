@@ -41,10 +41,11 @@
   ;;     INTERVALS_AT_ONCE lookahead are the C's, and `%syntax-entry-in'
   ;;     applies the `UPDATE_SYNTAX_TABLE' pair where the C's loops do it
   ;;     by hand, so that a lookup can never be made without it.
-  ;;   * `word_boundary_p' (`syntax.c:1425') answers false always: it
-  ;;     compares `char-script-table' entries, and this tree has no
-  ;;     Unicode script table. Two characters of different scripts are
-  ;;     therefore one word here where Emacs splits them.
+  ;;   * `word_boundary_p' (`syntax.c:1425') is `category.scm''s port,
+  ;;     called from the word scans below: it reads `char-script-table'
+  ;;     and the two category alists, which that library loads. It
+  ;;     answered false always while the tree had no script table; the
+  ;;     data landed with the regexp-engine pass.
   ;;   * `find_defun_start''s one-thousand-character cache
   ;;     (`search.c:585') is not carried; its `comment-use-syntax-ppss'
   ;;     shortcut is.
@@ -69,11 +70,13 @@
           *inhibit-read-only*
           buffer-local-value set-buffer-local-value!)
     (only (schemacs editor chartab)
-          make-char-table char-table? char-table-ref char-table-set
+          make-char-table char-table? char-table-p char-table-ref char-table-set
           char-table-set-range char-table-range set-char-table-range
           char-table-parent set-char-table-parent char-table-default
           char-table-subtype copy-char-table char-table-ref-and-range)
-    (only (schemacs editor command) maybe-quit rarely-quit)
+    ;; `word_boundary_p' (`category.c`), the word scans' script test.
+    (only (schemacs editor category) word-boundary-p)
+    (only (schemacs editor command) maybe-quit rarely-quit define-command)
     ;; `define-custom' - the three `syntax.c' variables `cus-start.el'
     ;; makes customizable (see "the variables scan_words reads" below).
     (only (schemacs editor custom) define-custom)
@@ -129,6 +132,8 @@
    scan-error-string
    ;; word motion - the old names, now over the syntax table
    word-char?
+   forward-word forward-word-strictly backward-word-strictly
+   *find-word-boundary-function-table* *constrain-to-field-function*
    forward-word-position backward-word-position
    word-run-end word-run-start
    ;; syntax.el
@@ -817,19 +822,44 @@
       (logand (%code-in ed pos c) #xff))
 
     (define (%word-boundary? c1 c2)
-      ;; `word_boundary_p' (`syntax.c:1425'): see the header.
+      ;; `word_boundary_p' (`syntax.c:1425'): "Return true if there is a
+      ;; word boundary between two word-constituent characters C1 and C2
+      ;; if they appear in this order."
+      ;;
+      ;; `category.scm' ports the function whole, script table and the
+      ;; two category alists included. When the first word-motion port
+      ;; was written the tree had no `char-script-table' and this
+      ;; answered false always; the data has since landed, so the real
+      ;; test is made.
       ;;--------------------------------------------------------------
-      #f)
+      (word-boundary-p c1 c2))
 
-    ;; ---------------------------------------------------------------
-    ;; `scan_words' (`syntax.c:1464') and the word motions.
-    ;; ---------------------------------------------------------------
+    (define *find-word-boundary-function-table* (make-parameter (make-char-table #f)))
+    ;; ^ `Vfind_word_boundary_function_table' (`syntax.c:3799', `:3814'):
+    ;; "Table of functions that decide word boundaries. It maps a
+    ;; character to a function..." The C makes it an empty char-table
+    ;; (`Fmake_char_table (Qnil, Qnil)') and calls an entry when
+    ;; `Ffboundp' of it is non-nil. An entry here is a *procedure*,
+    ;; because a Lisp-1 has no symbol-to-function indirection for
+    ;; `fboundp' to be asked. A parameter, because `forward-word-strictly'
+    ;; `let'-binds it, and the convention says a Elisp `let' target is a
+    ;; parameter - the stars are this tree's, not Emacs's.
+
+    (define (%word-boundary-function ch)
+      ;; `CHAR_TABLE_REF (Vfind_word_boundary_function_table, CH)'
+      ;; followed by the C's `Ffboundp' test.
+      (let ((f (char-table-ref (*find-word-boundary-function-table*) ch)))
+        (and (procedure? f) f)))
+
     (define (%scan-words ed from count)
-      ;; Move point of ED and answer the position it stopped at.
+      ;; `scan_words' (`syntax.c:1454'): "Return the position across
+      ;; COUNT words from FROM. If that many words cannot be found
+      ;; before the end of the buffer, return 0. COUNT negative means
+      ;; scan backward and stop at word beginning."
       ;;--------------------------------------------------------------
-      ;; `SETUP_SYNTAX_TABLE (from, ...)' (`syntax.c:1473') - the word
-      ;; motion is a `SYNTAX (c)' reader like every other scan, so it
-      ;; primes the syntax-table cache before it starts.
+      ;; `SETUP_SYNTAX_TABLE (from, ...)' (`:1472') - the word motion is
+      ;; a `SYNTAX (c)' reader like every other scan, so it primes the
+      ;; syntax-table cache before it starts.
       (%setup-syntax-table)
       (let ((beg (buffer-beg ed))
             (end (buffer-z ed))
@@ -841,39 +871,65 @@
         (cond
          ((> count 0)
           (let loop ((from from) (count count))
-            (if (or (<= count 0) (= from end))
-                from
-                ;; find the next word start
-                (let scan ((i from))
-                  (if (= i end)
-                      end
-                      (if (word-class? (%class-in ed i (char-at i)))
-                          (let run ((p (+ i 1)))
-                            (if (or (= p end)
-                                    (not (let* ((d (char-at p))
-                                                (dc (%class-in ed p d)))
-                                           (and (word-class? dc)
-                                                (not (%word-boundary? (char-at (- p 1)) d))))))
-                                (loop p (- count 1))
-                                (begin (rarely-quit p) (run (+ p 1)))))
-                          (begin (rarely-quit i) (scan (+ i 1)))))))))
+            ;; Scan to the start of the next word; CH0 is that character
+            ;; and FROM the position after it, in the C's terms. 0 is
+            ;; the C's "ran out of buffer".
+            (define (scan-to-word i)
+              (cond ((= i end) 0)
+                    ((word-class? (%class-in ed i (char-at i)))
+                     (start-run (char-at i) (+ i 1)))
+                    (else (rarely-quit i) (scan-to-word (+ i 1)))))
+            (define (start-run ch0 from1)
+              (let ((func (%word-boundary-function ch0)))
+                (if func
+                    ;; The boundary table has an entry for CH0: it
+                    ;; decides where the word ends (`syntax.c:1494').
+                    (let ((pos (func (- from1 1) end)))
+                      (if (and (integer? pos) (< from1 pos) (<= pos end))
+                          (loop pos (- count 1))
+                          (loop from1 (- count 1))))
+                    (let run ((p from1) (ch0 ch0))
+                      (if (or (= p end)
+                              (let* ((d (char-at p))
+                                     (dc (%class-in ed p d)))
+                                (or (not (word-class? dc))
+                                    (%word-boundary? ch0 d))))
+                          (loop p (- count 1))
+                          (begin (rarely-quit p)
+                                 (run (+ p 1) (char-at p))))))))
+            (cond ((<= count 0) from)
+                  ((= from end) 0)
+                  (else (scan-to-word from)))))
          ((< count 0)
           (let loop ((from from) (count count))
-            (if (or (>= count 0) (= from beg))
-                from
-                (let scan ((i (- from 1)))
-                  (if (< i beg)
-                      beg
-                      (if (word-class? (%class-in ed i (char-at i)))
-                          (let run ((p (- i 1)))
-                            (if (or (< p beg)
-                                    (not (let* ((d (char-at p))
-                                                (dc (%class-in ed p d)))
-                                           (and (word-class? dc)
-                                                (not (%word-boundary? (char-at (+ p 1)) d))))))
-                                (loop (+ p 1) (+ count 1))
-                                (begin (rarely-quit p) (run (- p 1)))))
-                          (begin (rarely-quit i) (scan (- i 1)))))))))
+            ;; Scan backward to the last character of the previous word;
+            ;; CH1 is that character and I its position (the C's FROM).
+            ;; The boundary test is directional and takes its two
+            ;; characters in text order - (CH0, CH1).
+            (define (scan-to-word i)
+              (cond ((< i beg) 0)
+                    ((word-class? (%class-in ed i (char-at i)))
+                     (start-run i (char-at i)))
+                    (else (rarely-quit i) (scan-to-word (- i 1)))))
+            (define (start-run i ch1)
+              (let ((func (%word-boundary-function ch1)))
+                (if func
+                    (let ((pos (func i beg)))
+                      (if (and (integer? pos) (<= beg pos) (< pos i))
+                          (loop pos (+ count 1))
+                          (loop i (+ count 1))))
+                    (let run ((p (- i 1)) (ch1 ch1))
+                      (if (or (< p beg)
+                              (let* ((d (char-at p))
+                                     (dc (%class-in ed p d)))
+                                (or (not (word-class? dc))
+                                    (%word-boundary? d ch1))))
+                          (loop (+ p 1) (+ count 1))
+                          (begin (rarely-quit p)
+                                 (run (- p 1) (char-at p))))))))
+            (cond ((>= count 0) from)
+                  ((= from beg) 0)
+                  (else (scan-to-word (- from 1))))))
          (else from))))
 
     (define (word-char? c)
@@ -883,25 +939,125 @@
       (= (%syntax-class (char-table-ref (syntax-table) (%char-code c)))
          sword))
 
+    ;; ---------------------------------------------------------------
+    ;; `forward-word' (`syntax.c:1581')
+    ;; ---------------------------------------------------------------
+    ;;
+    ;; The C DEFUN calls `constrain_to_field', which is `editfns.c''s
+    ;; and lives above this library, so it arrives through a seam that
+    ;; `editfns.scm' installs as it loads - the shape every upward reach
+    ;; in this tree takes (`*barf-if-buffer-read-only-function*' and its
+    ;; kind). Nothing here can load without the installer in practice;
+    ;; an uninstalled seam is an error that names it rather than a
+    ;; silent `#f'.
+    (define *constrain-to-field-function* (make-parameter #f))
+
+    (define-command (forward-word . rest)
+      "Move point forward ARG words (backward if ARG is negative).
+If ARG is omitted or nil, move point forward one word.
+Normally returns t.
+If an edge of the buffer or a field boundary is reached, point is
+left there and the function returns nil.  Field boundaries are not
+noticed if `inhibit-field-text-motion' is non-nil.
+
+The word boundaries are normally determined by the buffer's syntax
+table and character script (according to `char-script-table'), but
+`find-word-boundary-function-table', such as set up by `subword-mode',
+can change that.  If a Lisp program needs to move by words determined
+strictly by the syntax table, it should use `forward-word-strictly'
+instead.  See Info node `(elisp) Word Motion' for details."
+      (interactive "^p")
+      (let* ((arg (if (pair? rest) (car rest) #f))
+             (arg (if arg arg 1)))
+        (unless (integer? arg)
+          (error "Wrong type argument: integerp, ~s" arg))
+        (let* ((ed (current-buffer))
+               (orig (%scan-words ed (buffer-pt ed) arg))
+               (val (if (= orig 0)
+                        (if (> arg 0) (buffer-z ed) (buffer-beg ed))
+                        orig))
+               (constrain (*constrain-to-field-function*))
+               (val (if (procedure? constrain)
+                        (constrain val (buffer-pt ed) #f #f #f)
+                        (error "`constrain-to-field' is not installed: the `constrain-to-field' seam of `syntax.scm' is set by `editfns.scm'"))))
+          (set-point ed val)
+          (if (= val orig) #t #f))))
+
+    ;; `forward-word-strictly' and `backward-word-strictly'
+    ;; (`subr.el:6593', `:6609'). **Placement departure**: `subr.scm'
+    ;; is below this library and cannot call `forward-word', and these
+    ;; are the two functions that bind `find-word-boundary-function-
+    ;; table' to an empty table, which is exactly this library's
+    ;; variable. They are the reason a `subword-mode' style splitter
+    ;; cannot influence a mode that asks for strict word motion.
+    (define word-move-empty-char-table #f)
+    ;; ^ `subr.el''s `(defvar word-move-empty-char-table nil)': made on
+    ;; first use. A plain variable (nothing `let'-binds it).
+
+    (define (forward-word-strictly . rest)
+      "Move point forward ARG words (backward if ARG is negative).
+If ARG is omitted or nil, move point forward one word.
+Normally returns t.
+If an edge of the buffer or a field boundary is reached, point is
+left there and the function returns nil.  Field boundaries are not
+noticed if `inhibit-field-text-motion' is non-nil.
+
+This function is like `forward-word', but it is not affected
+by `find-word-boundary-function-table'.  It is also not interactive."
+      (parameterize ((*find-word-boundary-function-table*
+                      (if (char-table-p word-move-empty-char-table)
+                          word-move-empty-char-table
+                          (begin
+                            (set! word-move-empty-char-table (make-char-table #f))
+                            word-move-empty-char-table))))
+        (forward-word (let ((arg (if (pair? rest) (car rest) #f)))
+                        (if arg arg 1)))))
+
+    (define (backward-word-strictly . rest)
+      "Move backward until encountering the beginning of a word.
+With argument ARG, do this that many times.
+If ARG is omitted or nil, move point backward one word.
+
+This function is like `backward-word', but it is not affected
+by `find-word-boundary-function-table'.  It is also not interactive."
+      (parameterize ((*find-word-boundary-function-table*
+                      (if (char-table-p word-move-empty-char-table)
+                          word-move-empty-char-table
+                          (begin
+                            (set! word-move-empty-char-table (make-char-table #f))
+                            word-move-empty-char-table))))
+        (forward-word (- (let ((arg (if (pair? rest) (car rest) #f)))
+                           (if arg arg 1))))))
+
     (define (forward-word-position ed)
-      (%scan-words ed (buffer-pt ed) 1))
+      ;; The answer as a position: `0' is `scan_words''s failure, and
+      ;; the motion stops at the edge, so the edge is the position.
+      (let ((p (%scan-words ed (buffer-pt ed) 1)))
+        (if (= p 0) (buffer-z ed) p)))
 
     (define (backward-word-position ed)
-      (%scan-words ed (buffer-pt ed) -1))
+      (let ((p (%scan-words ed (buffer-pt ed) -1)))
+        (if (= p 0) (buffer-beg ed) p)))
 
     (define (word-run-end ed count)
       (let loop ((i 0) (pos (buffer-pt ed)))
         (if (>= i count)
             pos
             (let ((next (%scan-words ed pos 1)))
-              (if (= next pos) pos (loop (+ 1 i) next))))))
+              (if (or (= next 0) (= next pos))
+                  pos
+                  (loop (+ 1 i) next))))))
 
     (define (word-run-start ed count)
       (let loop ((i 0) (pos (buffer-pt ed)))
         (if (>= i count)
             pos
             (let ((prev (%scan-words ed pos -1)))
-              (if (= prev pos) prev (loop (+ 1 i) prev))))))
+              (if (= prev 0)
+                  pos
+                  (if (= prev pos)
+                      prev
+                      (loop (+ 1 i) prev)))))))
 
     ;; ---------------------------------------------------------------
     ;; `skip-chars-forward' / `skip-chars-backward' (`syntax.c:1618')

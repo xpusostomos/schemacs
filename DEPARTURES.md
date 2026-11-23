@@ -14998,3 +14998,112 @@ Nothing in the section is stubbed. `c-guess-basic-syntax''s Emacs 31.1
 text has one commented-out clause (CASE 5A.6, the concept defun) and it
 stays commented out, as in the source. The indentation *values* for
 line-up-function offsets wait on cc-align, as above.
+
+# cc-align: the line-up functions (2026-11-23)
+
+`schemacs/editor/cc-align.scm` is `cc-align.el` whole - every line-up
+function, the two one/multi-line-block offset functions, the brace
+actions (`c-snug-do-while`, `c-snug-1line-defun-close`), the GNU
+minimum-indentation hook and the three `c-semi&comma` criteria, in the
+file's own order with its docstrings.
+
+## The verification, which is two differentials
+
+* `tools/cc-indent-diff/` runs `c-guess-basic-syntax` +
+  `c-get-syntactic-indentation` - the whole of `c-indent-line` below the
+  line shifting - at every line start of the nine fixtures under **ten
+  styles** (`gnu k&r bsd stroustrup whitesmith ellemtel linux java
+  python awk`), C and C++: **90 runs, zero differences**. A style
+  selects which line-up functions its offsets name, so the sweep is
+  what exercises the majority of the file.
+* `tools/cc-align-diff/` calls the functions **directly** - the way a
+  line-up function is called, with `c-syntactic-element` and
+  `c-syntactic-context` bound - on the constructs the styles do not
+  reach: **51 probes (43 C, 8 C++), identical**, including the cases
+  where Emacs raises on the synthetic call (`assign-stmt`, `math-stmt`,
+  `argcont-plus`, `snug-do-while`). `schemacs/editor/cc-align-tests.scm`
+  pins every probe's Emacs answer.
+
+## Representation departures
+
+* **The registry.** `c-evaluate-offset`'s `(functionp offset)` arm and
+  `c-valid-offset`'s name test have no `functionp` to ask; cc-align
+  registers each function by symbol in cc-engine's registry
+  (`c-register-lineup-function!`) and by name in cc-vars'
+  `%c-offset-function-names` (through the new
+  `c-register-offset-function-name!`) at the end of the file. All 52
+  functions are registered, not only the line-up ones: the same lookup
+  is the file's function obarray for anything that `funcall`s a symbol
+  from an alist (the brace actions, the special-indent hook).
+* **`c-last-command-char`** is `cc-defs.scm`'s procedure answering
+  `(*last-command-event*)`, Emacs's macro minus the XEmacs arm. The
+  semi&comma criteria compare its answer with `eqv?` against `#\;`, not
+  Emacs's `eq` against `?\;` (a keypress event here is a character).
+* **`catch`/`throw`** are Guile's `(catch 'tag thunk handler)` in the
+  three functions that use them; the no-throw answer is the body's last
+  value, so a `while` in tail position carries an explicit `#f` (Elisp's
+  `while` answers nil; Scheme's answers the unspecified value).
+* **`c-last-command-char`** comparisons aside, Elisp's `if` with several
+  ELSE forms is a `begin` - `c-lineup-arglist` and the two
+  close-under-paren/close-paren functions have them.
+* The local variable `quote` in `c-lineup-string-cont` is
+  `quote-char`: in a Lisp-1 a binding named `quote` shadows the reader's
+  `'` syntax inside its `let`, so `(c-point 'boi)` read as a *call of the
+  variable* (the compiler's "possibly unbound variable `boi'"). The same
+  class as the `list`/`vector` local-name rule.
+
+## The primitives the file needed, and what each uncovered
+
+* **`forward-word` was mg's**, not `syntax.c`'s DEFUN: no negative
+  count, no return value, no field handling. `syntax.c:1581`'s is ported
+  in `syntax.scm` (`scan_words`' caller), and it is what
+  `c-lineup-java-inher`'s `forward-word-strictly` stands on.
+  `simple.scm`'s `backward-word` is `simple.el:8947`'s one line over it,
+  and `transpose-words` passes `forward-word` itself as the mover
+  again (the workaround for a forward-word that could not move
+  backward is gone).
+* **`find-word-boundary-function-table`** (`syntax.c:3799`, `:3814`)
+  is now honoured by `scan_words` - an empty char-table, as the C makes
+  it, and a **parameter**, because `forward-word-strictly`
+  `let`-binds it. An entry is a *procedure* here (no symbol-to-function
+  indirection for `fboundp` to ask); the tree has no `subword-mode`, so
+  the table is empty and the hook is exercised only by its own tests.
+* **`forward-word-strictly`/`backward-word-strictly`** (`subr.el:6593`,
+  `:6609`) are **placed in `syntax.scm`**: `subr.scm` is below it and
+  cannot call `forward-word`. They bind the table to
+  `word-move-empty-char-table` (a plain variable, as Emacs `defvar`s
+  it).
+* **`constrain-to-field`** is the one upward reach: `Fforward_word`
+  calls it, it is `editfns.c`'s, and `syntax.scm` is below it, so
+  `*constrain-to-field-function*` is a seam `editfns.scm` installs at
+  load - the `*barf-if-buffer-read-only-function*` shape.
+* **`scan_words` fixes**, all read out of the C:
+  * it answers **0** when it runs out of buffer (the port answered the
+    buffer edge), which is what `Fforward_word` tests;
+  * the backward run's `word_boundary_p (ch0, ch1)` takes its
+    characters **in text order**; the port had them reversed - only
+    visible when the two characters' scripts make the directional
+    categories differ;
+  * the boundary table arm is new (above).
+* **`make-char-table` accepts `#f` as its purpose**: Elisp's
+  `CHECK_SYMBOL` passes nil, and the C's own
+  `Vfind_word_boundary_function_table` is made with
+  `Fmake_char_table (Qnil, Qnil)` (`chartab.c`'s DEFUN, `syntax.c:3814`).
+  The port refused it.
+* **`c-in-gcc-asm-p`** (`cc-engine.el:12184`) was unported; it sits
+  before `c-at-toplevel-p` as in the file.
+* **`c-inside-block-syms`** (`cc-vars.el:1453`) is a `defconst`, so a
+  plain define; the three `c-objc-method-*` parameters
+  (`cc-vars.el:1169`-`:1215`) are `define-custom`s.
+* **`semi&comma-inside-parenlist`'s answer shape**: Emacs's
+  `(if CONDITION t 'stop)` - truthy condition answers `t`, the caught
+  error answers `t` too, and only a successful up-list *at a `(`*
+  answers `stop`. The first port had `'stop` and `#f` swapped.
+
+## Not carried
+
+Nothing in the file is stubbed. `c-lineup-class-decl-init-+` and
+`-after-brace` return `nil` in both editors for the probe's context
+(the brace-list-intro anchor Emacs's own analysis gives does not reach
+`c-forward-class-decl`), which is Emacs's answer for the same call, not
+a porting gap.

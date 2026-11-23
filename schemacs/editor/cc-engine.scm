@@ -386,7 +386,7 @@
    ;; statement-block walkers and the C++ lambda machinery
    c-back-over-member-initializers
    c-do-declarators c-forward-decl-or-cast-1 c-forward-objc-directive
-   c-at-toplevel-p c-just-after-func-arglist-p c-pull-open-brace
+   c-in-gcc-asm-p c-at-toplevel-p c-just-after-func-arglist-p c-pull-open-brace
    c-looking-at-decl-block c-directly-in-class-called-p
    c-search-uplist-for-classkey
    c-looking-at-statement-block-1 c-looking-at-statement-block
@@ -10199,9 +10199,26 @@
                 #f)))))
 
     ;;------------------------------------------------------------------
-    ;; `c-at-toplevel-p' (`cc-engine.el:12202'),
+    ;; `c-in-gcc-asm-p' (`cc-engine.el:12184'),
+    ;; `c-at-toplevel-p' (`:12202'),
     ;; `c-just-after-func-arglist-p' (`:12229')
     ;;------------------------------------------------------------------
+    (define (c-in-gcc-asm-p)
+      ;; "Return non-nil if point is within a gcc \"asm\" block."
+      ;;
+      ;; "This should be called with point inside an argument list."
+      ;; Only one level of enclosing parentheses is considered, so for
+      ;; instance nil is returned when in a function call within an asm
+      ;; operand.
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (and (%c-langvar 'c-opt-asm-stmt-key)
+           (save-excursion
+             (beginning-of-line)
+             (backward-up-list 1)
+             (c-beginning-of-statement-1 (point-min) #f #t)
+             (looking-at (%c-langvar 'c-opt-asm-stmt-key)))))
+
     (define (c-at-toplevel-p)
       ;; "Return a determination as to whether point is \"at the top
       ;; level\". ..." (The docstring describes the answers: nil, t, or

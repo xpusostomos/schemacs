@@ -91,7 +91,12 @@
           c-noise-macro-name-re set!c-noise-macro-name-re
           c-noise-macro-with-parens-name-re set!c-noise-macro-with-parens-name-re
           *c-noise-macro-names* *c-noise-macro-with-parens-names*
-          c-make-noise-macro-regexps)
+          c-make-noise-macro-regexps
+          c-inside-block-syms
+          *c-objc-method-arg-min-delta-to-bracket*
+          *c-objc-method-arg-unfinished-offset*
+          *c-objc-method-parameter-offset*
+          c-register-offset-function-name!)
 
   (begin
 
@@ -161,6 +166,47 @@ handle this in most cases.  If this problem occurs, it's usually
 countered easily by surrounding the statements by a block (or even
 better with the \"do { ... } while (0)\" trick)."
       :type 'boolean
+      :group 'c)
+
+    ;; The three Objective-C line-up parameters (`cc-vars.el:1169'-`:1215').
+    ;; `c-lineup-ObjC-method-call-colons' reads them.
+    (define-custom *c-objc-method-arg-min-delta-to-bracket* 2
+      "Minimum number of chars to the opening bracket.
+
+Consider this ObjC snippet:
+
+	[foo blahBlah: fred
+	|<-x->|barBaz: barney
+
+If `x' is less than this number then `c-lineup-ObjC-method-call-colons'
+will defer the indentation decision to the next function.  By default
+this is `c-lineup-ObjC-method-call', which would align it like:
+
+	[foo blahBlahBlah: fred
+	     thisIsTooDamnLong: barney
+
+This behavior can be overridden by customizing the indentation of
+`objc-method-call-cont' in the \"objc\" style."
+      :type 'integer
+      :group 'c)
+
+    (define-custom *c-objc-method-arg-unfinished-offset* 4
+      "Offset relative to bracket if first selector is on a new line.
+
+    [aaaaaaaaa
+    |<-x->|bbbbbbb:  cccccc
+             ddddd: eeee];"
+      :type 'integer
+      :group 'c)
+
+    (define-custom *c-objc-method-parameter-offset* 4
+      "Offset for selector parameter on a new line (relative to first selector.
+
+    [aaaaaaa bbbbbbbbbb:
+	     |<-x->|cccccccc
+                    ddd: eeee
+                   ffff: ggg];"
+      :type 'integer
       :group 'c)
 
     (define-custom *c-warn-ids-with-dollar* #f
@@ -1128,6 +1174,15 @@ Here is the current list of valid syntactic element symbols:
 
 (c-style-variable-register! 'c-offsets-alist c-offsets-alist set!c-offsets-alist *c-offsets-alist*)
 
+;; The syntactic symbols that can occur inside code blocks. Used by
+;; `c-gnu-impose-minimum' (`cc-vars.el:1453'). A defconst, so a plain
+;; definition, as the tree's convention says.
+(define c-inside-block-syms
+  '(defun-block-intro block-open block-close statement statement-cont
+    statement-block-intro statement-case-intro statement-case-open
+    substatement substatement-open substatement-label case-label label
+    do-while-closure else-clause catch-clause inlambda annotation-var-cont))
+
 (define-custom *c-style-variables-are-local-p* #t
   "Whether style variables should be buffer local by default.
 If non-nil, then all indentation style related variables will be made
@@ -1299,6 +1354,16 @@ can always override the use of ‘c-default-style’ by making calls to
    c-lineup-topmost-intro-cont
    c-lineup-whitesmith-in-block
    ))
+
+    (define (c-register-offset-function-name! symbol)
+      ;; Emacs's `(functionp offset)' arm of `c-valid-offset' accepts
+      ;; any symbol that names a function; a symbol has no function
+      ;; binding here, so the accepted names are kept in
+      ;; `%c-offset-function-names' and this is how a library adds one.
+      ;; `cc-align.scm' calls it as it defines each line-up function.
+      (unless (memq symbol %c-offset-function-names)
+        (set! %c-offset-function-names
+              (cons symbol %c-offset-function-names))))
 
     (define (c-string-or-string-list-p val)
       ;; "Return non-nil if VAL is a string or a list of strings."

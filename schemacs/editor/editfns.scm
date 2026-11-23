@@ -127,6 +127,10 @@
     ;; The insertion and the deletion themselves are `insdel.c`'s, in its
     ;; own library - `insert_1_both` and `del_range` are that file's, the
     ;; same way `Finsert` and `Fdelete_region` below are this one's.
+    ;; The seam `syntax.scm''s `forward-word' calls; the C's
+    ;; `Fconstrain_to_field' is this library's, and `syntax.scm' is below
+    ;; it, so the installer is here (see the end of the file).
+    (only (schemacs editor syntax) *constrain-to-field-function*)
     (only (schemacs editor insdel) del-range del-range-1 insert-from-string
           modify-text signal-after-change
           ;; `replace-region-contents`' apply phase: `replace_range` per
@@ -2666,5 +2670,11 @@ argument.  To gain access to other portions of the buffer, use
     ;; buffer text properties through (`keymap.c:1771`): the C's
     ;; `get_local_map` is this library's, and `keyboard.scm` is below it.
     (*get-local-map-function* get-local-map)
+
+    ;; The seam `syntax.scm''s `forward-word' (`syntax.c:1581') reads:
+    ;; the C calls `Fconstrain_to_field', which is this library's, and
+    ;; `syntax.scm' sits below it. Installed after the definition, as the
+    ;; tree's rule says for a library's own functions.
+    (*constrain-to-field-function* constrain-to-field)
 
     ))

@@ -126,8 +126,13 @@
       ;; filled with INIT - so *every* slot, including the default and
       ;; the contents, starts as INIT - then sets only parent and
       ;; purpose. It is copied as it stands.
+      ;;
+      ;; `purpose' may be nil: `CHECK_SYMBOL' passes Elisp's nil, and
+      ;; the C's own `Vfind_word_boundary_function_table' is made with
+      ;; `Fmake_char_table (Qnil, Qnil)' (`syntax.c:3814'). Nil is `#f'
+      ;; here, so the check allows it.
       ;;--------------------------------------------------------------
-      (if (not (symbol? purpose))
+      (if (not (or (symbol? purpose) (eq? purpose #f)))
           (error "Wrong type argument: symbolp" purpose))
       (let* ((init (if (pair? rest) (car rest) #f))
              (n (get purpose 'char-table-extra-slots))

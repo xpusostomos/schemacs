@@ -73,7 +73,7 @@
     ;; `c-safe' re-raises a quit; this tree's quit is command.scm's
     ;; record, and Emacs's `condition-case ... (error nil)' does not
     ;; catch one.
-    (only (schemacs editor command) quit-condition?)
+    (only (schemacs editor command) quit-condition? *last-command-event*)
     ;; `c-save-buffer-state' is `with-silent-modifications' since Emacs
     ;; 24 (see below), which is `subr.el''s.
     (only (schemacs editor subr) with-silent-modifications car-safe cdr-safe)
@@ -126,7 +126,7 @@
    c-suppress-<->-as-parens c-restore-<->-as-parens
    c-skip-ws-chars-forward c-skip-ws-chars-backward
    c-skip-ws-forward c-skip-ws-backward
-   c-safe c-forward-sexp c-backward-sexp c-safe-scan-lists
+   c-safe c-last-command-char c-forward-sexp c-backward-sexp c-safe-scan-lists
    c-go-list-forward c-go-list-backward
    c-up-list-forward c-up-list-backward
    c-down-list-forward c-down-list-backward
@@ -1276,6 +1276,13 @@
   ;; `cc-defs.el:487': Emacs's `previous-single-property-change', with
   ;; the XEmacs `previous-single-char-property-change' arm not carried.
   (previous-single-property-change position prop object limit))
+
+(define (c-last-command-char)
+  ;; `cc-defs.el:565': "The last character just typed." Emacs's macro
+  ;; answers `last-command-event' (`event-to-character' is the XEmacs
+  ;; arm), which is this tree's `*last-command-event*' parameter - a
+  ;; character for a keypress, an event cons for a click.
+  (*last-command-event*))
 
 ;;----------------------------------------------------------------------
 ;; The `scan-lists' wrappers (`cc-defs.el:541', `:780'-`:930')

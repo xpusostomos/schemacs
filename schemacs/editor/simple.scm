@@ -166,7 +166,7 @@
     (only (schemacs editor fns) line-number-at-pos %assq)
     (only (schemacs editor syntax) skip-chars-forward skip-chars-backward
           skip-syntax-forward backward-prefix-chars
-          word-char? forward-word-position backward-word-position
+          forward-word word-char? forward-word-position backward-word-position
           word-run-end word-run-start)
     ;; `newline-and-indent` calls `indent-according-to-mode`, `indent.el`'s;
     ;; `simple.scm` is above `indent.scm`, and the one call the other way -
@@ -1339,26 +1339,25 @@ non-nil."
         (delete-region start end)
         text))
 
-    (define-command (forward-word count)
-      ;; mg's `forwword` (word.c:51) with its numeric-argument loop: move
-      ;; N words forward, stopping at the end of the buffer.
-      "Move point N words forward, to the end of each word."
-      (interactive "p")
-      (let loop ((i 0))
-        (when (< i count)
-          (set-point
-           (current-buffer) (forward-word-position (current-buffer)))
-          (loop (+ 1 i)))))
+    (define-command (backward-word . rest)
+      ;; GNU Emacs's `backward-word' (`simple.el:8947'): "Move backward
+      ;; until encountering the beginning of a word." One line of
+      ;; `forward-word', which is `syntax.c''s DEFUN and this tree's
+      ;; `syntax.scm''s, with the count negated.
+      "Move backward until encountering the beginning of a word.
+With argument ARG, do this that many times.
+If ARG is omitted or nil, move point backward one word.
 
-    (define-command (backward-word count)
-      ;; mg's `backword` (word.c:27) with its numeric-argument loop.
-      "Move point N words backward, to the start of each word."
-      (interactive "p")
-      (let loop ((i 0))
-        (when (< i count)
-          (set-point
-           (current-buffer) (backward-word-position (current-buffer)))
-          (loop (+ 1 i)))))
+The word boundaries are normally determined by the buffer's
+syntax table and character script (according to
+`char-script-table'), but `find-word-boundary-function-table',
+such as set up by `subword-mode', can change that.  If a Lisp
+program needs to move by words determined strictly by the syntax
+table, it should use `backward-word-strictly' instead.  See Info
+node `(elisp) Word Motion' for details."
+      (interactive "^p")
+      (forward-word (- (let ((arg (if (pair? rest) (car rest) #f)))
+                         (if arg arg 1)))))
 
     (define-command (kill-word count)
       ;; Like mg's `delfword` (word.c:397): kill from point to the end
@@ -3533,18 +3532,13 @@ If N is omitted or nil, move point 1 character to the left."
       (%transpose-subr forward-char arg))
 
     (define-command (transpose-words arg)
-      ;; GNU Emacs's `transpose-words' (simple.el:8798), over
-      ;; `transpose-subr' with `forward-word' as its mover - which this
-      ;; tree's `forward-word' cannot do backward, so a negative count
-      ;; moves by `backward-word'.
+      ;; GNU Emacs's `transpose-words' (`simple.el:8798'), over
+      ;; `transpose-subr' with `forward-word' as its mover - `syntax.c''s
+      ;; DEFUN takes a signed count, so the one function is the mover in
+      ;; both directions.
       "Interchange words around point, leaving point at end of them."
       (interactive (list (uarg->integer 1 (current-prefix-arg))))
-      (%transpose-subr
-       (lambda (x)
-         (if (> x 0)
-             (forward-word x)
-             (backward-word (- x))))
-       arg))
+      (%transpose-subr forward-word arg))
 
     (define-key *default-keymap* (kbd "C-o") open-line-command)
     (define-key *default-keymap*

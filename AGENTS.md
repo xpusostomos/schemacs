@@ -17098,3 +17098,71 @@ Next, in the approved order: **cc-align** (the line-up functions and the
 registrations the offset evaluator waits for), then **easymenu**,
 **cc-cmds**, **cc-menus/cc-guess**, and **cc-mode.el** - then the
 `.c`/`.h` milestone.
+
+## cc-mode step 8: cc-align, the line-up functions (2026-11-23)
+
+`schemacs/editor/cc-align.scm` is `cc-align.el` whole, in the file's
+order with its docstrings, and the offset evaluator's registry is
+filled at the end of it. DEPARTURES.md's 2026-11-23 "cc-align" section
+has every representation departure and the primitives the port needed;
+this is what the next session needs.
+
+## The two differentials, which are the gate
+
+* `tools/cc-indent-diff/` - `c-guess-basic-syntax` +
+  `c-get-syntactic-indentation` per line start, both sides, under ten
+  styles on the nine fixtures: **90 runs, zero differences**. A style
+  picks the line-up functions its offsets name, so this is what
+  exercises most of the file. README has the three commands.
+* `tools/cc-align-diff/` - each function called **directly** with
+  `c-syntactic-element`/`c-syntactic-context` bound, on the constructs
+  the styles do not reach (assignments, ternary, cascaded calls, string
+  continuation, argcont, gcc asm, templates, lambda, the brace-list
+  ones, the semi&comma criteria, gnu-min): **51 probes identical**,
+  including four where Emacs itself raises.
+  `schemacs/editor/cc-align-tests.scm` pins every probe's answer (55
+  tests).
+
+A case table locates positions by **needles** (a substring plus a
+character delta) in both harnesses, so the same table works on both
+sides without position bookkeeping. Contexts are elements too: a
+`c-syntactic-element` is `(SYM ANCHOR SECOND)` - the second position is
+the arglist's open paren, which is what `c-langelem-2nd-pos` is for.
+
+## The three bugs worth carrying
+
+1. **A local named `quote` shadows the reader's `'` syntax.** Emacs's
+   `c-lineup-string-cont` binds a variable `quote`; in Scheme, inside
+   that `let`, `(c-point 'boi)` reads as a *call* of the variable and
+   the compiler warns "possibly unbound variable `boi'". It is
+   `quote-char` here.
+2. **Elisp's `if` takes several ELSE forms.** Three functions use them;
+   each is a `begin` in Scheme's else.
+3. **The semi&comma answer shape** is `(if CONDITION t 'stop)` - the
+   caught error answers `t` as well, and only a successful up-list at a
+   `(` answers `stop`. The first port had the arms swapped, which the
+   direct probe caught at once.
+
+## `forward-word` was mg's, and is now `syntax.c`'s
+
+`c-lineup-java-inher` calls `forward-word-strictly`, and that exposed
+that the tree's `forward-word` had none of the DEFUN's semantics. The
+full port is described in DEPARTURES; the things to know:
+
+* `syntax.scm` now has `forward-word` (`"^p"`), the boundary table
+  (honoured by `%scan-words`), and both strict variants (a placement
+  departure: `subr.scm` is below and cannot call it).
+* `%scan-words` answers **0** when it runs out of buffer, as the C does;
+  its callers treat 0 as "stop at the edge".
+* `constrain-to-field` arrives through
+  `*constrain-to-field-function*`, installed by `editfns.scm`.
+* `simple.scm`'s `backward-word` is `simple.el`'s one line, and
+  `transpose-words` passes `forward-word` as its mover again.
+* A test harness (or any code) that calls a line-up function with
+  language-dependent internals must have `*c-buffer-is-cc-mode*` bound
+  while it runs - `cc-align-tests.scm` binds it per case, which the
+  first version did not, and `c-lineup-inexpr-block` answered `#f`.
+
+Next, in the approved order: **easymenu** (the one primitive cc-mode.el
+needs for its eight menus), **cc-cmds**, **cc-menus/cc-guess**, and
+**cc-mode.el** - then the `.c`/`.h` milestone.
