@@ -95,6 +95,7 @@
     (schemacs editor novice)
     (schemacs editor warnings)
     (schemacs editor doc)
+    (schemacs editor easymenu)
     (schemacs editor loadup)
     (schemacs editor elisp-mode)
     (schemacs editor env)
@@ -139,7 +140,7 @@
     (schemacs editor tooltip)
     (schemacs editor mule-util)
     (schemacs editor tty-colors)
-    (except (schemacs editor subr)  char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd nthcdr nth)
+    (except (schemacs editor subr)  menu-bar-separator char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd nthcdr nth)
     (schemacs editor window-x)
     )
   (export
@@ -177,6 +178,7 @@
     %frame-total-scroll-bar-cols
     %frame-vertical-scroll-bar-type
     %help-arg
+    %keymap-remove-binding!
     %kill-buffer
     %length
     %lisp-el-special-forms-and-macros
@@ -446,6 +448,7 @@
     *display-type*
     *down-list-function*
     *drawing-window*
+    *easy-menu-avoid-duplicate-keys*
     *echo-area-buffer*
     *echo-buffers*
     *emacs-startup-hook*
@@ -984,6 +987,7 @@
     add-face-text-property
     add-hook
     add-minor-mode
+    add-submenu
     add-text-properties
     add-text-properties-from-list
     add-to-history
@@ -1990,6 +1994,7 @@
     current-display
     current-editor
     current-fill-column
+    current-global-map
     current-idle-time
     current-indentation
     current-justification
@@ -2282,6 +2287,33 @@
     doxygen-font-lock-keywords
     draw-box!
     draw-window-cursor!
+    easy-menu-add
+    easy-menu-add-item
+    easy-menu-always-true-p
+    easy-menu-binding
+    easy-menu-box-keymap
+    easy-menu-box-props
+    easy-menu-box?
+    easy-menu-button-prefix
+    easy-menu-change
+    easy-menu-convert-item
+    easy-menu-convert-item-1
+    easy-menu-converted-items-table
+    easy-menu-create-menu
+    easy-menu-define
+    easy-menu-define-key
+    easy-menu-do-define
+    easy-menu-filter-return
+    easy-menu-get-map
+    easy-menu-item-count
+    easy-menu-item-present-p
+    easy-menu-lookup-name
+    easy-menu-make-symbol
+    easy-menu-name-match
+    easy-menu-remove
+    easy-menu-remove-item
+    easy-menu-resolve-menu
+    easy-menu-return-item
     easy-mmode-pretty-mode-name
     echo-area-last-buffer
     echo-area-message-buffer
@@ -3108,6 +3140,7 @@
     make-diff-context
     make-directory
     make-directory-internal
+    make-easy-menu-box
     make-empty-face
     make-face
     make-frame
@@ -3177,6 +3210,7 @@
     matrix-mark-current!
     max-char
     maybe-quit
+    member-ignore-case
     menu-bar-define-mouse-key
     menu-bar-edit-menu
     menu-bar-file-menu
@@ -4224,6 +4258,7 @@
     string-collate-lessp
     string-empty-p
     string-equal
+    string-equal-ignore-case
     string-help-echo-at
     string-intervals
     string-lessp

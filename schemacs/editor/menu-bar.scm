@@ -56,7 +56,11 @@
     ;; `substitute-key-definition` builds `tty-menu-navigation-map`, and
     ;; `event-end` is `popup-menu-normalize-position`'s.
     (only (schemacs editor subr)
-          substitute-key-definition event-end posn-x-y posn-window)
+          substitute-key-definition event-end posn-x-y posn-window
+          ;; `menu-bar-separator` is `subr.el:7700`'s defconst; it is
+          ;; imported and re-exported here for the callers that have
+          ;; always found it in this library.
+          menu-bar-separator)
     ;; `menu-bar-open` asks which kind of display the frame is on, which
     ;; is what decides whether the toolkit opens the bar.
     (only (schemacs editor dispnew) window-system-display?)
@@ -209,13 +213,6 @@
     ;; reading the bar (a user's own Help menu) expects it.
     (set! *menu-bar-final-items* '(help-menu))
 
-    (define menu-bar-separator
-      ;; GNU Emacs's `(defconst menu-bar-separator '(menu-item "--"))'
-      ;; (`menu-bar.el`): the item that draws as a separator line. A
-      ;; bare `"--"` is *not* one - `parse_menu_item` refuses a binding
-      ;; that is not a cons, so a string in a menu is skipped entirely.
-      ;;--------------------------------------------------------------
-      '(menu-item "--"))
 
     (define *menu-bar-close-window* (make-parameter #f))
     ;; ^ GNU Emacs's `menu-bar-close-window' (`menu-bar.el:83'), a

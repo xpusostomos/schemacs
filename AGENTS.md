@@ -17166,3 +17166,67 @@ full port is described in DEPARTURES; the things to know:
 Next, in the approved order: **easymenu** (the one primitive cc-mode.el
 needs for its eight menus), **cc-cmds**, **cc-menus/cc-guess**, and
 **cc-mode.el** - then the `.c`/`.h` milestone.
+
+## cc-mode step 9: easymenu, and the separator it corrected (2026-11-23)
+
+`schemacs/editor/easymenu.scm` is `lisp/emacs-lisp/easymenu.el` whole,
+in the file's order with its docstrings, and it is in `loadup.scm` and
+`imports.scm`. DEPARTURES.md's 2026-11-23 easymenu section has every
+representation departure; this is what the next session needs.
+
+## The verification
+
+`tools/easymenu-diff/` compares `easy-menu-convert-item` on 18 item
+specs - every keyword a `easy-menu-define` item takes - plus
+`easy-menu-always-true-p` and `easy-menu-name-match`, with Emacs 31.1's
+answers: **identical**. `schemacs/editor/easymenu-tests.scm` (52 tests)
+pins those answers and the define/add/change mechanics Emacs measured on
+a real definition: the variable's prompt, the downcased
+`[menu-bar test]` binding, the written display order, add-at-end,
+add-BEFORE, present/remove, `easy-menu-change` replacing a submenu, the
+`:visible nil` invisible menu, and the `:filter` box.
+
+## The bug the differential found in existing code
+
+**`menu-bar-separator` was wrong.** `menu-bar.scm` had
+`'(menu-item "--")` with a comment claiming that was Emacs's value;
+Emacs 31.1's `(require 'easymenu)` then `menu-bar-separator` answers
+`("--")` - `subr.el:7700`'s `(defconst menu-bar-separator '("--"))`,
+the old-style `(STRING . DEFN)` binding. It is in `subr.scm` now (its
+Emacs home), `menu-bar.scm` imports and re-exports it, and
+`menu-bar-menus-tests.scm` pins the corrected value.
+
+## A hazard for every future reader of a keymap's bindings
+
+`store-in-keymap` writes the bindings hash with `hashv-set!`, and a
+*generic* `hash-ref`/`hash-remove!` on that table looks in a different
+bucket: after `(hashv-set! t 'A 1)`, `(hashv-ref t 'A)` is 1 and
+`(hash-ref t 'A)` is `#f`; `hash-remove!` left a removed menu item
+live, which is how this was found. Read and write the bindings with the
+`hashv` family (`easymenu` does; `%keymap-remove-binding!` is
+`hashv-remove!`). The same rule applies to every `make-hash-table` here
+that is written with a family accessor: stay in that family.
+
+## The Lisp-1 name split, and how easymenu spells Emacs's two-namespace name
+
+Emacs `defvar`s `c-c-menu` (the menu) and `defalias`es `c-c-menu` (the
+popup command). One Scheme binding cannot be both: the binding is the
+menu and the command is registered in the command table under the
+menu's name (docstring and name via `set-procedure-property!`). Emacs
+hides these commands from M-x with a completion-predicate; this tree
+lists them - a named departure.
+
+## Next
+
+**cc-cmds** (5,190 lines): the editing commands, including the
+`c-electric-*` family the electric discussion in this file is about
+(`c-electric-brace`, `-semi&comma`, `-colon`, `-slash`, `-star`,
+`-lt-gt`, `-paren`, `-backspace`, `-delete-forward`), their
+`c-hanging-*` machinery, and `c-indent-line`'s command layer - then
+**cc-menus/cc-guess** and **cc-mode.el**, then the `.c`/`.h` milestone.
+
+`c-electric-flag`/`c-auto-newline`/`c-hungry-delete-key` are already in
+(cc-engine buffer-locals) and `c-electric-flag` defaults `#t`;
+`electric-indent-mode` does not exist here, so `c-basic-common-init`'s
+`(setq electric-indent-inhibit t)` and the two sync hooks wait for it -
+record that as a named departure when cc-mode.el lands.

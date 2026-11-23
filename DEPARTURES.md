@@ -15107,3 +15107,92 @@ Nothing in the file is stubbed. `c-lineup-class-decl-init-+` and
 (the brace-list-intro anchor Emacs's own analysis gives does not reach
 `c-forward-class-decl`), which is Emacs's answer for the same call, not
 a porting gap.
+
+# easymenu: the menus cc-mode defines (2026-11-23)
+
+`schemacs/editor/easymenu.scm` is `lisp/emacs-lisp/easymenu.el` whole,
+in the file's order with its docstrings: `easy-menu-define` and
+everything it rests on (`easy-menu-do-define`, `easy-menu-create-menu`,
+`easy-menu-convert-item(-1)`, `easy-menu-binding`,
+`easy-menu-make-symbol`, `easy-menu-define-key`, the name and
+always-true predicates) plus the change API (`easy-menu-add-item`,
+`easy-menu-remove-item`, `easy-menu-item-present-p`, `easy-menu-change`,
+`easy-menu-get-map`, `easy-menu-lookup-name`, `add-submenu`) and the two
+obsolete no-ops `easy-menu-add`/`easy-menu-remove`.
+
+## The verification
+
+`tools/easymenu-diff/` compares `easy-menu-convert-item` on 18 item
+specs (simple, `:keys` with and without `\[cmd]`, `:active`,
+`:visible` nil and t, `:style toggle`/`radio`/`button` with `:selected`,
+`:label` as string and as form, `:suffix` as string and as symbol,
+`:help`, `:key-sequence`, separators, plain strings), plus
+`easy-menu-always-true-p` and `easy-menu-name-match`: **identical**.
+`schemacs/editor/easymenu-tests.scm` pins the same answers and the
+define/add/change mechanics Emacs measured on a real definition (52
+tests).
+
+## Representation departures
+
+* **`menu-prop` is a record, not a symbol's property list.** Emacs wraps
+  a keyword-carrying menu in an uninterned symbol whose function value is
+  the keymap and whose `menu-prop` property is the plist. A Lisp-1 has no
+  `fset` and no symbol-to-value indirection, so the wrapper is
+  `<easy-menu-box>` (keymap and props fields), and every `symbolp`-and-
+  look-through becomes a box test.
+* **The variable and the popup command are two names.** Emacs `defvar`s
+  SYMBOL (the menu) and `defalias`es SYMBOL (the popup command) - one
+  name in two namespaces. Here the Scheme binding SYMBOL is the menu,
+  and `easy-menu-do-define` creates the command as a procedure
+  registered in the command table under SYMBOL's *name* (its docstring
+  and name set with `set-procedure-property!`), reached by `M-x` and
+  `call-interactively`. Emacs hides these commands from M-x with a
+  `completion-predicate`; this tree's command table has no such flag, so
+  they are listed - **a named departure**.
+* **A callback that is an expression** (a list) becomes a thunk that
+  `eval`s it in the module current when the item was converted -
+  Emacs's `(eval `(lambda () (interactive) ,callback) t)`. The module is
+  captured at conversion, which is the defining module for a top-level
+  `easy-menu-define`; a conversion that happens later (from a filter)
+  captures that context instead, the same way `menu_item_eval_property`
+  already evaluates in the ambient module.
+* **A separator's converted key is nil** (`(nil . ("--"))` in Emacs's
+  keymap list). This tree's keymaps are keyed by one event and `#f` is
+  not one, so `easy-menu-store-item!` and `easy-menu-add-item` give a
+  separator a generated `separator-N` symbol event; the `("--")`
+  definition is what `parse_menu_item` draws the rule from either way.
+* **`easy-menu-create-menu` stores the converted pairs into the keymap
+  record back to front**, because `store-in-keymap` prepends and the
+  display order must be the written order. Emacs `append`s them onto
+  its keymap list.
+* **`easy-menu-define-key` is written over the order list** instead of
+  splicing alist conses (`setcdr`): an existing binding keeps its place,
+  a new one goes to the display end or immediately before BEFORE's item,
+  and removal goes through keymap.scm's new `%keymap-remove-binding!`.
+  A nil KEY (insert without a key) cannot arise from this file's
+  callers and is refused.
+* **`menu-bar-separator` moved to `subr.scm`**, where Emacs has it
+  (`subr.el:7700`), with Emacs's value `'("--")`. `menu-bar.scm` had
+  `'(menu-item "--")` and a comment asserting it; Emacs 31.1 measures
+  `("--")`, and the easymenu differential caught the difference.
+  `menu-bar.scm` imports and re-exports it.
+* **`easy-menu-always-true-p` and nil**: Emacs's nil is a *symbol*, so
+  its answer for nil is nil (not always true); here nil is `#f` or the
+  empty list, which a bare `(not (symbol? x))` would call true.
+* **`if` with no else in the `:keys` parsing** answered the unspecified
+  value (true) for PREFIX and POSTFIX, so a `:keys "C-c \[cmd]"` item
+  built `(cmd PREFIX . <unspecified>)`; both `if`s say `#f` now. The
+  recurring class, in a new place.
+
+## The hazard this port uncovered: the bindings hash is a `hashv` table
+
+`store-in-keymap` writes with `hashv-set!`, but a generic `hash-ref` /
+`hash-remove!` on that table computes its own bucket and **does not see
+the entry** - measured: after `hashv-set! A 1`, `(hashv-ref t 'A)` is 1
+and `(hash-ref t 'A)` is #f; `hash-remove!` left the binding readable
+through `hashv-ref`, so a removed menu item stayed live. The fix is the
+`hashv` family everywhere (`%keymap-remove-binding!` uses
+`hashv-remove!`; easymenu's own readers use `hashv-ref`). Any future
+code reading `(keymap-bindings map)` must use the `hashv` accessors,
+and anything *writing* a table with a family accessor and reading it
+with the generic one - or the reverse - is silently two tables.

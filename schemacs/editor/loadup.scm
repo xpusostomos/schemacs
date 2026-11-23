@@ -159,6 +159,7 @@
         (schemacs editor coding)
         (schemacs editor command)
         (schemacs editor custom)
+        (schemacs editor easymenu)
         (schemacs editor data)
         (schemacs editor derived)
         (schemacs editor diffseq)

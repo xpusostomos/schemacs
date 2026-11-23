@@ -44,8 +44,8 @@
           ;; comparator was for, and `hash-map->list' is the alist walk
           ;; (`hash-table->alist' is not a binding in any module here -
           ;; `(ice-9 hash-table)' exports only the alist *converters*).
-          make-hash-table hashv-ref hashv-set! hash-map->list hashq-ref
-          hashq-set!)
+          make-hash-table hashv-ref hashv-set! hashv-remove! hash-map->list
+          hashq-ref hashq-set!)
     ;; The event model: the modifier bits `push-key-description' tests,
     ;; and `event-convert-list' for the Lucid form `single-key-description'
     ;; converts first. `kbd' is `read-kbd-macro''s own input, and the reader
@@ -70,8 +70,8 @@
    ;; functions in Emacs that touch a keymap - and both are keyed by ONE
    ;; *event*.
    keymap make-sparse-keymap keymap-type? keymap-lookup
-   keymapp lookup-key keymap-by-name
-   define-key
+   keymapp lookup-key keymap-by-name current-global-map
+   define-key %keymap-remove-binding!
    store-in-keymap access-keymap
    keymap-parent set-keymap-parent keymap-prompt
    keymap-char-table set-keymap-char-table!
@@ -604,6 +604,28 @@
     ;; recurses into it, and a sequence is walked one event at a time.
     ;;------------------------------------------------------------------
 
+    (define (%keymap-remove-binding! keymap event)
+      ;; Remove EVENT's binding from KEYMAP, entrance from the order
+      ;; vector included. **No Emacs counterpart**: the C keeps its
+      ;; bindings in an alist, so `easy-menu-define-key' removes one by
+      ;; splicing the list (`(setcdr menu (cddr menu))') - there is
+      ;; nothing to splice in this tree's hash, so the removal is a
+      ;; function of its own. `easy-menu-remove-item' is its caller.
+      ;;--------------------------------------------------------------
+      (let ((event (if (char? event) (char->integer event) event)))
+        ;; `hashv-remove!`, not `hash-remove!`: the bindings table is
+        ;; written with the `hashv` family, and a generic removal looks
+        ;; in a bucket the generic hash function computes - a different
+        ;; bucket, so the binding survives (found by the easymenu port).
+        (hashv-remove! (keymap-bindings keymap) event)
+        (%set!keymap-order!
+         keymap
+         (let drop ((l (keymap-order keymap)))
+           (cond ((not (pair? l)) '())
+                 ((eqv? (car l) event) (cdr l))
+                 (else (cons (car l) (drop (cdr l)))))))
+        #f))
+
     (define (store-in-keymap keymap event def)
       ;; GNU Emacs's `store_in_keymap' (`keymap.c:730'): "Scan the keymap
       ;; for a binding of IDX" and set it.
@@ -889,6 +911,14 @@
 
     (define *default-keymap* (keymap '*default-keymap*))
     (define *special-event-map* (keymap '*special-event-map*))
+
+    (define (current-global-map)
+      ;; GNU Emacs's `current-global-map' (`keymap.c:1921'): "Return the
+      ;; current global keymap." The C's `current_global_map` is the
+      ;; `global-map' variable, which this tree holds as
+      ;; `*default-keymap*'.
+      ;;--------------------------------------------------------------
+      *default-keymap*)
 
     (define (define-key keymap keys command)
       ;; Bind KEYS to COMMAND in KEYMAP: GNU Emacs's `define-key'.

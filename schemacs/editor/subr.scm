@@ -123,7 +123,8 @@
    string-prefix-p
    make-syntax-table
    string-to-list
-   string-suffix-p
+   string-suffix-p string-equal-ignore-case member-ignore-case
+   menu-bar-separator
    assoc-default
    string-replace
    ctl-x-4-map
@@ -219,6 +220,42 @@
              (eq? #t (compare-strings suffix 0 (string-length suffix)
                                       string start-pos (string-length string)
                                       ignore-case)))))
+
+    (define menu-bar-separator '("--"))
+    ;; `subr.el:7700': `(defconst menu-bar-separator '("--") "Separator
+    ;; for menus.")'. **A one-element list, not `(menu-item "--")`** -
+    ;; the old-style `(STRING . DEFN)' binding whose `--' caption is
+    ;; what `parse_menu_item' sees as a separator. Moved here from
+    ;; `menu-bar.scm', where it was written as `(menu-item "--")' from a
+    ;; memory of an older Emacs; the easymenu differential caught it.
+
+    (define (string-equal-ignore-case string1 string2)
+      ;; GNU Emacs's `string-equal-ignore-case' (`subr.el:6240'):
+      ;; "Compare STRING1 and STRING2 case-insensitively."
+      ;;
+      ;; The C is `(eq t (compare-strings string1 0 nil string2 0 nil t))'
+      ;; - `nil' end means the string's length, and the answer is the
+      ;; symbol `t' or a mismatch index.
+      ;;--------------------------------------------------------------
+      (eq? #t (compare-strings string1 0 (string-length string1)
+                               string2 0 (string-length string2)
+                               #t)))
+
+    (define (member-ignore-case elt lst)
+      ;; GNU Emacs's `member-ignore-case' (`subr.el:1054'): "Like
+      ;; `member', but ignore differences in case and text
+      ;; representation. ELT must be a string. ... Non-strings in LIST
+      ;; are ignored."
+      ;;
+      ;; The answer is the TAIL whose car matches (`member''s answer),
+      ;; not a boolean.
+      ;;--------------------------------------------------------------
+      (let loop ((tail lst))
+        (cond ((not (pair? tail)) #f)
+              ((and (string? (car tail))
+                    (string-equal-ignore-case elt (car tail)))
+               tail)
+              (else (loop (cdr tail))))))
 
     (define (assoc-default key alist . rest)
       ;; GNU Emacs's `assoc-default' (subr.el): "Find object KEY in a

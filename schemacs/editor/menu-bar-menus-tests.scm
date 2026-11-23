@@ -72,8 +72,13 @@
         (keymap-lookup *default-keymap*
                        (kbd "<menu-bar> <edit> <replace> <query-replace>"))))
 
-(test-equal "a separator is a menu item, not a bare string"
-  (list 'menu-item "--")
+;; Emacs 31.1: `(require 'easymenu)' then `menu-bar-separator' answers
+;; `("--")' - `subr.el:7700`'s defconst, the old-style `(STRING . DEFN)'
+;; binding whose `--' caption `parse_menu_item' draws as a rule. This was
+;; written as `(menu-item "--")' from a memory of an older Emacs; the
+;; easymenu differential caught it.
+(test-equal "a separator is Emacs's old-style binding of two dashes"
+  '("--")
   menu-bar-separator)
 
 (test-equal "`menu-bar-final-items` is what `menu-bar.el` sets"
