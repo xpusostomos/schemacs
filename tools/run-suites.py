@@ -45,6 +45,7 @@ SUITES = [
     'schemacs/editor/cc-fonts-tests.scm',
     'schemacs/editor/cc-langs-tests.scm',
     'schemacs/editor/cc-vars-tests.scm',
+    'schemacs/editor/cc-styles-tests.scm',
     'schemacs/editor/cl-seq-tests.scm',
     'schemacs/editor/chartab-tests.scm',
     'schemacs/editor/syntax-tests.scm',

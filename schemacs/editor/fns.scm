@@ -94,6 +94,7 @@
           concat
           vconcat
           copy-sequence
+          copy-alist
           nreverse
           nconc
           %assq
@@ -723,6 +724,31 @@
        ((bool-vector? arg) (%bool-vector-copy arg))
        ((char-table? arg) (copy-char-table arg))
        (else (error "Wrong type argument: sequencep" arg))))
+
+    (define (copy-alist alist)
+      ;; GNU Emacs's `copy-alist' (`fns.c:1516'): "Return a copy of
+      ;; ALIST. This is an alist which represents the same mapping from
+      ;; objects to objects, but does not share the alist structure with
+      ;; ALIST. The objects mapped (cars and cdrs of elements of the
+      ;; alist) are shared, however. Elements of ALIST that are not conses
+      ;; are also shared."
+      ;;
+      ;; The C is `Fcopy_sequence' and then a fresh cons for every element
+      ;; that is a cons - `XSETCAR (tem, Fcons (XCAR (car), XCDR (car)))`.
+      ;; That is what a style needs: `c-get-style-variables' hands out
+      ;; copies of `c-style-alist''s entries, and `c-set-offset' then
+      ;; `setcdr's them in place.
+      ;;--------------------------------------------------------------
+      (if (null? alist)
+          alist
+          (let ((copy (list-copy alist)))
+            (let loop ((tail copy))
+              (when (pair? tail)
+                (let ((element (car tail)))
+                  (when (pair? element)
+                    (set-car! tail (cons (car element) (cdr element))))
+                  (loop (cdr tail)))))
+            copy)))
 
     (define (nreverse seq)
       ;; GNU Emacs's `nreverse' (`fns.c:2269'): "Reverse order of items

@@ -43,6 +43,8 @@
           *idl-font-lock-extra-types* *pike-font-lock-extra-types*
           c-style-variables c-fallback-style
           c-set-stylevar-fallback c-stylevar-fallback
+          c-style-variable-register! c-style-variable-value
+          c-style-variable-set! c-style-variable-default
           *c-basic-offset* c-basic-offset set!c-basic-offset
           *c-comment-only-line-offset* c-comment-only-line-offset
           set!c-comment-only-line-offset
@@ -72,10 +74,11 @@
           set!c-label-minimum-indentation
           *c-offsets-alist* c-offsets-alist set!c-offsets-alist
           *c-style-variables-are-local-p* *c-old-style-variable-behavior*
-          *c-default-style* *c-paragraph-start* *c-paragraph-separate*
+          *c-default-style*
           c-string-par-start c-string-par-separate
-          c-sentence-end-with-esc-eol c-valid-offset c-string-or-string-list-p
-          c-indentation-style
+          c-sentence-end-with-esc-eol c-default-value-sentence-end
+          c-valid-offset c-string-or-string-list-p
+          c-indentation-style set!c-indentation-style
           c-current-comment-prefix set!c-current-comment-prefix
           c-block-comment-flag set!c-block-comment-flag
           c-macro-with-semi-re set!c-macro-with-semi-re
@@ -290,6 +293,33 @@ names)."))
       ;; The fallback registered for NAME, or #f.
       (get name 'c-stylevar-fallback))
 
+    ;; Emacs reaches a style variable through `symbol-value' and sets it
+    ;; with `set' - the style system's whole interface (`c-set-style-1',
+    ;; `c-initialize-builtin-style'). There is no such reflection on a
+    ;; Scheme binding, so each style variable registers the readers and
+    ;; writer it is made of: the buffer's value (the `symbol-value' the
+    ;; accessors give), the setter, and the global default (`default-value'
+    ;; - the parameter behind the buffer-local slot). `c-set-style-1' and
+    ;; its callers dispatch on the symbol through these three.
+    (define %c-style-variable-table '())
+
+    (define (c-style-variable-register! name reader writer default-reader)
+      (set! %c-style-variable-table
+            (cons (cons name (vector reader writer default-reader))
+                  %c-style-variable-table)))
+
+    (define (c-style-variable-value name)
+      (let ((entry (assq name %c-style-variable-table)))
+        (and entry ((vector-ref (cdr entry) 0)))))
+
+    (define (c-style-variable-set! name value)
+      (let ((entry (assq name %c-style-variable-table)))
+        (and entry ((vector-ref (cdr entry) 1) value))))
+
+    (define (c-style-variable-default name)
+      (let ((entry (assq name %c-style-variable-table)))
+        (and entry ((vector-ref (cdr entry) 2)))))
+
     ;;------------------------------------------------------------------
     ;; The style variables (`cc-vars.el:481'-`:1340')
     ;;------------------------------------------------------------------
@@ -338,6 +368,8 @@ the value set here overrides the style system (there is a variable
 (define (set!c-basic-offset value)
   (set-buffer-local-value! (current-buffer) 'c-basic-offset value))
 
+(c-style-variable-register! 'c-basic-offset c-basic-offset set!c-basic-offset *c-basic-offset*)
+
 (define-custom *c-comment-only-line-offset* 'set-from-style
   "Extra offset for line which contains only the start of a comment.
 Can contain an integer or a cons cell of the form:
@@ -369,6 +401,8 @@ the value set here overrides the style system (there is a variable
   (buffer-local-value (current-buffer) 'c-comment-only-line-offset (*c-comment-only-line-offset*)))
 (define (set!c-comment-only-line-offset value)
   (set-buffer-local-value! (current-buffer) 'c-comment-only-line-offset value))
+
+(c-style-variable-register! 'c-comment-only-line-offset c-comment-only-line-offset set!c-comment-only-line-offset *c-comment-only-line-offset*)
 
 (define-custom *c-indent-comment-alist* 'set-from-style
   #("Specifies how M-x indent-for-comment calculates the comment start column.
@@ -432,6 +466,8 @@ the value set here overrides the style system (there is a variable
 (define (set!c-indent-comment-alist value)
   (set-buffer-local-value! (current-buffer) 'c-indent-comment-alist value))
 
+(c-style-variable-register! 'c-indent-comment-alist c-indent-comment-alist set!c-indent-comment-alist *c-indent-comment-alist*)
+
 (define-custom *c-indent-comments-syntactically-p* 'set-from-style
   #("Specifies how M-x indent-for-comment should handle comment-only lines.
 When this variable is non-nil, comment-only lines are indented
@@ -456,6 +492,8 @@ the value set here overrides the style system (there is a variable
   (buffer-local-value (current-buffer) 'c-indent-comments-syntactically-p (*c-indent-comments-syntactically-p*)))
 (define (set!c-indent-comments-syntactically-p value)
   (set-buffer-local-value! (current-buffer) 'c-indent-comments-syntactically-p value))
+
+(c-style-variable-register! 'c-indent-comments-syntactically-p c-indent-comments-syntactically-p set!c-indent-comments-syntactically-p *c-indent-comments-syntactically-p*)
 
 (define-custom *c-block-comment-prefix* 'set-from-style
   "Specifies the line prefix of continued C-style block comments.
@@ -487,6 +525,8 @@ the value set here overrides the style system (there is a variable
   (buffer-local-value (current-buffer) 'c-block-comment-prefix (*c-block-comment-prefix*)))
 (define (set!c-block-comment-prefix value)
   (set-buffer-local-value! (current-buffer) 'c-block-comment-prefix value))
+
+(c-style-variable-register! 'c-block-comment-prefix c-block-comment-prefix set!c-block-comment-prefix *c-block-comment-prefix*)
 
 (define-custom *c-comment-prefix-regexp* 'set-from-style
   #("Regexp to match the line prefix inside comments.
@@ -535,6 +575,8 @@ the value set here overrides the style system (there is a variable
   (buffer-local-value (current-buffer) 'c-comment-prefix-regexp (*c-comment-prefix-regexp*)))
 (define (set!c-comment-prefix-regexp value)
   (set-buffer-local-value! (current-buffer) 'c-comment-prefix-regexp value))
+
+(c-style-variable-register! 'c-comment-prefix-regexp c-comment-prefix-regexp set!c-comment-prefix-regexp *c-comment-prefix-regexp*)
 
 (define-custom *c-doc-comment-style* 'set-from-style
   #("Specifies documentation comment style(s) to recognize.
@@ -588,6 +630,8 @@ the value set here overrides the style system (there is a variable
   (buffer-local-value (current-buffer) 'c-doc-comment-style (*c-doc-comment-style*)))
 (define (set!c-doc-comment-style value)
   (set-buffer-local-value! (current-buffer) 'c-doc-comment-style value))
+
+(c-style-variable-register! 'c-doc-comment-style c-doc-comment-style set!c-doc-comment-style *c-doc-comment-style*)
 
 (define-custom *c-cleanup-list* 'set-from-style
   "List of various C/C++/ObjC constructs to \"clean up\".
@@ -668,6 +712,8 @@ the value set here overrides the style system (there is a variable
 (define (set!c-cleanup-list value)
   (set-buffer-local-value! (current-buffer) 'c-cleanup-list value))
 
+(c-style-variable-register! 'c-cleanup-list c-cleanup-list set!c-cleanup-list *c-cleanup-list*)
+
 (define-custom *c-hanging-braces-alist* 'set-from-style
   "Controls the insertion of newlines before and after braces
 when the auto-newline feature is active.  This variable contains an
@@ -716,6 +762,8 @@ the value set here overrides the style system (there is a variable
 (define (set!c-hanging-braces-alist value)
   (set-buffer-local-value! (current-buffer) 'c-hanging-braces-alist value))
 
+(c-style-variable-register! 'c-hanging-braces-alist c-hanging-braces-alist set!c-hanging-braces-alist *c-hanging-braces-alist*)
+
 (define-custom *c-hanging-colons-alist* 'set-from-style
   "Controls the insertion of newlines before and after certain colons.
 This variable contains an association list with elements of the
@@ -744,6 +792,8 @@ the value set here overrides the style system (there is a variable
   (buffer-local-value (current-buffer) 'c-hanging-colons-alist (*c-hanging-colons-alist*)))
 (define (set!c-hanging-colons-alist value)
   (set-buffer-local-value! (current-buffer) 'c-hanging-colons-alist value))
+
+(c-style-variable-register! 'c-hanging-colons-alist c-hanging-colons-alist set!c-hanging-colons-alist *c-hanging-colons-alist*)
 
 (define-custom *c-hanging-semi&comma-criteria* 'set-from-style
   "List of functions that decide whether to insert a newline or not.
@@ -777,6 +827,8 @@ the value set here overrides the style system (there is a variable
 (define (set!c-hanging-semi&comma-criteria value)
   (set-buffer-local-value! (current-buffer) 'c-hanging-semi&comma-criteria value))
 
+(c-style-variable-register! 'c-hanging-semi&comma-criteria c-hanging-semi&comma-criteria set!c-hanging-semi&comma-criteria *c-hanging-semi&comma-criteria*)
+
 (define-custom *c-backslash-column* 'set-from-style
   "Minimum alignment column for line continuation backslashes.
 This is used by the functions that automatically insert or align the
@@ -800,6 +852,8 @@ the value set here overrides the style system (there is a variable
   (buffer-local-value (current-buffer) 'c-backslash-column (*c-backslash-column*)))
 (define (set!c-backslash-column value)
   (set-buffer-local-value! (current-buffer) 'c-backslash-column value))
+
+(c-style-variable-register! 'c-backslash-column c-backslash-column set!c-backslash-column *c-backslash-column*)
 
 (define-custom *c-backslash-max-column* 'set-from-style
   "Maximum alignment column for line continuation backslashes.
@@ -825,20 +879,25 @@ the value set here overrides the style system (there is a variable
 (define (set!c-backslash-max-column value)
   (set-buffer-local-value! (current-buffer) 'c-backslash-max-column value))
 
-(define-custom *c-special-indent-hook* 'set-from-style
+(c-style-variable-register! 'c-backslash-max-column c-backslash-max-column set!c-backslash-max-column *c-backslash-max-column*)
+
+(define-custom *c-special-indent-hook* '()
   "Hook for user defined special indentation adjustments.
 This hook gets called after each line is indented by the mode.  It is only
 called when ‘c-syntactic-indentation’ is non-nil."
-  :type 'sexp
+  :type 'hook
   :group 'c)
-
-(c-set-stylevar-fallback 'c-special-indent-hook
-  '())
+;; ^ A plain `defcustom' (`cc-vars.el:1145'), not a `defcustom-c-stylevar':
+;; it is in `c-style-variables' so `c-set-style-1' treats it specially, but
+;; it has no `c-stylevar-fallback' property and no `c-fallback-style' entry
+;; (measured: both are nil in Emacs 31.1).
 
 (define (c-special-indent-hook)
   (buffer-local-value (current-buffer) 'c-special-indent-hook (*c-special-indent-hook*)))
 (define (set!c-special-indent-hook value)
   (set-buffer-local-value! (current-buffer) 'c-special-indent-hook value))
+
+(c-style-variable-register! 'c-special-indent-hook c-special-indent-hook set!c-special-indent-hook *c-special-indent-hook*)
 
 (define-custom *c-label-minimum-indentation* 'set-from-style
   "Minimum indentation for lines inside code blocks.
@@ -863,6 +922,8 @@ the value set here overrides the style system (there is a variable
   (buffer-local-value (current-buffer) 'c-label-minimum-indentation (*c-label-minimum-indentation*)))
 (define (set!c-label-minimum-indentation value)
   (set-buffer-local-value! (current-buffer) 'c-label-minimum-indentation value))
+
+(c-style-variable-register! 'c-label-minimum-indentation c-label-minimum-indentation set!c-label-minimum-indentation *c-label-minimum-indentation*)
 
 (define-custom *c-offsets-alist* '()
   "Alist of syntactic element symbols and indentation offsets.
@@ -1043,6 +1104,8 @@ Here is the current list of valid syntactic element symbols:
 (define (set!c-offsets-alist value)
   (set-buffer-local-value! (current-buffer) 'c-offsets-alist value))
 
+(c-style-variable-register! 'c-offsets-alist c-offsets-alist set!c-offsets-alist *c-offsets-alist*)
+
 (define-custom *c-style-variables-are-local-p* #t
   "Whether style variables should be buffer local by default.
 If non-nil, then all indentation style related variables will be made
@@ -1113,25 +1176,32 @@ can always override the use of ‘c-default-style’ by making calls to
   :type 'radio
   :group 'c)
 
-(define-custom *c-paragraph-start* '()
-  "Regexp to append to ‘paragraph-start’."
-  :type 'sexp
-  :group 'c)
-
-(define-custom *c-paragraph-separate* '()
-  "Regexp to append to ‘paragraph-separate’."
-  :type 'sexp
-  :group 'c)
-
 
     ;;------------------------------------------------------------------
     ;; The plain and buffer-local variables
     ;;------------------------------------------------------------------
-    (define c-indentation-style #f)
-    ;; ^ "Name of the currently installed style." Set by `c-set-style'
-    ;; (cc-styles) - a global, as in Emacs, not a parameter.
+    (define (c-indentation-style)
+      ;; "Name of the currently installed style." Set by `c-set-style'
+      ;; (cc-styles). **A buffer-local slot, not a global**: Emacs's
+      ;; `c-make-styles-buffer-local' puts it on its list and every CC
+      ;; buffer chooses its own style, so one buffer's `c-set-style' must
+      ;; not rename the style of another.
+      (buffer-local-value (current-buffer) 'c-indentation-style #f))
 
-    (define (c-valid-offset offset)
+    (define (set!c-indentation-style value)
+      (set-buffer-local-value! (current-buffer) 'c-indentation-style value))
+
+    (define (c-default-value-sentence-end)
+  ;; "Get the default value of the variable sentence end" -
+  ;; `cc-defs.el:580''s macro, the Emacs 22+ arm `(let (sentence-end)
+  ;; (sentence-end))'. **A placement departure**: it is cc-defs.el's, but
+  ;; cc-defs sits below `paragraphs.scm' and this is one call to
+  ;; `sentence-end' - the same value this file's
+  ;; `c-sentence-end-with-esc-eol' is built from, so it lives beside it.
+  ;; The C's `let' of a variable is this tree's `parameterize'.
+  (parameterize ((*sentence-end* #f)) (sentence-end)))
+
+(define (c-valid-offset offset)
       ;; "Return non-nil if OFFSET is a valid offset for a syntactic
       ;; symbol. See `c-offsets-alist'."
       ;;
@@ -1153,8 +1223,11 @@ can always override the use of ‘c-default-style’ by making calls to
           (and (symbol? offset)
                (or (memq offset %c-offset-function-names)
                    (assq offset (c-offsets-alist))))
+          ;; `vector-length', not `length': Guile's `length' is lists
+          ;; only, and the C's `(length offset)' is `Flength' over a
+          ;; vector, which answers its size.
           (and (vector? offset)
-               (= (length offset) 1)
+               (= (vector-length offset) 1)
                (integer? (vector-ref offset 0)))
           (and (pair? offset)
                (not (eq? (car offset) 'quote)) ; "Detect misquoted lists."

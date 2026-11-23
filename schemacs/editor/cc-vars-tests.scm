@@ -23,7 +23,7 @@
             (*c-mark-wrong-style-of-comment*))
 (test-equal "c-asymmetry-fontification-flag defaults on" #t
             (*c-asymmetry-fontification-flag*))
-(test-equal "c-indentation-style starts unset" #f c-indentation-style)
+(test-equal "c-indentation-style starts unset" #f (c-indentation-style))
 
 (test-equal "the C extra types are Emacs's default"
             '("\\sw+_t" "bool" "complex" "imaginary"

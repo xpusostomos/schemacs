@@ -16977,3 +16977,66 @@ still `cc-styles.scm` (`c-style-alist`, `c-set-style-1`,
 `c-setup-paragraph-variables`, ...), then `cc-mode.el` and the
 `.c`/`.h` milestone. The java modifier-keyword declaration gap is still
 open and still reproducible.
+
+## cc-styles is ported, and the four bugs under it (2026-11-23)
+
+`schemacs/editor/cc-styles.scm` is `cc-styles.el` whole, verified
+assertion for assertion against Emacs 31.1 (`cc-styles-tests.scm`, 60).
+DEPARTURES.md's same-day "cc-styles: the style system" section has the
+C and the details; the things the next session needs:
+
+* **The data is an alist of proper lists**: `("gnu" (c-basic-offset . 2)
+  ...)`, so `(cdr (assoc "gnu" c-style-alist))` is the variable alist.
+  The first transcription wrapped the whole datum in one extra list and
+  nothing matched; `(map car c-style-alist)` against Emacs's twelve
+  names is what caught it.
+* **`set!` on an imported binding is not "set the variable".** Guile
+  raised `Wrong type to apply: ((c . c-lineup-C-comments))` (the new
+  value applied as a procedure) from `c-set-offset`'s Emacs `(setq
+  c-offsets-alist ...)`; the setter call `(set!c-offsets-alist ...)` is
+  the correct spelling, and the buffer-local it writes is what Emacs's
+  `setq` means. Any future port of a `setq` of a style variable must
+  use its `set!` accessor.
+* **`c-special-indent-hook` is a plain `defcustom`** - nil default, no
+  `c-stylevar-fallback` property, no `c-fallback-style` entry - while
+  still a member of `c-style-variables`. It is why the value after the
+  gnu style is `(t c-gnu-impose-minimum)`: `add-hook`'s LOCAL arm seats
+  `(list t)` first. `c-add-local-hook` reproduces that by hand (the
+  tree's `add-hook` has no LOCAL arm); do not simplify it to a `cons`.
+* **`c-valid-offset`'s vector arm needs `vector-length`** - Guile's
+  `length` is lists only, and the fallback offset table's `cpp-macro`
+  entry is Emacs's own `[0]`. Every `c-set-style` installs the fallback
+  table, so this is reached on the first call.
+* **`c-get-style-variables` merges the fallback first**, so `gnu`'s
+  `c-basic-offset` reads 4 from the merged alist while `c-set-style`
+  applies 2 afterwards. That duplicate is measured Emacs behaviour.
+  An undefined style reports through `c-benign-error` and resolves to
+  the fallback; the Emacs `(cdr nil)` there is `%c-cdr`.
+* **`adaptive-fill-regexp`'s default in fill.scm was an older Emacs's
+  value** (`"[ \t]*\\([-…]+\\)?[ \t]*"`); Emacs 31.1's is
+  `"[-–!|#%;>*·•‣⁃◦ \t]*"` (`fill.el:104`). It is shared by every
+  adaptive fill and embedded by `c-setup-paragraph-variables`, and the
+  corrected default is what makes the CC paragraph variables match.
+* **The six paragraph/fill variables `c-setup-paragraph-variables`
+  writes are parameter + buffer-local accessor pairs** (the previous
+  pass's open question); the CC setup cannot leak across buffers.
+
+Test-harness notes: `c-init-language-vars` expands into `cc-langs`
+internals, so a test that imports only `c-init-language-vars` fails
+with `Unbound variable: c-lang-set-local!` at the first call - import
+`(schemacs editor cc-langs)` wholesale (as `cc-vars-tests` does). And
+`srfi 64` catches errors raised inside a test form and reports them as
+`actual-error`, so an unbound name in a test reads as a failure rather
+than killing the suite - useful, and one more reason to read the whole
+failure block.
+
+Verified: all **91 suites** pass (exit 0), `cc-styles-tests` 60,
+`cc-vars-tests` 32, `cc-fonts-tests` 60, `fill-tests` 39, `fns-tests`
+41, `subr-tests` 104 - and the pty battery is **100/100** on the
+settled tree, run alone.
+
+Next, unchanged: `cc-mode.el` - the mode definitions, `c-before-change`/
+`c-after-change`, `c-font-lock-init`, with `easy-menu-define` and a
+`def-edebug-spec` stub as the two missing primitives - then the first
+milestone: `.c`/`.h` opening in c-mode through `auto-mode-alist`, faces
+compared to Emacs.

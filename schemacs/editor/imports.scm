@@ -69,6 +69,7 @@
     (schemacs editor cc-langs)
     (schemacs editor cc-vars)
     (schemacs editor cc-fonts)
+    (schemacs editor cc-styles)
     (schemacs editor callproc)
     (schemacs editor casetab)
     (schemacs editor casefiddle)
@@ -281,6 +282,7 @@
     *c-font-lock-extra-types*
     *c-font-lock-fontify-region-function*
     *c-fontify-new-found-type-function*
+    *c-guess-basic-syntax-function*
     *c-hanging-braces-alist*
     *c-hanging-colons-alist*
     *c-hanging-semi&comma-criteria*
@@ -298,8 +300,6 @@
     *c-noise-macro-with-parens-names*
     *c-offsets-alist*
     *c-old-style-variable-behavior*
-    *c-paragraph-separate*
-    *c-paragraph-start*
     *c-parse-and-markup-<>-arglists*
     *c-promote-possible-types*
     *c-record-found-types*
@@ -1159,6 +1159,7 @@
     c-<>-get-restricted
     c->-as-paren-syntax
     c-add-language
+    c-add-style
     c-add-type
     c-add-type-1
     c-after-change-check-<>-operators
@@ -1245,6 +1246,7 @@
     c-debug-parse-state
     c-debug-put-decl-spot-faces
     c-debug-sws-msg
+    c-default-value-sentence-end
     c-define-lang-constant
     c-define-lang-constant-here
     c-delq-from-dotted-list
@@ -1365,6 +1367,7 @@
     c-get-fontification-context
     c-get-lang-constant
     c-get-ml-closer
+    c-get-style-variables
     c-go-down-list-backward
     c-go-down-list-forward
     c-go-list-backward
@@ -1385,6 +1388,7 @@
     c-indentation-style
     c-init-bs-cache
     c-init-language-vars
+    c-initialize-builtin-style
     c-int-to-char
     c-invalidate-find-decl-cache
     c-invalidate-macro-cache
@@ -1398,6 +1402,7 @@
     c-jump-syntax-balanced
     c-jump-syntax-unbalanced
     c-just-after-func-arglist-p
+    c-keep-region-active
     c-keyword-member
     c-keyword-sym
     c-kwds-lang-consts
@@ -1462,6 +1467,7 @@
     c-make-keywords-re
     c-make-macro-with-semi-re
     c-make-noise-macro-regexps
+    c-make-styles-buffer-local
     c-make-syntactic-matcher
     c-mark-<-as-paren
     c-mark->-as-paren
@@ -1517,6 +1523,8 @@
     c-query-and-set-macro-start
     c-query-macro-start
     c-re-redisplay-timer
+    c-read-offset
+    c-read-offset-history
     c-record-ref-id
     c-record-type-id
     c-reference-face-name
@@ -1552,7 +1560,13 @@
     c-set-doc-comment-char-list
     c-set-doc-comment-re-element
     c-set-doc-comment-res
+    c-set-offset
+    c-set-style
+    c-set-style-1
+    c-set-style-history
     c-set-stylevar-fallback
+    c-setup-filladapt
+    c-setup-paragraph-variables
     c-shift-line-indentation
     c-simple-decl-matchers
     c-simple-skip-symbol-backward
@@ -1599,6 +1613,11 @@
     c-string-par-start
     c-string-syntax
     c-strip-conses
+    c-style-alist
+    c-style-variable-default
+    c-style-variable-register!
+    c-style-variable-set!
+    c-style-variable-value
     c-style-variables
     c-stylevar-fallback
     c-suppress-<->-as-parens
@@ -1638,6 +1657,7 @@
     canonically-space-region
     capitalize
     capitalize-word
+    car-safe
     case-canon-table
     case-eqv-table
     case-table-p
@@ -1647,9 +1667,11 @@
     category-set-mnemonics
     category-table
     category-table-p
+    cc-choose-style-for-mode
     cd
     cd-absolute
     cd-path
+    cdr-safe
     change-frame-size
     char-after
     char-alt
@@ -1849,6 +1871,7 @@
     concat
     confirm-nonexistent-file-or-buffer
     constrain-to-field
+    copy-alist
     copy-category-table
     copy-char-table
     copy-face
@@ -2336,6 +2359,9 @@
     fill-single-char-nobreak-p
     fill-single-word-nobreak-p
     fill-text-properties-at
+    filladapt-token-conversion-table
+    filladapt-token-match-table
+    filladapt-token-table
     find-alternate-file
     find-and-call-menu-selection
     find-auto-coding
@@ -3781,6 +3807,7 @@
     set!c-hungry-delete-key
     set!c-indent-comment-alist
     set!c-indent-comments-syntactically-p
+    set!c-indentation-style
     set!c-label-minimum-indentation
     set!c-laomib-cache
     set!c-lit-pos-cache

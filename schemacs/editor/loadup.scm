@@ -148,6 +148,7 @@
         (schemacs editor eval)
         (schemacs editor cc-langs)
         (schemacs editor cc-vars)
+        (schemacs editor cc-styles)
         (schemacs editor character)
         (schemacs editor characters)
         (schemacs editor charset)

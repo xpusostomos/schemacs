@@ -273,7 +273,12 @@ of a line, in Japanese typography."
     (define (set!adaptive-fill-mode value)
       (set-buffer-local-value! (current-buffer) 'adaptive-fill-mode value))
 
-    (define-custom *adaptive-fill-regexp* "[ \t]*\\([-–!|#%;>*·•‣⁃◦]+\\)?[ \t]*"
+    ;; `fill.el:104''s own value, character for character. (The previous
+    ;; value here was an older Emacs's shape - leading whitespace, a
+    ;; required bullet - and `c-setup-paragraph-variables' embeds this
+    ;; value in `adaptive-fill-regexp', so it was visible in every CC
+    ;; buffer's filling.)
+    (define-custom *adaptive-fill-regexp* "[-–!|#%;>*·•‣⁃◦ \t]*"
       "Regexp to match text at start of line that constitutes indentation.
 If Adaptive Fill mode is enabled, a prefix matching this pattern
 on the first and second lines of a paragraph is used as the

@@ -93,7 +93,7 @@
   (export
    user-error
    assoc-delete-all assq-delete-all delq remq remove copy-tree last
-   butlast
+   butlast car-safe cdr-safe
    add-to-history add-to-list
    ;; string/list helpers `subr.el`'s, for the external packages and
    ;; anything else written in Emacs's idiom
@@ -1536,6 +1536,18 @@
                 (if (or (<= k 0) (null? l))
                     (reverse acc)
                     (loop (cdr l) (- k 1) (cons (car l) acc))))))))
+
+    (define (car-safe object)
+      ;; GNU Emacs's `car-safe' (`data.c:670'): "Return the car of OBJECT
+      ;; if it is a cons cell, or else nil." The C's `CAR_SAFE' is the
+      ;; test; nil is `'()' here, as it is for the lists these answer.
+      (if (pair? object) (car object) '()))
+
+    (define (cdr-safe object)
+      ;; GNU Emacs's `cdr-safe' (`data.c:688'): "Return the cdr of
+      ;; OBJECT if it is a cons cell, or else nil." (Not `cdr', which
+      ;; signals for a non-list.)
+      (if (pair? object) (cdr object) '()))
 
     (define (copy-tree tree . rest)
       ;; GNU Emacs's `copy-tree' (`subr.el:1002'): "Make a copy of TREE.

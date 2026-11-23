@@ -14740,3 +14740,131 @@ appearing and the C-g went 15/15 (it was 9/10), and
 `query-replace-quit` 15/15 (was 9/10). The unit test is
 `tty-editor-tests.scm`'s "handle-interrupt sets the flag before it
 wakes the wait".
+
+# cc-styles: the style system (2026-11-23)
+
+`schemacs/editor/cc-styles.scm` is `cc-styles.el` whole: the ten built-in
+styles, `c-set-style-1`, `c-get-style-variables`, `c-set-style`,
+`c-add-style`, `c-read-offset`/`c-set-offset`,
+`c-setup-paragraph-variables`, `c-setup-filladapt`,
+`c-initialize-builtin-style`, `c-make-styles-buffer-local` and
+`cc-choose-style-for-mode`. Every expectation in
+`cc-styles-tests.scm` (59 assertions in six groups) is Emacs 31.1's
+own answer, measured in a real `c-mode` buffer first.
+
+## The data
+
+`c-style-alist` is a transcription of Emacs 31.1's value, compared
+field for field with GITE's `cc-styles.el` (they are equal). It is
+**not** an alist of `(NAME . VARS)` pairs: Emacs's own list is
+`(("gnu" (c-basic-offset . 2) ...) ...)`, so each element is a proper
+list whose car is the style name and whose cdr is the variable alist -
+which is what makes `(assoc "gnu" c-style-alist)`'s cdr the alist and
+`(cdr (assoc ...))`'s cdr the next variable. A first transcription had
+wrapped the whole datum in one extra list, so `(car c-style-alist)` was
+the gnu style itself and no `assoc` ever matched; the differential
+against Emacs caught it at once (`(mapcar #'car c-style-alist)`).
+
+## The style system reaches variables through a registry
+
+`c-set-style-1`'s "all other variables" arm is Emacs's `(set attr val)`
+and `(default-value attr)`. Here it is `c-style-variable-set!` /
+`c-style-variable-value` / `c-style-variable-default` over the
+registry cc-vars fills as each style variable is declared. Two
+consequences worth knowing:
+
+* **`c-set-offset`'s `setq c-offsets-alist` is `set!c-offsets-alist`.**
+  `c-offsets-alist` is an imported accessor pair, and `set!` on an
+  imported binding is not "write the variable" in Guile: it raised
+  `Wrong type to apply: ((c . c-lineup-C-comments))` - the *new value*
+  applied as a procedure, several frames from the line. The tree's
+  setter call is the only correct spelling, and it is what Emacs's
+  `setq` means for a buffer-local anyway (`set` with the local binding).
+* **`c-indentation-style` is the buffer-local accessor pair**, not a
+  bare parameter. Emacs makes it buffer-local
+  (`c-style-variables-are-local-p`), and a shared parameter leaked one
+  buffer's style name into another in the first draft.
+
+## `c-special-indent-hook` is a plain `defcustom`
+
+`cc-vars.el:1145` declares it with `defcustom`, *not*
+`defcustom-c-stylevar`: its value is nil, it has no
+`c-stylevar-fallback` property and no `c-fallback-style` entry
+(measured - all three nil in Emacs 31.1), while still being *named* in
+`c-style-variables` so `c-set-style-1` treats it specially. Our first
+port gave it `set-from-style` and a fallback entry, which made
+`c-set-style`'s `add-hook` call `memq` a symbol and raise. Corrected.
+
+`add-hook`'s LOCAL arm is why the buffer's value after the gnu style is
+`(t c-gnu-impose-minimum)`: `subr.el:2330` sets a fresh local value to
+`(list t)` - "run the global value as well" - before appending. There is
+no LOCAL arm on this tree's `add-hook`, so `c-add-local-hook` does the
+same steps by hand (local value if absent, single-function coercion,
+append unless present), which is what makes the value match.
+
+## `c-valid-offset`'s vector arm
+
+`(length offset)` on `#(0)` - the `cpp-macro` entry's offset, Emacs's
+own shape - raises in Guile: `length` is lists only. The C's
+`(length offset)` over a vector is `Flength`, so the port is
+`vector-length`. Applying any style installs the whole fallback offset
+table, `cpp-macro` included, so this was reached by the very first
+`c-set-style`.
+
+## `c-get-style-variables` merges the fallback *first*
+
+`(c-get-style-variables "gnu" nil)` answers `(c-basic-offset . 4)`,
+not 2: `nconc` of the fallback alist and the style's own variables puts
+the fallback's binding first, and `assq` takes the first. `c-set-style`
+then applies them in order and the style's own 2 wins. That duplicate
+is Emacs's behaviour (measured) and the port keeps it - do not "fix" it.
+
+An undefined style prints "Undefined style: ..." through
+`c-benign-error` and resolves to the fallback alone; Emacs's
+`(cdr nil)` there is this tree's `%c-cdr`, without which the call
+raises `(cdr #f)` on the first miss.
+
+## The paragraph variables were the shared-primitive ripple
+
+The previous section named this as the open question; it is settled.
+All six variables `c-setup-paragraph-variables` writes -
+`paragraph-start`, `paragraph-separate`,
+`paragraph-ignore-fill-prefix`, `adaptive-fill-mode`,
+`adaptive-fill-regexp`, `adaptive-fill-first-line-regexp` - are
+parameter + buffer-local accessor pairs now (paragraphs.scm, fill.scm),
+so one CC buffer's setup cannot leak into another. `paragraph-start` /
+`paragraph-separate` were already pairs; the other four were made
+pairs in the same way, and every reader was converted.
+
+**Found on the way: `adaptive-fill-regexp`'s default was wrong.** It
+was `"[ \t]*\\([-–!|#%;>*·•‣⁃◦]+\\)?[ \t]*"` (an older Emacs's shape);
+Emacs 31.1's is `"[-–!|#%;>*·•‣⁃◦ \t]*"` (`fill.el:104`, measured). It
+is shared by every adaptive fill, and `c-setup-paragraph-variables`
+embeds it - the CC value was `"[ \t]*\\(//+\\|\\**\\)[ \t]*\\([ \t]*\\([-…]+\\)?[ \t]*\\)"`
+where Emacs's is `"...\\([-… \t]*\\)"`. Fixed at the definition.
+
+## The corrections to the earlier section
+
+* `c-paragraph-start` and `c-paragraph-separate` are **not**
+  `cc-vars` custom variables: they are `cc-langs`' language variables
+  (`c-lang-defvar`), as `cc-styles.el:130` reads them. The two stray
+  defcustoms from the earlier pass are deleted; the language data
+  carries `t "$"`, and the port's `c-setup-paragraph-variables` reads
+  `(%c-langvar 'c-paragraph-start)`.
+* `c-special-indent-hook`'s shape above supersedes "all sixteen style
+  variables are `defcustom` parameters with accessor pairs": fifteen
+  are; this one has the plain default.
+
+## Still named, not carried (all in the file header)
+
+`c-read-offset`/`c-set-offset` complete against no obarray, so an
+offset naming a line-up function is typed out rather than completed
+(the `a` interactive code's departure); `c-set-offset`'s initial
+contents need `c-guess-basic-syntax`, which is cc-engine's
+indentation-analysis section and arrives through
+`*c-guess-basic-syntax-function*`, #f until it lands; `ding` is not
+ported, so a rejected offset reports by message alone; the filladapt
+tables are empty because filladapt is not part of Emacs (the function
+appends to whatever the package would have defined); and a language
+value naming `c-gnu-impose-minimum` is the *symbol*, resolved through
+the line-up-function registry rather than an obarray.

@@ -97,6 +97,7 @@
    c--mapcan c--set-difference c--intersection c--delete-duplicates
    %c-true %c-false
    c-emacs-features c-with-syntax-table c-int-to-char c-characterp
+   c-keep-region-active
    c-register-emacs-variable-reader!
    c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
    *c-lang-var-overrides*
@@ -172,6 +173,15 @@
 
 (define (c-characterp arg)
   (char? arg))
+
+(define (c-keep-region-active)
+  ;; `cc-defs.el:2092': "Do whatever is necessary to keep the region
+  ;; active in XEmacs. This is not needed for Emacs." The C's whole body
+  ;; is `(and (boundp 'zmacs-region-stays) (setq zmacs-region-stays t))'
+  ;; - a variable only XEmacs has, so in Emacs the function is a no-op
+  ;; that answers nil. It is called from `c-set-style', `c-set-offset'
+  ;; and the cc-cmds commands, and answers #f here for the same reason.
+  #f)
 
 ;;----------------------------------------------------------------------
 ;; `c-add-language' (`cc-defs.el:2477') and the language declarations
