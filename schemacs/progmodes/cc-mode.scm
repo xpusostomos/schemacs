@@ -48,7 +48,7 @@
   ;; `set!`-prefixed setter.
   (import
     (scheme base)
-    (only (guile) logand)
+    (only (guile) logand caddr while)
     (only (schemacs core syntax-macros) when-e while-e setq)
     (only (schemacs buffer) current-buffer buffer-local-value
           set-buffer-local-value!)
@@ -57,7 +57,7 @@
           bobp eobp char-before char-after buffer-substring-no-properties
           save-excursion forward-line narrow-to-region save-restriction)
     (only (schemacs search) looking-at match-end match-beginning
-          re-search-forward save-match-data)
+          re-search-forward search-forward save-match-data)
     (only (schemacs syntax) skip-syntax-backward skip-chars-backward
           parse-partial-sexp)
     (only (schemacs cmds) backward-char forward-char end-of-line)
@@ -73,6 +73,7 @@
           c-previous-single-property-change
           c-<-as-paren-syntax c->-as-paren-syntax
           c-characterp
+          c-mark-<-as-paren c-mark->-as-paren c-unmark-<-or->-as-paren
           c-save-buffer-state
           *c-restore-string-fences-function*
           *c-clear-string-fences-function*)
@@ -88,6 +89,8 @@
           c-benign-error
           c-syntactic-re-search-forward
           c-literal-limits c-literal-start c-literal-type
+          c-semi-pp-to-literal c-full-pp-to-literal
+          c-forward-comments
           c-end-of-macro c-in-literal
           c-ml-string-opener-at-or-around-point
           c-maybe-re-mark-ml-string
@@ -118,6 +121,8 @@
    c-before-change-check-unbalanced-strings
    c-after-change-mark-abnormal-strings
    c-after-change-escape-NL-in-string
+   c-before-change-include-<> c-after-change-include-<>
+   c-before-change-fix-comment-escapes c-after-change-fix-comment-escapes
    c-bc-changed-stringiness set!c-bc-changed-stringiness
    c-open-string-opener set!c-open-string-opener)
 
@@ -871,6 +876,137 @@
                  'syntax-table '(15) #\" lim)
             (c-remove-string-fences end)
             (c-remove-string-fences (- (point) 1))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-before-change-include-<>' and `c-after-change-include-<>'
+    ;; (`cc-mode.el:2029', `:2064')
+    ;;--------------------------------------------------------------
+    (define (c-before-change-include-<> beg end)
+      ;; "Remove category/syntax-table properties from each #include
+      ;; <..>. In particular, from the < and > characters which have been
+      ;; marked as parens using these properties. This is done on every
+      ;; such #include <..> with a portion between BEG and END."
+      (c-save-buffer-state
+          ((search-end (begin (goto-char end)
+                              (c-end-of-macro)
+                              (point)))
+           (hash-pos #f))
+        (goto-char beg)
+        (c-beginning-of-macro)
+        (while (and (< (point) search-end)
+                    (re-search-forward (%c-langvar 'c-cpp-include-key)
+                                       search-end 'bound)
+                    (begin (set! hash-pos (match-beginning 0)) hash-pos))
+          (c-forward-comments (c-point 'eoll))
+          (when (and (< (point) search-end)
+                     (looking-at "\\s(")
+                     (looking-at "\\(<\\)[^>\n\r]*\\(>\\)?")
+                     (null? (cdr (c-semi-pp-to-literal hash-pos))))
+            (c-unmark-<-or->-as-paren (match-beginning 1))
+            (when (< hash-pos (c-new-BEG))
+              (set!c-new-BEG hash-pos))
+            (when (match-beginning 2)
+              (c-unmark-<-or->-as-paren (match-beginning 2))
+              (when (> (match-end 2) (c-new-END))
+                (set!c-new-END (match-end 2))))))))
+
+    (define (c-after-change-include-<> beg end old-len)
+      ;; "Apply category/syntax-table properties to each #include <..>.
+      ;; In particular, to the < and > characters to mark them as
+      ;; matching parens using these properties. This is done on every
+      ;; such #include <..> with a portion between BEG and END."
+      (c-save-buffer-state
+          ((search-end (begin (goto-char end)
+                              (c-end-of-macro)
+                              (point)))
+           (hash-pos #f))
+        (goto-char beg)
+        (c-beginning-of-macro)
+        (while (and (< (point) search-end)
+                    (re-search-forward (%c-langvar 'c-cpp-include-key)
+                                       search-end 'bound)
+                    (begin (set! hash-pos (match-beginning 0)) hash-pos))
+          (c-forward-comments (c-point 'eoll))
+          (when (and (< (point) search-end)
+                     (looking-at "\\(<\\)[^>\n\r]*\\(>\\)")
+                     (null? (cdr (c-semi-pp-to-literal (match-beginning 0)))))
+            (c-mark-<-as-paren (match-beginning 1))
+            (when (< hash-pos (c-new-BEG)) (set!c-new-BEG hash-pos))
+            (c-mark->-as-paren (match-beginning 2))
+            (when (> (match-end 2) (c-new-END))
+              (set!c-new-END (match-end 2)))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-before-change-fix-comment-escapes' and
+    ;; `c-after-change-fix-comment-escapes' (`cc-mode.el:2093', `:2112')
+    ;;--------------------------------------------------------------
+    (define (c-before-change-fix-comment-escapes beg end)
+      ;; "Remove punctuation syntax-table text properties from C/C++
+      ;; comment markers. This is to handle the rare case of two or more
+      ;; backslashes at an end of line in a // comment or the equally
+      ;; rare case of a backslash preceding the terminator of a /*
+      ;; comment, as \\*/."
+      (c-save-buffer-state
+          ((end-state #f))
+        (set! end-state (c-full-pp-to-literal end))
+        (when (memv (cadr end-state) '(c c++))
+          (goto-char (max (- beg 2) (point-min)))
+          (if (eq? (cadr end-state) 'c)
+              (when (search-forward "\\*/"
+                                    (or (cdr (caddr end-state)) (point-max)) #t)
+                (c-clear-syntax-table-trim-caches (match-beginning 0)))
+              (let loop ()
+                (when (search-forward "\\\\\n"
+                                      (or (cdr (caddr end-state)) (point-max))
+                                      #t)
+                  (c-clear-syntax-table-trim-caches (match-beginning 0))
+                  (loop)))))))
+
+    (define (c-after-change-fix-comment-escapes beg end old-len)
+      ;; "Apply punctuation syntax-table text properties to C/C++ comment
+      ;; markers. ... Note that the function currently only handles
+      ;; comments beginning with // and /*, not more generic line and
+      ;; block comments."
+      (c-save-buffer-state
+          ((state #f))
+        ;; "We cannot use `c-full-pp-to-literal' in this function, since
+        ;; the `syntax-table' text properties after point are not yet in
+        ;; a consistent state."
+        (set! state (c-semi-pp-to-literal beg))
+        (goto-char (if (memv (cadr state) '(c c++))
+                       (caddr state)
+                       (max (- beg 2) (point-min))))
+        (while-e (re-search-forward "\\\\\\(\\(\\\\\n\\)\\|\\(\\*/\\)\\)"
+                                  (min (+ end 2) (point-max)) #t)
+          (set! state (c-semi-pp-to-literal (match-beginning 0)))
+          (when (cond
+                 ((eq? (cadr state) 'c)
+                  (match-beginning 3))
+                 ((eq? (cadr state) 'c++)
+                  (match-beginning 2)))
+            (c-put-syntax-table-trim-caches (match-beginning 0) '(1))))
+
+        (goto-char end)
+        (set! state (c-semi-pp-to-literal (point)))
+        (cond
+         ((eq? (cadr state) 'c)
+          (when (search-forward "*/" #f #t)
+            (when (eqv? (char-before (match-beginning 0)) #\\)
+              (c-put-syntax-table-trim-caches
+               (- (match-beginning 0) 1) '(1)))))
+         ((eq? (cadr state) 'c++)
+          (let loop ()
+            (when (begin
+                    (end-of-line)
+                    (and (eqv? (char-before) #\\)
+                         (begin
+                           (when (eqv? (char-before (- (point) 1)) #\\)
+                             (c-put-syntax-table-trim-caches
+                              (- (point) 2) '(1)))
+                           #t)
+                         (not (eobp))))
+              (forward-char)
+              (loop)))))))
 
     ;; ---------------------------------------------------------------
     ;; `c-with-string-fences'` seams (`cc-defs.el:1774')

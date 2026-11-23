@@ -1217,6 +1217,8 @@
     c-after-change-check-<>-operators
     c-after-change-de-typedef
     c-after-change-escape-NL-in-string
+    c-after-change-fix-comment-escapes
+    c-after-change-include-<>
     c-after-change-mark-abnormal-strings
     c-after-conditional
     c-after-special-operator-id
@@ -1261,6 +1263,8 @@
     c-before-change-check-<>-operators
     c-before-change-check-unbalanced-strings
     c-before-change-de-typedef
+    c-before-change-fix-comment-escapes
+    c-before-change-include-<>
     c-beginning-of-current-token
     c-beginning-of-decl-1
     c-beginning-of-defun-1

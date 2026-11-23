@@ -17379,10 +17379,22 @@ it, as that library's header explains.
    way**: `c-get-ml-closer` applied a language variable that holds a
    function *symbol* - always resolve through `(%c-lang-function
    (%c-langvar 'NAME))`.
+   **The include-<> and comment-escape pairs are in too**
+   (`c-before-change-include-<>` / `c-after-change-include-<>`, and
+   `c-before-change-fix-comment-escapes` /
+   `c-after-change-fix-comment-escapes`), with the
+   bug that `(not (cdr LIST))` is false in Scheme - use `(null? (cdr
+   ...))` - caught by their differential; the group is
+   `schemacs_editor_cc_mode_include_comment_escapes` (9). The dumps
+   differ only where Emacs's mode initialisation has already marked
+   things, which this tree has no counterpart for yet.
    Next: the quote parsing (`c-quoted-number-*`,
-   `c-parse-quotes-before/after-change`), the
-   `c-before/after-change-include-<>` wrappers, the comment-escape
-   pair, then the CPP functions and `c-before-change`/`c-after-change`.
+   `c-parse-quotes-before/after-change`), the ml-string change
+   machinery (`c-before-change-check-ml-strings`,
+   `c-after-change-unmark-ml-strings`, `c-depropertize-ml-string`),
+   then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`,
+   `c-change-expand-fl-region`, `c-called-from-text-property-change-p`,
+   and `c-before-change`/`c-after-change` themselves.
 2. Then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`, the
    comment-escape pair, `c-parse-quotes-after-change`,
    `c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,

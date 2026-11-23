@@ -15543,3 +15543,63 @@ the ml-string change machinery (`c-before-change-check-ml-strings`,
 `c-after-change-unmark-ml-strings`, `c-depropertize-ml-string`),
 `c-before-change`/`c-after-change` themselves, and the mode
 definitions.
+
+# cc-mode: #include brackets and comment escapes, and a cdr test that
+# was true (2026-11-24)
+
+`cc-mode.el:2029`-`:2166`'s four remaining change functions are in:
+`c-before-change-include-<>` / `c-after-change-include-<>` (they
+unmark and re-mark the `<`/`>` of every `#include <...>` as parens) and
+`c-before-change-fix-comment-escapes` /
+`c-after-change-fix-comment-escapes` (the punctuation `'(1)` a
+backslash needs beside a `//` line end or a `/*` terminator).
+
+## The bug: `(not (cdr LIST))` is false in Scheme
+
+Both include functions gate on Emacs's
+
+    (not (cdr (c-semi-pp-to-literal HASH-POS)))
+
+meaning "there is no literal here" - `c-semi-pp-to-literal` answers a
+one-element list `(STATE)` outside a literal, and Emacs's `cdr` of that
+is nil. In Scheme the same expression is `(cdr '(state))` = `'()` - an
+*empty list*, which is true - so `(not ...)` was `#f`, the `and` never
+fired, and no bracket was ever unmarked. Measured: Emacs's before-change
+left the include line with neither category nor `syntax-table` at 10/18;
+ours left both. The test is `(null? (cdr ...))`.
+
+This is the `'()`-is-true class in a position the earlier passes had not
+touched: a *cdr emptiness* test, rather than an empty-list value. Both
+include functions are fixed, and `cc-mode-test.scm`'s
+`schemacs_editor_cc_mode_include_comment_escapes` group pins the
+mark/unmark/remark cycle.
+
+## Verification
+
+Same-method differential (real `c-mode` buffers, modification hooks
+inhibited, explicit `c-new-BEG`/`c-new-END`). Identical answers:
+
+| case | Emacs 31.1 | here |
+|---|---|---|
+| include line, brackets marked | `(10 (4 . 62) c-<-as-paren-syntax)` etc. | same |
+| before-change over it | both unmarked, region `(1 27)` | same |
+| after-change | both marked again | same |
+| `//` line ending `\\` | after-change marks 13 `(1)` | same |
+| ... before-change | clears 13, leaves 14 `(1)`, region `(1 23)` | same |
+| `/* c \*/` | after-change marks 13 `(1)`; before-change clears it | same |
+
+One measured difference is *not* a departure: Emacs's `c-mode` has
+already marked the include brackets and the `//` backslash during mode
+initialisation (its `c-before-font-lock-functions` sweep), so the Emacs
+dumps start non-empty; our tree has no mode initialisation yet. The
+tests build the same starting state explicitly, which is exactly what
+the after-change function produces.
+
+## Not carried yet from cc-mode.el
+
+The quote parsing (`c-quoted-number-*`, `c-parse-quotes-before-change`,
+`c-parse-quotes-after-change`), the ml-string change machinery,
+`c-depropertize-CPP`/`c-neutralize-syntax-in-CPP`,
+`c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,
+`c-called-from-text-property-change-p`, `c-before-change`/`c-after-change`
+themselves, and the mode definitions.

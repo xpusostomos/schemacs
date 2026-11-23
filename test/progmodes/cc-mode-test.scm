@@ -25,12 +25,14 @@
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs marker) marker-position)
  (only (schemacs textprop) get-text-property)
- (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*)
+ (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*
+       c-clear-char-property c-mark-<-as-paren c-mark->-as-paren)
  (schemacs progmodes cc-langs)
  (only (schemacs progmodes cc-styles) c-set-style)
  (only (schemacs progmodes cc-engine) c-found-types c-add-type-1 c-clear-found-types
        c-new-id-start c-new-id-end c-new-id-is-type
-       c-new-BEG set!c-new-BEG c-new-END set!c-new-END)
+       c-new-BEG set!c-new-BEG c-new-END set!c-new-END
+       c-put-syntax-table-trim-caches)
  (only (schemacs progmodes cc-mode)
        c-unfind-enclosing-token c-unfind-coalesced-tokens c-update-new-id
        c-put-syn-tab c-clear-syn-tab c-clear-string-fences
@@ -40,7 +42,9 @@
        c-before-change-check-unbalanced-strings
        c-after-change-mark-abnormal-strings
        c-after-change-escape-NL-in-string
-       c-open-string-opener))
+       c-open-string-opener
+       c-before-change-include-<> c-after-change-include-<>
+       c-before-change-fix-comment-escapes c-after-change-fix-comment-escapes))
 
 (test-begin "schemacs_editor_cc_mode")
 
@@ -314,3 +318,65 @@
 (test-equal "... and leaves the markers" '(18 24) (mrk))
 
 (test-end "schemacs_editor_cc_mode_string_changes")
+
+
+;;--------------------------------------------------------------
+;; `#include <...>' and the comment escapes (`cc-mode.el:2029'-`:2166')
+;;--------------------------------------------------------------
+;; Every expectation is Emacs 31.1's. Emacs's `c-mode' marks the include
+;; brackets itself during initialisation (its before-font-lock sweep);
+;; the tests mark them explicitly, which is the same state the
+;; after-change function produces.
+(test-begin "schemacs_editor_cc_mode_include_comment_escapes")
+
+(fresh "#include <stdio.h>\nint a;\n")
+(c-mark-<-as-paren 10)
+(c-mark->-as-paren 18)
+(test-equal "the include brackets are marked as parens"
+  (list (list 10 '(4 . 62) #f) (list 18 '(5 . 60) #f)) (fences))
+
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-before-change-include-<> 1 18)
+(test-equal "before a change the include brackets lose their syntax"
+  '() (fences))
+(test-equal "... and the region is extended" (list 1 27)
+  (list (c-new-BEG) (c-new-END)))
+
+(c-after-change-include-<> 1 18 0)
+(test-equal "after the change they are marked again"
+  (list (list 10 '(4 . 62) #f) (list 18 '(5 . 60) #f)) (fences))
+
+;; A line comment ending in two backslashes: "int a;\n// c \\\\\nint b;\n".
+;; The backslashes are 13 and 14; the newline 15.
+(fresh "int a;\n// c \\\\\nint b;\n")
+(c-clear-char-property 13 'syntax-table)
+(c-clear-char-property 14 'syntax-table)
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-after-change-fix-comment-escapes 13 15 0)
+(test-equal "the first of two backslashes at a // end is punctuation"
+  (list (list 13 '(1) #f)) (fences))
+
+(c-clear-char-property 13 'syntax-table)
+(c-clear-char-property 14 'syntax-table)
+(c-put-syntax-table-trim-caches 13 '(1))
+(c-put-syntax-table-trim-caches 14 '(1))
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-before-change-fix-comment-escapes 15 15)
+(test-equal "before the change only the first marker is cleared"
+  (list (list 14 '(1) #f)) (fences))
+(test-equal "... and the region is extended" (list 1 23)
+  (list (c-new-BEG) (c-new-END)))
+
+;; A block comment with a backslash before its terminator:
+;; "int a;\n/* c \\*/\nint b;\n" - the backslash is 13.
+(fresh "int a;\n/* c \\*/\nint b;\n")
+(c-clear-char-property 13 'syntax-table)
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-after-change-fix-comment-escapes 13 15 0)
+(test-equal "a backslash before */ is punctuation" (list (list 13 '(1) #f)) (fences))
+
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-before-change-fix-comment-escapes 13 15)
+(test-equal "before the change it is cleared again" '() (fences))
+
+(test-end "schemacs_editor_cc_mode_include_comment_escapes")
