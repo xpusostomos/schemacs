@@ -17353,16 +17353,26 @@ it, as that library's header explains.
 **cc-mode resume point, exactly:**
 
 1. `schemacs/progmodes/cc-mode.scm` is the partial cc-mode.el: the
-   found-type helpers only (`cc-mode-tests.scm` -> `test/progmodes/
-   cc-mode-test.scm`, 13 tests). Next is the string-fence layer, in
-   this order: `c-put-syn-tab`/`c-clear-syn-tab` and their
-   `c-fl-syn-tab` mirrors, the `c-min-syn-tab-mkr`/`c-max-syn-tab-mkr`
-   pair, `c-put-string-fence-trim-caches`/`c-clear-syntax-table-
-   trim-caches`, `c-restore-string-fences`/`c-clear-string-fences`,
-   then `c-before-change-check-unbalanced-strings`,
+   found-type helpers (`test/progmodes/cc-mode-test.scm`, 13 tests) and
+   **the string-fence layer** - `c-put-syn-tab`/`c-clear-syn-tab`, the
+   `c-min-syn-tab-mkr`/`c-max-syn-tab-mkr` pair,
+   `c-clear-string-fences`/`c-restore-string-fences`,
+   `c-multiline-string-check-final-quote` and
+   `c-remove-string-fences` - with `c-with-string-fences`' two seams
+   installed at load (22 tests now). The Emacs-measured differential
+   is in DEPARTURES.md's 2026-11-23 "string-fence layer" section; the
+   unit group is `schemacs_editor_cc_mode_fences`. The
+   `*-trim-caches` wrappers live in `cc-engine.scm` (a name-placement
+   departure: their last form is cc-engine's cache truncator).
+   **The bug that pass found**: five cc-defs property searches returned
+   the *unspecified* value (true) on failure where Emacs's `when`
+   answers nil; `c-clear-string-fences`'s "already unbalanced" test
+   then fired on failure. They are explicit `(if ... #f)` now.
+   Next: `c-before-change-check-unbalanced-strings`,
    `c-after-change-mark-abnormal-strings`,
-   `c-after-change-escape-NL-in-string` and the ml-string functions
-   (inactive for C, active for C++ raw strings).
+   `c-after-change-escape-NL-in-string`, `c-pps-to-string-delim`, the
+   ml-string fence machinery and `c-open-string-opener` (inactive for
+   C, active for C++ raw strings).
 2. Then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`, the
    comment-escape pair, `c-parse-quotes-after-change`,
    `c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,

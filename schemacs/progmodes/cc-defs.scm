@@ -66,7 +66,8 @@
     ;; `c-skip-ws-chars-*' and the scan-lists wrappers move point and
     ;; narrow.
     (only (schemacs editfns) point goto-char point-min point-max
-          save-restriction narrow-to-region char-after char-before eolp)
+          save-restriction narrow-to-region char-after char-before eolp
+          save-excursion)
     (only (schemacs cmds) forward-char backward-char)
     ;; `c-langelem-col' reads the column of an anchor position.
     (only (schemacs indentc) current-column)
@@ -127,6 +128,8 @@
    c-langelem-sym c-langelem-pos c-langelem-col c-langelem-2nd-pos
    c-put-char-property c-get-char-property c-clear-char-property
    c-put-char-properties c-clear-char-properties c-min-property-position
+   c-clear-char-property-with-value
+   c-clear-char-property-with-value-on-char c-put-char-properties-on-char
    c-put-string-fence
    c-search-forward-char-property c-search-forward-non-nil-char-property
    c-search-backward-char-property
@@ -1036,6 +1039,34 @@
   (c-clear-char-property pos 'c-is-sws)
   (c-clear-char-property pos 'c-in-sws))
 
+;; "Remove all text-properties PROPERTY from the region (FROM, TO)
+;; which have the value VALUE, as tested by `equal'. ... POINT remains
+;; unchanged. Return the position of the first removed property, if any,
+;; or nil."
+;;
+;; Emacs's macro wraps `c-clear-char-property-with-value-function'; the
+;; XEmacs arm is not carried, and its GNU arm is that function alone, so
+;; the function is the procedure here.
+(define (c-clear-char-property-with-value from to property value)
+  (let ((place from) (first #f))
+    (let loop ()
+      (when (begin
+              ;; "Loop round changes in PROPERTY till we find VALUE."
+              (let seek ()
+                (when (and (< place to)
+                           (not (equal? (get-text-property place property) value)))
+                  (set! place (c-next-single-property-change place property #f to))
+                  (seek)))
+              (< place to))
+        (when (eq? property 'syntax-table)
+          (set! c-syntax-table-hwm (min c-syntax-table-hwm place)))
+        (let ((end-place (c-next-single-property-change place property #f to)))
+          (remove-text-properties place end-place (list property #f))
+          (unless first (set! first place))
+          (set! place end-place))
+        (loop)))
+    first))
+
 ;;----------------------------------------------------------------------
 ;; The three searches for a char with a property value (`cc-defs.el:1595'-`:1695')
 ;;----------------------------------------------------------------------
@@ -1051,9 +1082,11 @@
 ;; character, and return point. If the search fails, return nil; point is
 ;; then left undefined."
 ;;
-;; Not carried yet: the `c-clear-char-property-with-value*' family
-;; (`cc-defs.el:1555'-`:1590', `:1697'-`:1760'), which the mode's change
-;; hooks (`cc-mode.el') use; they come with those hooks.
+;; **The `*-trim-caches' wrappers are not here.** Every one of them is
+;; `c-truncate-lit-pos/state-cache' plus a property write, and that
+;; truncator is `cc-engine.el'`s - which this library is below. They
+;; live beside it in `cc-engine.scm', a named placement departure
+;; (`c-put-string-fence-trim-caches' and its siblings).
 
 (define (c-search-forward-char-property-with-value-on-char property value char limit)
   ;; "Search forward for a text-property PROPERTY having value VALUE on a
@@ -1065,9 +1098,11 @@
                   (< (point) limit))
                 (not (equal? (c-get-char-property (point) property) value)))
       (forward-char 1))
-    (when (< (point) limit)
-      (re-search-forward "\\(\n\\|.\\)")    ; to set the match-data.
-      (point))))
+    (if (< (point) limit)
+        (begin
+          (re-search-forward "\\(\n\\|.\\)")    ; to set the match-data.
+          (point))
+        #f)))
 
 (define (c-search-backward-char-property-with-value-on-char property value char limit)
   ;; "Search backward for a text-property PROPERTY having value VALUE on a
@@ -1082,9 +1117,62 @@
                 (not (equal? (c-get-char-property (- (point) 1) property)
                              value)))
       (backward-char 1))
-    (when (> (point) limit)
-      (re-search-backward "\\(\n\\|.\\)")   ; to set the match-data.
-      (point))))
+    (if (> (point) limit)
+        (begin
+          (re-search-backward "\\(\n\\|.\\)")   ; to set the match-data.
+          (point))
+        #f)))
+
+;; "Remove all text-properties PROPERTY with value VALUE on characters
+;; with value CHAR from the region [FROM, TO), as tested by `equal'. ...
+;; POINT remains unchanged. Return the position of the first removed
+;; property, or nil."
+;;
+;; Emacs's macro wraps `c-clear-char-property-with-value-on-char-function';
+;; the XEmacs arm is not carried, so that function is this procedure.
+(define (c-clear-char-property-with-value-on-char from to property value char)
+  (let ((place from)
+        (first #f))
+    (let loop ()
+      (when (begin
+              ;; "Loop round changes in PROPERTY till we find VALUE."
+              (let seek ()
+                (when (and (< place to)
+                           (not (equal? (get-text-property place property) value)))
+                  (set! place (c-next-single-property-change place property #f to))
+                  (seek)))
+              (< place to))
+        (when (char=? (char-after place) char)
+          (remove-text-properties place (+ place 1) (list property #f))
+          (or first
+              (begin
+                (set! first place)
+                (when (eq? property 'syntax-table)
+                  (set! c-syntax-table-hwm (min c-syntax-table-hwm place))))))
+        (set! place (+ place 1))
+        (loop)))
+    first))
+
+;; "Put the text property PROPERTY with value VALUE on characters with
+;; value CHAR in the region [FROM TO). Return the position of the first
+;; char changed, if any, else nil."
+;;
+;; Emacs's macro splices CHAR into `(concat "^" (list ,char))'; as a
+;; procedure the same skip set is built at run time.
+(define (c-put-char-properties-on-char from to property value char)
+  (let ((skip-string (string-append "^" (string char)))
+        (first #f))
+    (save-excursion
+      (goto-char from)
+      (while (begin
+               (skip-chars-forward skip-string to)
+               (< (point) to))
+        (when (eq? property 'syntax-table)
+          (set! c-syntax-table-hwm (min c-syntax-table-hwm (point))))
+        (c-put-char-property (point) property value)
+        (unless first (set! first (point)))
+        (forward-char)))
+    first))
 
 (define (c-search-forward-char-property property value limit)
   ;; "Search forward for a text-property PROPERTY having value VALUE.
@@ -1098,10 +1186,12 @@
     (while (and (< place limit)
                 (not (equal? (c-get-char-property place property) value)))
       (setq place (c-next-single-property-change place property #f limit)))
-    (when (< place limit)
-      (goto-char place)
-      (re-search-forward "\\(\n\\|.\\)")   ; to set the match-data.
-      (point))))
+    (if (< place limit)
+        (begin
+          (goto-char place)
+          (re-search-forward "\\(\n\\|.\\)")   ; to set the match-data.
+          (point))
+        #f)))
 
 (define (c-search-forward-non-nil-char-property property . limit-args)
   ;; "Search forward for a text-property PROPERTY value non-nil. LIMIT
@@ -1144,10 +1234,12 @@
     (while (and (> place limit)
                 (not (equal? (c-get-char-property (- place 1) property) value)))
       (setq place (previous-single-property-change place property #f limit)))
-    (when (> place limit)
-      (goto-char place)
-      (re-search-backward "\\(\n\\|.\\)")  ; to set the match-data.
-      (point))))
+    (if (> place limit)
+        (begin
+          (goto-char place)
+          (re-search-backward "\\(\n\\|.\\)")  ; to set the match-data.
+          (point))
+        #f)))
 
 (define (c-search-forward-char-property-without-value-on-char property value char limit)
   ;; "Search forward for a character CHAR without text property PROPERTY
@@ -1159,9 +1251,11 @@
                   (< (point) limit))
                 (equal? (c-get-char-property (point) property) value))
       (forward-char 1))
-    (when (< (point) limit)
-      (re-search-forward "\\(\n\\|.\\)")    ; to set the match-data.
-      (point))))
+    (if (< (point) limit)
+        (begin
+          (re-search-forward "\\(\n\\|.\\)")    ; to set the match-data.
+          (point))
+        #f)))
 
 ;;----------------------------------------------------------------------
 ;; The `<'/`>' paren syntax categories (`cc-defs.el:1190'-`:1205')
@@ -1490,15 +1584,12 @@
 ;; Emacs's flag is `let'-bound by the macro and by nothing else, so it
 ;; is a parameter here. The two functions the macro calls,
 ;; `c-restore-string-fences' and `c-clear-string-fences', are
-;; `cc-mode.el:1411' and `:1343' - **not ported**, because they exist
-;; for the multi-line-string change machinery (`c-min-syn-tab-mkr' and
-;; `c-max-syn-tab-mkr', maintained by `c-before-change' and
-;; `c-after-change'), which is the one large remaining tranche in
-;; cc-engine. Both begin `(when (and c-min-syn-tab-mkr
-;; c-max-syn-tab-mkr) ...)', so with those markers unmade they are
-;; Emacs's own no-ops; the seams default to #f and the macro degenerates
-;; to the body, exactly as an Emacs with no string fences behaves.
-;; `cc-mode.scm' will install the real two when it lands.
+;; `cc-mode.el:1411' and `:1343' and live in `cc-mode.scm', which is
+;; above this library - it installs both through these parameters as it
+;; loads. They begin `(when (and c-min-syn-tab-mkr c-max-syn-tab-mkr)
+;; ...)' and the markers are made by `c-put-syn-tab', so before
+;; cc-mode is loaded, or in a buffer that has never had a string fence,
+;; they are Emacs's own no-ops.
 (define *c-string-fences-set-flag* (make-parameter #f))
 (define *c-restore-string-fences-function* (make-parameter #f))
 (define *c-clear-string-fences-function* (make-parameter #f))

@@ -182,6 +182,9 @@
     (only (schemacs progmodes cc-defs) c-emacs-features c-save-buffer-state
           c-put-char-property c-clear-char-property c-get-char-property
           c-put-char-properties c-clear-char-properties
+          c-clear-char-property-with-value
+          c-clear-char-property-with-value-on-char
+          c-put-char-properties-on-char
           c-put-string-fence c-search-forward-non-nil-char-property
           c-<-as-paren-syntax c->-as-paren-syntax
           c-next-single-property-change c-previous-single-property-change
@@ -375,6 +378,10 @@
    c-state-push-any-brace-pair c-append-to-state-cache
    c-remove-stale-state-cache c-remove-stale-state-cache-backwards
    c-state-cache-init c-truncate-lit-pos/state-cache
+   c-put-syntax-table-trim-caches c-clear-syntax-table-trim-caches
+   c-put-string-fence-trim-caches c-clear-syntax-table-with-value-trim-caches
+   c-clear-syntax-table-with-value-on-char-trim-caches
+   c-put-syntax-table-properties-on-char-trim-caches
    c-foreign-truncate-lit-pos-cache c-foreign-init-lit-pos-cache
    c-invalidate-state-cache-1 c-parse-state-1
    c-invalidate-state-cache c-parse-state
@@ -2490,6 +2497,63 @@
       ;; it is higher than that position."
       (c-truncate-lit-pos-cache pos)
       (set!c-state-cache-invalid-pos (min (c-state-cache-invalid-pos) pos)))
+
+    ;; ---------------------------------------------------------------
+    ;; The `*-trim-caches' wrappers (`cc-defs.el:1256'-`:1520',
+    ;; `:1735'-`:1770')
+    ;; ---------------------------------------------------------------
+    ;; Emacs's are `cc-defs.el' macros, and every one of them ends in
+    ;; `c-truncate-lit-pos/state-cache' - `cc-engine.el'`s function,
+    ;; which `cc-defs.el' is below. A macro in `cc-defs' would put an
+    ;; unbound name in every expansion outside this library, so the
+    ;; wrappers live here, beside the truncator: a named placement
+    ;; departure, and the only one in this group.
+    (define (c-put-syntax-table-trim-caches pos value)
+      ;; "Put a 'syntax-table property with VALUE at POS. Also invalidate
+      ;; four caches from the position POS."
+      (c-put-char-property pos 'syntax-table value)
+      (c-truncate-lit-pos/state-cache pos))
+
+    (define (c-clear-syntax-table-trim-caches pos)
+      ;; "Remove the 'syntax-table property at POS and invalidate the
+      ;; four caches from that position."
+      (c-clear-char-property pos 'syntax-table)
+      (c-truncate-lit-pos/state-cache pos))
+
+    (define (c-put-string-fence-trim-caches pos)
+      ;; "Put the string-fence syntax-table text property at POS, and
+      ;; invalidate the four caches from position POS."
+      (c-put-string-fence pos)
+      (c-truncate-lit-pos/state-cache pos))
+
+    (define (c-clear-syntax-table-with-value-trim-caches from to value)
+      ;; "Remove all `syntax-table' text-properties with value VALUE from
+      ;; [FROM, TO) and invalidate the four caches from the first
+      ;; position, if any, where a property was removed. Return the
+      ;; position of the first property removed, if any, else nil."
+      (let ((first (c-clear-char-property-with-value from to 'syntax-table value)))
+        (when first
+          (c-truncate-lit-pos/state-cache first))
+        first))
+
+    (define (c-clear-syntax-table-with-value-on-char-trim-caches from to value char)
+      ;; "Remove all `syntax-table' properties with VALUE on CHAR in
+      ;; [FROM, TO), as tested by `equal', and invalidate the four caches
+      ;; from the first position, if any, where a property was removed."
+      (let ((first (c-clear-char-property-with-value-on-char
+                    from to 'syntax-table value char)))
+        (when first
+          (c-truncate-lit-pos/state-cache first))))
+
+    (define (c-put-syntax-table-properties-on-char-trim-caches from to value char)
+      ;; "Put a `syntax-table' text property with value VALUE on all
+      ;; characters with value CHAR in the region [FROM to), and
+      ;; invalidate the four caches from the first position, if any,
+      ;; where a property was put."
+      (let ((first (c-put-char-properties-on-char
+                    from to 'syntax-table value char)))
+        (when first
+          (c-truncate-lit-pos/state-cache first))))
 
     (define (c-foreign-truncate-lit-pos-cache beg end)
       (c-truncate-lit-pos/state-cache beg))

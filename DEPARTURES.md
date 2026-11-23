@@ -15338,3 +15338,122 @@ One small fidelity fix went in on the way:
 `c-search-forward-non-nil-char-property`'s LIMIT is `&optional` in
 Emacs (`cc-defs.el:1452`) and was required here;
 `c-before-change-de-typedef` calls without it.
+
+# cc-mode: the string-fence layer, and five searches that answered true
+# (2026-11-23)
+
+`cc-mode.el`'s `c-put-syn-tab` / `c-clear-syn-tab` and the two fences
+functions are ported, with the `*-trim-caches` wrappers and the
+`c-clear-char-property-with-value` family they use. What the next
+session needs is the bug the differential found underneath them.
+
+## The departure: a `when` tail is the unspecified value, which is true
+
+`cc-defs.el`'s five property searches are `while` ... `(when TEST
+BODY)` in Emacs, and Emacs's `when` answers **nil** when TEST fails.
+The port wrote the same `when`, and Scheme's answers the *unspecified*
+value - which is true. So
+
+- `c-search-forward-char-property-with-value-on-char`,
+- `c-search-backward-char-property-with-value-on-char`,
+- `c-search-forward-char-property`,
+- `c-search-backward-char-property`, and
+- `c-search-forward-char-property-without-value-on-char`
+
+all answered truthy on **failure**, where every caller tests the answer
+as nil.
+
+It is invisible until a caller branches on success:
+`c-clear-string-fences` opens with "is there already an unbalanced quote
+before BEG?" - `(when (and (c-search-backward ...) ...) (setq pos (1+ pos)))`
+- and with failure looking like success it skipped the first fence and
+landed on the *closing* quote, marking it `(1)` where Emacs marks
+nothing (and, with only an opener fenced, marking nothing where Emacs
+marks the opener). Both symptoms are pinned in `cc-mode-test.scm`'s
+fence group; the differential is the Emacs-measured table below.
+
+The five are `(if TEST (begin BODY (point)) #f)` now, with a comment at
+the family's header (cc-defs.scm) saying why. This is the `when`-in-
+value-position class the cc work has hit repeatedly; the difference is
+that here a *ported Emacs function* was the offender, not a translation.
+
+## The five trim-cache wrappers are in cc-engine, not cc-defs
+
+`c-put-syntax-table-trim-caches`, `c-clear-syntax-table-trim-caches`,
+`c-put-string-fence-trim-caches`,
+`c-clear-syntax-table-with-value-trim-caches`,
+`c-clear-syntax-table-with-value-on-char-trim-caches` and
+`c-put-syntax-table-properties-on-char-trim-caches` are `cc-defs.el`
+macros (`:1256'-`:1520', `:1735'-`:1770') whose last form is
+`c-truncate-lit-pos/state-cache` - `cc-engine.el`'s function. A
+`cc-defs` procedure would be an upward edge (a cycle); Emacs gets away
+with it because a macro's body is expanded at the *use site*, which is
+cc-engine or cc-mode. In Scheme the macro's free identifier would be
+unbound in every other library, so the wrappers live beside the
+truncator in `cc-engine.scm` (named placement departure, documented
+there). The three non-trim functions
+(`c-clear-char-property-with-value`, its on-char sibling and
+`c-put-char-properties-on-char`) stayed in `cc-defs.scm` at their
+Emacs positions.
+
+## The markers, and where their accessors live
+
+`c-min-syn-tab-mkr`/`c-max-syn-tab-mkr` are `defvar`s with
+`make-variable-buffer-local` (`cc-mode.el:586', `:592'). Here they are
+buffer-local slots behind accessor pairs (`(c-min-syn-tab-mkr)` /
+`(set!c-min-syn-tab-mkr v)`), default `#f`. Their accessors sit with
+their only readers (the two syn-tab functions) rather than before
+`c-basic-common-init`, which is not ported yet; the file says so.
+
+Emacs compares a marker with a number (`(< pos c-min-syn-tab-mkr)`) and
+adds 1 to one (`(1+ c-min-syn-tab-mkr)`). Scheme markers do no
+arithmetic, so the port reads `(marker-position ...)` at each use - the
+same number, since no edit happens inside these functions
+(`c-clear-string-fences` and `c-restore-string-fences` bind the two
+marker positions to locals for exactly that reason, and say so).
+
+## The differential, and why it needed a wipe
+
+Emacs's `c-mode` marks a real multi-line string during mode
+initialisation (`c-after-change-mark-abnormal-strings` is on
+`c-before-font-lock-functions`, and the mode's init runs that list over
+the buffer - "Starting a mode is a sort of change"). So a fixture with
+an abnormal string starts with fences already in it, and a probe that
+merely calls the functions measures the mode's own machinery as well.
+
+The differential therefore uses a single-line string and wipes any
+fences first (`c-clear-syn-tab` at every fenced position), with
+`inhibit-modification-hooks` bound around every probe so Emacs's change
+functions cannot react to the property writes - which they do: with the
+hooks live, the first `c-put-syn-tab` makes Emacs's own
+`c-before-change-check-unbalanced-strings` strip the very property the
+probe just wrote, and add one elsewhere. Both sides start from the same
+empty state, and the answers are identical:
+
+| probe | Emacs 31.1 | here |
+|---|---|---|
+| put `(15)` at 18 | `(18 (15) (15))`, markers `(18 19)` | same |
+| put `(15)` at 21 | markers `(18 22)` | same |
+| put `(1)` at 20 | `(20 (1) (1))` | same |
+| clear 18 / 21 / 20 | markers `(20 22)` / `(20 21)` / `(nil nil)` | same |
+| clear-string-fences, balanced pair | syntax removed, mirrors kept, markers `(18 22)` | same |
+| restore-string-fences | `(15)` back on both | same |
+| remove-string-fences 18 | only 21 fenced, markers `(21 22)` | same |
+| unbalanced opener | `(18 (1) (15))` | same |
+| final quote, unterminated | `(18 (15) (15))`, markers `(18 19)` | same |
+| final quote, terminated | nothing | same |
+
+`test/progmodes/cc-mode-test.scm`'s `schemacs_editor_cc_mode_fences`
+group pins every row.
+
+## Still not carried in this file
+
+The string change functions (`c-before-change-check-unbalanced-strings`,
+`c-after-change-mark-abnormal-strings`,
+`c-after-change-escape-NL-in-string`, `c-pps-to-string-delim`, the
+ml-string fence machinery, `c-open-string-opener`), the CPP and quote
+functions, `c-change-expand-fl-region`, `c-called-from-text-property-
+change-p`, `c-before-change`/`c-after-change` themselves, and the mode
+definitions. The `c-with-string-fences` seams are installed by
+`cc-mode.scm` as it loads now, so `cc-defs.scm`'s comment about them
+saying "not ported" was corrected.

@@ -1293,7 +1293,14 @@
     c-clear-c-type-property
     c-clear-char-properties
     c-clear-char-property
+    c-clear-char-property-with-value
+    c-clear-char-property-with-value-on-char
     c-clear-found-types
+    c-clear-string-fences
+    c-clear-syn-tab
+    c-clear-syntax-table-trim-caches
+    c-clear-syntax-table-with-value-on-char-trim-caches
+    c-clear-syntax-table-with-value-trim-caches
     c-collect-line-comments
     c-comment-only-line-offset
     c-comment-prefix-regexp
@@ -1610,9 +1617,11 @@
     c-matchers-1
     c-matchers-2
     c-matchers-3
+    c-max-syn-tab-mkr
     c-maybe-font-lock-wrong-style-comments
     c-maybe-stale-found-type
     c-min-property-position
+    c-min-syn-tab-mkr
     c-ml-string-make-closer-re
     c-ml-string-opener-around-point
     c-ml-string-opener-at-or-around-point
@@ -1621,6 +1630,7 @@
     c-mode-var-boundp
     c-most-enclosing-brace
     c-most-enclosing-decl-block
+    c-multiline-string-check-final-quote
     c-negation-char-face-name
     c-new-BEG
     c-new-END
@@ -1655,6 +1665,7 @@
     c-punctuation-in
     c-put-c-type-property
     c-put-char-properties
+    c-put-char-properties-on-char
     c-put-char-property
     c-put-font-lock-face
     c-put-font-lock-string-face
@@ -1662,6 +1673,10 @@
     c-put-is-sws
     c-put-overlay
     c-put-string-fence
+    c-put-string-fence-trim-caches
+    c-put-syn-tab
+    c-put-syntax-table-properties-on-char-trim-caches
+    c-put-syntax-table-trim-caches
     c-query-and-set-macro-start
     c-query-macro-start
     c-re-redisplay-timer
@@ -1680,9 +1695,11 @@
     c-remove-is-sws
     c-remove-stale-state-cache
     c-remove-stale-state-cache-backwards
+    c-remove-string-fences
     c-renarrow-state-cache
     c-restore-<->-as-parens
     c-restore-<>-properties
+    c-restore-string-fences
     c-run-special-indent-hook
     c-safe
     c-safe-position
@@ -4040,7 +4057,9 @@
     set!c-macro-cache-syntactic
     set!c-macro-names-with-semicolon
     set!c-macro-with-semi-re
+    set!c-max-syn-tab-mkr
     set!c-maybe-stale-found-type
+    set!c-min-syn-tab-mkr
     set!c-new-BEG
     set!c-new-END
     set!c-new-id-end

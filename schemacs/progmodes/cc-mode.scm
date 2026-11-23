@@ -1,28 +1,32 @@
 (define-library (schemacs progmodes cc-mode)
-  ;; `lisp/progmodes/cc-mode.el' - the mode itself. This first pass
-  ;; carries the change machinery's found-type half, in the file's
-  ;; order: the two buffer-local flags, `c-unfind-enclosing-token',
+  ;; `lisp/progmodes/cc-mode.el' - the mode itself. This pass carries
+  ;; the change machinery's found-type half, in the file's order - the
+  ;; two buffer-local flags, `c-unfind-enclosing-token',
   ;; `c-unfind-coalesced-tokens', `c-before-change-de-typedef',
-  ;; `c-after-change-de-typedef' and `c-update-new-id'.
+  ;; `c-after-change-de-typedef' and `c-update-new-id' - and then the
+  ;; string-fence layer those functions and the change hooks stand on:
+  ;; the `c-min-syn-tab-mkr'/`c-max-syn-tab-mkr' pair, `c-put-syn-tab',
+  ;; `c-clear-syn-tab', `c-clear-string-fences',
+  ;; `c-restore-string-fences', `c-multiline-string-check-final-quote'
+  ;; and `c-remove-string-fences', with `c-with-string-fences'' two
+  ;; seams installed as this library loads.
   ;;
   ;; **Not carried yet**, and the reason this library is partial:
   ;;
-  ;;   * `c-before-change' and `c-after-change' themselves, which call
-  ;;     every entry of `c-get-state-before-change-functions' and
-  ;;     `c-before-font-lock-functions'. Every entry must resolve, and
-  ;;     the string-fence machinery those lists name - `c-put-syn-tab',
-  ;;     `c-clear-syn-tab', `c-restore-string-fences',
-  ;;     `c-clear-string-fences', `c-before-change-check-unbalanced-strings',
+  ;;   * the string change functions
+  ;;     (`c-before-change-check-unbalanced-strings',
   ;;     `c-after-change-mark-abnormal-strings',
-  ;;     `c-after-change-escape-NL-in-string', the `c-min-syn-tab-mkr'/
-  ;;     `c-max-syn-tab-mkr' pair and the ml-string functions - is the
-  ;;     layer they stand on. `c-with-string-fences' in cc-defs is
-  ;;     ported with its two functions as seams until this lands.
+  ;;     `c-after-change-escape-NL-in-string', `c-pps-to-string-delim',
+  ;;     the ml-string fence machinery and the `c-open-string-opener'
+  ;;     variable they maintain);
   ;;   * `c-depropertize-CPP', `c-neutralize-syntax-in-CPP',
   ;;     `c-before/after-change-fix-comment-escapes',
   ;;     `c-parse-quotes-after-change',
   ;;     `c-extend-font-lock-region-for-macros',
-  ;;     `c-change-expand-fl-region', and `c-called-from-text-property-change-p'.
+  ;;     `c-change-expand-fl-region', and `c-called-from-text-property-change-p';
+  ;;   * `c-before-change' and `c-after-change' themselves, which call
+  ;;     every entry of `c-get-state-before-change-functions' and
+  ;;     `c-before-font-lock-functions';
   ;;   * the mode definitions (`c-basic-common-init', `c-common-init',
   ;;     `c-mode' and its siblings), which install the two change
   ;;     functions on `before-change-functions' and
@@ -38,16 +42,27 @@
     (only (schemacs core syntax-macros) when-e while-e setq)
     (only (schemacs buffer) current-buffer buffer-local-value
           set-buffer-local-value!)
-    (only (schemacs editfns) point goto-char point-min point-max
+    (only (schemacs marker) copy-marker set-marker marker-position)
+    (only (schemacs editfns) point point-max point-min goto-char
           bobp eobp char-before char-after buffer-substring-no-properties
           save-excursion)
     (only (schemacs search) looking-at match-end match-beginning
-          re-search-forward)
-    (only (schemacs syntax) skip-syntax-backward skip-chars-backward)
+          re-search-forward save-match-data)
+    (only (schemacs syntax) skip-syntax-backward skip-chars-backward
+          parse-partial-sexp)
     (only (schemacs cmds) backward-char forward-char)
     (only (schemacs progmodes cc-defs)
           c-search-forward-non-nil-char-property
-          c-clear-char-property c-get-char-property)
+          c-search-forward-char-property c-search-backward-char-property
+          c-search-backward-char-property-with-value-on-char
+          c-clear-char-property c-get-char-property c-put-char-property
+          c-clear-char-properties c-clear-char-property-with-value
+          c-min-property-position c-next-single-property-change
+          c-previous-single-property-change
+          c-<-as-paren-syntax c->-as-paren-syntax
+          c-save-buffer-state
+          *c-restore-string-fences-function*
+          *c-clear-string-fences-function*)
     (only (schemacs progmodes cc-engine)
           c-beginning-of-current-token c-end-of-current-token
           c-simple-skip-symbol-backward
@@ -55,6 +70,11 @@
           c-determine-limit c-determine-+ve-limit
           c-unfind-type c-on-identifier c-forward-token-2 c-backward-token-2
           c-beginning-of-macro %c-langvar
+          c-point c-is-escaped c-benign-error
+          c-literal-limits c-literal-type
+          c-truncate-lit-pos/state-cache
+          c-put-syntax-table-trim-caches c-clear-syntax-table-trim-caches
+          c-put-string-fence-trim-caches
           ;; The buffer-local flags already live in cc-engine (a named
           ;; placement there, because the found-type table reads them).
           c-maybe-stale-found-type set!c-maybe-stale-found-type
@@ -67,7 +87,13 @@
    c-just-done-before-change set!c-just-done-before-change
    c-unfind-enclosing-token c-unfind-coalesced-tokens
    c-before-change-de-typedef c-after-change-de-typedef
-   c-update-new-id)
+   c-update-new-id
+   ;; the string-fence layer (`cc-mode.el:586', `:1258'-`:1465')
+   c-min-syn-tab-mkr set!c-min-syn-tab-mkr
+   c-max-syn-tab-mkr set!c-max-syn-tab-mkr
+   c-multiline-string-check-final-quote
+   c-put-syn-tab c-clear-syn-tab
+   c-clear-string-fences c-restore-string-fences c-remove-string-fences)
 
   (begin
 
@@ -209,5 +235,250 @@
                        (c-forward-token-2)
                        (point))))
           (set!c-new-id-is-type #f))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-min-syn-tab-mkr' and `c-max-syn-tab-mkr' (`cc-mode.el:586',
+    ;; `:592'): the range of the buffer that carries a `c-fl-syn-tab'
+    ;; property, as markers. They live beside their only readers below
+    ;; rather than at their Emacs position (before
+    ;; `c-basic-common-init'), which is not ported yet.
+    ;;--------------------------------------------------------------
+    (define (c-min-syn-tab-mkr)
+      (buffer-local-value (current-buffer) 'c-min-syn-tab-mkr #f))
+    (define (set!c-min-syn-tab-mkr value)
+      (set-buffer-local-value! (current-buffer) 'c-min-syn-tab-mkr value))
+    (define (c-max-syn-tab-mkr)
+      (buffer-local-value (current-buffer) 'c-max-syn-tab-mkr #f))
+    (define (set!c-max-syn-tab-mkr value)
+      (set-buffer-local-value! (current-buffer) 'c-max-syn-tab-mkr value))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-put-syn-tab' and `c-clear-syn-tab' (`cc-mode.el:1298', `:1318')
+    ;;--------------------------------------------------------------
+    (define (c-put-syn-tab pos value)
+      ;; "Set both the syntax-table and the c-fl-syn-tab text properties
+      ;; at POS to VALUE (which should not be nil)."
+      (if (equal? value '(15))
+          (c-put-string-fence-trim-caches pos)
+          (c-put-syntax-table-trim-caches pos value))
+      (c-put-char-property pos 'c-fl-syn-tab value)
+      (cond
+       ((not (c-min-syn-tab-mkr))
+        (set!c-min-syn-tab-mkr (copy-marker pos #t)))
+       ((< pos (marker-position (c-min-syn-tab-mkr)))
+        (set-marker (c-min-syn-tab-mkr) pos)))
+      (cond
+       ((not (c-max-syn-tab-mkr))
+        (set!c-max-syn-tab-mkr (copy-marker (+ pos 1) #f)))
+       ((>= pos (marker-position (c-max-syn-tab-mkr)))
+        (set-marker (c-max-syn-tab-mkr) (+ pos 1)))))
+
+    (define (c-clear-syn-tab pos)
+      ;; "Remove both the 'syntax-table and `c-fl-syn-tab properties at
+      ;; POS."
+      (c-clear-syntax-table-trim-caches pos)
+      (c-clear-char-property pos 'c-fl-syn-tab)
+      (when (c-min-syn-tab-mkr)
+        (if (and (eqv? pos (marker-position (c-min-syn-tab-mkr)))
+                 (eqv? (+ pos 1) (marker-position (c-max-syn-tab-mkr))))
+            (begin
+              (set-marker (c-min-syn-tab-mkr) #f)
+              (set-marker (c-max-syn-tab-mkr) #f)
+              (set!c-min-syn-tab-mkr #f)
+              (set!c-max-syn-tab-mkr #f))
+            (begin
+              (when (eqv? pos (marker-position (c-min-syn-tab-mkr)))
+                (set-marker
+                 (c-min-syn-tab-mkr)
+                 (if (c-get-char-property (+ pos 1) 'c-fl-syn-tab)
+                     (+ pos 1)
+                     (c-next-single-property-change
+                      (+ pos 1) 'c-fl-syn-tab #f
+                      (marker-position (c-max-syn-tab-mkr))))))
+              (when (eqv? (+ pos 1) (marker-position (c-max-syn-tab-mkr)))
+                (set-marker
+                 (c-max-syn-tab-mkr)
+                 (if (c-get-char-property (- pos 1) 'c-fl-syn-tab)
+                     pos
+                     (c-previous-single-property-change
+                      pos 'c-fl-syn-tab #f
+                      (+ (marker-position (c-min-syn-tab-mkr)) 1))))))))
+      (c-truncate-lit-pos/state-cache pos))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-clear-string-fences' and `c-restore-string-fences'
+    ;; (`cc-mode.el:1343', `:1411')
+    ;;--------------------------------------------------------------
+    ;; The two markers are numbers in these bodies: no buffer edit
+    ;; happens inside them, so a marker cannot move, and Emacs's use of
+    ;; the markers' positions is the same number.
+    (define (c-clear-string-fences)
+      ;; "Clear syntax-table text properties which are \"mirrored\" by
+      ;; c-fl-syn-tab text properties. However, any such \" character
+      ;; which ends up not being balanced by another \" is left with a
+      ;; '(1) syntax-table property."
+      (when (and (c-min-syn-tab-mkr) (c-max-syn-tab-mkr))
+        (c-save-buffer-state ((s #f) (pos #f))
+          (let ((min-pos (marker-position (c-min-syn-tab-mkr)))
+                (max-pos (marker-position (c-max-syn-tab-mkr))))
+            (set! pos min-pos)
+            (let clear ()
+              (when (and (< pos max-pos)
+                         (begin
+                           (set! pos (c-min-property-position
+                                      pos max-pos 'c-fl-syn-tab))
+                           pos)
+                         (< pos max-pos))
+                (c-clear-char-property pos 'syntax-table)
+                (set! pos (+ pos 1))
+                (clear)))
+            (save-excursion
+              (set! pos min-pos)
+              ;; "Is there already an unbalanced \" before BEG?"
+              (set! pos (c-min-property-position pos max-pos 'c-fl-syn-tab))
+              (when (< pos max-pos)
+                (goto-char pos)
+                (when (and (save-match-data
+                             (c-search-backward-char-property-with-value-on-char
+                              'c-fl-syn-tab '(15) #\" (max (- (point) 500)
+                                                           (point-min))))
+                           (not (equal? (c-get-char-property (point) 'syntax-table)
+                                        '(1))))
+                  (set! pos (+ pos 1))))
+              (let walk ()
+                (when (< pos max-pos)
+                  (set! pos (c-min-property-position pos max-pos 'c-fl-syn-tab))
+                  (when (< pos max-pos)
+                    (if (memv (char-after pos) (%c-langvar 'c-string-delims))
+                        (begin
+                          ;; "Step over the \"."
+                          (set! s (parse-partial-sexp
+                                   pos max-pos #f #f #f 'syntax-table))
+                          ;; "Seek a (bogus) matching \"."
+                          (set! s (parse-partial-sexp
+                                   (point) max-pos #f #f s 'syntax-table))
+                          ;; "When a bogus matching \" is found, do
+                          ;; nothing. Otherwise mark the \" with
+                          ;; 'syntax-table '(1)."
+                          (unless (and (not (list-ref s 3))
+                                       (c-get-char-property
+                                        (- (point) 1) 'c-fl-syn-tab))
+                            (c-put-char-property pos 'syntax-table '(1))
+                            ;; "Remove syntax-table text properties from
+                            ;; template delimiters."
+                            (c-clear-char-property-with-value
+                             (+ pos 1) (c-point 'eol pos)
+                             'syntax-table c-<-as-paren-syntax)
+                            (c-clear-char-property-with-value
+                             (+ pos 1) (c-point 'eol pos)
+                             'syntax-table c->-as-paren-syntax))
+                          (set! pos (point)))
+                        (set! pos (+ pos 1))))
+                    (walk))))))))
+
+    (define (c-restore-string-fences)
+      ;; "Restore any syntax-table text properties which are \"mirrored\"
+      ;; by c-fl-syn-tab text properties."
+      (when (and (c-min-syn-tab-mkr) (c-max-syn-tab-mkr))
+        (c-save-buffer-state ((pos (marker-position (c-min-syn-tab-mkr))))
+          (let ((max-pos (marker-position (c-max-syn-tab-mkr))))
+            (let loop ()
+              (when (and (< pos max-pos)
+                         (begin
+                           (set! pos (c-min-property-position
+                                      pos max-pos 'c-fl-syn-tab))
+                           pos)
+                         (< pos max-pos))
+                (when (and (equal? (c-get-char-property pos 'syntax-table) '(1))
+                           (equal? (c-get-char-property pos 'c-fl-syn-tab) '(15)))
+                  (c-clear-char-properties (+ pos 1) (c-point 'eol pos)
+                                           'syntax-table))
+                (c-put-char-property pos 'syntax-table
+                                     (c-get-char-property pos 'c-fl-syn-tab))
+                (set! pos (+ pos 1))
+                (loop)))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-multiline-string-check-final-quote' (`cc-mode.el:1258')
+    ;;--------------------------------------------------------------
+    (define (c-multiline-string-check-final-quote)
+      ;; "Check that the final quote in the buffer is correctly marked or
+      ;; not with a string-fence syntax-table text property."
+      (let ((pos-ll #f) (pos-lt #f))
+        (save-excursion
+          (goto-char (point-max))
+          (skip-chars-backward "^\"")
+
+          (let loop ()
+            (when (and (not (bobp))
+                       (cond
+                        ((begin
+                           (set! pos-ll (c-literal-limits))
+                           (set! pos-lt (c-literal-type pos-ll))
+                           (memv pos-lt '(c c++)))
+                         ;; In a comment.
+                         (goto-char (car pos-ll)))
+                        ((save-excursion
+                           (backward-char)      ; over "
+                           (c-is-escaped (point)))
+                         ;; At an escaped string.
+                         (backward-char)
+                         #t)
+                        (else
+                         ;; At a significant "
+                         (c-clear-syn-tab (- (point) 1))
+                         (set! pos-ll (c-literal-limits))
+                         (set! pos-lt (c-literal-type pos-ll))
+                         #f)))
+              (skip-chars-backward "^\"")))
+          (cond
+           ((bobp) #f)
+           ((eq? pos-lt 'string)
+            (c-put-syn-tab (- (point) 1) '(15)))
+           (else #f)))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-remove-string-fences' (`cc-mode.el:1439')
+    ;;--------------------------------------------------------------
+    (define (c-remove-string-fences . here-args)
+      ;; "The character after HERE (default point) is either a string
+      ;; delimiter or a newline, which is marked with a string fence text
+      ;; property for both syntax-table and c-fl-syn-tab. Remove these
+      ;; properties from that character and its matching newline or
+      ;; string delimiter, if any (there may not be one if there is a
+      ;; missing newline at EOB)."
+      (let ((here (and (pair? here-args) (car here-args))))
+        (save-excursion
+          (if here
+              (goto-char here)
+              (set! here (point)))
+          (cond
+           ((memv (char-after) (%c-langvar 'c-string-delims))
+            (save-excursion
+              (save-match-data
+                (forward-char)
+                (if (and (c-search-forward-char-property 'syntax-table '(15) #f)
+                         (memv (char-before) (list #\newline #\return)))
+                    (c-clear-syn-tab (- (point) 1)))))
+            (c-clear-syn-tab (point)))
+           ((memv (char-after) (list #\newline #\return))
+            (save-excursion
+              (save-match-data
+                (when (and (c-search-backward-char-property
+                            'syntax-table '(15) #f)
+                           (memv (char-after) (%c-langvar 'c-string-delims)))
+                  (c-clear-syn-tab (point)))))
+            (c-clear-syn-tab (point)))
+           (else
+            (c-benign-error "c-remove-string-fences: Wrong position"))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-with-string-fences'` seams (`cc-defs.el:1774')
+    ;; ---------------------------------------------------------------
+    ;; `cc-defs' is below this library and cannot reach these two, so it
+    ;; reads them through parameters; install them as this library loads,
+    ;; as `keyboard.scm' installs its seam.
+    (*c-restore-string-fences-function* c-restore-string-fences)
+    (*c-clear-string-fences-function* c-clear-string-fences)
 
     ))
