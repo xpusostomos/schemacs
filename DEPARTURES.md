@@ -14868,3 +14868,133 @@ tables are empty because filladapt is not part of Emacs (the function
 appends to whatever the package would have defined); and a language
 value naming `c-gnu-impose-minimum` is the *symbol*, resolved through
 the line-up-function registry rather than an obarray.
+
+# The indentation analysis: `c-guess-basic-syntax' (2026-11-23)
+
+`cc-engine.scm` now has the file's last section: `c-brace-anchor-point`,
+`c-add-syntax`/`c-append-syntax`, `c-add-stmt-syntax`,
+`c-add-class-syntax`, `c-guess-continued-construct`,
+`c-guess-basic-syntax` (the whole 1,700-line decision tree),
+`c-used-syntactic-symbols`, `c-evaluate-offset`, `c-calc-offset`,
+`c-get-offset` and `c-get-syntactic-indentation` - plus the pieces
+around them the section needs: `c-looking-at-inexpr-block-backward`,
+`c-beginning-of-inheritance-list`, the C++20 concept walkers
+(`c-forward-concept-fragment`, `c-looking-at-concept`,
+`c-in-requires-or-at-end-of-clause`) and the `c-langelem-*` accessors in
+cc-defs.
+
+**The gate is the whole-fixture differential**: both trees print
+`(POSITION SYNTAX)` at every line start, in `c-mode` (or `c++-mode`) with
+the gnu style, and `diff` them. It is identical on the C fixture here,
+the four C fixtures under `tools/cc-decl-diff/` and the three C++
+fixtures - 8 files, 100+ answers, including the `<>`-marked C++ forms.
+The harness is checked in as `tools/cc-cgbs-diff/`.
+
+## The representation
+
+`c-syntactic-context' and `c-syntactic-element' are the parameters
+`*c-syntactic-context*' and `*c-syntactic-element*' (cc-vars, with
+Emacs's own `variable-documentation' text); `c-auto-newline-analysis'
+(the `defvar' cc-cmds `let'-binds) is `*c-auto-newline-analysis*' in
+cc-engine. A language variable an Elisp `let' binds - here
+`c-recognize-typeless-decls' and `c-parse-and-markup-<>-arglists' - is
+`*c-lang-var-overrides*`.
+
+## `set!` is not `setq`: the bug class that dominated this port
+
+Elisp's `setq' answers the value it set, and the C uses that answer as a
+test in about twenty places. Guile's `set!' answers the *unspecified*
+value - truthy - and in one context it answers **zero values**, which
+raises `Zero values returned to single-valued continuation`. So every
+`(set! X EXPR)` used as an `and`/`or`/`cond`-test/`if`-test had to be
+`(begin (set! X EXPR) X)`. The sites found by the differential, each of
+which produced a wrong clause or a crash:
+
+- the declaration-block `when' and CASE 2's literal-start test;
+- CASE 4/16A/17E's `c-looking-at-inexpr-block' tests;
+- CASE 5A's `special-brace-list', 5A.1's `tmp2', 5A.2's `tmp-pos',
+  5A.3's `enum-pos', 5R's and 5B's placeholders, 5D's
+  `c-after-special-operator-id', CASE 9's `special-brace-list',
+  CASE 10's `placeholder', 5U's and 20's `c-in-requires...', 19's
+  `containing-<', 5T's `tmp', and `c-evaluate-offset''s `assq';
+- in `c-guess-continued-construct`, CASE B's `special-brace-list',
+  B.1's `placeholder' and B.6's `enum-pos'.
+
+The zero-values error surfaced first as `(set! macro-start (point))` as
+an `if` branch in CASE 3. Two `(set! placeholder (point))` uses were
+harmless (a position is truthy) and were left as they stand.
+
+## A `cond` with no `else' is *true*
+
+CASE 5A.3's inner `cond' has no else in Emacs because its only use is as
+a `save-excursion' test, where nil means "not this case". Scheme's
+`cond' answers the unspecified value when no clause matches - truthy -
+so the clause ran with a stale `placeholder' (`#t' from the failed
+`c-looking-at-or-maybe-in-bracelist' clause) and the answer was
+`(brace-list-open #t)'. The fix is Emacs's own `(else #f)' (or
+`cond-e'), and the same audit should be repeated for any cond whose
+value is tested.
+
+## A balanced file with the wrong shape, again
+
+The CASE 18 clause kept its body *inside* the `and` because the test was
+one `)` short before the body and the clause had one `)` too many at its
+end - the file read perfectly and compiled. The reader cannot see it;
+the differential could (`topmost-intro` where Emacs gave
+`(defmacro)`). The tell is the same as in earlier passes: the clause's
+*parsed* structure (dump the sexp) rather than its paren count. The
+per-clause reader check - wrap one clause in a `cond' with an `else' and
+read it - localizes such a break to one clause in a minute.
+
+## The init's `lim` placement
+
+`(setq lim (1+ containing-sexp))` is the **else** of
+`(if (consp containing-sexp) SAVE-EXC ...)`, not a statement inside the
+save-excursion. Placed inside, it runs after the inner if has set
+`containing-sexp` to nil and dies in `(+ 1 #f)` - which is exactly the
+crash the brace fixture produced.
+
+## Nil-vs-empty-list, twice more
+
+`(if paren-state ...)` and `(and state-cache (pair? (car state-cache)))`
+are Emacs nil tests; here an empty list is true, so both are `pair?`
+tests. `(car paren-state)` in CASE 5J is `car-safe` (Emacs's `(car
+nil)`). This file's `%c-car' family is the cc-engine idiom; cc-defs has
+no copy because cc-engine is above it.
+
+## Operand evaluation order
+
+`(> (point) (progn ... (c-beginning-of-statement-1 ...) (point)))` must
+sequence its operands by hand: the C reads point *before* the progn, and
+Scheme leaves the order to the implementation. `(let ((before (point)))
+(begin ...) (> before placeholder))` is the C's order. The handoff has
+the same rule from an earlier pass; this is its second instance.
+
+## New primitives and stand-ins
+
+* `/= ` (`data.c:2919') is in `(schemacs editor data)'; `rassq' and
+  `rassoc' (`fns.c:2050', `:2063') are in fns - the host has neither
+  name, and `c-add-stmt-syntax' asks the first.
+* `c-langelem-sym/-pos/-col/-2nd-pos' and `c-intersect-lists'/
+  `c-lookup-lists' are in cc-defs, with Emacs's nil answers as `#f'.
+* `c-evaluate-offset''s `(functionp offset)' arm cannot be Emacs's:
+  a *symbol* naming a line-up function has no function binding here. The
+  registry `c-register-lineup-function!' (and `c-lineup-function') is
+  its stand-in; cc-align fills it as it defines the functions. Until
+  then a style offset naming a line-up function reaches the benign-error
+  arm, which is a named departure, not a silent one.
+* The `symbol-value' arm (`(and (symbolp offset) (boundp offset))') is
+  the style-variable registry (`c-style-variable-bound?'), because there
+  is no `symbol-value' over a Scheme binding; a plain `defvar' a user
+  made is not reachable that way, which is the same gap `C-h v' has.
+* `c-beginning-of-inheritance-list' had been skipped in the earlier
+  tranches; it is ported in its Emacs position.
+* The three concept walkers were skipped too; `c-looking-at-concept' and
+  `c-in-requires-or-at-end-of-clause' are used by CASEs 5T/5D/20/5U.
+
+## Not carried
+
+Nothing in the section is stubbed. `c-guess-basic-syntax''s Emacs 31.1
+text has one commented-out clause (CASE 5A.6, the concept defun) and it
+stays commented out, as in the source. The indentation *values* for
+line-up-function offsets wait on cc-align, as above.

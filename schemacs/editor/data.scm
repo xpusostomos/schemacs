@@ -28,6 +28,7 @@
    make-local-variable
    default-value set-default default-boundp
    keywordp
+   /=
    aref
    ;; `alloc.c''s `make-bool-vector' and `bool-vector', and `data.c''s
    ;; predicates and bitwise operations. See "Bool vectors" below.
@@ -40,6 +41,15 @@
    )
 
   (begin
+
+    (define (/= num1 num2)
+      ;; GNU Emacs's `/= ` (`data.c:2919'): "Return t if first arg is not
+      ;; equal to second arg. Both must be numbers or markers." The C is
+      ;; `arithcompare (num1, num2) & Cmp_EQ ? Qnil : Qt'; the numeric
+      ;; comparison itself is the host's `='. Emacs's `coerce_marker' of
+      ;; a marker argument is not carried - nothing here passes one, and
+      ;; the coercion needs `markerp', which is a library above this one.
+      (not (= num1 num2)))
 
     (define (keywordp object)
       ;; GNU Emacs's `keywordp' (`data.c:207'): "Return t if OBJECT is a

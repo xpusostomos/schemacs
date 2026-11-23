@@ -67,6 +67,8 @@
     (only (schemacs editor editfns) point goto-char point-min point-max
           save-restriction narrow-to-region char-after char-before eolp)
     (only (schemacs editor cmds) forward-char backward-char)
+    ;; `c-langelem-col' reads the column of an anchor position.
+    (only (schemacs editor indentc) current-column)
     (only (schemacs editor syntax) scan-lists scan-sexps)
     ;; `c-safe' re-raises a quit; this tree's quit is command.scm's
     ;; record, and Emacs's `condition-case ... (error nil)' does not
@@ -74,7 +76,7 @@
     (only (schemacs editor command) quit-condition?)
     ;; `c-save-buffer-state' is `with-silent-modifications' since Emacs
     ;; 24 (see below), which is `subr.el''s.
-    (only (schemacs editor subr) with-silent-modifications)
+    (only (schemacs editor subr) with-silent-modifications car-safe cdr-safe)
     ;; `c-face-name-p' asks whether a face exists.
     (only (schemacs editor faces) face-list)
     ;; The property API `c-put-char-property' and friends stand on
@@ -108,6 +110,8 @@
    c-major-mode-is *c-langs-are-parametric* *c-lang-const-expansion*
    c-save-buffer-state
    c-syntax-table-hwm
+   c-intersect-lists c-lookup-lists
+   c-langelem-sym c-langelem-pos c-langelem-col c-langelem-2nd-pos
    c-put-char-property c-get-char-property c-clear-char-property
    c-put-char-properties c-clear-char-properties c-min-property-position
    c-put-string-fence
@@ -1385,6 +1389,60 @@
   ;; before POS, or before the point if POS is left out."
   (let ((dest (apply c-down-list-backward args)))
     (if dest (begin (goto-char dest) #t) #f)))
+
+;;----------------------------------------------------------------------
+;; The syntactic-element accessors (`cc-defs.el:2018'-`:2090')
+;;----------------------------------------------------------------------
+;; A "langelem" is either the old form `(SYMBOL . ANCHOR)' or the new
+;; form `(SYMBOL ANCHOR . EXTRA)'. Emacs's nil answers (no anchor, no
+;; second position) are #f here - the callers test them, and an empty
+;; list would be true.
+
+(define (c-intersect-lists list alist)
+  ;; "Return the element of ALIST that matches the first element found
+  ;; in LIST. Uses assq."
+  (let loop ((l list))
+    (cond ((not (pair? l)) #f)
+          ((assq (car l) alist))
+          (else (loop (cdr l))))))
+
+(define (c-lookup-lists list alist1 alist2)
+  ;; "First, find the first entry from LIST that is present in ALIST1,
+  ;; then find the entry in ALIST2 for that entry."
+  (let ((entry (c-intersect-lists list alist1)))
+    (and entry (assq (car entry) alist2))))
+
+(define (c-langelem-sym langelem)
+  ;; "Return the syntactic symbol in LANGELEM."
+  (car langelem))
+
+(define (c-langelem-pos langelem)
+  ;; "Return the anchor position in LANGELEM, or nil if there is none."
+  (let ((tail (cdr langelem)))
+    (if (pair? tail)
+        (let ((pos (car tail)))
+          (and pos (if (null? pos) #f pos)))
+        (and tail (if (null? tail) #f tail)))))
+
+(define (c-langelem-col langelem . rest)
+  ;; "Return the column of the anchor position in LANGELEM. Also move
+  ;; the point to that position unless PRESERVE-POINT is non-nil."
+  (let ((pos (c-langelem-pos langelem))
+        (preserve-point (if (pair? rest) (car rest) #f))
+        (here (point)))
+    (if pos
+        (begin
+          (goto-char pos)
+          (let ((col (current-column)))
+            (if preserve-point (goto-char here))
+            col))
+        0)))
+
+(define (c-langelem-2nd-pos langelem)
+  ;; "Return the secondary position in LANGELEM, or nil if there is
+  ;; none."
+  (let ((pos (car-safe (cdr-safe (cdr-safe langelem)))))
+    (and pos (if (null? pos) #f pos))))
 
 )
 )

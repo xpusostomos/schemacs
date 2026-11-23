@@ -98,6 +98,7 @@
           nreverse
           nconc
           %assq
+          rassq rassoc
           %count-lines
           install-fns-textprop!
           line-number-at-pos
@@ -963,6 +964,39 @@
         (cond ((or (null? tail) (not tail)) #f)
               ((not (pair? tail)) (error "Wrong type argument" alist))
               ((and (pair? (car tail)) (eq? (car (car tail)) key))
+               (car tail))
+              (else (loop (cdr tail))))))
+
+    ;; `rassq' and `rassoc' (`fns.c:2050', `:2063')
+    ;;
+    ;; The reverse `assq': the value is the element whose *cdr* is KEY.
+    ;; cc-engine's `c-add-stmt-syntax' asks `(rassq SYNTAX-SYMBOL
+    ;; c-other-decl-block-key-in-symbols-alist)', and the host has no
+    ;; binding for either name (`(scheme base)' has no `rassq', and
+    ;; Guile's own module does not export one - measured), so both are
+    ;; written out here. Non-cons elements are ignored, as in `%assq'.
+    (define (rassq key alist)
+      ;; "Return non-nil if KEY is `eq' to the cdr of an element of
+      ;; ALIST. The value is actually the first element of ALIST whose
+      ;; cdr is KEY."
+      (let loop ((tail alist))
+        (cond ((or (null? tail) (not tail)) #f)
+              ((not (pair? tail)) (error "Wrong type argument" alist))
+              ((and (pair? (car tail)) (eq? (cdr (car tail)) key))
+               (car tail))
+              (else (loop (cdr tail))))))
+
+    (define (rassoc key alist)
+      ;; "Return non-nil if KEY is `equal' to the cdr of an element of
+      ;; ALIST. The value is actually the first element of ALIST whose cdr
+      ;; equals KEY." The C's `eq_comparable_value' fast path is the same
+      ;; test as the `equal?' it skips.
+      (let loop ((tail alist))
+        (cond ((or (null? tail) (not tail)) #f)
+              ((not (pair? tail)) (error "Wrong type argument" alist))
+              ((and (pair? (car tail))
+                    (or (eq? (cdr (car tail)) key)
+                        (equal? (cdr (car tail)) key)))
                (car tail))
               (else (loop (cdr tail))))))
 

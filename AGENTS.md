@@ -17040,3 +17040,61 @@ Next, unchanged: `cc-mode.el` - the mode definitions, `c-before-change`/
 `def-edebug-spec` stub as the two missing primitives - then the first
 milestone: `.c`/`.h` opening in c-mode through `auto-mode-alist`, faces
 compared to Emacs.
+
+## cc-mode step 7: the indentation analysis (2026-11-23)
+
+`cc-engine.scm` now has cc-engine.el's final section - `c-add-syntax`,
+`c-add-stmt-syntax`, `c-add-class-syntax`, `c-guess-continued-construct`,
+`c-guess-basic-syntax`, `c-evaluate-offset`, `c-calc-offset`,
+`c-get-offset`, `c-get-syntactic-indentation` - and the pieces it stands
+on that the earlier tranches had skipped: `c-looking-at-inexpr-block-
+backward`, `c-beginning-of-inheritance-list` and the three C++20 concept
+walkers. The `c-langelem-*` accessors moved into cc-defs.
+
+**The gate is `tools/cc-cgbs-diff/`**: both trees print
+`(POSITION SYNTAX)` at every line start and `diff` them, in `c-mode` or
+`c++-mode` with the gnu style. It is **identical on 8 fixtures** - the
+one in that directory, the four C and three C++ ones under
+`tools/cc-decl-diff/`. `cc-engine-tests` grew the `guess` group (20
+Emacs-measured rows from the fixture, plus two brace-list rows) and the
+`offsets` group (17 rows for `c-evaluate-offset`'s number/vector/nil/
+`+ - ++ -- * /`/min/max/add/first/quote arms and
+`c-get-syntactic-indentation`'s two anchors).
+
+What this pass cost, all of it recorded in DEPARTURES.md:
+
+* **`set!` is not `setq`.** About twenty `(set! X ...)` uses in *test*
+  position returned Guile's unspecified value (truthy; once zero values,
+  which raises) instead of Emacs's new value. Each is
+  `(begin (set! X e) X)` now. Grep a ported condition for `(set!` before
+  believing it.
+* **A `cond` with no `else` is true.** CASE 5A.3's inner cond has no
+  else in Emacs; in Scheme that is an always-true test and a stale
+  placeholder (`(brace-list-open #t)`).
+* **A balanced file can be the wrong shape** - the CASE 18 body was
+  inside its test by one paren, compensated at the clause's end. Dump
+  the parsed clause and compare its operand heads; per-clause reader
+  checks localize it.
+* **Nil tests on lists**: `(if paren-state ...)` and `(and state-cache
+  (pair? (car state-cache)))` need `pair?`; `(car paren-state)` needs
+  `car-safe`.
+* **Operand order**: `(> (point) (progn ...))` reads point before the
+  progn in C; bind it first.
+* New primitives: `/=` (data), `rassq`/`rassoc` (fns). The line-up
+  function registry (`c-register-lineup-function!`) is the stand-in for
+  Emacs's `(functionp SYMBOL)`, empty until cc-align.
+
+The harness's mode replay, for reuse: `major-mode`, `parse-sexp-
+ignore-comments`, the language vars, the syntax table, the gnu style,
+`c-clear-found-types`, `c-make-noise-macro-regexps` and
+`c-make-macro-with-semi-re` (the mode's `:after-hook`). A missing noise
+regexp reaches `(looking-at #f)`; a missing `c-clear-found-types`
+reaches `hash-for-each` on `#f`.
+
+Verified: full suite battery 91/91 (exit 0) and `tools/pty-check.py` run
+alone on the settled tree (see the commit message for its count).
+
+Next, in the approved order: **cc-align** (the line-up functions and the
+registrations the offset evaluator waits for), then **easymenu**,
+**cc-cmds**, **cc-menus/cc-guess**, and **cc-mode.el** - then the
+`.c`/`.h` milestone.

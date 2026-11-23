@@ -44,6 +44,7 @@
           c-style-variables c-fallback-style
           c-set-stylevar-fallback c-stylevar-fallback
           c-style-variable-register! c-style-variable-value
+          c-style-variable-bound?
           c-style-variable-set! c-style-variable-default
           *c-basic-offset* c-basic-offset set!c-basic-offset
           *c-comment-only-line-offset* c-comment-only-line-offset
@@ -78,6 +79,8 @@
           c-string-par-start c-string-par-separate
           c-sentence-end-with-esc-eol c-default-value-sentence-end
           c-valid-offset c-string-or-string-list-p
+          *c-syntactic-context* *c-syntactic-element*
+          *c-strict-syntax-p*
           c-indentation-style set!c-indentation-style
           c-current-comment-prefix set!c-current-comment-prefix
           c-block-comment-flag set!c-block-comment-flag
@@ -311,6 +314,12 @@ names)."))
     (define (c-style-variable-value name)
       (let ((entry (assq name %c-style-variable-table)))
         (and entry ((vector-ref (cdr entry) 0)))))
+
+    (define (c-style-variable-bound? name)
+      ;; Emacs's `(boundp name)' for the style variables: registered here
+      ;; means bound, whatever its value. `c-evaluate-offset''s
+      ;; `symbol-value' arm needs the distinction a value of #f loses.
+      (and (assq name %c-style-variable-table) #t))
 
     (define (c-style-variable-set! name value)
       (let ((entry (assq name %c-style-variable-table)))
@@ -880,6 +889,19 @@ the value set here overrides the style system (there is a variable
   (set-buffer-local-value! (current-buffer) 'c-backslash-max-column value))
 
 (c-style-variable-register! 'c-backslash-max-column c-backslash-max-column set!c-backslash-max-column *c-backslash-max-column*)
+
+(define-custom *c-strict-syntax-p* #f
+  "If non-nil, all syntactic symbols must be found in `c-offsets-alist'.
+If the syntactic symbol for a particular line does not match a symbol
+in the offsets alist, or if no non-nil offset value can be determined
+for a symbol, an error is generated, otherwise no error is reported
+and the syntactic symbol is ignored.
+
+This variable is considered obsolete; it doesn't work well with lineup
+functions that return nil to support the feature of using lists on
+syntactic elements in `c-offsets-alist'."
+  :type 'boolean
+  :group 'c)
 
 (define-custom *c-special-indent-hook* '()
   "Hook for user defined special indentation adjustments.
@@ -1470,5 +1492,48 @@ this implicitly by reinitializing C/C++/Objc Mode on any buffer)."
      'idl-font-lock-extra-types (lambda () (*idl-font-lock-extra-types*)))
     (c-register-emacs-variable-reader!
      'pike-font-lock-extra-types (lambda () (*pike-font-lock-extra-types*)))
+
+    ;;------------------------------------------------------------------
+    ;; The two always-dynamically-bound analysis variables
+    ;; (`cc-vars.el:1869'-`:1904')
+    ;;------------------------------------------------------------------
+    ;; Emacs declares both with a bare `defvar' (void) and gives them a
+    ;; `variable-documentation' property; a parameter needs a default, and
+    ;; #f is "not bound". They are `let'-bound by their readers, so the
+    ;; convention makes them parameters.
+    (define-custom *c-syntactic-context* #f
+      "Variable containing the syntactic analysis list for a line of code.
+
+It is a list with one element for each syntactic symbol pertinent to the
+line, for example \"((defun-block-intro 1) (comment-intro))\".
+
+It is dynamically bound when calling (i) a brace hanging \"action
+function\"; (ii) a semicolon/comma hanging \"criteria function\"; (iii) a
+\"line-up function\"; (iv) a c-special-indent-hook function.  It is also
+used internally by CC Mode.
+
+c-syntactic-context is always bound dynamically.  It must NEVER be set
+statically (e.g. with `setq')."
+      :type 'sexp
+      :group 'c)
+
+    (define-custom *c-syntactic-element* #f
+      "Variable containing the current syntactic element during calls to
+the lineup functions.  The value is one of the elements in the list in
+`c-syntactic-context' and is a list with the symbol name in the first
+position, followed by zero or more elements containing any additional
+info associated with the syntactic symbol.  There are accessor functions
+`c-langelem-sym', `c-langelem-pos', `c-langelem-col', and
+`c-langelem-2nd-pos' to access the list.
+
+Specifically, the element returned by `c-langelem-pos' is the anchor
+position, or nil if there isn't any.  See the comments in the
+`c-offsets-alist' variable and the CC Mode manual for more detailed info
+about the data each syntactic symbol provides.
+
+This is always bound dynamically.  It should never be set
+statically (e.g. with `setq')."
+      :type 'sexp
+      :group 'c)
 
     ))

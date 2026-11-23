@@ -268,6 +268,7 @@
     *byte-count-to-string-function*
     *c++-font-lock-extra-types*
     *c-asymmetry-fontification-flag*
+    *c-auto-newline-analysis*
     *c-backslash-column*
     *c-backslash-max-column*
     *c-basic-offset*
@@ -308,9 +309,13 @@
     *c-report-syntactic-errors*
     *c-restricted-<>-arglists*
     *c-special-indent-hook*
+    *c-strict-syntax-p*
     *c-style-variables-are-local-p*
+    *c-syntactic-context*
+    *c-syntactic-element*
     *c-syntactic-indentation*
     *c-syntactic-indentation-in-macros*
+    *c-used-syntactic-symbols*
     *c-warn-ids-with-dollar*
     *calculate-lisp-indent-function*
     *calculate-lisp-indent-last-sexp*
@@ -930,6 +935,7 @@
     *x-select-request-type*
     *x-show-tooltip-timeout*
     *yank-pop-change-selection*
+    /=
     <display>
     <glyph-matrix>
     <glyph-row>
@@ -1158,8 +1164,11 @@
     c-<-as-paren-syntax
     c-<>-get-restricted
     c->-as-paren-syntax
+    c-add-class-syntax
     c-add-language
+    c-add-stmt-syntax
     c-add-style
+    c-add-syntax
     c-add-type
     c-add-type-1
     c-after-change-check-<>-operators
@@ -1169,6 +1178,7 @@
     c-alpha
     c-annotation-face
     c-append-lower-brace-pair-to-state-cache
+    c-append-syntax
     c-append-to-state-cache
     c-at-bracelist-p
     c-at-enum-brace
@@ -1203,12 +1213,14 @@
     c-beginning-of-current-token
     c-beginning-of-decl-1
     c-beginning-of-defun-1
+    c-beginning-of-inheritance-list
     c-beginning-of-macro
     c-beginning-of-statement-1
     c-beginning-of-syntax
     c-benign-error
     c-block-comment-flag
     c-block-comment-prefix
+    c-brace-anchor-point
     c-brace-stack-at
     c-bs-at-toplevel-p
     c-bs-cache
@@ -1218,6 +1230,7 @@
     c-c++-make-ml-string-closer-re
     c-c++-vsemi-p
     c-cache-to-parse-ps-state
+    c-calc-offset
     c-calculate-state
     c-characterp
     c-cheap-inside-bracelist-p
@@ -1275,6 +1288,7 @@
     c-end-of-literal
     c-end-of-macro
     c-end-of-token
+    c-evaluate-offset
     c-face-name-p
     c-fallback-style
     c-filter-ops
@@ -1327,6 +1341,7 @@
     c-forward-class-decl
     c-forward-comment-minus-1
     c-forward-comments
+    c-forward-concept-fragment
     c-forward-constraint-clause
     c-forward-decl-arglist
     c-forward-decl-or-cast-1
@@ -1367,7 +1382,9 @@
     c-get-fontification-context
     c-get-lang-constant
     c-get-ml-closer
+    c-get-offset
     c-get-style-variables
+    c-get-syntactic-indentation
     c-go-down-list-backward
     c-go-down-list-forward
     c-go-list-backward
@@ -1375,6 +1392,8 @@
     c-go-up-list-backward
     c-go-up-list-forward
     c-got-face-at
+    c-guess-basic-syntax
+    c-guess-continued-construct
     c-hanging-braces-alist
     c-hanging-colons-alist
     c-hanging-semi&comma-criteria
@@ -1383,6 +1402,7 @@
     c-in-knr-argdecl
     c-in-literal
     c-in-method-def-p
+    c-in-requires-or-at-end-of-clause
     c-indent-comment-alist
     c-indent-comments-syntactically-p
     c-indentation-style
@@ -1390,6 +1410,7 @@
     c-init-language-vars
     c-initialize-builtin-style
     c-int-to-char
+    c-intersect-lists
     c-invalidate-find-decl-cache
     c-invalidate-macro-cache
     c-invalidate-state-cache
@@ -1421,6 +1442,10 @@
     c-lang-set-local!
     c-lang-setvar
     c-lang-var-value
+    c-langelem-2nd-pos
+    c-langelem-col
+    c-langelem-pos
+    c-langelem-sym
     c-laomib-cache
     c-laomib-fix-elt
     c-laomib-get-cache
@@ -1428,6 +1453,7 @@
     c-laomib-loop
     c-laomib-put-cache
     c-least-enclosing-brace
+    c-lineup-function
     c-list-found-types
     c-lit-pos-cache
     c-lit-pos-cache-limit
@@ -1439,12 +1465,15 @@
     c-looking-at-c++-attribute
     c-looking-at-c++-lambda-capture-list
     c-looking-at-c++-lambda-expression
+    c-looking-at-concept
     c-looking-at-decl-block
     c-looking-at-inexpr-block
+    c-looking-at-inexpr-block-backward
     c-looking-at-or-maybe-in-bracelist
     c-looking-at-special-brace-list
     c-looking-at-statement-block
     c-looking-at-statement-block-1
+    c-lookup-lists
     c-lower
     c-macro-cache
     c-macro-cache-no-comment
@@ -1529,6 +1558,7 @@
     c-record-type-id
     c-reference-face-name
     c-register-emacs-variable-reader!
+    c-register-lineup-function!
     c-remove-font-lock-face
     c-remove-in-sws
     c-remove-is-and-in-sws
@@ -1614,6 +1644,7 @@
     c-string-syntax
     c-strip-conses
     c-style-alist
+    c-style-variable-bound?
     c-style-variable-default
     c-style-variable-register!
     c-style-variable-set!
@@ -3474,6 +3505,8 @@
     quoted-insert
     raise-frame
     rarely-quit
+    rassoc
+    rassq
     raw-cursor-to!
     re-charset-classes
     re-charset-map

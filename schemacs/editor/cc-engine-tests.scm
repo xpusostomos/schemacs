@@ -34,8 +34,10 @@
  (only (schemacs editor textprop) get-text-property text-property-any)
  (only (schemacs editor cc-defs) c-lang-const *c-buffer-is-cc-mode*
        c-skip-ws-chars-forward c-skip-ws-chars-backward)
+ (only (schemacs editor cmds) beginning-of-line)
  (schemacs editor cc-langs)
  (schemacs editor cc-vars)
+ (schemacs editor cc-styles)
  (schemacs editor cc-engine))
 
 (test-begin "schemacs_editor_cc_engine")
@@ -2173,3 +2175,108 @@
                (list 1 37) (list (c-new-BEG) (c-new-END)))))
 
 (test-end "schemacs_editor_cc_engine_angle_props")
+
+;;----------------------------------------------------------------------
+;; `c-guess-basic-syntax' (`cc-engine.el:14769'-`:16532')
+;;----------------------------------------------------------------------
+;; Every expected value below is Emacs 31.1's own answer on the same
+;; text. The whole-fixture differential (this text and the fixtures
+;; under `tools/cc-decl-diff/') was run both ways and is identical; the
+;; rows here are the representative ones, kept so a break shows a
+;; readable answer rather than a diff.
+(test-begin "schemacs_editor_cc_engine_guess")
+
+(define cgbs-fixture1
+  "int main (int argc, char **argv)\n{\n  int i;\n  if (argc > 1)\n    return 1;\n  else\n    i = 0;\n  switch (i)\n    {\n    case 0:\n      break;\n    default:\n      i++;\n    }\n  for (i = 0; i < argc; i++)\n    {\n      printf (\"%s\\n\", argv[i]);\n    }\n  return 0;\n}\n")
+
+(define (cgbs-buffer text thunk)
+  ;; A `c-mode' buffer with the mode's init replayed: the language
+  ;; variables, the syntax table, and the after-hook's two regexp
+  ;; builders. `parse-sexp-ignore-comments' is what `cc-mode.el:639'
+  ;; sets buffer-locally.
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert text)
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+      (c-init-language-vars c-mode)
+      (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+      (c-set-style "gnu")
+      (c-clear-found-types)
+      (c-make-noise-macro-regexps)
+      (c-make-macro-with-semi-re)
+      (thunk))))
+
+(define (cgbs-at pos)
+  (goto-char pos)
+  (beginning-of-line)
+  (c-guess-basic-syntax))
+
+(cgbs-buffer
+ cgbs-fixture1
+ (lambda ()
+   (test-equal "line 1 is a topmost intro" '((topmost-intro 1)) (cgbs-at 1))
+   (test-equal "the defun brace" '((defun-open 1)) (cgbs-at 34))
+   (test-equal "the defun body" '((defun-block-intro 34)) (cgbs-at 36))
+   (test-equal "a statement" '((statement 38)) (cgbs-at 45))
+   (test-equal "a substatement" '((substatement 47)) (cgbs-at 61))
+   (test-equal "an else clause" '((else-clause 47)) (cgbs-at 75))
+   (test-equal "a substatement body" '((substatement 77)) (cgbs-at 82))
+   (test-equal "the statement after the if" '((statement 47)) (cgbs-at 93))
+   (test-equal "a switch brace" '((substatement-open 95)) (cgbs-at 106))
+   (test-equal "a case label" '((case-label 110)) (cgbs-at 112))
+   (test-equal "a case body" '((statement-case-intro 116)) (cgbs-at 124))
+   (test-equal "the default label" '((case-label 110)) (cgbs-at 137))
+   (test-equal "the default body" '((statement-case-intro 141)) (cgbs-at 150))
+   (test-equal "the switch's close" '((block-close 110)) (cgbs-at 161))
+   (test-equal "the for statement" '((statement 95)) (cgbs-at 167))
+   (test-equal "the for body brace" '((substatement-open 169)) (cgbs-at 196))
+   (test-equal "the for body" '((statement-block-intro 200)) (cgbs-at 202))
+   (test-equal "the for body's close" '((block-close 200)) (cgbs-at 234))
+   (test-equal "the return" '((statement 169)) (cgbs-at 240))
+   (test-equal "the defun's close" '((defun-close 34)) (cgbs-at 252))))
+
+(cgbs-buffer
+ "int a[] = {1, 2, 3};\nstruct S s = {.x = 1, .y = 2};\n"
+ (lambda ()
+   (test-equal "a top-level initializer" '((topmost-intro 1)) (cgbs-at 1))
+   (test-equal "the next top-level line" '((topmost-intro 1)) (cgbs-at 22))))
+
+(test-end "schemacs_editor_cc_engine_guess")
+
+;;----------------------------------------------------------------------
+;; Indentation calculation (`cc-engine.el:16537'-`:16738')
+;;----------------------------------------------------------------------
+(test-begin "schemacs_editor_cc_engine_offsets")
+
+(cgbs-buffer
+ "int main (int argc)\n{\n  int i;\n}\n"
+ (lambda ()
+   (set!c-basic-offset 4)
+   (test-equal "a number is itself" 4 (c-evaluate-offset 4 #f 'test))
+   (test-equal "a vector is itself" '#(0) (c-evaluate-offset '#(0) #f 'test))
+   (test-equal "nil stays nil" #f (c-evaluate-offset #f #f 'test))
+   (test-equal "+ is c-basic-offset" 4 (c-evaluate-offset '+ #f 'test))
+   (test-equal "- is minus c-basic-offset" -4 (c-evaluate-offset '- #f 'test))
+   (test-equal "++ doubles" 8 (c-evaluate-offset '++ #f 'test))
+   (test-equal "-- doubles the negative" -8 (c-evaluate-offset '-- #f 'test))
+   (test-equal "* halves" 2 (c-evaluate-offset '* #f 'test))
+   (test-equal "/ halves the negative" -2 (c-evaluate-offset '/ #f 'test))
+   (test-equal "min picks the smaller" 3 (c-evaluate-offset '(min 3 5) #f 'test))
+   (test-equal "max picks the larger" 5 (c-evaluate-offset '(max 3 5) #f 'test))
+   (test-equal "add sums" 7 (c-evaluate-offset '(add 3 4) #f 'test))
+   (test-equal "a quoted offset in add is ignored" 3
+               (c-evaluate-offset '(add 3 '(4)) #f 'test))
+   (test-equal "first takes the first non-nil" 3
+               (c-evaluate-offset '(first nil 3) #f 'test))
+   (test-equal "a mistakenly quoted offset is nil" #f
+               (c-evaluate-offset '(quote 3) #f 'test))
+   ;; c-basic-offset is 4 in this buffer, so gnu's `+' offset for
+   ;; defun-block-intro is 4 (Emacs answers 4 on the same text).
+   (test-equal "c-get-offset through the old form" 4
+               (c-get-syntactic-indentation '((defun-block-intro 34))))
+   (test-equal "a zero-offset statement" 0
+               (c-get-syntactic-indentation '((statement 38))))))
+
+(test-end "schemacs_editor_cc_engine_offsets")
