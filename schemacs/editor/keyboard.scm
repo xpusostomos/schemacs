@@ -44,7 +44,7 @@
     ;; reporting an error failed - and only a test that makes a command
     ;; signal one could see it, because the error path is not otherwise
     ;; reached.
-    (only (guile) format inexact->exact logior logand string-index
+    (only (guile) format inexact->exact logior logand lognot string-index
           current-module filter caddr
           ;; `init_signals`: C-g and C-\ arrive as signals, because
           ;; `init_sys_modes` made them the terminal's interrupt and quit
@@ -298,7 +298,7 @@
    ;; importer of this library is unchanged.
    signal-quit quit-char *quit-flag* *inhibit-quit*
    ;; The SIGINT handler and `maybe_quit` - `keyboard.c`'s and `eval.c`'s.
-   handle-interrupt init-signals maybe-quit
+   handle-interrupt init-signals maybe-quit *signal-wake-function*
    ;; `timer_check' and the read's deadline are the command loop's, so
    ;; they are published the way the rest of the loop is.
    timer-check!
@@ -1527,20 +1527,44 @@
     ;; `inhibit-quit`, which is how a user escapes a loop that meant to be
     ;; uninterruptible.
 
+    (define *signal-wake-function*
+      (make-parameter #f))
+    ;; ^ How a front end is told that a signal has set `*quit-flag*`, or
+    ;; #f when it needs no telling.
+    ;;
+    ;; **Emacs's handler longjmps out of `pselect`** (`quit_throw_to_
+    ;; read_char`), and that is what ends the wait; a Scheme `sigaction`
+    ;; handler is a *deferred* procedure, run at the VM's next safe
+    ;; point, so it cannot. Measured on this Guile: a SIGINT during a
+    ;; blocking `select` makes `select` return an empty ready set with
+    ;; the handler *not yet run*, and the wait then re-blocks with the
+    ;; flag set and nothing to see it - `C-g` was occasionally lost until
+    ;; the next key. A front end whose wait is a `select` gives this
+    ;; parameter a thunk that writes one byte to a pipe it selects on;
+    ;; the handler runs at the loop's next safe point, writes, and the
+    ;; wait returns and reads the flag. The terminal installs it beside
+    ;; its back-door wake; the Gtk loop is already woken by its own
+    ;; sources, so it needs nothing.
+
     (define (handle-interrupt sig)
       ;; GNU Emacs's `handle_interrupt` (`keyboard.c`): "Request quit when
       ;; it's safe."
       ;;
       ;; **The emergency-escape branch is not carried.** The C's first
-      ;; branch is for `quit-flag' holding `kill-emacs' - it drops to a
+      ;; branch is for `quit-flag' holding `kill-emacs` - it drops to a
       ;; shell and offers to auto-save and dump core - and nothing here
       ;; sets that value.
+      ;;
+      ;; The wake is *after* the flag: a wait that returns for the byte
+      ;; must find the quit recorded. See `*signal-wake-function*`.
       ;;--------------------------------------------------------------
       (let ((count (if (*quit-flag*) (+ force-quit-count 1) 1)))
         (set! force-quit-count count)
         (when (= count 3)
           (*inhibit-quit* #f))
-        (*quit-flag* #t)))
+        (*quit-flag* #t)
+        (when (*signal-wake-function*)
+          ((*signal-wake-function*)))))
 
     (define (init-signals)
       ;; GNU Emacs's `init_signals` (`keyboard.c`), the two that matter for
@@ -1652,6 +1676,13 @@
       ;; of the partial sequence as it is typed.
       ;;--------------------------------------------------------------
       (when prompt (message "%s" prompt))
+      ;; **`read_key_sequence_vs` opens with `maybe_quit ()`**
+      ;; (`keyboard.c:12457`), and this is the Lisp-facing
+      ;; `read-key-sequence` it wraps. The quit is *not* raised by
+      ;; `read-key-event` - that is `read_char`, which answers a pending
+      ;; C-g as `quit_char` - so a reader assembling a sequence starts
+      ;; with the same check the command loop does.
+      (maybe-quit)
       (let ((state (new-modal-lookup-state (lookup-keymaps)))
             (events '())
             ;; The step's own answer is "was the chord finished?" - a
@@ -1661,6 +1692,9 @@
             (answer #f))
         (let loop ((meta-prefix #f))
           (let* ((raw (function-key-translate (read-key-event -1)))
+                 ;; `read_key_sequence` clears `Vquit_flag` after every
+                 ;; key it reads (`keyboard.c:11892`).
+                 (_ (*quit-flag* #f))
                  (event (cond ((not raw) raw)
                               ((not meta-prefix) raw)
                               ((integer? raw) (logior raw char-meta))
@@ -1807,13 +1841,21 @@
       ;;--------------------------------------------------------------
       (let ((deadline (and (>= timeout 0) (+ (%now-ms) timeout))))
         (let loop ()
-          ;; **`read_key_sequence` opens with `maybe_quit ()`**
-          ;; (`keyboard.c:11917`): a quit recorded since the last read is
-          ;; signalled now, which is what makes a C-g that arrived while a
-          ;; command was running take effect at the next read. A C-g that
-          ;; arrives *during* the read below is the other half - the read
-          ;; answers `quit_char` for it, as `read_char` does.
-          (maybe-quit)
+          ;; **This is `read_char`, and `read_char` does not signal a
+          ;; quit.** A pending C-g is *answered* - `quit_char`, from
+          ;; `read_char`'s interrupted branch (`keyboard.c:2817`) or from
+          ;; `kbd_buffer_get_event` before it blocks (`:4117`) - so that
+          ;; a reader which asked for a key (a `read-char`, and
+          ;; `read-quoted-char` above all) gets the character the user
+          ;; pressed. The raise lives one level up, in
+          ;; `read_key_sequence_vs`'s `maybe_quit ()`
+          ;; (`keyboard.c:12457`), and that is the command loop's and
+          ;; `read-key-sequence`'s read - both call `maybe-quit` before
+          ;; they read for exactly this reason. Putting it here as well
+          ;; made a C-g that arrived between the command loop reading
+          ;; C-q and `read-quoted-char` reading its character *raise*
+          ;; instead of being the quoted character: `C-q C-g` was "Quit"
+          ;; about a third of the time, measured at a pty.
           (let* ((unread (*unread-command-events*))
                    (ev (if (null? unread)
                            (begin
@@ -1854,16 +1896,22 @@
                                ;; an event it re-reads.
                                (record-nonmenu-event! #f key)
                                key)))))
-              ;; **`read_key_sequence` clears `Vquit_flag` after every key
-              ;; it reads** (`keyboard.c:11892`). The flag is what the
-              ;; terminal's read turned into `quit_char` above
-              ;; (`keyboard.c:2806`); leaving it set is what made a C-g
-              ;; that aborted isearch fire again at the *next*
-              ;; `maybe-quit` - as a quit condition raised out of the
-              ;; command loop's read, which nothing caught, so the editor
-              ;; exited. A real C-g key (a Gtk frame's) leaves the flag
-              ;; #f and this is a no-op.
-              (when (and (eqv? ev quit-char) (*quit-flag*))
+              ;; **The flag is cleared here only when quitting was
+              ;; inhibited** - `read_char`'s own rule (`keyboard.c:2824`:
+              ;; "If we report the quit char as an event, don't do so
+              ;; more than once", `if (!NILP (Vinhibit_quit))
+              ;; Vquit_flag = Qnil;`). With quitting enabled the flag
+              ;; stays set on purpose: the C-g is answered once to the
+              ;; reader that asked (so `read-quoted-char` can finish a
+              ;; digit sequence with it), and the *next* command-loop
+              ;; read raises it as the quit it is - which is what makes
+              ;; Emacs insert the code read so far and then say
+              ;; "Quit". The command loop clears the flag itself after
+              ;; every key it reads, as `read_key_sequence` does
+              ;; (`keyboard.c:11892`). A real C-g key (a Gtk frame's)
+              ;; leaves the flag #f and this is a no-op.
+              (when (and (eqv? ev quit-char) (*quit-flag*)
+                         (*inhibit-quit*))
                 (*quit-flag* #f))
               (if (and ev (dispatch-special-event (*current-frame*) ev))
                   (begin
@@ -2388,9 +2436,9 @@
              ;; **The read is inside the error guard too, as it is in
              ;; Emacs.** `command_loop_1`'s `condition-case` wraps the
              ;; whole iteration, `read_key_sequence` included; this loop
-             ;; guarded only the command, so a quit raised by the read's
-             ;; own `maybe-quit` - a C-g that arrived between one command
-             ;; and the next read - escaped and exited the editor
+             ;; guarded only the command, so a quit raised by the read -
+             ;; `maybe-quit` below, for a C-g that arrived between one
+             ;; command and the next read - escaped and exited the editor
              ;; (measured: SIGINT, then the process gone with a
              ;; `%quit-condition' throw). The handler reports it and the
              ;; loop goes on reading, which is what `cmd_error` does.
@@ -2403,6 +2451,18 @@
              ;; the window it had made stayed there until the next key.
              (guard (ex (else (report-command-error! frame ex)
                               (redisplay-frames!)))
+             ;; **`read_key_sequence_vs` opens with `maybe_quit ()`**
+             ;; (`keyboard.c:12457`): "a quit recorded since the last
+             ;; read is signalled now", which is what makes a C-g that
+             ;; arrived while a command was running take effect at the
+             ;; next read. It is here and not in `read-key-event'
+             ;; because `read-key-event' is `read_char', and
+             ;; `read_char` *answers* a pending C-g as `quit_char`
+             ;; instead (`keyboard.c:2817`) - a reader such as
+             ;; `read-quoted-char` needs the character, not a quit.
+             ;; **The guard wraps it too**, as Emacs's `command_loop_1`
+             ;; condition-case wraps `read_key_sequence`.
+             (maybe-quit)
              (let ((want (read-timeout-or
                           ;; **Nothing to wait for but a key.** The
                           ;; echo area's two clock-driven habits - a
@@ -2425,6 +2485,14 @@
                           ;; keeps the cap. See `REPL-WAKE'.
                           (and (repl-running?) (not (repl-wake)) 100))))
              (let ((ev (read-key-event want)))
+               ;; **`read_key_sequence` clears `Vquit_flag` after every
+               ;; key it reads** (`keyboard.c:11892`). The C-g above may
+               ;; have arrived as a `quit_char` during the wait; the key
+               ;; itself still goes through the keymaps (which is how a
+               ;; menu consumes it as `tty-menu-exit`), and the flag
+               ;; must not fire a second time at the *next* read - that
+               ;; double quit is what used to exit the editor.
+               (*quit-flag* #f)
                (cond
                 ((key-event? ev)
                  ;; The half of the loop that belongs to *a key arriving*:
@@ -2529,70 +2597,101 @@
         (let loop ()
             (if done
                 code
-                ;; The key is the *event*, and the C is a character
-                ;; reader: `read-char' answers the character the event
-                ;; is, which for every key this asks about - a digit, a
-                ;; `C-g', RET - is the event itself. `event-convert-list'
-                ;; names the event of a description and is the C's own, so
-                ;; the tests below spell the keys the way Emacs's
-                ;; `(eq char ?\C-g)' does.
-                (let* ((key (read-key-event -1))
-                       (code-read (and (integer? key) key)))
-                  (cond
-                   ;; a C-g after the first character quits, as the
-                   ;; C's quitting is enabled once `first' is past
-                   ((and (not first)
-                         (eqv? key (event-convert-list '(control #\g))))
-                    (signal-quit))
-                   ;; a digit of the radix: accumulate, and echo the
-                   ;; digit after the prompt
-                   ((and code-read
-                         (or (char-numeric? (integer->char code-read))
-                             (and (= 16 radix)
-                                  (char<=? #\a (integer->char code-read) #\f))
-                             (and (<= 10 radix)
-                                  (char<=? #\a (integer->char code-read)
-                                           (integer->char (+ 87 (- radix 10)))))))
-                    ;; ^ Elisp's second branch is the letters a-F up
-                    ;; to the radix, for 16: `(and (<= ?a (downcase
-                    ;; translated)) (< (downcase translated) (+ ?a
-                    ;; -10 (min 36 read-quoted-char-radix))))'
-                    (set! code (+ (* code radix)
-                                  (- code-read (char->integer #\0))))
+                ;; **`(let ((inhibit-quit first)) ... (if inhibit-quit
+                ;; (setq quit-flag nil)))`** (`simple.el:1002`,
+                ;; `:1013`). The read is a `read-char`'s: a C-g that
+                ;; arrives now is *answered* as `quit_char' by
+                ;; `read-key-event' (`read_char`'s own rule) and is the
+                ;; character C-q quotes. Inhibiting quitting for the
+                ;; first read is what keeps `maybe_quit`-style code from
+                ;; turning it into a quit on the way through, and the
+                ;; clear afterwards is the C's, for the case where the
+                ;; flag was already set when the read began. With
+                ;; `first' past, a C-g is an ordinary terminator here -
+                ;; it is pushed back and the code read so far is
+                ;; returned; the *next* command-loop read raises the
+                ;; flag as the quit it is, which is Emacs's "finish the
+                ;; character, then quit".
+                (let* ((inhibit-quit first)
+                       (key (parameterize ((*inhibit-quit* inhibit-quit))
+                              (read-key-event -1))))
+                  (when inhibit-quit
+                    (*quit-flag* #f))
+                  ;; Emacs's `(lookup-key local-function-key-map (vector
+                  ;; char))': RET is 13 and TAB 9 whichever display sent
+                  ;; them, and `function-key-translate' is this tree's
+                  ;; step for that (and for the events a Gtk frame names
+                  ;; by symbol).
+                  (let* ((translated (and key (function-key-translate key)))
+                         (code-read (and (integer? translated) translated)))
+                    (cond
+                     ;; `((null translated))': nothing that is a
+                     ;; character - ask again.
+                     ((not translated) #f)
+                     ;; `((not (integerp translated)) (setq
+                     ;; unread-command-events (list char) done t)':
+                     ;; a function key is used itself as input.
+                     ((not code-read)
+                      (*unread-command-events*
+                       (cons key (*unread-command-events*)))
+                      (set! done #t))
+                     ;; "Turn a meta-character into a character with
+                     ;; the 0200 bit set."
+                     ((not (= 0 (logand code-read char-meta)))
+                      (set! code (logior (logand code-read (lognot char-meta))
+                                         128))
+                      (set! done #t))
+                     ;; "if the first character read is an octal
+                     ;; digit, we read any number of octal digits" -
+                     ;; and decimal and hex, by `read-quoted-char-radix'.
+                     ((and (<= (char->integer #\0) code-read)
+                           (< code-read (+ (char->integer #\0)
+                                           (min 10 radix))))
+                      (set! code (+ (* code radix)
+                                    (- code-read (char->integer #\0))))
+                      (when prompt
+                        (set! prompt
+                              (format #f "~a ~a" prompt
+                                      (integer->char code-read)))
+                        (set!frame-message frame prompt)))
+                     ((and (<= (char->integer #\a)
+                               (char->integer
+                                (char-downcase (integer->char code-read))))
+                           (< (char->integer
+                               (char-downcase (integer->char code-read)))
+                              (+ (char->integer #\a) -10 (min 36 radix))))
+                      (set! code (+ (* code radix)
+                                    (+ 10 (- (char->integer
+                                              (char-downcase
+                                               (integer->char code-read)))
+                                             (char->integer #\a)))))
+                      (when prompt
+                        (set! prompt
+                              (format #f "~a ~a" prompt
+                                      (integer->char code-read)))
+                        (set!frame-message frame prompt)))
+                     ;; RET after the first digit terminates and is
+                     ;; discarded; before that it is the character.
+                     ((and (not first)
+                           (eqv? translated
+                                 (event-convert-list '(control #\m))))
+                      (set! done #t))
+                     ;; any other terminator after the first digit is
+                     ;; used itself as input: pushed back for the
+                     ;; caller, and its code read
+                     ((not first)
+                      (*unread-command-events*
+                       (cons key (*unread-command-events*)))
+                      (set! done #t))
+                     ;; the first character, not a digit: it is the
+                     ;; answer
+                     (else
+                      (set! code code-read)
+                      (set! done #t)))
+                    ;; `(setq first nil)' at the end of every
+                    ;; iteration, as the C has it.
                     (set! first #f)
-                    ;; `(and prompt (setq prompt (message "%s %c" prompt
-                    ;; translated)))` - the digits typed so far.
-                    (when prompt
-                      (set! prompt
-                            (format #f "~a ~a" prompt
-                                    (integer->char code-read)))
-                      (set!frame-message frame prompt))
-                    (loop))
-                   ;; RET after the first digit terminates and is
-                   ;; discarded; before that it is the character
-                   ((and (not first)
-                         (eqv? key (event-convert-list '(control #\m))))
-                    (set! done #t)
-                    (loop))
-                   ;; any other terminator after the first digit is
-                   ;; used itself as input: pushed back for the
-                   ;; caller, and its code read
-                   ((not first)
-                    (*unread-command-events*
-                     (cons key (*unread-command-events*)))
-                    (set! done #t)
-                    (loop))
-                   ;; the first character, not a digit: it is the
-                   ;; answer - quitting inhibited, so a C-g is code 7
-                   ((and code-read)
-                    (set! code code-read)
-                    (set! done #t)
-                    (loop))
-                   (else
-                    ;; a key that is not a character at all (an
-                    ;; arrow, a frame resize): ask again, as the C's
-                    ;; `(cond ((null translated)))' does
-                    (loop))))))))
+                    (loop)))))))
 
     (define-command (abort-recursive-edit)
       ;; Leave the innermost recursive edit and signal quit, so the

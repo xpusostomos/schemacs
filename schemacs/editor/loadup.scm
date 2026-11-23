@@ -143,6 +143,7 @@
         (schemacs editor category)
         (schemacs editor cc-defs)
         (schemacs editor cc-engine)
+        (schemacs editor cc-fonts)
         (schemacs editor cl-seq)
         (schemacs editor eval)
         (schemacs editor cc-langs)

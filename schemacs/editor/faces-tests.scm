@@ -520,3 +520,61 @@
         (= (car tokens) (cadr tokens))))))
 
 (test-end "schemacs_editor_faces_extend")
+
+;;----------------------------------------------------------------------
+;; The face-copying primitives (`faces.el:212', `:232', `:605', `:1072')
+;;----------------------------------------------------------------------
+;; Every expectation is GNU Emacs 31.1's own, measured with
+;; `emacs -Q --batch'.
+(test-begin "schemacs_editor_faces_copy")
+
+(test-equal "copy-face copies the attributes onto a new face"
+  (list "red" "blue")
+  (begin
+    (f:make-face 'fc-old)
+    (f:set-face-attribute 'fc-old #f ':foreground "red" ':background "blue")
+    (f:copy-face 'fc-old 'fc-new)
+    (list (f:face-attribute 'fc-new ':foreground)
+          (f:face-attribute 'fc-new ':background))))
+
+(test-equal "copy-face onto an existing face replaces what it had"
+  (list "red" 'unspecified)
+  (begin
+    (f:make-face 'fc-existing)
+    (f:set-face-attribute 'fc-existing #f ':weight 'bold)
+    (f:copy-face 'fc-old 'fc-existing)
+    (list (f:face-attribute 'fc-existing ':foreground)
+          (f:face-attribute 'fc-existing ':weight))))
+
+(test-equal "copy-face with no FRAME and a NEW-FRAME signals"
+  #t
+  (guard (e (#t #t))
+    (f:copy-face 'fc-old 'fc-new #f 'some-frame)
+    #f))
+
+(test-equal "invert-face swaps the foreground and background"
+  (list "blue" "red")
+  (begin
+    (f:make-face 'fc-inv)
+    (f:set-face-attribute 'fc-inv #f ':foreground "red" ':background "blue")
+    (f:invert-face 'fc-inv)
+    (list (f:face-attribute 'fc-inv ':foreground)
+          (f:face-attribute 'fc-inv ':background))))
+
+(test-equal "face-inverse-video-p reads :inverse-video"
+  (list #f #t)
+  (begin
+    (f:make-face 'fc-video)
+    (let ((before (f:face-inverse-video-p 'fc-video)))
+      (f:set-face-attribute 'fc-video #f ':inverse-video #t)
+      (list before (f:face-inverse-video-p 'fc-video)))))
+
+(test-equal "make-empty-face clears a face that already existed"
+  'unspecified
+  (begin
+    (f:make-face 'fc-empty)
+    (f:set-face-attribute 'fc-empty #f ':weight 'bold)
+    (f:make-empty-face 'fc-empty)
+    (f:face-attribute 'fc-empty ':weight)))
+
+(test-end "schemacs_editor_faces_copy")

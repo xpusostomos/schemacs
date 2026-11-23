@@ -36,11 +36,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
+    'schemacs/syntax-tests.scm',
     'schemacs/editor/character-tests.scm',
     'schemacs/editor/casetab-tests.scm',
     'schemacs/editor/category-tests.scm',
     'schemacs/editor/cc-defs-tests.scm',
     'schemacs/editor/cc-engine-tests.scm',
+    'schemacs/editor/cc-fonts-tests.scm',
     'schemacs/editor/cc-langs-tests.scm',
     'schemacs/editor/cc-vars-tests.scm',
     'schemacs/editor/cl-seq-tests.scm',

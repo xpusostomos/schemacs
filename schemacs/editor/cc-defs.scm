@@ -49,7 +49,11 @@
     (only (guile) make-hash-table hashq-ref hashq-set! hashq-get-handle
                   hash-clear! hash-map->list current-module module-name
                   eval-when eval sort string<? most-positive-fixnum
-                  syntax with-syntax syntax-case syntax->datum datum->syntax)
+                  syntax with-syntax syntax-case syntax->datum datum->syntax
+                  while)
+    ;; `c-got-face-at' is written with Emacs's `while' and `setq'; the
+    ;; `-e' forms are for the places where Emacs's answer is observable.
+    (only (schemacs syntax) setq when-e)
     (only (schemacs editor intervals) get put)
     (only (schemacs editor buffer) current-buffer buffer-local-value)
     (only (schemacs editor cl-seq)
@@ -71,11 +75,17 @@
     ;; `c-save-buffer-state' is `with-silent-modifications' since Emacs
     ;; 24 (see below), which is `subr.el''s.
     (only (schemacs editor subr) with-silent-modifications)
+    ;; `c-face-name-p' asks whether a face exists.
+    (only (schemacs editor faces) face-list)
     ;; The property API `c-put-char-property' and friends stand on
     ;; (`textprop.c''s), which `cc-defs.el' reaches directly in Emacs.
     (only (schemacs editor textprop) put-text-property get-text-property
           remove-text-properties next-single-property-change
           previous-single-property-change)
+    ;; The `c-search-*-char-property-with-value-on-char' helpers move one
+    ;; character at a time and set the match data on it, as the C's
+    ;; `search-forward-regexp' does.
+    (only (schemacs editor search) re-search-forward re-search-backward)
     (only (schemacs regexp-opt) regexp-opt))
 
   (export
@@ -91,13 +101,20 @@
    c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
    *c-lang-var-overrides*
    c-alpha c-alnum c-digit c-upper c-lower
-   c-mode-symbol c-mode-var c-mode-var-boundp c-concat-separated c-make-bare-char-alt
+   c-mode-symbol c-mode-var c-mode-var-boundp c-got-face-at c-face-name-p
+   c-concat-separated c-make-bare-char-alt
    c-make-keywords-re c-lang-constant-documentation c-literal-datum?
    c-major-mode-is *c-langs-are-parametric* *c-lang-const-expansion*
    c-save-buffer-state
    c-syntax-table-hwm
    c-put-char-property c-get-char-property c-clear-char-property
    c-put-char-properties c-clear-char-properties c-min-property-position
+   c-put-string-fence
+   c-search-forward-char-property c-search-forward-non-nil-char-property
+   c-search-backward-char-property
+   c-search-forward-char-property-with-value-on-char
+   c-search-backward-char-property-with-value-on-char
+   c-search-forward-char-property-without-value-on-char
    c-next-single-property-change c-previous-single-property-change
    c-<-as-paren-syntax c->-as-paren-syntax c-use-category
    c-mark-<-as-paren c-mark->-as-paren c-unmark-<-or->-as-paren
@@ -299,6 +316,27 @@
              ((hashq-ref %c-emacs-variable-readers symbol)
               => (lambda (reader) (reader)))
              (else (error "Void variable ~a" symbol))))))))
+
+(define (c-got-face-at pos faces)
+  ;; "Return non-nil if position POS in the current buffer has any of
+  ;; the faces in the list FACES."
+  (let ((pos-faces (get-text-property pos 'face)))
+    (if (pair? pos-faces)
+        (begin
+          ;; `'()` is true in Scheme, so the walk's end is a `pair?'
+          ;; test; and the answer is Emacs's nil, not the empty list.
+          (while (and (pair? pos-faces)
+                      (not (memq (car pos-faces) faces)))
+            (setq pos-faces (cdr pos-faces)))
+          (and (pair? pos-faces) pos-faces))
+        (memq pos-faces faces))))
+
+(define (c-face-name-p facename)
+  ;; "Return t if FACENAME is the name of a face.  This method is
+  ;; necessary since facep in XEmacs only returns t for the actual face
+  ;; objects (while it's only their names that are used just about
+  ;; anywhere else) without providing a predicate that tests face names."
+  (memq facename (face-list)))
 
 ;;----------------------------------------------------------------------
 ;; `c-concat-separated', `c-make-bare-char-alt' and `c-make-keywords-re'
@@ -944,6 +982,141 @@
           (remove-text-properties ret to (list property #f))
           ret)
         #f)))
+
+(define (c-put-string-fence pos)
+  ;; "Put the string-fence syntax-table text property at POS. Since the
+  ;; character there cannot then count as syntactic whitespace, clear the
+  ;; properties `c-is-sws' and `c-in-sws' (see the functions
+  ;; `c-forward-sws' and `c-backward-sws' in cc-engine.el for details)."
+  ;; Emacs's macro also wraps POS in `-pos-'; as a procedure the argument
+  ;; is evaluated once by the caller.
+  (c-put-char-property pos 'syntax-table '(15))
+  (c-clear-char-property pos 'c-is-sws)
+  (c-clear-char-property pos 'c-in-sws))
+
+;;----------------------------------------------------------------------
+;; The three searches for a char with a property value (`cc-defs.el:1595'-`:1695')
+;;----------------------------------------------------------------------
+;; Emacs's are macros whose CHAR is spliced into `(char-to-string ,char)'
+;; and whose LIMIT is optional; here they are procedures with LIMIT the
+;; last argument and `#f' meaning absent, the tree's spelling for an
+;; optional argument. The value comparison is `equal', as the docstrings
+;; say. `(search-forward-regexp "\\(\n\\|.\\)")' is `re-search-forward'
+;; (they are the same function in Emacs) with the regexp's newline a real
+;; newline character, which is what Emacs's string literal holds.
+;;
+;; "Leave point just after the character, and set the match data on this
+;; character, and return point. If the search fails, return nil; point is
+;; then left undefined."
+;;
+;; Not carried yet: the `c-clear-char-property-with-value*' family
+;; (`cc-defs.el:1555'-`:1590', `:1697'-`:1760'), which the mode's change
+;; hooks (`cc-mode.el') use; they come with those hooks.
+
+(define (c-search-forward-char-property-with-value-on-char property value char limit)
+  ;; "Search forward for a text-property PROPERTY having value VALUE on a
+  ;; character with value CHAR. LIMIT bounds the search."
+  (let ((char-skip (string-append "^" (string char)))
+        (limit (or limit (point-max))))
+    (while (and (begin
+                  (skip-chars-forward char-skip limit)
+                  (< (point) limit))
+                (not (equal? (c-get-char-property (point) property) value)))
+      (forward-char 1))
+    (when (< (point) limit)
+      (re-search-forward "\\(\n\\|.\\)")    ; to set the match-data.
+      (point))))
+
+(define (c-search-backward-char-property-with-value-on-char property value char limit)
+  ;; "Search backward for a text-property PROPERTY having value VALUE on a
+  ;; character with value CHAR. LIMIT bounds the search."
+  ;;
+  ;; "Leave point just before the character, ..."
+  (let ((char-skip (string-append "^" (string char)))
+        (limit (or limit (point-min))))
+    (while (and (begin
+                  (skip-chars-backward char-skip limit)
+                  (> (point) limit))
+                (not (equal? (c-get-char-property (- (point) 1) property)
+                             value)))
+      (backward-char 1))
+    (when (> (point) limit)
+      (re-search-backward "\\(\n\\|.\\)")   ; to set the match-data.
+      (point))))
+
+(define (c-search-forward-char-property property value limit)
+  ;; "Search forward for a text-property PROPERTY having value VALUE.
+  ;; LIMIT bounds the search. The comparison is done with `equal'."
+  ;;
+  ;; "Leave point just after the character, and set the match data on this
+  ;; character, and return point. If VALUE isn't found, Return nil; point is
+  ;; then left undefined."
+  (let ((place (point))
+        (limit (or limit (point-max))))
+    (while (and (< place limit)
+                (not (equal? (c-get-char-property place property) value)))
+      (setq place (c-next-single-property-change place property #f limit)))
+    (when (< place limit)
+      (goto-char place)
+      (re-search-forward "\\(\n\\|.\\)")   ; to set the match-data.
+      (point))))
+
+(define (c-search-forward-non-nil-char-property property limit)
+  ;; "Search forward for a text-property PROPERTY value non-nil. LIMIT
+  ;; bounds the search."
+  ;;
+  ;; "Leave point just after the character. The match data remain
+  ;; unchanged. Return the value of PROPERTY. If a non-nil value isn't
+  ;; found, return nil; point is then left undefined."
+  (let* ((limit (or limit (point-max)))
+         (value (c-get-char-property (point) property)))
+    (cond
+     ((>= (point) limit)
+      #f)
+     (value
+      (forward-char)
+      value)
+     (else
+      ;; Emacs's `when' answers nil when the test fails, and the value is
+      ;; this procedure's answer - `c-unmark-<>-around-region' loops on
+      ;; it, so it must be `#f' and not the unspecified value.
+      (let ((place (c-next-single-property-change (point) property #f limit)))
+        (if (and place (< place limit))
+            (begin
+              (goto-char (+ place 1))
+              (c-get-char-property place property))
+            #f))))))
+
+(define (c-search-backward-char-property property value limit)
+  ;; "Search backward for a text-property PROPERTY having value VALUE.
+  ;; LIMIT bounds the search. The comparison is done with `equal'."
+  ;;
+  ;; "Leave point just before the character, set the match data on this
+  ;; character, and return point. If VALUE isn't found, Return nil; point is
+  ;; then left undefined."
+  (let ((place (point))
+        (limit (or limit (point-min))))
+    (while (and (> place limit)
+                (not (equal? (c-get-char-property (- place 1) property) value)))
+      (setq place (previous-single-property-change place property #f limit)))
+    (when (> place limit)
+      (goto-char place)
+      (re-search-backward "\\(\n\\|.\\)")  ; to set the match-data.
+      (point))))
+
+(define (c-search-forward-char-property-without-value-on-char property value char limit)
+  ;; "Search forward for a character CHAR without text property PROPERTY
+  ;; having a value CHAR. LIMIT bounds the search."
+  (let ((char-skip (string-append "^" (string char)))
+        (limit (or limit (point-max))))
+    (while (and (begin
+                  (skip-chars-forward char-skip limit)
+                  (< (point) limit))
+                (equal? (c-get-char-property (point) property) value))
+      (forward-char 1))
+    (when (< (point) limit)
+      (re-search-forward "\\(\n\\|.\\)")    ; to set the match-data.
+      (point))))
 
 ;;----------------------------------------------------------------------
 ;; The `<'/`>' paren syntax categories (`cc-defs.el:1190'-`:1205')

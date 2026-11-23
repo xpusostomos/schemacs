@@ -69,7 +69,8 @@
     ;; simple.sld's (the command loop binds it there)
     (only (schemacs editor buffer)
           current-buffer mark-active transient-mark-mode
-          buffer-beg buffer-z buffer-pt)
+          buffer-beg buffer-z buffer-pt
+          buffer-local-value set-buffer-local-value!)
     (only (schemacs editor simple) *last-command*)
     (only (schemacs editor command) current-prefix-arg define-command
           uarg->integer)
@@ -79,6 +80,9 @@
   (export
    ;; the variables
    *paragraph-start* *paragraph-separate* *paragraph-ignore-fill-prefix*
+   paragraph-start set!paragraph-start
+   paragraph-separate set!paragraph-separate
+   paragraph-ignore-fill-prefix set!paragraph-ignore-fill-prefix
    *use-hard-newlines* *page-delimiter*
    *sentence-end* *sentence-end-base* *sentence-end-double-space*
    *sentence-end-without-period* *sentence-end-without-space*
@@ -116,6 +120,15 @@ hard newline are considered to match."
       :safe 'stringp
       :group 'paragraphs)
 
+    ;; Emacs makes `paragraph-start' buffer-local (`make-variable-buffer-local):
+    ;; the parameter is its default, the slot is the buffer's
+    ;; value, and this pair is `symbol-value'/`set'. ELisp's
+    ;; `let' of it is `call-with-buffer-local'.
+    (define (paragraph-start)
+      (buffer-local-value (current-buffer) 'paragraph-start (*paragraph-start*)))
+    (define (set!paragraph-start value)
+      (set-buffer-local-value! (current-buffer) 'paragraph-start value))
+
     (define-custom *paragraph-separate* "[ \t\f]*$"
       "Regexp for beginning of a line that separates paragraphs.
 If you change this, you may have to change `paragraph-start' also.
@@ -127,6 +140,15 @@ of text indented by a margin setting."
       :type 'regexp
       :safe 'stringp
       :group 'paragraphs)
+
+    ;; Emacs makes `paragraph-separate' buffer-local (`make-variable-buffer-local):
+    ;; the parameter is its default, the slot is the buffer's
+    ;; value, and this pair is `symbol-value'/`set'. ELisp's
+    ;; `let' of it is `call-with-buffer-local'.
+    (define (paragraph-separate)
+      (buffer-local-value (current-buffer) 'paragraph-separate (*paragraph-separate*)))
+    (define (set!paragraph-separate value)
+      (set-buffer-local-value! (current-buffer) 'paragraph-separate value))
 
     (define-custom *sentence-end-double-space* #t
       "Non-nil means a single space does not end a sentence.
@@ -210,6 +232,15 @@ This is desirable in modes where blank lines are the paragraph delimiters."
       :safe 'booleanp
       :group 'paragraphs)
 
+    ;; Emacs makes `paragraph-ignore-fill-prefix' buffer-local (`make-variable-buffer-local):
+    ;; the parameter is its default, the slot is the buffer's
+    ;; value, and this pair is `symbol-value'/`set'. ELisp's
+    ;; `let' of it is `call-with-buffer-local'.
+    (define (paragraph-ignore-fill-prefix)
+      (buffer-local-value (current-buffer) 'paragraph-ignore-fill-prefix (*paragraph-ignore-fill-prefix*)))
+    (define (set!paragraph-ignore-fill-prefix value)
+      (set-buffer-local-value! (current-buffer) 'paragraph-ignore-fill-prefix value))
+
     (define-command (forward-paragraph . args)
       "Move forward to end of paragraph.
 With argument ARG, do it ARG times;
@@ -244,7 +275,7 @@ Returns the count of paragraphs left to move."
              (fill-prefix-regexp
               (and (*fill-prefix*)
                    (not (equal? (*fill-prefix*) ""))
-                   (not (*paragraph-ignore-fill-prefix*))
+                   (not (paragraph-ignore-fill-prefix))
                    (regexp-quote (*fill-prefix*))))
              ;; "Remove ^ from paragraph-start and paragraph-sep if they
              ;; are there. These regexps shouldn't be anchored, because
@@ -252,14 +283,14 @@ Returns the count of paragraphs left to move."
              ;; allows paragraph commands to work normally with indented
              ;; text. This hack will not find problem cases like
              ;; \"whatever\\|^something\"."
-             (parstart (if (and (not (equal? "" (*paragraph-start*)))
-                                (char=? #\^ (string-ref (*paragraph-start*) 0)))
-                           (substring (*paragraph-start*) 1)
-                           (*paragraph-start*)))
-             (parsep (if (and (not (equal? "" (*paragraph-separate*)))
-                              (char=? #\^ (string-ref (*paragraph-separate*) 0)))
-                         (substring (*paragraph-separate*) 1)
-                         (*paragraph-separate*)))
+             (parstart (if (and (not (equal? "" (paragraph-start)))
+                                (char=? #\^ (string-ref (paragraph-start) 0)))
+                           (substring (paragraph-start) 1)
+                           (paragraph-start)))
+             (parsep (if (and (not (equal? "" (paragraph-separate)))
+                              (char=? #\^ (string-ref (paragraph-separate) 0)))
+                         (substring (paragraph-separate) 1)
+                         (paragraph-separate)))
              (parsep (if fill-prefix-regexp
                          (string-append parsep "\\|"
                                         fill-prefix-regexp "[ \t]*$")

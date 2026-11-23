@@ -61,7 +61,7 @@
           current-buffer bufferp get-buffer set-buffer
           buffer-local-value set-buffer-local-value!
           buffer-fill-column set!buffer-fill-column
-          buffer-read-only?
+          buffer-read-only? call-with-buffer-local
           buffer-modified-p restore-buffer-modified-p buffer-live-p
           *case-fold-search* *inhibit-read-only*
           ;; `auto-fill-mode`'s buffer slot (`buffer.c:5425`) and the
@@ -117,7 +117,9 @@
     (only (schemacs editor marker)
           copy-marker markerp marker-position set-marker)
     (only (schemacs editor paragraphs)
-          *paragraph-start* *paragraph-separate* *paragraph-ignore-fill-prefix*
+          paragraph-start set!paragraph-start
+          paragraph-separate set!paragraph-separate
+          paragraph-ignore-fill-prefix set!paragraph-ignore-fill-prefix
           *use-hard-newlines*
           *sentence-end* sentence-end *sentence-end-double-space*
           *sentence-end-without-period* *sentence-end-without-space*
@@ -151,7 +153,10 @@
   (export
    ;; the variables
    *fill-column-override* fill-column
-   *adaptive-fill-mode* *adaptive-fill-regexp* *adaptive-fill-first-line-regexp*
+   *adaptive-fill-mode* adaptive-fill-mode set!adaptive-fill-mode
+   *adaptive-fill-regexp* adaptive-fill-regexp set!adaptive-fill-regexp
+   *adaptive-fill-first-line-regexp* adaptive-fill-first-line-regexp
+   set!adaptive-fill-first-line-regexp
    *adaptive-fill-function* *fill-paragraph-function*
    *fill-paragraph-handle-comment* *fill-nobreak-predicate*
    *fill-nobreak-invisible* *colon-double-space*
@@ -259,6 +264,15 @@ of a line, in Japanese typography."
       :safe 'booleanp
       :group 'fill)
 
+    ;; Emacs makes `adaptive-fill-mode' buffer-local (`make-variable-buffer-local):
+    ;; the parameter is its default, the slot is the buffer's
+    ;; value, and this pair is `symbol-value'/`set'. ELisp's
+    ;; `let' of it is `call-with-buffer-local'.
+    (define (adaptive-fill-mode)
+      (buffer-local-value (current-buffer) 'adaptive-fill-mode (*adaptive-fill-mode*)))
+    (define (set!adaptive-fill-mode value)
+      (set-buffer-local-value! (current-buffer) 'adaptive-fill-mode value))
+
     (define-custom *adaptive-fill-regexp* "[ \t]*\\([-–!|#%;>*·•‣⁃◦]+\\)?[ \t]*"
       "Regexp to match text at start of line that constitutes indentation.
 If Adaptive Fill mode is enabled, a prefix matching this pattern
@@ -272,6 +286,15 @@ a role."
       :safe 'stringp
       :group 'fill)
 
+    ;; Emacs makes `adaptive-fill-regexp' buffer-local (`make-variable-buffer-local):
+    ;; the parameter is its default, the slot is the buffer's
+    ;; value, and this pair is `symbol-value'/`set'. ELisp's
+    ;; `let' of it is `call-with-buffer-local'.
+    (define (adaptive-fill-regexp)
+      (buffer-local-value (current-buffer) 'adaptive-fill-regexp (*adaptive-fill-regexp*)))
+    (define (set!adaptive-fill-regexp value)
+      (set-buffer-local-value! (current-buffer) 'adaptive-fill-regexp value))
+
     (define-custom *adaptive-fill-first-line-regexp* "\\`[ \t]*\\'"
       "Regexp specifying whether to set fill prefix from a one-line paragraph.
 When `adaptive-fill-regexp' matches at the beginning of a paragraph
@@ -280,6 +303,15 @@ as the fill prefix.  Otherwise, the whitespace is replaced by spaces."
       :type 'regexp
       :safe 'stringp
       :group 'fill)
+
+    ;; Emacs makes `adaptive-fill-first-line-regexp' buffer-local (`make-variable-buffer-local):
+    ;; the parameter is its default, the slot is the buffer's
+    ;; value, and this pair is `symbol-value'/`set'. ELisp's
+    ;; `let' of it is `call-with-buffer-local'.
+    (define (adaptive-fill-first-line-regexp)
+      (buffer-local-value (current-buffer) 'adaptive-fill-first-line-regexp (*adaptive-fill-first-line-regexp*)))
+    (define (set!adaptive-fill-first-line-regexp value)
+      (set-buffer-local-value! (current-buffer) 'adaptive-fill-first-line-regexp value))
 
     (define-custom *adaptive-fill-function* (lambda () #f)
       "Function to call to choose a fill prefix for a paragraph.
@@ -518,8 +550,8 @@ Remove indentation from each line."
       ;;--------------------------------------------------------------
       (let ((str (or (and (*adaptive-fill-function*)
                           ((*adaptive-fill-function*)))
-                     (and (*adaptive-fill-regexp*)
-                          (looking-at (*adaptive-fill-regexp*))
+                     (and (adaptive-fill-regexp)
+                          (looking-at (adaptive-fill-regexp))
                           (match-string 0)))))
         (if (>= (+ (current-left-margin) (string-length (or str "")))
                 (current-fill-column))
@@ -536,7 +568,7 @@ Remove indentation from each line."
       ;; if that prefix would act as a paragraph-separator."
       ;;--------------------------------------------------------------
       (let ((first-line-regexp (or (and (pair? rest) (car rest))
-                                   (*adaptive-fill-first-line-regexp*))))
+                                   (adaptive-fill-first-line-regexp))))
         (save-excursion
           (goto-char from)
           (if (eolp) (forward-line 1))
@@ -549,7 +581,7 @@ Remove indentation from each line."
                 (let ((second-line-prefix
                        (begin
                          (move-to-left-margin 1 #f)
-                         (cond ((looking-at (*paragraph-start*)) #f)
+                         (cond ((looking-at (paragraph-start)) #f)
                                (else (fill-match-adaptive-prefix))))))
                   ;; "If we get a fill prefix from the second line, make
                   ;; sure it or something compatible is on the first line
@@ -596,7 +628,7 @@ Remove indentation from each line."
                       ;; "But either way, reject it if it indicates the
                       ;; start of a paragraph when text follows it."
                       (if (not (eq? 0 (string-match
-                                       (*paragraph-start*)
+                                       (paragraph-start)
                                        (string-append result "a"))))
                           result
                           #f))
@@ -689,7 +721,7 @@ Remove indentation from each line."
                      ;; which can occur for auto-fill, don't consider the
                      ;; newline which follows as a reason to return t."
                      (and (not (eolp))
-                          (looking-at (*paragraph-start*)))))
+                          (looking-at (paragraph-start)))))
               #t)
              ((null? hook) #f)
              (else hook)))))
@@ -1011,7 +1043,7 @@ space does not end a sentence, so don't break a line there."
                     (parameterize ((*fill-prefix* (*fill-prefix*)))
                       ;; "Figure out how this paragraph is indented, if
                       ;; desired."
-                      (when (and (*adaptive-fill-mode*)
+                      (when (and (adaptive-fill-mode)
                                  (or (not (*fill-prefix*))
                                      (string=? (*fill-prefix*) "")))
                         (*fill-prefix* (fill-context-prefix from (marker-position to)))
@@ -1214,18 +1246,18 @@ If `fill-paragraph-function' is nil, return the `fill-prefix' used for filling."
           ;; "4. If it all fails, default to the good ol' text paragraph
           ;; filling."
           (let ((before (point))
-                (paragraph-start-orig (*paragraph-start*))
+                (paragraph-start-orig (paragraph-start))
                 ;; "Fill prefix used for filling the paragraph."
                 (fill-pfx #f))
             ;; "Try to prevent code sections and comment sections from
             ;; being filled together."
-            (parameterize ((*paragraph-start*
-                            (if (and (*fill-paragraph-handle-comment*)
+            (call-with-buffer-local 'paragraph-start (if (and (*fill-paragraph-handle-comment*)
                                      (comment-start-skip))
                                 (string-append
-                                 (*paragraph-start*) "\\\\|[ \t]*\\(?:"
+                                 (paragraph-start) "\\\\|[ \t]*\\(?:"
                                  (comment-start-skip) "\\)")
-                                (*paragraph-start*))))
+                                (paragraph-start))
+  (lambda () 
               (save-excursion
                 ;; "To make sure the return value of forward-paragraph is
                 ;; meaningful, we have to start from the beginning of
@@ -1261,7 +1293,7 @@ If `fill-paragraph-function' is nil, return the `fill-prefix' used for filling."
                                 ;; hard newlines. See fill-region."
                                 (fill-region beg end justify #f #f)
                                 (fill-region-as-paragraph beg end
-                                                          justify)))))))
+                                                          justify))))))))
             fill-pfx)))))
 
     (define-command (unfill-paragraph arg . rest)
@@ -1418,17 +1450,15 @@ themselves."
                               (point)))
                            ;; "Obey paragraph starters and boundaries
                            ;; within comments."
-                           (parameterize
-                               ((*paragraph-separate*
-                                 (string-append
-                                  (*paragraph-separate*) "\\|[ \t]*\\(?:"
+                           (call-with-buffer-local 'paragraph-separate (string-append
+                                  (paragraph-separate) "\\|[ \t]*\\(?:"
                                   (or (comment-start-skip) "") "\\)\\(?:"
-                                  (*paragraph-separate*) "\\)"))
-                                (*paragraph-start*
-                                 (string-append
-                                  (*paragraph-start*) "\\|[ \t]*\\(?:"
+                                  (paragraph-separate) "\\)")
+  (lambda () (call-with-buffer-local 'paragraph-start (string-append
+                                  (paragraph-start) "\\|[ \t]*\\(?:"
                                   (or (comment-start-skip) "") "\\)\\(?:"
-                                  (*paragraph-start*) "\\)")))
+                                  (paragraph-start) "\\)")
+  (lambda () 
                              ;; "We now use comment-re to 'manually' make
                              ;; sure we treat comment-marker changes as
                              ;; paragraph boundaries."
@@ -1441,12 +1471,12 @@ themselves."
                                            (backward-paragraph 1)
                                            (if (eq? (point) after-line)
                                                (forward-line -1))
-                                           (point)))))
+                                           (point))))))))
                            ;; "Find the fill-prefix to use."
                            (cond ((*fill-prefix*) #f) ; "Use the
                                                       ; user-provided fill
                                                       ; prefix."
-                                 ((and (*adaptive-fill-mode*)
+                                 ((and (adaptive-fill-mode)
                                        (begin
                                          (*fill-prefix*
                                           (fill-context-prefix beg end))
@@ -1591,11 +1621,10 @@ See `default-justification' for the possible values and their meaning."
         (save-excursion
           (save-restriction
             (when whole-par
-              (parameterize ((*paragraph-start*
-                              (if (*use-hard-newlines*) "." (*paragraph-start*)))
-                             (*paragraph-ignore-fill-prefix*
-                              (if (*use-hard-newlines*) #t
-                                  (*paragraph-ignore-fill-prefix*))))
+              (call-with-buffer-local 'paragraph-start (if (*use-hard-newlines*) "." (paragraph-start))
+  (lambda () (call-with-buffer-local 'paragraph-ignore-fill-prefix (if (*use-hard-newlines*) #t
+                                  (paragraph-ignore-fill-prefix))
+  (lambda () 
                 (goto-char begin)
                 (let skip ()
                   (when (and (bolp) (not (eobp)))
@@ -1606,7 +1635,7 @@ See `default-justification' for the possible values and their meaning."
                 (goto-char end)
                 (skip-chars-backward " \t\n" begin)
                 (forward-paragraph 1)
-                (set! end (point))))
+                (set! end (point)))))))
             (narrow-to-region (point-min) end)
             (unjustify-region begin (point-max))
             (put-text-property begin (point-max) 'justification style)
@@ -1713,8 +1742,8 @@ If the mark is not active, this applies to the current paragraph."
                                            (+ (string-length (*fill-prefix*))
                                               (point))))))
                         (forward-char (string-length (*fill-prefix*)))
-                        (if (and (*adaptive-fill-mode*)
-                                 (looking-at (*adaptive-fill-regexp*)))
+                        (if (and (adaptive-fill-mode)
+                                 (looking-at (adaptive-fill-regexp)))
                             (goto-char (match-end 0))))
                     (set! fp-end (point))
                     (skip-chars-forward " \t")
@@ -1849,8 +1878,8 @@ If the mark is not active, this applies to the current paragraph."
                          (min (point-max) (+ (string-length (*fill-prefix*))
                                              (point)))))
                 (forward-char (string-length (*fill-prefix*))))
-            (if (and (*adaptive-fill-mode*) (*adaptive-fill-regexp*)
-                     (looking-at (*adaptive-fill-regexp*)))
+            (if (and (adaptive-fill-mode) (adaptive-fill-regexp)
+                     (looking-at (adaptive-fill-regexp)))
                 (goto-char (match-end 0))))
         ;; "Skip centering or flushright indentation"
         (if (memv (current-justification) '(center right))
@@ -1929,7 +1958,7 @@ as the first two arguments."
                         (when (and (not (eobp))
                                    (begin (move-to-left-margin 1 #f)
                                           (and (not (eobp))
-                                               (looking-at (*paragraph-separate*)))))
+                                               (looking-at (paragraph-separate)))))
                           (forward-line 1)
                           (skip)))
                       (skip-chars-forward " \t\n")
@@ -1966,7 +1995,7 @@ as the first two arguments."
                                      ;; with or without prefix, end the
                                      ;; paragraph."
                                      (and
-                                      (not (looking-at (*paragraph-separate*)))
+                                      (not (looking-at (paragraph-separate)))
                                       (save-excursion
                                         (not (and (looking-at
                                                    fill-prefix-regexp)
@@ -1974,7 +2003,7 @@ as the first two arguments."
                                                     (forward-char
                                                      (string-length fill-prefix))
                                                     (looking-at
-                                                     (*paragraph-separate*)))))))
+                                                     (paragraph-separate)))))))
                                      ;; "If this line has more or less indent
                                      ;; than the fill prefix wants, end the
                                      ;; paragraph."
@@ -1994,9 +2023,9 @@ as the first two arguments."
                                                     (string-length fill-prefix))
                                                    (or (looking-at "[ \t]")
                                                        (looking-at
-                                                        (*paragraph-separate*))
+                                                        (paragraph-separate))
                                                        (looking-at
-                                                        (*paragraph-start*))))))
+                                                        (paragraph-start))))))
                                           (not (and (equal? fill-prefix "")
                                                     citation-regexp
                                                     (looking-at
@@ -2021,8 +2050,9 @@ as the first two arguments."
       (let* ((just-one-line-prefix
               ;; "Accept any prefix rather than just the ones matched by
               ;; `adaptive-fill-first-line-regexp'."
-              (parameterize ((*adaptive-fill-first-line-regexp* ".*"))
-                (fill-context-prefix (point) (line-beginning-position 2))))
+              (call-with-buffer-local 'adaptive-fill-first-line-regexp ".*"
+  (lambda () 
+                (fill-context-prefix (point) (line-beginning-position 2)))))
              (two-lines-prefix
               (fill-context-prefix (point) (line-beginning-position 3))))
         (if (not just-one-line-prefix)
@@ -2260,7 +2290,7 @@ Returns t if it really did any work."
                 (if (memv justify '(full center right))
                     (save-excursion (unjustify-current-line)))
                 ;; "Choose a fill-prefix automatically."
-                (when (and (*adaptive-fill-mode*)
+                (when (and (adaptive-fill-mode)
                            (or (not (*fill-prefix*))
                                (string=? (*fill-prefix*) "")))
                   (let ((prefix
@@ -2510,7 +2540,7 @@ unless optional argument SOFT is non-nil."
               (save-excursion (forward-char -1) (delete-horizontal-space #f))
               (delete-horizontal-space #f)
 
-              (if (and (*fill-prefix*) (not (*adaptive-fill-mode*)))
+              (if (and (*fill-prefix*) (not (adaptive-fill-mode)))
                   ;; "Blindly trust a non-adaptive fill-prefix."
                   (begin
                     (indent-to-left-margin)
@@ -2644,7 +2674,7 @@ unless optional argument SOFT is non-nil."
                   (insert-newline 1))
               (save-excursion (forward-char -1) (delete-horizontal-space #f))
               (delete-horizontal-space #f)
-              (if (and (*fill-prefix*) (not (*adaptive-fill-mode*)))
+              (if (and (*fill-prefix*) (not (adaptive-fill-mode)))
                   ;; "Blindly trust a non-adaptive fill-prefix."
                   (begin
                     (indent-to-left-margin)

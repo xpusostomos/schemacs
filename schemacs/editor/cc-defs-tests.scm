@@ -13,10 +13,33 @@
  (only (guile) current-module eval)
  (only (schemacs editor buffer) allocate-buffer set-buffer erase-buffer)
  (only (schemacs editor editfns) insert goto-char point)
+ (only (schemacs editor textprop) put-text-property get-text-property)
  (only (schemacs editor command) signal-quit quit-condition?)
  (schemacs editor cc-defs))
 
 (test-begin "schemacs_editor_cc_defs")
+
+;;----------------------------------------------------------------------
+;; `c-got-face-at' (`cc-defs.el:2122') - Emacs's answers, measured with
+;; `emacs -Q --batch' on the same three-property fixture.
+;;----------------------------------------------------------------------
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert "abcdef")
+  (put-text-property 2 4 'face '(bold italic))
+  (put-text-property 1 2 'face 'bold)
+  (test-equal "c-got-face-at answers the tail from the matching face"
+              '(italic) (c-got-face-at 2 '(italic)))
+  (test-equal "c-got-face-at is nil when no listed face is there"
+              #f (c-got-face-at 2 '(underline)))
+  (test-equal "c-got-face-at answers the tail from the first matching face"
+              '(bold italic) (c-got-face-at 2 '(italic bold)))
+  (test-equal "c-got-face-at with a single face symbol"
+              '(bold) (c-got-face-at 1 '(bold)))
+  (test-equal "c-got-face-at at the second position of a face run"
+              '(italic) (c-got-face-at 3 '(italic)))
+  (test-equal "c-got-face-at where no face property exists"
+              #f (c-got-face-at 5 '(bold))))
 
 ;; `c-mode' and the other core languages got their `c-mode-prefix'
 ;; when cc-defs loaded. A derived language exercises the fallback.
@@ -204,5 +227,41 @@
               'no-quit))
 
 (test-end "schemacs_editor_cc_defs_scan")
+
+;;----------------------------------------------------------------------
+;; The property searches and the string fence (`cc-defs.el:1242',
+;; `:1482')
+;;----------------------------------------------------------------------
+;; Emacs's answers for this fixture, measured with `emacs -Q --batch'
+;; first.
+(test-begin "schemacs_editor_cc_defs_props")
+
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert "abcdef")
+  (put-text-property 3 4 'syntax-table '(1))
+  (put-text-property 4 5 'syntax-table '(1))
+  (put-text-property 5 6 'c-is-sws #t)
+  (put-text-property 5 6 'c-in-sws #t)
+  (goto-char 1)
+  (test-equal "c-search-forward-non-nil-char-property answers the value"
+              '(1) (c-search-forward-non-nil-char-property 'syntax-table 20))
+  (test-equal "...and leaves point just after the character"
+              4 (point))
+  (goto-char 2)
+  (test-equal "...from a position before the run" '(1)
+              (c-search-forward-non-nil-char-property 'syntax-table 20))
+  (goto-char 1)
+  (test-equal "...and nil when the limit comes first" #f
+              (c-search-forward-non-nil-char-property 'syntax-table 2))
+  (test-equal "...leaving point where it was" 1 (point))
+  (goto-char 5)
+  (c-put-string-fence 5)
+  (test-equal "c-put-string-fence puts the (15) syntax-table value"
+              '(15) (get-text-property 5 'syntax-table))
+  (test-equal "...and clears c-is-sws" #f (get-text-property 5 'c-is-sws))
+  (test-equal "...and c-in-sws" #f (get-text-property 5 'c-in-sws)))
+
+(test-end "schemacs_editor_cc_defs_props")
 
 (test-end "schemacs_editor_cc_defs")

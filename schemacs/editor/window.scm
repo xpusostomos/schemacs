@@ -186,6 +186,7 @@
    delete-window
    display-buffer
    get-buffer-window
+   get-buffer-window-list
    list-substitute
    list-without
    other-window
@@ -856,6 +857,49 @@
           (cond ((null? rest) #f)
                 ((in-frame (car rest)))
                 (else (loop (cdr rest)))))))
+
+    (define (get-buffer-window-list . args)
+      ;; "Return list of all windows displaying BUFFER-OR-NAME, or nil if
+      ;; none" - GNU Emacs's `get-buffer-window-list' (`window.el:2656'),
+      ;; which walks `window-list-1 (selected-window) MINIBUF ALL-FRAMES'
+      ;; and keeps the windows showing the buffer, in window-list order.
+      ;;
+      ;; BUFFER-OR-NAME, MINIBUF and ALL-FRAMES are as in
+      ;; `get-buffer-window' above - the same frame choice and the same
+      ;; three-way MINIBUF rule (`window-list' carries it).
+      ;;
+      ;; INDIRECT is not carried: it appends the windows whose buffer is
+      ;; an indirect buffer of this one, and this tree has no indirect
+      ;; buffers (`buffer-base-buffer' answers nil for every buffer), so
+      ;; the C's loop would add nothing.
+      ;;--------------------------------------------------------------
+      (let* ((thing (if (pair? args) (car args) (current-buffer)))
+             (buffer (cond ((not thing) (current-buffer))
+                           ((bufferp thing) thing)
+                           (else (get-buffer thing))))
+             (minibuf (and (pair? args) (pair? (cdr args)) (cadr args)))
+             (all (and (pair? args) (pair? (cdr args))
+                       (pair? (cdr (cdr args)))
+                       (car (cdr (cdr args)))))
+             (frames (cond ((or (eq? all #t) (eqv? all 0)
+                                (eq? all 'visible) (eq? all 'all-frames))
+                            (*frame-list*))
+                           ((and all (not (symbol? all)) (not (number? all)))
+                            (list all))
+                           (else (list (*current-frame*))))))
+        ;; `(dolist (window window-list) (when (eq (window-buffer window)
+        ;; buffer) (setq windows (cons window windows))))', then
+        ;; `nreverse' - so the answer keeps the window-list order.
+        (let loop ((frames frames) (acc '()))
+          (cond ((null? frames) (reverse acc))
+                (else
+                 (loop (cdr frames)
+                       (let inner ((rest (window-list (car frames) minibuf))
+                                   (acc acc))
+                         (cond ((null? rest) acc)
+                               ((eq? (window-buffer (car rest)) buffer)
+                                (inner (cdr rest) (cons (car rest) acc)))
+                               (else (inner (cdr rest) acc))))))))))
 
     (define (display-buffer--inhibit-same-window? action)
       ;; Whether ACTION refuses the selected window. GNU Emacs's

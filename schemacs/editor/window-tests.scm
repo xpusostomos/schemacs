@@ -15,6 +15,7 @@
        window-width window-left)
  (only (schemacs editor window)
        split-window delete-window delete-other-windows
+       get-buffer-window-list
        adjust-window-trailing-edge
        current-window-configuration set-window-configuration
        *window-configuration-change-hook*
@@ -228,5 +229,39 @@
                   aw (window-width a)))))
 
 (test-end "schemacs_editor_window_combination_axis")
+
+;;----------------------------------------------------------------------
+;; `get-buffer-window-list' (`window.el:2656')
+;;----------------------------------------------------------------------
+;; Emacs 31.1, measured in `emacs -Q --batch' on the same layout: the
+;; answer keeps `window-list' order, `no-mini' and `t' add nothing when
+;; the minibuffer is not showing the buffer, and a buffer shown nowhere
+;; answers nil.
+(test-begin "schemacs_editor_window_get_buffer_window_list")
+(let* ((frame (fresh-frame))
+       (b (get-buffer-create "gbl-probe"))
+       (w1 (frame-selected-window frame)))
+  (parameterize ((*current-frame* frame) (*current-buffer* #f))
+    (set-window-buffer! w1 b)
+    (test-equal "one window on the buffer"
+                (list w1) (get-buffer-window-list b))
+    (let ((w2 (split-window (frame-selected-window frame) -12 #f)))
+      (set-window-buffer! w2 b)
+      ;; Compared by identity, not `equal?': a window record holds its
+      ;; frame and the frame holds its windows, so `equal?' would walk
+      ;; the cycle (the menu-bar work's trap).
+      (test-assert "both windows, in window-list order"
+                   (let ((r (get-buffer-window-list b)))
+                     (and (= (length r) 2)
+                          (eq? (car r) w1) (eq? (cadr r) w2))))
+      (test-assert "no-mini over all frames adds nothing"
+                   (let ((r (get-buffer-window-list b 'no-mini #t)))
+                     (and (= (length r) 2)
+                          (eq? (car r) w1) (eq? (cadr r) w2)))))
+  (test-equal "a buffer shown nowhere answers nil"
+              '() (get-buffer-window-list (get-buffer-create "gbl-other")))))
+(test-end "schemacs_editor_window_get_buffer_window_list")
+
+
 
 (test-end "schemacs_editor_window")

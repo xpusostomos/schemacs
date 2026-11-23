@@ -151,9 +151,15 @@
       ;; LIST1 and LIST2 using a set-difference operation. The resulting
       ;; list contains all items that appear in LIST1 but not LIST2."
       ;;--------------------------------------------------------------
-      (if (or (null? list1) (null? list2))
-          list1
-          (let ((parsed (%cl-parse-keywords keys '(:test :test-not :key))))
+      ;; Emacs's nil is this tree's `#f` as well as its `'()`, and a
+      ;; caller may hand either (`c-font-lock-declarators' hands the
+      ;; `c-typedef' property, which is `#f' until a typedef has been
+      ;; seen). Normalise both before the walk.
+      (let ((list1 (if (pair? list1) list1 '()))
+            (list2 (if (pair? list2) list2 '())))
+        (if (or (null? list1) (null? list2))
+            list1
+            (let ((parsed (%cl-parse-keywords keys '(:test :test-not :key))))
             (let loop ((rest list1) (res '()))
               (cond ((null? rest) (reverse res))
                     ((if (or (pair? keys) (number? (car rest)))
@@ -161,7 +167,7 @@
                                 list2 keys)
                          (memq (car rest) list2))
                      (loop (cdr rest) res))
-                    (else (loop (cdr rest) (cons (car rest) res))))))))
+                    (else (loop (cdr rest) (cons (car rest) res)))))))))
 
     (define (cl-intersection list1 list2 . keys)
       ;; GNU Emacs's `cl-intersection' (`cl-seq.el:896'): "Combine LIST1

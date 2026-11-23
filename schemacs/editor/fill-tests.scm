@@ -11,7 +11,10 @@
         (only (schemacs editor buffer)
               allocate-buffer set-buffer buffer-fill-column
               set!buffer-fill-column *current-buffer*
-              set!buffer-left-margin)
+              set!buffer-left-margin local-variable-p kill-local-variable
+              call-with-buffer-local)
+        (only (schemacs editor paragraphs)
+              *paragraph-start* paragraph-start set!paragraph-start)
         (only (schemacs editor editfns)
               buffer-string point-min point-max goto-char insert
               point-marker char-after save-excursion
@@ -399,4 +402,43 @@
     (buffer-string)))
 
 (test-end "schemacs_editor_fill_comment_line")
+
+;;----------------------------------------------------------------------
+;; The paragraph variables are buffer-local (`make-variable-buffer-local'
+;; in `paragraphs.el'; measured on Emacs 31.1: after `setq' in one
+;; buffer, `(default-value 'paragraph-start)' is unchanged and another
+;; buffer still sees the standard value).
+;;----------------------------------------------------------------------
+(test-begin "schemacs_editor_fill_buffer_local")
+(let ((b1 (allocate-buffer)))
+  (set-buffer b1)
+  (test-equal "a buffer with no local value reads the global"
+              "\f\\|[ \t]*$" (paragraph-start))
+  (set!paragraph-start "X")
+  (test-equal "the buffer now has its own value" "X" (paragraph-start))
+  (test-equal "and the global is untouched"
+              "\f\\|[ \t]*$" (*paragraph-start*))
+  (let ((b2 (allocate-buffer)))
+    (set-buffer b2)
+    (test-equal "another buffer still sees the global"
+                "\f\\|[ \t]*$" (paragraph-start)))
+  (set-buffer b1)
+  (kill-local-variable 'paragraph-start)
+  (test-equal "killing the slot restores the global"
+              "\f\\|[ \t]*$" (paragraph-start))
+  (test-equal "call-with-buffer-local binds the buffer's value and restores"
+              (list "Y" "\f\\|[ \t]*$" #f)
+              (let ((inside (call-with-buffer-local 'paragraph-start "Y"
+                                                    (lambda () (paragraph-start)))))
+                (list inside (paragraph-start)
+                      (local-variable-p 'paragraph-start b1))))
+  (set!paragraph-start "W")
+  (test-equal "and restores a value the buffer already had"
+              (list "Z" "W" #t)
+              (let ((inside (call-with-buffer-local 'paragraph-start "Z"
+                                                    (lambda () (paragraph-start)))))
+                (list inside (paragraph-start)
+                      (local-variable-p 'paragraph-start b1)))))
+(test-end "schemacs_editor_fill_buffer_local")
+
 

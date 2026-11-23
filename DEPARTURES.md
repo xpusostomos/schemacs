@@ -13709,3 +13709,1034 @@ an explicit `#f`.
   `#t`/`#f`**, and a multi-value answer needs its wrapping list - both
   are `srfi 64` traps this tree has recorded before, and both cost a
   round here.
+
+# cc-mode: the find-decl machinery and the brace stack (2026-11-22)
+
+The tranche `cc-fonts` stands on: `c-literal-faces`, `c-collect-line-comments`,
+the find-decl cache, the brace-stack cache, `c-find-decl-prefix-search`,
+`c-find-decl-spots` and the found-type helpers - plus `c-got-face-at` in
+`cc-defs` and `match-string-no-properties` in `search`. Every function is in
+`cc-engine.scm` in Emacs's file order within the tranche.
+
+## What is where
+
+| Emacs | here |
+|---|---|
+| `cc-engine.el:657` `c-literal-faces` | plain variable, with the `(set! x x)` mutability mark |
+| `cc-engine.el:5805` `c-collect-line-comments` | same name |
+| `cc-engine.el:6027` `c-find-decl-syntactic-pos`, `c-find-decl-match-pos`, `c-invalidate-find-decl-cache` | buffer-local accessors + function |
+| `cc-engine.el:6052` `c-debug-put-decl-spot-faces` | a no-op `define-syntax` |
+| `cc-engine.el:6111`-`:6285` the brace-stack cache | `c-bs-interval` and the accessors, `c-init-bs-cache`, `c-truncate-bs-cache`, `c-update-brace-stack`, `c-brace-stack-at`, `c-bs-at-toplevel-p` |
+| `cc-engine.el:6286` `c-find-decl-prefix-search` | `define-syntax`, as in Emacs |
+| `cc-engine.el:6428` `c-find-decl-spots` | same name |
+| `cc-engine.el:6947`-`:7000` | `c-list-found-types`, `c-maybe-stale-found-type` accessors, `c-trim-found-types` |
+| `cc-defs.el:2122` `c-got-face-at` | `cc-defs.scm` |
+| `subr.el:5876` `match-string-no-properties` | `search.scm` beside `match-string` |
+
+## Departures
+
+1. **The cfd variables are parameters.** Emacs's `c-find-decl-prefix-search`
+   is a macro over variables that `c-find-decl-spots` `let`-binds. Here they
+   are SRFI-39 parameters - `*cfd-limit*`, `*cfd-prop-match*`,
+   `*cfd-re-match*`, `*cfd-re-match-end*`, `*cfd-match-pos*`,
+   `*cfd-continue-pos*`, `*cfd-top-level*` - and `c-find-decl-spots`
+   `parameterize`s them. The macro reads and sets them with `setq`, whose
+   star rule calls a parameter to set it.
+2. **The brace-stack and find-decl cache slots are buffer-local accessors**
+   (`c-bs-cache` / `set!c-bs-cache`, and so on), as the tree spells Emacs's
+   `make-variable-buffer-local`. Emacs's `setq` of one is the accessor's
+   setter here. `c-find-decl-spots`'s `setq c-find-decl-match-pos` is
+   `set!c-find-decl-match-pos`.
+3. **`c-debug-put-decl-spot-faces` is a no-op.** Emacs's macro body is
+   `(when (facep 'c-debug-decl-spot-face) ...)`, and the defface is commented
+   out in Emacs itself, so the macro expands to nil there too.
+4. **The XEmacs arm of `c-find-decl-spots` is not carried** (`featurep` is not
+   ported; this tree is not XEmacs, so the arm is dead).
+5. **`condition-case ... (error range)` in `c-collect-line-comments` is
+   `guard`,** with a quit re-raised because Emacs's `error` handler does not
+   catch one.
+6. **`c-literal-faces` is a plain variable**, not an accessor pair: Emacs
+   `defvar`s it and nothing `let`-binds it; cc-fonts `setq`s it, hence the
+   self-assignment that keeps the compiler from folding its reads.
+7. **`match-string-no-properties` is in `search.scm`**, not subr: the tree's
+   `match-string` is there for the same import-graph reason.
+
+## Bugs this tranche found
+
+1. **The `setq` macro evaluated its value twice.** `(setq *x* (re-search-forward
+   ...))` expanded to `(begin (*x* VALUE) VALUE)`, so the search ran twice and
+   the second run skipped a match - which is exactly what made
+   `c-find-decl-spots` miss three spots (10, 35 and 47 of the fixture). It now
+   binds VALUE to a hygienic temporary and answers it, as Elisp's `setq` does.
+   `syntax-tests.scm` now pins the single evaluation for both a plain variable
+   and a parameter.
+2. **`'()` is true in Scheme.** The brace-stack's `(while (and c ...))` and
+   `(if s ...)` tests were Emacs nil tests; with an empty cache or an exhausted
+   stack they did not short-circuit and `(car '())` raised. They are `pair?`
+   tests now, and `c-bs-at-toplevel-p` uses `null?` rather than `not`.
+3. **`c-got-face-at` had the same trap** in its face-list walk; it now walks
+   with `(pair? pos-faces)` and answers Emacs's nil, not the empty list.
+4. **Two multi-else `if`s** copied from the C (`(if TEST THEN ELSE1 ELSE2)`)
+   were rejected by R7RS. They are `begin`-wrapped now, as the syntax file's
+   header says.
+
+## Verification
+
+- `c-find-decl-spots` on the fixture `class A { public: void f(int x); int y; };
+  int g(void) { return 1; }` produces Emacs 31.1's exact spot list:
+  `((0 #f #t 1) (10 #f #f 11) (28 #f #f 28) (35 #f #f 38) (47 #f #t 49)
+  (55 #f #t 55) (62 #f #f 63))` (Emacs's nil/t rendered as #f/#t).
+- `c-brace-stack-at` gives `(#f 1)` at bob and `(#f 2)` inside the class
+  brace; `c-bs-at-toplevel-p` is `#t`/`#f` at the same positions.
+- `c-collect-line-comments` answers `(1 . 14)` for a range starting at the
+  second of three adjacent `//` comments, and returns a range that does not
+  start at a comment starter unchanged - Emacs's own answers.
+- `c-list-found-types` sorts the keys; `c-trim-found-types` removes a stale
+  `c-decl-id-start` type.
+- `cc-engine-tests` gained `schemacs_editor_cc_engine_find_decl` (10) and
+  `cc-defs-tests` gained six `c-got-face-at` rows; every expectation was
+  measured on `emacs -Q --batch` first.
+- The full suite battery is green and the touched libraries compile without
+  warnings. The pty battery was not run: nothing here touches a front end.
+
+# cc-mode: cc-fonts, the first tranche - face names and matchers (2026-11-22)
+
+`schemacs/editor/cc-fonts.scm` is new and mirrors `lisp/progmodes/cc-fonts.el`.
+What is here is the file's first tranche, `cc-fonts.el:112'-`:525': the
+face-name constants, `c-annotation-face`, the `c-font-lock-context` slot and
+the helpers and matcher constructors the keyword data is built with.
+
+## What is where
+
+| Emacs | here |
+|---|---|
+| `cc-fonts.el:112`-`:188` the face-name constants | same names |
+| `cc-fonts.el:207` `c-annotation-face` | `defface` |
+| `cc-fonts.el:211` `c-font-lock-context` | buffer-local accessors |
+| `cc-fonts.el:216`-`:246` `c-put-font-lock-face`, `c-remove-font-lock-face`, `c-put-font-lock-string-face` | procedures |
+| `cc-fonts.el:248` `c-fontify-types-and-refs` | `define-syntax` over `parameterize` |
+| `cc-fonts.el:260` `c-skip-comments-and-strings` | same name |
+| `cc-fonts.el:287` `c-make-syntactic-matcher` | same name, returning a closure |
+| `cc-fonts.el:305`-`:500` the four matcher constructors | same names, returning closures |
+| `cc-fonts.el:506` `c-fontify-recorded-types-and-refs` | same name |
+
+## Departures
+
+1. **The matchers are procedures, not generated code.** Emacs's
+   `c-make-font-lock-search-form` returns an Elisp *form* that
+   `c-make-font-lock-search-function` splices into a `byte-compile`d
+   lambda. Scheme has no lexical `eval`, so the constructor returns the
+   procedure the form would have been - one taking LIMIT - and the
+   search-function constructor wraps it in the
+   `parse-sexp-lookup-properties` binding. The tree's font-lock already
+   calls a non-string keyword matcher with `end`
+   (`font-lock-fontify-keywords-region`), which is the same protocol.
+2. **An anchored highlighter's code-as-data is procedures.** Emacs's
+   `(ANCHORED-MATCHER PRE-FORM POST-FORM ...)` holds forms that are
+   spliced into the generated lambda. Here the data is
+   `(MATCHER-PROCEDURE PRE-THUNK POST-THUNK ...)`, with the matcher
+   taking LIMIT; the next tranche's keyword data builds those instead of
+   quoting forms. `c-make-font-lock-context-search-function`'s stanza LIM
+   is a thunk for the same reason.
+3. **`c-put-font-lock-face` and its siblings are procedures.** Emacs's
+   macros choose between the Emacs and XEmacs font-lock packages; only
+   the `put-text-property` arm applies here.
+4. **The face-name constants drop the `boundp`/alias tests.** A face name
+   in this tree is the face, and `c-face-name-p` asks `face-list`. The
+   `font-lock-reference-face`/`font-lock-label-face` branches stay as
+   Emacs writes them and are false here, so the later branches are taken.
+5. **`c-annotation-face`'s spec is `((#t :inherit ...))`** where Emacs
+   writes `((default :inherit ...))`; `#t` is this tree's spelling of the
+   display spec that always matches.
+6. **`c-make-inverse-face` is not ported yet.** It needs `copy-face`,
+   `invert-face` and `face-inverse-video-p` (`xfaces.c`), which the face
+   layer does not have; its only caller is the hard-space matcher in
+   `c-basic-matchers-before`, which comes with the keyword-data tranche.
+7. **cc-fonts imports `font-lock` for its side effect.** The face-name
+   constants are computed when cc-fonts loads and test for `font-lock-*`
+   faces that `font-lock.scm` defines. Emacs has font-lock preloaded; the
+   import is this tree's way of placing the load in the same order.
+
+## Also landed, outside cc-fonts
+
+- **`c-face-name-p`** (`cc-defs.el:2134`) was missing from cc-defs; it is
+  there now, beside `c-got-face-at`, and exported.
+- **`c-literal-start`, `c-determine-limit`, `c-beginning-of-decl-1`**
+  gained exports from cc-engine: cc-fonts is their first external caller.
+- `imports.scm` regenerated (114 libraries, 4475 names).
+
+## Verification
+
+- `cc-fonts-tests.scm` (15 tests), every expectation measured on
+  `emacs -Q --batch`: the seven face names, the three face helpers,
+  `c-skip-comments-and-strings` at a comment and outside one, the
+  search-function matcher's face-by-face answer on `foo ; foo\nbar foo`
+  (keyword at 1-3 and 15-17, the comment's `foo` untouched), and the two
+  recording helpers.
+- The full suite battery is green (`cc-fonts-tests` included), and
+  `pty-check.py scratch imports` is 2/2 with cc-fonts loaded.
+
+## Next
+
+The keyword data - `c-basic-matchers-before`/`-after`,
+`c-simple-decl-matchers`, `c-complex-decl-matchers`, `c-matchers-1`-`3` -
+then the fontification commands (`c-font-lock-declarations`,
+`c-font-lock-declarators`, `c-get-fontification-context`, ...), then
+`cc-mode.el`.
+
+# cc-fonts' keyword data (2026-11-22)
+
+## `char-after`'s POSITION is optional - a fixed departure
+
+`char-after` took a **required** POSITION, where the C is
+`(char-after &optional POSITION)` and nil means point (`editfns.c`). The
+departure was recorded in an earlier handoff and left standing; a
+`c-lang-defconst` VAL calling `(char-after)` made it an arity error
+("Wrong number of arguments to `char-after`"). Fixed at the primitive,
+with a test in `editfns-tests.scm`.
+
+## `font-lock-compile-keyword`'s `(MATCHER)` arm
+
+Emacs's `font-lock-compile-keyword` (`font-lock.el:1807`) ends with
+`(nlistp (nth 1 keyword)) -> (list (car keyword) (cdr keyword))`, which
+leaves a keyword with **no highlights** (`(MATCHER)`) as it stands.
+Ours tested `(not (pair? (cadr keyword)))` - `(cadr '(proc))` is a
+`car` of the empty list, so a one-element keyword raised "expecting
+pair". The null-cdr arm is now the C's, and `(MATCHER . HIGHLIGHT)`
+still normalizes to `(MATCHER HIGHLIGHT)`.
+
+The C data is what found it: `c-basic-matchers-before` writes
+`(c-font-lock-invalid-single-quotes)` - a bare procedure element in
+Emacs's data, a one-element list in Scheme's.
+
+## The anchored-highlighter slots take LIMIT
+
+Emacs's `c-make-font-lock-search-form` splices an anchored highlighter
+`(ANCHORED-MATCHER PRE-FORM POST-FORM ...)` into a `lambda (limit)`, so
+`limit` is in scope for all three. Scheme has no lexical eval, and a
+closure built when the *data* is evaluated cannot see a `limit` that
+only exists when the matcher runs. The port's slots are therefore
+**procedures of one argument, LIMIT**, called in Emacs's order:
+`(MATCHER-FN PRE-FN POST-FN SUBEXP-HIGHLIGHTERS...)`. A thunk version
+was written first and died with "Unbound variable: limit" - the header
+of `cc-fonts.scm` records the reasoning.
+
+## Language variables are read by their own symbol
+
+`c-mode-var` implements Emacs's `(symbol-value (c-mode-symbol SUFFIX))`,
+which prefixes the major mode's name: `(c-mode-var "cpp-messages-re")`
+is `c-cpp-messages-re` in `c-mode` and `c++-cpp-messages-re` in
+`c++-mode`. But a `c-lang-defvar`'s symbol is **not** mode-prefixed -
+`c-cpp-messages-re` is `c-cpp-messages-re` in every mode - so reading
+one through `c-mode-var` is right only by coincidence in `c-mode` and a
+"Void variable" elsewhere. Runtime reads of a language variable use
+`(%c-langvar 'c-cpp-messages-re)`, now exported from `cc-engine.scm`.
+`c-mode-var` stays for the mode-prefixed `*-font-lock-extra-types`
+family, which is what Emacs uses it for.
+
+## `c-block-comment-flag` lives in `cc-vars.scm`
+
+It is `cc-cmds.el:261`'s `defvar` + `make-variable-buffer-local`, and
+`cc-cmds.el` is not ported. The accessor pair is in `cc-vars.scm` with a
+placement note; move it when cc-cmds arrives.
+
+## The multi-line strings' propertization is not ported
+
+`c-font-lock-ml-strings` is ported whole (`cc-fonts.el:1941`), with
+`c-get-ml-closer` and `c-ml-string-opener-around-point`
+(`cc-engine.el:7559`, `:7575`). What is missing is what *puts* the
+`'(15)` `syntax-table` properties on the delimiters:
+`c-ml-string-propertize` and the ml-string half of
+`c-before-change`/`c-after-change` (`cc-engine.el:7100`-`:7550`,
+`cc-mode.el`), together with the `c-clear-char-property-with-value`
+family they call (`cc-defs.el:1555`, `:1697`, not ported). Until then
+the fontifier acts only on delimiters that already carry the
+properties, which nothing sets - so C++/Pike raw strings are not yet
+fontified where Emacs would. C and Java are unaffected
+(`c-ml-string-opener-re` is nil for them).
+
+## `faces.scm`'s copy primitives and the one-attribute-set model
+
+`make-empty-face`, `copy-face`, `invert-face`,
+`face-inverse-video-p` and `internal-copy-lisp-face` are ported from
+`faces.el:212`/`:232`/`:605`/`:1072`. `copy-face`'s per-frame loop and
+its `t` (frame-independent) pass are **one copy here**, because this
+tree keeps one attribute set rather than one per frame - the same
+one-frame departure the face table's header already states.
+
+## The source/binary version split
+
+GITE's `lisp/` is Emacs **32.0.50**; the installed `emacs` binary is
+**31.1** and its compiled Lisp predates GITE's sources. Measurements
+have been against 31.1 and the port follows GITE's source. The one
+place this pass saw them differ: 31.1's compiled
+`c-font-lock-cpp-messages` leaves the `'(1)` syntax-table properties
+alone, while GITE's source rewrites them to `'(3)`; the port has the
+source's behaviour (verified by running GITE's own function in the
+31.1 runtime). Where a source and a measurement disagree, **the source
+wins** and the difference is named - never "fix" a port to the binary
+without checking the source.
+
+# `cond` in value position, and `(cdr nil)` (2026-11-22)
+
+## `cond` whose value is tested
+
+Emacs's `cond` answers nil when no clause matches; Scheme's answers the
+unspecified value, which is true. `c-get-fontification-context` is built
+out of conds whose values are `and`/`or` operands, and two of them have
+no else clause in Emacs: the "(foo((bar))" clause's inner cond and the
+"At start of a declaration inside a declaration paren" clause's inner
+cond. Translating them with plain Scheme `cond` made both clauses true
+when Emacs's are false - the differential showed `(decl)` where Emacs
+says `(arglist . t)` at two positions.
+
+They are translated with `cond-e` (`schemacs/syntax.scm`), which is
+Emacs's `cond` including the nil answer, so no `(else #f)` is added by
+hand and the text mirrors Emacs's. The top-level cond keeps its
+`cond-e` too (it has an `else`, so either form would answer the same -
+`cond-e` is used for uniformity and because the value is returned).
+
+## `(cdr (c-parse-state))` - Elisp's cdr of nil
+
+The brace-list clause passes `(cdr (c-parse-state))` to
+`c-at-bracelist-p`. `c-parse-state` answers nil (this tree's `'()`) for
+a buffer with no enclosing brace, and `(cdr '())` is an error here where
+Elisp's is nil. The port uses `%c-cdr` (`cc-engine.scm`).
+
+The symptom is worth knowing: the whole-position differential was
+identical at 164 of 165 positions and raised "Wrong type argument in
+position 1 (expecting pair): ()" at exactly the one position where the
+parse state was empty.
+
+## `c-fontify-recorded-types-and-refs` answers nil
+
+Its body ends with two `while` loops; Scheme's `while` answers the
+unspecified value where Emacs's answers nil, so an explicit `#f` is the
+last form. `c-font-lock-declarators` returns that value.
+
+# cc-mode: `c-font-lock-declarations', and the `<'-`>' change functions (2026-11-23)
+
+The task in flight was the face comparison for `c-font-lock-declarations`
+against Emacs. The C fixture matched, and the C++ fixture differed in
+exactly one run: `static_cast<int>'s `int` was fontified as a type in
+Emacs and not here. Chasing it found that the missing piece was not in
+cc-fonts at all - it was the `<>` bracket-property machinery, and the
+`cc-mode.el' change block that runs it as a mode starts.
+
+## What the difference was, traced with advice
+
+`c-find-decl-spots' calls `c-bs-at-toplevel-p' on each candidate spot
+*before* it calls the fontifying lambda (`c-find-decl-prefix-search',
+`cc-engine.el:6399'), and that call walks the brace stack through
+`c-update-brace-stack'. The latter's `<` branch only treats a `<` as a
+template opener when `(looking-at "\\s(")' holds at it - i.e. when the
+`<` *already* carries open-paren syntax. Then the "false matches" filter
+(`cc-engine.el:6784') drops any spot whose preceding character is a `<`
+that has no `syntax-table' property.
+
+Emacs has the property already when fontification starts: `c-common-init'
+ends with "Starting a mode is a sort of 'change'" - it sets
+(c-new-BEG c-new-END) to the whole buffer and runs
+`c-before-font-lock-functions', of which `c-restore-<>-properties' is
+what marks `static_cast<int>''s brackets. Without the mark the spot at
+`int' is filtered out; with it, `c-forward-decl-or-cast-1' is called at
+`int' and the type face lands.
+
+Measured with advice on `c-forward-<>-arglist' in a real c++-mode
+buffer: the first call is `c-restore-<>-properties(1 37 36)' from
+`c-common-init', and the spot at 25 is processed afterwards. So the
+port had to have the change-function block before it could match.
+
+## What landed
+
+`cc-engine.scm`, in Emacs's own order (inserted after the found-type
+helpers, where Emacs has them, `:7035'-`:7537'):
+
+`c-clear-<-pair-props', `c-clear->-pair-props', `c-clear-<>-pair-props',
+`c-clear-<-pair-props-if-match-after',
+`c-clear->-pair-props-if-match-before', the (c-new-BEG c-new-END)
+slots, `c-end-of-literal', `c-unmark-<>-around-region',
+`c-before-change-check-<>-operators',
+`c-after-change-check-<>-operators', `c-<>-get-restricted',
+`c-restore-<>-properties', `c-ml-string-make-closer-re',
+`c-c++-make-ml-string-closer-re', and `c-ml-string-opener-at-or-around-point'
+(after the ml-string helpers at the file's end, as Emacs has it).
+
+`cc-defs.scm`: `c-put-string-fence' and
+`c-search-forward-non-nil-char-property' (`cc-defs.el:1247', `:1482'),
+procedures here as the neighbouring macros are.
+
+## Representation notes
+
+* **`unwind-protect' is `dynamic-wind'.** `c-unmark-<>-around-region'
+  uses Emacs's `unwind-protect' around the unmarking, with the cache
+  restore and the string-fence swap as cleanup. The tree's rule
+  (AGENTS.md) is that a library cannot use `unwind-protect'; the
+  cleanup is the third thunk of a `dynamic-wind' with a thunk body.
+  `c-save-buffer-state` wraps the whole thing, so the cleanup runs with
+  silent modifications on, as in Emacs.
+* **`c-save-buffer-state`'s Emacs bindings are bare names.** Emacs's
+  `(c-save-buffer-state (syn-tab-settings syn-tab-value
+  swap-open-string-ends) ...)' binds three nils; Guile's `let*' has no
+  bare bindings, so each is spelled with an explicit `#f' (`'()` for
+  the list `push'ed onto).
+* **`c-new-BEG`/`c-new-END` are buffer-local slots** behind
+  `c-new-BEG`/`set!c-new-BEG` accessors, like `c-macro-cache' -
+  `cc-mode.el' `defvar's them and `make-variable-buffer-local's them,
+  and their default is 0. `c-old-END-literality' (declared in the same
+  block, `:7135') is **not carried**: its only setter,
+  `c-before-change-check-raw-strings', is unported and nothing in the
+  block reads it.
+* **A language function value is a symbol, resolved by hand.** Emacs
+  `funcall's `c-make-ml-string-closer-re-function''s value through the
+  obarray; here the value is the function's symbol, so
+  `c-end-of-literal' resolves it with `%c-lang-function' and the two
+  implementations register themselves at load (`c-register-lang-
+  function!', the same stand-in `c-at-vsemi-p' uses).
+* `c-ml-string-make-closer-re' answers the *language variable*
+  `c-ml-string-any-closer-re' (`%c-langvar'), not a global.
+
+## The `when'-in-value-position trap, again
+
+`c-search-forward-non-nil-char-property''s no-match branch is Emacs's
+`(when (and place (< place limit)) ...)', i.e. nil. Written as a Scheme
+`when' it answers the unspecified value - truthy - and
+`c-unmark-<>-around-region''s `(while (setq syn-tab-value
+(c-search-forward-non-nil-char-property ...)))' then loops for ever.
+It is an `if' with an explicit `#f', and the comment says why.
+
+The reverse trap also bit: a `(when (and ...) (push ...)
+(c-put-char-property ...))' in `c-unmark-<>-around-region' was closed
+one paren early while patching, so the `when' had no body - the
+*compiler* named it ("source expression failed to match any pattern in
+form (when ...)"), the reader had accepted it, and the structure check
+that finally settled it was a depth profile of the spliced text against
+Emacs's own `pp' of the form (`(pp (read ...))' on the raw source, since
+the installed cc-engine is byte-compiled).
+
+## `(car (cddr STATE))` is `%c-car` - the car-of-nil trap
+
+`c-end-of-literal` and `c-unmark-<>-around-region` read
+`(car (cddr pt-s))`, the literal's start. `c-semi-pp-to-literal`
+answers a one-element list `(STATE)` when the position is not in a
+literal, so Emacs's `(cddr pt-s)` is nil and `(car nil)` is nil; here
+`(cddr '(x))` is `'()` and `(car '())` **raises**. The first direct
+call to `c-unmark-<>-around-region` died with "Wrong type argument in
+position 1 (expecting pair): ()" - a crash that no fontification test
+reaches, because the declaration pass only calls `c-restore-<>-
+properties'. Both sites use `%c-car' now, and the group's unmark row is
+the regression test (it is also what exercises the function at all).
+
+## How the test harness stands in for cc-mode.el
+
+`c-common-init''s block is the only caller of these functions in Emacs,
+and `cc-mode.el' is not ported. The unit tests therefore replay it by
+hand, exactly:
+
+    (set!c-new-BEG (point-min))
+    (set!c-new-END (point-max))
+    (c-restore-<>-properties (point-min) (point-max) 0)
+
+with the buffer's mode set and `c-init-language-vars' run. That is the
+same sequence the mode's init performs; when `cc-mode.el' lands it calls
+these instead. The other `c-before-font-lock-functions'
+(`c-neutralize-syntax-in-CPP', the abnormal-string and quote machinery)
+are unported and are not needed for the declarations pass.
+
+## Verified
+
+* `cc-fonts-tests.scm'''s new `declarations' group pin the whole-buffer
+  face runs of both fixtures: 25 runs for the C fixture and 15 for the
+  C++ one, byte-identical to Emacs 31.1 - including `(142 145
+  font-lock-type-face)', the run this pass was about.
+* `cc-engine-tests.scm'''s `angle_props' group pins the measured
+  answers: the mode-init marking of `static_cast<int>''s brackets
+  (`(4 . 62)' and `(5 . 60)'), `c-clear-<>-pair-props' removing both,
+  a deletion driven through the three change functions (the `<` stays
+  marked, as Emacs leaves it), and `c-end-of-literal' on a string
+  literal.
+* `cc-defs-tests.scm'''s `props' group pins the two new helpers:
+  the search's value and point, its nil arm and unmoved point, and the
+  string fence's `(15)' with `c-is-sws'/`c-in-sws' cleared.
+
+All 90 suites pass (`cc-defs-tests` 59, `cc-engine-tests` 553,
+`cc-fonts-tests` 37); `imports.scm` is regenerated (114 libraries, 4,526 names); and
+`python3 tools/pty-check.py imports scratch` is 2/2.
+
+# cc-mode: the matcher data, and the whole fontification end to end (2026-11-23)
+
+This pass finished `cc-fonts.el`'s matcher chain: the enum/declaration
+fontifiers, the lambda captures, `c-font-lock-labels`, the
+`c-simple-decl-matchers`/`c-complex-decl-matchers`/`c-basic-matchers-after`
+data and `c-matchers-1'-`3', and the C++-`using'/`new' and Objective-C
+fontifiers the data names. With them in, a full `font-lock` run over
+`(c-lang-const c-matchers-3 LANG)` reproduces Emacs 31.1's face runs
+**exactly** on all six fixtures measured - declarations in C and C++,
+enums/`using`/`new`/lambda captures, a label after `goto`, and two
+comment/string fixtures. It also found two bugs in **shared primitives**
+(`looking-back` and font-lock's comment-delimiter reader), each fixed at
+the primitive with a regression test.
+
+## What landed
+
+`cc-fonts.scm`, in Emacs's file order: `c-font-lock-complex-decl-prepare`
+(`:947'`), `c-font-lock-<>-arglists' (`:1005'`),
+`c-font-lock-enum-body'/`-enum-tail' (`:1772'`, `:1787'`),
+`c-font-lock-cut-off-declarators' (`:1814'`),
+`c-font-lock-enclosing-decls' (`:1875'`),
+`c-font-lock-ids-with-dollar' (`:1909'`),
+`c-font-lock-c++-lambda-captures' (`:2027'`),
+`c-simple-decl-matchers' (`:2274'`), `c-complex-decl-matchers' (`:2348'`),
+`c-font-lock-labels' (`:2431'`), `c-basic-matchers-after' (`:2487'`),
+`c-matchers-1'/`-2'/`-3' (`:2552'-`:2567'`), `c-font-lock-c++-using'
+(`:2713'`), `c-font-lock-c++-new' (`:2749'`),
+`c-font-lock-objc-method'/`-objc-methods' (`:2910'`, `:2962'`).
+
+## The `(eval . FORM)` entries, and `c-known-type-key`
+
+Emacs's data has `(eval . FORM)` elements that font-lock's setup
+evaluates later. The tree's language data is evaluated at
+`c-init-language-vars' time, so each such element is written as the
+element it evaluates to - the same treatment `c-cpp-matchers' already
+used, with the Emacs form quoted beside it.
+
+The one that cannot be evaluated that way is the `c-known-type-key`
+matcher: Emacs splices the *variable reference* into the generated
+matcher and reads it at match time, because the value comes from
+`*-font-lock-extra-types'. At our data-evaluation time the variable's
+buffer slot may not be set yet (`c-lang-defvar' records are installed in
+init order and the ordering between kinds is not the file's), so the
+regexp slot is a **thunk**: `c-make-font-lock-search-form' now accepts a
+string or a procedure of no arguments, reading it once per call. That is
+the same deferral Emacs's `eval` gives, one step later.
+
+## Two shared-primitive bugs this found
+
+### `looking-back`'s GREEDY extension tested only the match's end
+
+`search.scm`'s `looking-back` documents Emacs's relation - "does REGEXP
+match the *whole* of S..PT?" - but implemented only "does some match end
+at PT". Emacs's extension step is `(looking-at (concat regexp "\\'"))`
+at candidate starts: the match must *begin* there and reach PT. The
+difference shows on font-lock's comment-end-skip: on `"/* aaa */"` at
+position 10, `(looking-back "[ \t]*\\*/" 1 t)` is `7..10` (the space is
+part of the match), and the end-only test answered `1..10`, painting the
+whole comment as its own delimiter. Measured: Emacs `(7 10)`, ours
+before `(1 10)`. The fix is `(= (match-beginning 0) 0)` beside the
+`match-end` test, and `search-tests.scm` has six measured rows (greedy
+and not, a run regexp, a class run, the nil case, the nil-regexp case).
+
+### font-lock read a parameter where the language had set a buffer slot
+
+`font-lock-comment-start-skip'/`-end-skip' are parameters in
+`font-lock.scm` (Emacs defvars), while `c-lang-setvar` - which cc-langs
+uses to give a language `font-lock-comment-end-skip' - writes a
+**buffer-local slot**. The syntactic pass read only the parameter, so
+the language's value never reached it and a block comment's closing `*/`
+was never given `font-lock-comment-delimiter-face'. Measured on
+`"/* aaa */"`: Emacs `(1 4 delimiter) (4 7 comment) (7 10 delimiter)`,
+ours `(1 4 delimiter) (4 10 comment)`.
+
+`font-lock-comment-start-skip-value'/`-end-skip-value' read the
+parameter first - a `let' binding still wins, as in Emacs - then the
+buffer's slot, which is where a language's answer lives. The stale
+comment above the parameters ("newcomment.el is not ported") is
+corrected; it is.
+
+## The smaller traps, in one line each
+
+* **Appending a language's nil list**: `(c-lang-const X)` is `#f` for a
+  list a language does not have, and `(append A #f)` builds an improper
+  list here where Elisp's `(append A nil)` is proper. Every list append
+  in the data is `(or (c-lang-const X) '())`. The symptom was
+  `cl-delete-duplicates` refusing a dotted list
+  (`("bool" ... "void" . #f)`).
+* **`(car paren-state)` of an empty parse state**: nil in Emacs, an
+  error here; `c-font-lock-cut-off-declarators` uses `%c-car`.
+* **A cond-clause with only a test**: `c-font-lock-c++-using`'s
+  "inherited protected member" clause is `((save-excursion ...))` with
+  no body - Emacs's `(cond (TEST))`. Written as `(else #f)` inside the
+  previous clause it was a compile error ("bad use of 'else'"), which is
+  the compiler catching the shape.
+* **`match-string` was not imported into cc-fonts** - the
+  missing-import class again, first reached by `c-font-lock-<>-arglists`
+  on the C++ fixture. The compiler did not warn; the runtime did.
+* **`c-font-lock-c++-new`'s `(catch 'false-alarm ...)`** is a
+  `call-with-current-continuation`; its `(condition-case nil ... (scan-error
+  ...))` is a `guard` on `scan-error?`, and the `let` of
+  `c-record-type-identifiers'/`c-record-ref-identifiers' is a
+  `parameterize`.
+* **The `c-promote-possible-types` bindings inside the data** are
+  `parameterize`s around `c-fontify-types-and-refs`, not bindings in its
+  varlist: the variable is a parameter.
+
+## Verified
+
+* `cc-fonts-tests.scm`'s new `end_to_end` group pins the whole
+  fontification of the six fixtures - 30, 22, 25, 10, 14 and 17 face
+  runs - every list Emacs 31.1's own, measured with
+  `(font-lock-ensure)' in a real mode buffer.
+* `search-tests.scm` 93 -> 99 (the six `looking-back` rows).
+* `cc-fonts-tests.scm` 37 -> 43.
+* All 90 suites pass; `imports.scm` regenerated (114 libraries, 4,547
+  names). `tools/pty-check.py`: **99/100**, the failure `completion-ui`
+  - the check's long-documented C-g-straight-after-TAB race, on a path
+  neither primitive touches (`looking-back` is called only from
+  font-lock's delimiter branch, fill and replace; the fixture is a
+  text-mode .txt with no comments). Measured alone before the harness
+  change: **8/10**. The check now says `WAIT(b"possible completions:")`
+  before its C-g and RET - the documented remedy, a check naming what it
+  waits for instead of racing the settle - which took it to **9/10**,
+  so the WAIT is a real improvement but does **not** close it: one run
+  in ten still shows the pre-C-g screen, which is either a lost C-g or
+  a screen captured a frame early, and telling those apart is an
+  investigation of its own. Named here rather than filed as fixed.
+
+# cc-fonts: the keyword variables, the doc comments, and two font-lock
+# fixes (2026-11-23)
+
+The second half of `cc-fonts.el`: `c-get-doc-comment-style`,
+`c-compose-keywords-list`, `c-override-default-keywords`,
+`c-fontify-new-found-type`, the six `*-font-lock-keywords` definitions
+and the whole doc-comment machinery (`:2567'-`:3593'`). The face runs of
+all four doc styles now match Emacs 31.1 exactly - gtkdoc, javadoc,
+autodoc and doxygen - measured with `(font-lock-ensure)' on the same
+text in a real mode buffer.
+
+## The obarray stand-ins
+
+Emacs finds a doc style's keyword list with `intern-soft` +
+`fboundp`/`boundp` + `symbol-value`, and its per-style regexps the same
+way. There is no obarray here, so two alists stand in, filled at the end
+of the file once everything they name exists:
+
+* `%c-doc-font-lock-keywords` - `(STYLE . VALUE)`, where a procedure
+  entry is Emacs's `fboundp` arm (called) and a list is its `boundp` arm
+  (`append`ed). `autodoc` is the only function.
+* `%c-doc-comment-properties` - `(SYMBOL . VALUE)`, the `<style>-line-
+  join-re`-style variables; only autodoc has any (`autodoc-line-join-re`,
+  `-bright-comment-start-re`, `-line-join-end-ch`).
+
+`c-doc-style-property` is the lookup; Emacs's "not bound" answer is #f.
+
+## The keyword variables' function halves
+
+`c-font-lock-keywords` and its five siblings are, in Emacs, a variable
+*and* a function of the same name; `font-lock-eval-keywords` prefers the
+function (`fboundp` first), which is how the doc-comment keywords get
+composed at font-lock setup. A Scheme name cannot be both (the
+`comment-add` collision), so:
+
+* the **variable** keeps the name (`(define c-font-lock-keywords ...)`),
+  which is what a user reads and sets;
+* the **function** half is the value registered for the symbol in
+  `*font-lock-keyword-variables*` - a `(lambda () (c-compose-keywords-
+  list ...))` - so `font-lock-eval-keywords` calls it exactly where
+  Emacs's `funcall` of the fboundp symbol would.
+`c-font-lock-keywords-1` has no function in Emacs either, so it is
+registered as its plain list.
+
+**A shared fix this needed**: `font-lock-eval-keywords`' symbol branch
+returned the table entry without evaluating it, where Emacs's body is a
+`while` loop - so a *procedure* entry never got called and
+`font-lock-compile-keywords` was handed a procedure. The branch recurses
+now, which is the C's loop.
+
+## `c-override-default-keywords`
+
+Emacs unbinds `*-font-lock-keywords` (with `makunbound`) when its value
+is nil or one of the `-1`/`-2`/`-3` values, so the later `defvar`
+installs the default without clobbering a user's setting. The obarray
+stand-in is the same keyword table: a registered value is "bound", and
+removing the entry is `makunbound`. Every call in the file precedes its
+variable's registration, which is Emacs's state too (its `defvar` comes
+after the call), so all six are no-ops in a normal load - the behaviour
+is exercised by a test with a pre-registered value.
+
+## `c-fontify-new-found-type` and its seam
+
+`c-force-redisplay` calls `c-font-lock-fontify-region`, which is
+`cc-mode.el`'s (`:2690`) and above this library; the call is the seam
+`*c-font-lock-fontify-region-function*`, which cc-mode will install as
+it loads. The default signals, which is Emacs's void-function state
+before cc-mode loads. cc-engine's `*c-fontify-new-found-type-function*`
+(said in its comment to be waiting for cc-fonts) is installed at this
+file's load: `(*c-fontify-new-found-type-function* c-fontify-new-found-
+type)`.
+
+`get-buffer-window-list` (`window.el:2656`) is new in window.scm for it.
+**INDIRECT is not carried**: it appends windows showing an indirect
+buffer of the argument's, and this tree has no indirect buffers
+(`buffer-base-buffer` answers nil for every buffer), so the loop would
+add nothing.
+
+## The three doc variables are buffer-local slots
+
+`c-doc-line-join-re`, `c-doc-bright-comment-start-re` and
+`c-doc-line-join-end-ch` are `cc-mode.el`'s defvars with global defaults
+(`regexp-unmatchable`, `regexp-unmatchable`, nil) that
+`c-set-doc-comment-re-element` gives each *buffer* its own value for.
+They were plain definitions in cc-engine and are accessor pairs now -
+`(c-doc-line-join-re)` reads the buffer-local slot with the defvar's
+default as fallback - with every read site (six in cc-engine, including
+the sws engine) converted. Without that, one buffer's doc style leaked
+into every other buffer's, which is the font-lock comment-skip bug's
+shape from the previous pass.
+
+## The two doc-comment macros are procedures
+
+Emacs writes `c-set-doc-comment-re-element`/`-char-list` as macros
+because they compute the *variable's name* from a literal suffix
+(`(intern (concat "c-doc" suffix))`) and need it as a binding for
+`(set (make-local-variable ',var) ...)`. Here the name is only ever
+*data* - a buffer-local slot key - so the computation is a procedure
+taking the suffix, with `kill-local-variable` for Emacs's else arm. Same
+computation, same answers; the macro spelling would need `datum->syntax`
+to rebuild the datum and buy nothing. The three call sites pass
+literals.
+
+## Placement: the C++ fontifiers above the C keyword defs
+
+Emacs's order is C's keyword defconsts (`:2679'`), then C++'s two
+fontifiers (`:2713'`). Ours puts the fontifiers first, because Emacs's
+matcher data holds the *symbol* `c-font-lock-c++-using` (undefined until
+font-lock runs) where this tree's data holds the procedure - and
+`c-using-key` is a never-matching regexp in C as well as C++, so the C
+list does reference it. Evaluating `(c-lang-const c-matchers-3 c)` before
+the procedure exists is an unbound variable.
+
+## `font-lock-compile-keyword`'s `(MATCHER)` form
+
+The doc-comment keyword lists use Emacs's one-element form
+`((lambda (limit) ...))`. Emacs's `(MATCHER . HIGHLIGHT)` test is
+`(nlistp (nth 1 keyword))`, true for a one-element list; ours tested
+`(not (pair? (cadr keyword)))`, and `(cadr '(x))` is an error in
+Scheme. It is `(list-ref-safe keyword 1)` now - the library's own
+`(nth N LIST)`.
+
+## Test-harness notes
+
+* `c-common-init` is not ported, so the tests replay its block by hand
+  (`c-new-BEG`/`c-new-END` + `c-restore-<>-properties`) *and* the pike
+  case sets `c-current-comment-prefix` to `//+!?\\|\\**` (measured in
+  Emacs pike-mode; `c-setup-paragraph-variables` is what sets it at mode
+  init). Without it the autodoc line-markup regexp never matches.
+* The doc face's composition adds `c-doc-face-name` to `c-literal-faces`
+  *globally* (Emacs's `setq`), so a test that asserts "no style, no
+  change" must look at the *list length*, not at `c-literal-faces`: any
+  earlier composition has already put the face there, in both editors.
+
+## Open: java's modifier keywords break declaration fontification
+
+Found by the autodoc/javadoc fixtures and **pre-existing**:
+`public void foo () {}`, `static void foo () {}` and `abstract void
+foo ();` leave `foo` unfontified in java-mode here, where Emacs 31.1
+gives it `font-lock-function-name-face`; `final void foo () {}` works,
+and so does `void foo () {}`. `public class C {}` gives `C` no face
+(Emacs: type).
+
+Where the divergence is **not**: `c-forward-type` at the `public`
+(`known`, point 8), `c-forward-decl-arglist` at the `(` (`t`, point 20),
+`c-go-list-forward`, and a direct `c-font-lock-declarators` call at the
+declarator (both paint the function name) all match Emacs 31.1.
+
+Where it **is**: inside font-lock's pipeline the declaration matcher's
+callback calls `c-forward-decl-or-cast-1` once with `match-pos` 0,
+context `'top`, from point 1. Emacs answers `(13 nil nil 8 t)` there;
+ours answers nil. **The same call outside the pipeline answers nil in
+both editors**, so some state that only the pipeline has - the syntactic
+pass and the earlier matchers' text properties, `c-find-decl-spots`'
+own narrowing, or a cache it warms - is the discriminator, and it has
+not been identified. The next session's move is to instrument
+`c-forward-decl-or-cast-1` on both sides at that call and diff its
+early decisions (`c-forward-keyword-clause` on `static`/`public`
+against `final`). The javadoc
+end-to-end test uses a comment-only fixture so that it pins the doc
+machinery and not this; the gap is named here rather than encoded in an
+expectation, which would pin the departure.
+
+## Verified
+
+* `cc-fonts-tests.scm` 43 -> 58: the five doc-style answers, the
+  composition and the kludge, the keyword-variable registration, the
+  override behaviour, the buffer-local setting and killing, the seam,
+  and the four doc-style face tables (gtkdoc, javadoc, autodoc,
+  doxygen), every run Emacs 31.1's own.
+* `window-tests.scm` 18 -> 22: `get-buffer-window-list`'s window-list
+  order, the all-frames/no-mini arm and the nil answer, compared by
+  identity (`equal?` on window records walks the frame cycle).
+* `window.scm`'s new `get-buffer-window-list` compiles; the cc, font-
+  lock, search and loadup suites all pass (cc-defs 59, cc-langs 37,
+  cc-vars 32, cc-engine 553, cl-seq 21, font-lock 15, loadup 16,
+  search 99), and `tools/run-suites.py` is **90/90**.
+* `tools/pty-check.py` **99/100**, the failure `completion-ui` - the
+  documented between-key race, not on any path this pass touched;
+  **3/3 when run alone** on the same tree.
+* `imports.scm` regenerated.
+
+# The style variables: `defcustom-c-stylevar` in cc-vars (2026-11-23,
+# second pass)
+
+The first piece of `cc-mode.el`'s dependency chain: the style-variable
+system that `c-basic-common-init` stands on. `cc-vars.scm` now has
+`c-style-variables`, `c-fallback-style`, `c-set-stylevar-fallback`
+(with `c-stylevar-fallback` as the reader cc-styles uses for
+`(get 'c-offsets-alist 'c-stylevar-fallback)`), and all sixteen style
+variables - `c-basic-offset` through `c-offsets-alist` - plus
+`c-style-variables-are-local-p`, `c-old-style-variable-behavior`,
+`c-default-style`, `c-paragraph-start`, `c-paragraph-separate`,
+`c-string-par-start`, `c-string-par-separate`,
+`c-sentence-end-with-esc-eol`, `c-valid-offset` and
+`c-string-or-string-list-p`.
+
+Every docstring, :type and value was **emitted from a running Emacs
+31.1** (the `c-offsets-alist` fallback is the full syntactic-symbol
+table, and `c-style-alist`'s shipped styles' function names seed the
+registry below).
+
+## The representation, and why it is two names
+
+Emacs declares a style variable with `defcustom-c-stylevar`, whose
+expansion (a) sets the variable's *value* to the symbol
+`set-from-style`, (b) registers the real default with
+`c-set-stylevar-fallback`, and (c) - because `c-style-variables-are-
+local-p` defaults t - makes the variable *buffer-local*, so the style
+one buffer installs does not leak into another.
+
+A `define-custom` here is a parameter: one value, no buffer-locality.
+So each style variable is a pair:
+
+* `*c-basic-offset*` - the parameter, the *global* value, which is
+  `set-from-style` until the user sets it (Emacs's `default-value`);
+* `(c-basic-offset)` / `(set!c-basic-offset v)` - the buffer-local
+  slot behind an accessor pair, which is Emacs's `symbol-value` and
+  `set`. `c-set-style-1`'s `(set attr val)` is the setter, and its
+  `(default-value attr)` is the parameter. This is the same shape
+  `c-current-comment-prefix` already had.
+
+`c-offsets-alist` is the exception: Emacs's own `defcustom` gives it
+nil, not `set-from-style` (its full table is only the fallback), and a
+test pins that.
+
+## Two stand-ins the names force
+
+* **`c-valid-offset`'s `(functionp offset)` arm.** Emacs accepts a
+  *symbol that names a line-up function*; a symbol has no function
+  binding here. The arm consults `%c-offset-function-names`, a registry
+  seeded (by script, from Emacs's own `c-style-alist` and fallback)
+  with the 27 line-up function names the shipped styles use; cc-align
+  extends it as it defines them. A *procedure* is accepted too, which
+  is what a direct `(lambda ...)` offset becomes in this tree.
+* **`c-default-value-sentence-end`** (`cc-defs.el:580`'s macro) is
+  written at its use site in cc-vars: `(parameterize ((*sentence-end*
+  #f)) (sentence-end))` - Emacs's `(let (sentence-end) (sentence-end))`.
+  The macro could live in cc-defs, but importing paragraphs there would
+  drag it into every cc library; cc-vars is the only caller.
+
+## What is not written yet, and the one open question
+
+`cc-styles.scm` itself - `c-style-alist` (the data is dumped and ready),
+`c-set-style-1`, `c-get-style-variables`, `c-set-style`, `c-add-style`,
+`c-set-offset`, `c-read-offset`, `c-setup-paragraph-variables`,
+`c-setup-filladapt`, `c-initialize-builtin-style`,
+`c-make-styles-buffer-local` and `cc-choose-style-for-mode` - is **the
+next file**, in Emacs's order. The tests that needed a style applied
+stand in for it (`with-doc-style` in `cc-fonts-tests.scm`), exactly as
+`c-set-style-1` will set the buffer-local slot.
+
+**The open question that file runs into**:
+`c-setup-paragraph-variables` `setq`s `paragraph-start`,
+`paragraph-separate`, `paragraph-ignore-fill-prefix`,
+`adaptive-fill-mode`, `adaptive-fill-regexp` and
+`adaptive-fill-first-line-regexp`, which are *buffer-local* in Emacs.
+They are `define-custom` parameters here (paragraphs.scm, fill.scm), and
+setting them per CC buffer would leak into every other buffer - the
+doc-comment-style bug's shape. So either those six variables get the
+same parameter + buffer-local-accessor treatment (a ripple through
+fill.scm/paragraphs.scm and their readers), or `c-setup-paragraph-
+variables` is deferred with that gap named. **Decide this before
+writing cc-styles.scm**; it is the one piece of cc-mode.el's init chain
+that touches shared primitives.
+
+## Verified
+
+* `cc-fonts-tests.scm` 59 -> 60: the doc style is `set-from-style`
+  before any style is applied (a new test pins it - Emacs's state
+  between load and mode init), and the doc tests apply the standard
+  value through `c-stylevar-fallback`, which is what `c-set-style-1`
+  does.
+* `tools/run-suites.py` **90/90** with the new cc-vars machinery;
+  `imports.scm` regenerated (the style variables and accessors are
+  reachable from M-:/the REPL/init files).
+* The pty battery was not re-run for this pass: the change is
+  cc-only (cc-vars is imported by nothing outside the cc libraries
+  except through imports.scm, which the suite runner covers).
+
+# The six paragraph/fill variables are buffer-local (2026-11-23, third
+# pass)
+
+`paragraph-start`, `paragraph-separate`, `paragraph-ignore-fill-prefix`
+(paragraphs.scm) and `adaptive-fill-mode`, `adaptive-fill-regexp`,
+`adaptive-fill-first-line-regexp` (fill.scm) were `define-custom`
+parameters, and Emacs makes all six buffer-local
+(`make-variable-buffer-local`; measured: after `setq` in a c-mode buffer
+`(default-value 'paragraph-start)` is still the standard
+`"\f\\|[ \t]*$"`). The first caller that writes them per buffer -
+`c-setup-paragraph-variables`, coming with `cc-styles.el` - would have
+leaked one CC buffer's paragraph regexps into every text buffer.
+
+## What they are now
+
+Each is the tree's established pair: the `define-custom` parameter is
+its **global/default** value (`(default-value var)`), and a
+buffer-local slot behind `(paragraph-start)` / `(set!paragraph-start v)`
+is the buffer's value (`symbol-value` / `set`). All 45 read sites in the
+two libraries were converted (readers elsewhere: none - only the
+generated `imports.scm`).
+
+**Emacs `let`-binds four of them in fill.el**, and the three (four, with
+the multi-line one in `fill-comment-paragraph`) `parameterize` sites are
+now `buffer.sld`'s **`call-with-buffer-local`**: save the buffer's
+value, set it, run the thunk, restore - **killing the slot when the
+buffer had none**, or the restore would pin the default as a local
+value for ever. That is `specbind`'s buffer-local branch, written as a
+call because no Scheme `let` can bind a buffer's slot; the parameter
+staysthe global half, so nothing else changed for dynamic binding.
+
+## The bug this pass introduced and the tests that caught it
+
+The mechanical replacement of `(*paragraph-start*)` with
+`(paragraph-start)` also rewrote the **accessor's own fallback**,
+making `(paragraph-start)` call itself: every fill hung. A 15-second
+timeout on a one-line fill-region probe found it in a minute (the fill
+battery's first group simply never returned), and the fix is the
+parameter read in the body. **Do the definition and the call-site
+rewrite in separate passes, or exclude the bodies** - the same
+"a mechanical rename catches the definition" hazard the coding-system
+work recorded.
+
+## Tests
+
+`fill-tests.scm`'s `schemacs_editor_fill_buffer_local` group (7): a
+buffer with no local value reads the global, `set!` isolates it from
+another buffer, `kill-local-variable` restores the global,
+`call-with-buffer-local` binds and restores both with and without a
+pre-existing local value. Expectations measured on Emacs 31.1 first.
+
+`tools/run-suites.py` **90/90**; the pty battery is run on the settled
+tree (this pass is a shared-primitive change, so it must be).
+
+## Open, and now unblocked
+
+`cc-styles.scm` can be written with `c-setup-paragraph-variables`
+faithful: it sets the six through the setters. `c-all-...` -
+`call-with-buffer-local` is exported from buffer.scm and can adopt
+isearch's hand-rolled save/restore of `tool-bar-map` (`isearch.scm`,
+the `local-variable-p` block) when that file is next touched.
+
+# A C-g is a key to the read and a quit to the command loop (2026-11-23)
+
+`read-key-event` is this tree's `read_char`, and it had two rules that
+`read_char` does not have: it called `maybe-quit` at the top of every
+read, and it cleared `Vquit_flag` after answering `quit_char`.
+
+GNU Emacs splits the three jobs across three functions:
+
+  * `read_char` *answers* a pending C-g - `XSETINT (c, quit_char)` in
+    its interrupted branch (`keyboard.c:2817`) and
+    `quit_throw_to_read_char (0)` in `kbd_buffer_get_event` before it
+    blocks (`:4117`) - and clears `Vquit_flag` only when quitting was
+    inhibited (`:2824`, "If we report the quit char as an event, don't
+    do so more than once").
+  * `read_key_sequence_vs` calls `maybe_quit ()` *before* it reads
+    (`:12457`). (`keyboard.c:11917`, which this tree's comment quoted,
+    is not a `maybe_quit` at all.) That call is what makes a C-g that
+    arrived while a command was running take effect at the next read.
+  * `read_key_sequence` clears `Vquit_flag` after every key it reads
+    (`:11892`), so the C-g answered as a key goes through the keymaps
+    and does not fire again.
+
+The port had the first and the third merged into the read, so any
+`read-char`-style reader raised instead of being answered. The visible
+bug: `C-q` reads its character with `read-quoted-char`, whose Emacs
+source binds `inhibit-quit` to `first` for the read and then does
+`(if inhibit-quit (setq quit-flag nil))` (`simple.el:1002`, `:1013`).
+Nothing there raises a pending quit, so `C-q C-g` inserts a ^G however
+the C-g is timed; ours raised a quit whenever the C-g's SIGINT landed
+between the command loop reading C-q and `read-quoted-char` beginning
+its read. Measured on Emacs 31.1: `C-q C-g` inserts ^G; `C-q 1 0 1
+RET` inserts `A`; and a C-g *after* a digit ends the code sequence,
+inserts the code read so far and *then* quits - the flag is still set
+when `read-quoted-char` returns, and `read_key_sequence_vs` raises it
+at the next read.
+
+Ported, in the three places Emacs has them:
+
+  * `read-key-event` no longer calls `maybe-quit`; it clears the flag
+    only under `*inhibit-quit*`.
+  * the command loop calls `maybe-quit` inside its error guard before
+    the read (`read_key_sequence_vs`) and clears the flag after every
+    key read (`read_key_sequence`). A pending C-g that the read answers
+    as a key therefore still goes through the keymaps, which is how a
+    menu consumes it as `tty-menu-exit`.
+  * `%read-key-sequence` does the same pair, since it is the
+    Lisp-facing `read-key-sequence`.
+  * `read-quoted-char` is Emacs's `while` clause for clause:
+    `inhibit-quit` = `first` around the read, the clear afterwards, the
+    meta-character branch (0200 bit), the two radix digit branches (the
+    hex letters were computed as `code - ?0` before, which is only
+    right for 0-9), RET after a digit, the pushback of any other
+    terminator, and the first character as the answer. The direct
+    `signal-quit` on a later C-g is gone; Emacs pushes the C-g back and
+    lets the leftover flag raise the quit at the next command-loop read.
+
+The battery failures `quoted-insert` and `tty-menu` that led here were
+**two** problems. This one is real and is fixed above. The other was
+the harness: `schemacs/editor/imports.scm` was newer than its `.go`, so
+every editor spent its first few hundred milliseconds interpreting the
+generated user-environment library. The pty harness treats "output and
+then quiet" as "the editor is ready", and in that window the command
+loop was not reading yet: the C-g's SIGINT arrived first and the quit
+was raised. Compiling the tree makes the check pass 5/5; with the stale
+`.go` it failed 5/5. Both are on the record because either alone
+reproduces the same "Quit" screen. Tests: `tty-editor-tests.scm`'s
+`schemacs_tty_editor_quit_read` group (four: the inhibited read's
+answer and clear, the uninhibited read leaving the flag, the command
+loop raising it and going on, and `quoted-insert` inserting a pending
+C-g), plus the pty checks `quoted-insert` and `tty-menu`.
+
+## The wait a signal has to end: a self-pipe (2026-11-23)
+
+Emacs's SIGINT handler ends the blocking wait by longjmp:
+`handle_interrupt` → `quit_throw_to_read_char` → `sys_longjmp` to
+`read_char`'s `local_getcjmp`, which answers `quit_char`. A Scheme
+`sigaction` handler is a *deferred* procedure run at the VM's next safe
+point, so it cannot longjmp - and measured on this Guile, a SIGINT that
+interrupts a blocking `select` makes `select` return an empty ready set
+**with the handler not yet run**. The terminal's `%wait-and-read` then
+checks `*quit-flag*` (still #f), finds nothing ready and no deadline,
+and re-blocks - with the flag set by then and nothing left to look at
+it. The C-g was answered only at the next key: rare, load-dependent,
+and seen as `query-replace-quit`/`completion-ui` losing a C-g (and as
+`C-q C-g` occasionally printing "Quit" once the startup race was
+removed).
+
+`(schemacs editor keyboard)`'s `*signal-wake-function*` is the stand-in
+for the longjmp: `handle-interrupt` sets `*quit-flag*` and then calls
+the front end's thunk, and a front end whose wait is a `select` gives
+it one that writes a byte to a pipe it selects on. The terminal already
+has such a pipe - the back door's wake (`install-repl-wake!`) - and
+`%wait-and-read` drains it and re-reads the flag, answering the quit
+before any byte. Emacs needs no such channel; this is a host-language
+departure, not a behavioural one: the observable rule is the C's ("if
+quit is requested, return the quit character", `keyboard.c:2806`), and
+it now holds however the signal and the wait interleave. The Gtk front
+end leaves the parameter #f - its loop is woken by its own sources and
+its C-g is an ordinary key event.
+
+Measured after the fix, on the tree that had been failing: the tight
+`completion-ui` sequence with only 0.1 s between the completions list
+appearing and the C-g went 15/15 (it was 9/10), and
+`query-replace-quit` 15/15 (was 9/10). The unit test is
+`tty-editor-tests.scm`'s "handle-interrupt sets the flag before it
+wakes the wait".

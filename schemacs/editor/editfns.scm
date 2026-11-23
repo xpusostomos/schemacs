@@ -541,13 +541,16 @@ point-marker
       (let ((ed (current-buffer)))
         (= (point) (text-editor-get-end-of-line ed))))
 
-    (define (char-after position)
+    (define (char-after . rest)
       ;; GNU Emacs's `char-after' (editfns.c): "Return character in
       ;; current buffer at position POSITION" - nil, this tree's #f,
-      ;; when POSITION is past the end. A POSITION of nil means point,
-      ;; as Emacs's docstring keeps out of the synopsis.
+      ;; when POSITION is past the end. POSITION is optional and nil
+      ;; means point, as the C's `(char-after &optional POSITION)' has
+      ;; it (this took a required argument until 2026-11-22, which made
+      ;; Emacs's `(char-after)' an arity error).
       ;;--------------------------------------------------------------
-      (let* ((ed (current-buffer))
+      (let* ((position (if (pair? rest) (car rest) #f))
+             (ed (current-buffer))
              (pos (if position position (point))))
         (and (<= (point-min) pos) (< pos (point-max))
              (fetch-char ed pos))))

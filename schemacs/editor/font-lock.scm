@@ -120,6 +120,7 @@
    *font-lock-fontify-syntactically-function*
    *font-lock-comment-start-skip*
    *font-lock-comment-end-skip*
+   font-lock-comment-start-skip-value font-lock-comment-end-skip-value
    *font-lock-maximum-decoration*
    *font-lock-mode*
    *font-lock-multiline*
@@ -137,6 +138,7 @@
    font-lock-default-fontify-buffer
    font-lock-defaults
    font-lock-register-keyword-variable!
+   *font-lock-keyword-variables*
    font-lock-default-fontify-region
    font-lock-default-unfontify-buffer
    font-lock-default-unfontify-region
@@ -425,12 +427,25 @@
     (define *font-lock-comment-start-skip* (make-parameter #f))
     (define *font-lock-comment-end-skip* (make-parameter #f))
     ;; ^ GNU Emacs's `font-lock-comment-start-skip' and `-end-skip'. The
-    ;; delimiter-face branch of the syntactic pass reads them, and
-    ;; `comment-start-skip' with them; **newcomment.el is not ported**,
-    ;; so both are false and that branch is skipped - a comment gets
-    ;; `font-lock-comment-face' from its first character, and
-    ;; `font-lock-comment-delimiter-face' is not used until a mode sets
-    ;; these.
+    ;; delimiter-face branch of the syntactic pass reads them, with
+    ;; `comment-start-skip'/`comment-end-skip' after them.
+    ;;
+    ;; **A language sets them through `c-lang-setvar', which here is a
+    ;; buffer-local slot.** Emacs's variable would be buffer-local too
+    ;; (`c-make-emacs-variables-local'), and its reader sees the
+    ;; buffer-local value; a parameter alone cannot, so the readers below
+    ;; take the parameter first - a `let' binding still wins, as in Emacs
+    ;; - and the buffer's slot second.
+
+    (define (font-lock-comment-start-skip-value)
+      (or (*font-lock-comment-start-skip*)
+          (buffer-local-value (current-buffer)
+                              'font-lock-comment-start-skip #f)))
+
+    (define (font-lock-comment-end-skip-value)
+      (or (*font-lock-comment-end-skip*)
+          (buffer-local-value (current-buffer)
+                              'font-lock-comment-end-skip #f)))
 
     (define *font-lock-major-mode* (make-parameter #f))
 
@@ -933,7 +948,12 @@
                    (list (cdr keyword) 'font-lock-keyword-face)))
             ((symbol? (cdr keyword))                          ; (MATCHER . FACENAME)
              (list (car keyword) (list 0 (cdr keyword))))
-            ((not (pair? (cadr keyword)))                     ; (MATCHER . HIGHLIGHT)
+            ;; `list-ref-safe' is this library's `(nth N LIST)', and the
+            ;; test is Emacs's `(nlistp (nth 1 keyword))' - true for a
+            ;; one-element list too, the `((lambda (limit) ...))' form
+            ;; the doc-comment keywords use, where Scheme's `cadr' of one
+            ;; is an error.
+            ((not (pair? (list-ref-safe keyword 1)))          ; (MATCHER . HIGHLIGHT)
              (list (car keyword) (cdr keyword)))
             (else                                             ; (MATCHER HIGHLIGHT ...)
              keyword)))
@@ -1097,15 +1117,15 @@
                     ;; `font-lock-comment-delimiter-face' for them."
                     ;; Only a comment gets them, not a doc-string.
                     (when (and face (eq? face 'font-lock-comment-face)
-                               (or (*font-lock-comment-start-skip*)
+                               (or (font-lock-comment-start-skip-value)
                                    (comment-start-skip)))
                       (save-excursion
                         (goto-char beg)
-                        (if (looking-at (or (*font-lock-comment-start-skip*)
+                        (if (looking-at (or (font-lock-comment-start-skip-value)
                                             (comment-start-skip)))
                             (put-text-property beg (match-end 0) 'face
                                                'font-lock-comment-delimiter-face)))
-                      (if (looking-back (or (*font-lock-comment-end-skip*)
+                      (if (looking-back (or (font-lock-comment-end-skip-value)
                                             (comment-end-skip))
                                         (line-beginning-position) #t)
                           (put-text-property (match-beginning 0) (point) 'face
@@ -1360,12 +1380,20 @@
       ;; "Evaluate KEYWORDS if a function (funcall) or variable (eval)
       ;; name." A symbol is looked up in the keyword-variable table, and
       ;; a procedure is called; the C's recursion is the walk here.
+      ;;
+      ;; The symbol branch *recurses*, because the C is a `while` loop:
+      ;; `(setq keywords (if (fboundp keywords) (funcall keywords) (eval
+      ;; keywords)))` and round again. A mode whose table entry is a
+      ;; *procedure* - cc-mode's `c-font-lock-keywords`, which composes
+      ;; the doc-comment keywords at setup - relies on the second turn;
+      ;; answering the procedure itself handed `font-lock-compile-keywords`
+      ;; a procedure where it wanted a list.
       ;;--------------------------------------------------------------
       (cond ((procedure? keywords)
              (font-lock-eval-keywords (keywords)))
             ((symbol? keywords)
              (let ((entry (assq keywords (*font-lock-keyword-variables*))))
-               (if entry (cdr entry) #f)))
+               (if entry (font-lock-eval-keywords (cdr entry)) #f)))
             (else keywords)))
 
     (define (font-lock-value-in-major-mode values)

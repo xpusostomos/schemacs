@@ -67,6 +67,11 @@
    face-list
    facep
    make-face
+   make-empty-face
+   copy-face
+   invert-face
+   face-inverse-video-p
+   internal-copy-lisp-face
    ;; reading
    face-all-attributes
    face-attribute
@@ -175,6 +180,63 @@
         (*face-attributes*
          (cons (cons face '()) (*face-attributes*))))
       face)
+
+    (define (make-empty-face face)
+      ;; GNU Emacs's `make-empty-face' (`faces.el:212'): "Define a new,
+      ;; empty face named FACE.  If FACE already exists, make it empty."
+      ;;
+      ;; The C behind it is `internal-make-lisp-face (face, t)', where the
+      ;; `t' forces every attribute to `unspecified' even for a face that
+      ;; already existed.
+      ;;--------------------------------------------------------------
+      (if (facep face)
+          (let loop ((rest (*face-attributes*)) (acc '()))
+            (cond ((null? rest) (*face-attributes* (reverse acc)))
+                  ((eq? (caar rest) face)
+                   (loop (cdr rest) (cons (cons face '()) acc)))
+                  (else (loop (cdr rest) (cons (car rest) acc)))))
+          (make-face face))
+      face)
+
+    (define (internal-copy-lisp-face from to . args)
+      ;; The C `internal-copy-lisp-face': copy every attribute FROM has
+      ;; onto TO.  FRAME and NEW-FRAME are accepted and not consulted:
+      ;; this tree keeps one attribute set rather than one per frame (see
+      ;; the header), so the C's per-frame copy is the same copy for every
+      ;; frame.
+      ;;--------------------------------------------------------------
+      (let ((attrs (cdr (assq (check-face from) (*face-attributes*)))))
+        (check-face to)
+        (let loop ((rest (*face-attributes*)) (acc '()))
+          (cond ((null? rest) (*face-attributes* (reverse acc)))
+                ((eq? (caar rest) to)
+                 (loop (cdr rest) (cons (cons to (append attrs '())) acc)))
+                (else (loop (cdr rest) (cons (car rest) acc)))))
+        to))
+
+    (define (copy-face old-face new-face . args)
+      ;; GNU Emacs's `copy-face' (`faces.el:232'): "Define a face named
+      ;; NEW-FACE, which is a copy of OLD-FACE."
+      ;;
+      ;; The FRAME/NEW-FRAME arms are Emacs's; with no FRAME it copies for
+      ;; every existing frame and then the frame-independent defaults, and
+      ;; with one attribute set here those are one copy (named departure).
+      ;;--------------------------------------------------------------
+      (let ((frame (if (pair? args) (car args) #f))
+            (new-frame (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+        (if (not frame)
+            (begin
+              (when new-frame
+                (error "Copying face ~a from all frames to one frame"
+                       old-face))
+              (make-empty-face new-face)
+              ;; Every frame has the same attribute set here, so the loop
+              ;; over `(frame-list)' and the `t' pass copy the same set.
+              (internal-copy-lisp-face old-face new-face))
+            (begin
+              (make-empty-face new-face)
+              (internal-copy-lisp-face old-face new-face new-frame)))
+        new-face))
 
     (define (internal-get-lisp-face-attribute face attribute . args)
       ;; The C `internal-get-lisp-face-attribute': ATTRIBUTE's value on
@@ -320,6 +382,31 @@
                    (face-attribute-relative-p attribute value))
               (face-attribute-merged-with attribute value inherit)
               value))))
+
+    (define (face-inverse-video-p face . args)
+      ;; GNU Emacs's `face-inverse-video-p' (`faces.el:605'): non-nil when
+      ;; FACE specifies a non-nil `:inverse-video'.
+      ;;--------------------------------------------------------------
+      (eq? (apply face-attribute face ':inverse-video args) #t))
+
+    (define (invert-face face . args)
+      ;; GNU Emacs's `invert-face' (`faces.el:1072'): "Swap the foreground
+      ;; and background colors of FACE."
+      ;;
+      ;; "If FACE specifies neither foreground nor background color, set
+      ;; its foreground and background to the background and foreground of
+      ;; the default face."
+      ;;--------------------------------------------------------------
+      (let ((frame (if (pair? args) (car args) #f)))
+        (let ((fg (face-attribute face ':foreground frame))
+              (bg (face-attribute face ':background frame)))
+          (if (not (and (eq? fg 'unspecified) (eq? bg 'unspecified)))
+              (set-face-attribute face frame
+                                  ':foreground bg ':background fg)
+              (set-face-attribute face frame
+                                  ':foreground (face-attribute 'default ':background frame)
+                                  ':background (face-attribute 'default ':foreground frame))))
+        face))
 
     (define (face-differs-from-default-p face . args)
       ;; GNU Emacs's `face-differs-from-default-p' (`faces.el:304'):

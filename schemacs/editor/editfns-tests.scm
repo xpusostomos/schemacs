@@ -656,6 +656,15 @@
     (guard (e (#t 'args-out-of-range))
       (narrow-to-region 1 99))))
 
+;; `char-after`'s POSITION is optional (`editfns.c`'s
+;; `(char-after &optional POSITION)') and nil means point; it took a
+;; required argument until 2026-11-22. Measured on Emacs 31.1.
+(test-equal '(#\e #\e #f)
+  (let ((b (narrow-buffer)))
+    (set-buffer b)
+    (goto-char 2)
+    (list (char-after) (char-after 2) (char-after 99))))
+
 (test-end "schemacs_editor_editfns_narrowing")
 
 ;;--------------------------------------------------------------------

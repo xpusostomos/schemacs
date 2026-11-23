@@ -279,7 +279,7 @@
    save-current-buffer
    set-buffer
    set-buffer-local-value!
-   kill-local-variable local-variable-p
+   kill-local-variable local-variable-p call-with-buffer-local
    set-buffer-modified-p
    restore-buffer-modified-p
    set!buffer-default-directory
@@ -1915,6 +1915,31 @@
         (and buffer
              (pair? (assq variable (hashq-ref buffer-slots-table buffer '())))
              #t)))
+
+    (define (call-with-buffer-local variable value thunk)
+      ;; Run THUNK with VARIABLE's *buffer-local* value bound to VALUE,
+      ;; restoring the buffer's previous state on the way out - GNU
+      ;; Emacs's `let' of a buffer-local variable, which `specbind' saves
+      ;; and restores as the buffer's value. There is no Scheme `let'
+      ;; that can do this (a `parameterize' binds the global), so the
+      ;; dynamic binding of a buffer-local variable is this call.
+      ;;
+      ;; **Killing the slot is part of the restore**: if the buffer had no
+      ;; local value before, setting it back to the default would leave a
+      ;; local binding behind and pin the default for ever, which is the
+      ;; leak `local-variable-p' exists to tell apart.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (current-buffer))
+             (had (local-variable-p variable buffer))
+             (saved (and had (buffer-local-value buffer variable))))
+        (set-buffer-local-value! buffer variable value)
+        (dynamic-wind
+         (lambda () #f)
+         thunk
+         (lambda ()
+           (if had
+               (set-buffer-local-value! buffer variable saved)
+               (kill-local-variable variable))))))
 
     (define (use-local-map keymap)
       ;; GNU Emacs's `use-local-map' (keymap.c:1900): "Select KEYMAP as

@@ -49,7 +49,16 @@
        read-key-sequence read-key-sequence-vector
        ;; The outermost loop, and the quit it has to survive - see
        ;; "an error in the read does not end the loop" below.
-       event-loop signal-quit)
+       event-loop signal-quit
+       ;; `read_char`'s rule for a pending quit, which the group below
+       ;; "the quit is a key here" pins: the event, the flag, and the
+       ;; inhibited read's binding.
+       read-key-event *quit-flag* *inhibit-quit* quit-char
+       ;; ...and the reader that must be able to quote the C-g.
+       quoted-insert
+       ;; The signal handler and the wake a `select`-based front end
+       ;; gives it - see "the quit is a key here" below.
+       handle-interrupt *signal-wake-function*)
  ;; The cursor's type, which `xdisp.sld' resolves from the buffer's
  ;; `cursor-type' - the tests below are its rule, not the drawing of it.
  (only (schemacs editor xdisp)
@@ -5374,8 +5383,10 @@
 ;; Measured on a terminal: hold Down in Dired and press C-g while the
 ;; queued keys are still being read, and the editor exited with status 0
 ;; and no message at all. A C-g makes SIGINT the kernel delivers, so the
-;; quit is raised by the read's own `maybe-quit` - inside the guard and
-;; outside the per-command one - which is exactly this shape.
+;; quit is raised inside the loop's read - by `maybe-quit` there now (it
+;; was `read-key-event`'s when this was written; see "the quit is a key
+;; here" below) - inside the guard and outside the per-command one, which
+;; is exactly this shape.
 ;;--------------------------------------------------------------------
 
 (define %quit-once #f)
@@ -5429,6 +5440,109 @@
         (buffer-substring-no-properties (point-min) (point-max))))))
 
 (test-end "schemacs_tty_editor_error_loop")
+
+;;--------------------------------------------------------------------
+;; The quit is a key here and a raise at the command loop
+;;
+;; GNU Emacs's `read_char` *answers* a pending C-g - `quit_char`, from its
+;; interrupted branch (`keyboard.c:2817`) - and clears `Vquit_flag` only
+;; when quitting was inhibited (`:2824`). The raise is
+;; `read_key_sequence_vs`'s `maybe_quit ()` (`:12457`), and
+;; `read_key_sequence` clears the flag after every key it reads
+;; (`:11892`). This tree's `read-key-event` is `read_char` and called
+;; `maybe-quit` itself, so a reader such as `read-quoted-char` got a
+;; raised quit where Emacs gives it the character: measured at a pty,
+;; `C-q C-g` said "Quit" whenever the C-g's SIGINT landed before the
+;; read began, instead of inserting a ^G.
+;;--------------------------------------------------------------------
+
+(test-begin "schemacs_tty_editor_quit_read")
+
+(test-equal "an inhibited read answers the quit character and clears the flag"
+  (list quit-char #f)
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed))
+         (d (make <test-display>)))
+    (parameterize ((*current-frame* frame)
+                   (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*frame-list* (list frame))
+                   (current-display d)
+                   (*inhibit-quit* #t)
+                   (*quit-flag* #t))
+      (set!test-display-script d (list quit-char))
+      (list (read-key-event -1) (*quit-flag*)))))
+
+(test-equal "an uninhibited read answers it and leaves the flag set"
+  (list quit-char #t)
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed))
+         (d (make <test-display>)))
+    (parameterize ((*current-frame* frame)
+                   (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*frame-list* (list frame))
+                   (current-display d)
+                   (*inhibit-quit* #f)
+                   (*quit-flag* #t))
+      (set!test-display-script d (list quit-char))
+      (list (read-key-event -1) (*quit-flag*)))))
+
+;; ...and the command loop is where that leftover flag becomes the quit.
+;; The key scripted after it still runs, so "the loop goes on" is what is
+;; being asserted.
+(test-equal "the command loop raises a pending quit, then reads the key"
+  "a"
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed))
+         (d (make <test-display>)))
+    (parameterize ((*current-frame* frame)
+                   (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*frame-list* (list frame))
+                   (*buffer-list* '())
+                   (current-display d)
+                   (*inhibit-quit* #f)
+                   (*quit-flag* #t))
+      (set!test-display-script d (list #\a))
+      (event-loop frame)
+      (with-current-buffer ed
+        (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; ...and `C-q` quotes it: the inhibited first read is what makes a C-g
+;; arriving before the read began the character rather than a quit.
+(test-equal "quoted-insert inserts a quoted C-g that was already pending"
+  "\a"
+  (let* ((ed (allocate-buffer))
+         (frame (test-frame ed))
+         (d (make <test-display>)))
+    (parameterize ((*current-frame* frame)
+                   (*current-buffer* ed)
+                   (*echo-area-buffer* #f)
+                   (*frame-list* (list frame))
+                   (current-display d)
+                   (*inhibit-quit* #f)
+                   (*quit-flag* #t))
+      (set!test-display-script d (list quit-char))
+      (quoted-insert 1)
+      (with-current-buffer ed
+        (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; The handler records the quit and *then* wakes the wait: the wait returns
+;; on the wake byte and reads the flag, so the byte before the flag would
+;; lose the quit. Emacs's C handler longjmps out of `pselect` instead; a
+;; Scheme handler runs at a safe point and cannot, so the wake is a
+;; self-pipe - see `*signal-wake-function*`.
+(test-equal "handle-interrupt sets the flag before it wakes the wait"
+  '(#t #t)
+  (let ((seen #f))
+    (parameterize ((*quit-flag* #f)
+                   (*signal-wake-function*
+                    (lambda () (set! seen (*quit-flag*)))))
+      (handle-interrupt 'sigint)
+      (list seen (*quit-flag*)))))
+
+(test-end "schemacs_tty_editor_quit_read")
 
 (test-begin "schemacs_tty_editor_interactive_readers")
 

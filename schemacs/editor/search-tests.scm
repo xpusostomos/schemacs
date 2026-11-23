@@ -697,4 +697,84 @@
                  "\\([[:alpha:]_$][[:alnum:]_$]\\{,1000\\}\\)")
                 "std::vector"))
 
+;; ------------------------------------------------------------------
+;; `looking-back''s GREEDY extension is a WHOLE-match test
+;; ------------------------------------------------------------------
+;; Emacs's `(looking-at (concat regexp "\\'"))' asks whether REGEXP
+;; matches from THIS position to point, not merely whether some match
+;; ends at point. The difference is visible on font-lock's
+;; comment-end-skip: on "/* aaa */" at 10 the greedy answer starts at
+;; the space (7), and an end-only test gave 1. Every answer below is
+;; Emacs 31.1's own.
+
+(test-equal "greedy looking-back stops where the regexp no longer covers the text"
+  '(#t 7 10)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*lb1*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "/* aaa */")
+       (goto-char 10)
+       (let ((r (looking-back "[ \t]*\\*/" 1 #t)))
+         (list r (match-beginning 0) (match-end 0)))))))
+
+(test-equal "without greedy, looking-back answers the nearest match ending at point"
+  '(#t 8 10)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*lb2*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "/* aaa */")
+       (goto-char 10)
+       (let ((r (looking-back "[ \t]*\\*/" 1)))
+         (list r (match-beginning 0) (match-end 0)))))))
+
+(test-equal "greedy looking-back extends over a run"
+  '(#t 2 5)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*lb3*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "baaa")
+       (goto-char 5)
+       (let ((r (looking-back "a+" 1 #t)))
+         (list r (match-beginning 0) (match-end 0)))))))
+
+(test-equal "greedy looking-back extends a character class run"
+  '(#t 1 4)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*lb4*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "aab")
+       (goto-char 4)
+       (let ((r (looking-back "[ab]*" 1 #t)))
+         (list r (match-beginning 0) (match-end 0)))))))
+
+(test-equal "looking-back is nil when nothing matches"
+  #f
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*lb5*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "abc")
+       (goto-char 4)
+       (looking-back "x" 1 #t)))))
+
+(test-equal "a nil regexp matches empty at point"
+  #t
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*lb6*")))
+       (set-buffer b)
+       (erase-buffer)
+       (fill "abc")
+       (goto-char 1)
+       (looking-back #f)))))
+
 (test-end)

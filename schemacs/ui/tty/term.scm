@@ -115,6 +115,10 @@
     ;; terminal's interrupt characters, so they arrive as signals.
     (only (schemacs editor keyboard)
           init-signals *quit-flag* quit-char *overriding-terminal-local-map*
+          ;; How a signal ends this library's `select`: a byte written to
+          ;; the wake pipe below, because a Scheme handler cannot longjmp
+          ;; out of the wait the way the C's does.
+          *signal-wake-function*
           ;; The menu's reader (`read_menu_command`, `keyboard.c:1691`),
           ;; the separator test `display_tty_menu_item` asks
           ;; (`keyboard.c:8608`), and the quit a cancelled menu raises.
@@ -1053,7 +1057,18 @@
            (set! %repl-wake-thunk thunk)
            (and %repl-wake-wr
                 (begin (put-u8 %repl-wake-wr (char->integer #\newline))
-                       #t))))))
+                       #t))))
+        ;; **The same pipe carries the quit's wake.** Emacs's SIGINT
+        ;; handler ends `pselect` by longjmp (`quit_throw_to_read_char`);
+        ;; a Scheme handler is deferred to a safe point, so without a byte
+        ;; the wait can re-block with `*quit-flag*` set and never look
+        ;; again - measured, a C-g was occasionally lost until the next
+        ;; key. `handle-interrupt` writes through this thunk.
+        (*signal-wake-function*
+         (lambda ()
+           (and %repl-wake-wr
+                (put-u8 %repl-wake-wr (char->integer #\newline))
+                #t)))))
 
     (define (%drain-repl-wake!)
       ;; Run what the server asked for and empty the pipe, so the next wait

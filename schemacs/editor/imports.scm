@@ -68,6 +68,7 @@
     (schemacs editor cc-defs)
     (schemacs editor cc-langs)
     (schemacs editor cc-vars)
+    (schemacs editor cc-fonts)
     (schemacs editor callproc)
     (schemacs editor casetab)
     (schemacs editor casefiddle)
@@ -153,6 +154,7 @@
     %c-cddr
     %c-cdr
     %c-false
+    %c-langvar
     %c-true
     %class-in
     %comend-first?
@@ -265,10 +267,26 @@
     *byte-count-to-string-function*
     *c++-font-lock-extra-types*
     *c-asymmetry-fontification-flag*
+    *c-backslash-column*
+    *c-backslash-max-column*
+    *c-basic-offset*
+    *c-block-comment-prefix*
     *c-buffer-is-cc-mode*
+    *c-cleanup-list*
     *c-commas-bound-stmts*
+    *c-comment-only-line-offset*
+    *c-comment-prefix-regexp*
+    *c-default-style*
+    *c-doc-comment-style*
     *c-font-lock-extra-types*
+    *c-font-lock-fontify-region-function*
     *c-fontify-new-found-type-function*
+    *c-hanging-braces-alist*
+    *c-hanging-colons-alist*
+    *c-hanging-semi&comma-criteria*
+    *c-indent-comment-alist*
+    *c-indent-comments-syntactically-p*
+    *c-label-minimum-indentation*
     *c-lang-const-expansion*
     *c-lang-var-overrides*
     *c-langs-are-parametric*
@@ -278,6 +296,10 @@
     *c-maybe-labelp*
     *c-noise-macro-names*
     *c-noise-macro-with-parens-names*
+    *c-offsets-alist*
+    *c-old-style-variable-behavior*
+    *c-paragraph-separate*
+    *c-paragraph-start*
     *c-parse-and-markup-<>-arglists*
     *c-promote-possible-types*
     *c-record-found-types*
@@ -285,6 +307,8 @@
     *c-record-type-identifiers*
     *c-report-syntactic-errors*
     *c-restricted-<>-arglists*
+    *c-special-indent-hook*
+    *c-style-variables-are-local-p*
     *c-syntactic-indentation*
     *c-syntactic-indentation-in-macros*
     *c-warn-ids-with-dollar*
@@ -293,6 +317,13 @@
     *called-interactively*
     *case-fold-search*
     *case-replace*
+    *cfd-continue-pos*
+    *cfd-limit*
+    *cfd-match-pos*
+    *cfd-prop-match*
+    *cfd-re-match*
+    *cfd-re-match-end*
+    *cfd-top-level*
     *change-major-mode-after-body-hook*
     *change-major-mode-hook*
     *char-property-alias-alist*
@@ -449,6 +480,7 @@
     *font-lock-fontify-syntactically-function*
     *font-lock-function*
     *font-lock-global-modes*
+    *font-lock-keyword-variables*
     *font-lock-keywords*
     *font-lock-keywords-case-fold-search*
     *font-lock-keywords-only*
@@ -764,6 +796,7 @@
     *show-help-echo-function*
     *show-help-function*
     *show-trailing-whitespace*
+    *signal-wake-function*
     *special-event-map*
     *split-string-default-separators*
     *standard-display-table*
@@ -933,6 +966,9 @@
     access-keymap
     accessible-keymaps
     activate-mark
+    adaptive-fill-first-line-regexp
+    adaptive-fill-mode
+    adaptive-fill-regexp
     add-face-text-property
     add-hook
     add-minor-mode
@@ -970,6 +1006,14 @@
     auto-coding-regexp-alist-lookup
     auto-fill-chars
     auto-fill-mode
+    autodoc-bright-comment-start-re
+    autodoc-decl-keywords
+    autodoc-decl-type-keywords
+    autodoc-font-lock-doc-comments
+    autodoc-font-lock-keywords
+    autodoc-font-lock-line-markup
+    autodoc-line-join-end-ch
+    autodoc-line-join-re
     back-to-indentation
     backward-char
     backward-delete-char
@@ -1103,19 +1147,26 @@
     butlast
     byte8-to-char
     bytes-have-null?
+    c++-font-lock-keywords
+    c++-font-lock-keywords-1
+    c++-font-lock-keywords-2
+    c++-font-lock-keywords-3
     c--delete-duplicates
     c--intersection
     c--mapcan
     c--set-difference
     c-<-as-paren-syntax
+    c-<>-get-restricted
     c->-as-paren-syntax
     c-add-language
     c-add-type
     c-add-type-1
+    c-after-change-check-<>-operators
     c-after-conditional
     c-after-special-operator-id
     c-alnum
     c-alpha
+    c-annotation-face
     c-append-lower-brace-pair-to-state-cache
     c-append-to-state-cache
     c-at-bracelist-p
@@ -1129,6 +1180,8 @@
     c-back-over-compound-identifier
     c-back-over-member-initializer-braces
     c-back-over-member-initializers
+    c-backslash-column
+    c-backslash-max-column
     c-backward-<>-arglist
     c-backward-comments
     c-backward-over-enum-header
@@ -1142,6 +1195,10 @@
     c-backward-token-1
     c-backward-token-2
     c-backward-typed-enum-colon
+    c-basic-matchers-after
+    c-basic-matchers-before
+    c-basic-offset
+    c-before-change-check-<>-operators
     c-beginning-of-current-token
     c-beginning-of-decl-1
     c-beginning-of-defun-1
@@ -1149,6 +1206,15 @@
     c-beginning-of-statement-1
     c-beginning-of-syntax
     c-benign-error
+    c-block-comment-flag
+    c-block-comment-prefix
+    c-brace-stack-at
+    c-bs-at-toplevel-p
+    c-bs-cache
+    c-bs-cache-limit
+    c-bs-prev-pos
+    c-bs-prev-stack
+    c-c++-make-ml-string-closer-re
     c-c++-vsemi-p
     c-cache-to-parse-ps-state
     c-calculate-state
@@ -1156,14 +1222,28 @@
     c-cheap-inside-bracelist-p
     c-check-qualified-type
     c-check-type
+    c-cleanup-list
+    c-clear-<-pair-props
+    c-clear-<-pair-props-if-match-after
+    c-clear-<>-pair-props
+    c-clear->-pair-props
+    c-clear->-pair-props-if-match-before
     c-clear-c-type-property
     c-clear-char-properties
     c-clear-char-property
     c-clear-found-types
+    c-collect-line-comments
+    c-comment-only-line-offset
+    c-comment-prefix-regexp
+    c-complex-decl-matchers
+    c-compose-keywords-list
     c-concat-separated
+    c-constant-face-name
+    c-cpp-matchers
     c-crosses-statement-barrier-p
     c-current-comment-prefix
     c-debug-parse-state
+    c-debug-put-decl-spot-faces
     c-debug-sws-msg
     c-define-lang-constant
     c-define-lang-constant-here
@@ -1176,8 +1256,12 @@
     c-directly-in-class-called-p
     c-do-declarators
     c-doc-bright-comment-start-re
+    c-doc-comment-style
+    c-doc-face-name
     c-doc-line-join-end-ch
     c-doc-line-join-re
+    c-doc-markup-face-name
+    c-doc-style-property
     c-down-list-backward
     c-down-list-forward
     c-echo-parsing-error
@@ -1186,16 +1270,57 @@
     c-enclosing-c++-attribute
     c-end-of-current-token
     c-end-of-decl-1
+    c-end-of-literal
     c-end-of-macro
     c-end-of-token
+    c-face-name-p
+    c-fallback-style
     c-filter-ops
     c-find-assignment-for-mode
+    c-find-decl-match-pos
+    c-find-decl-prefix-search
+    c-find-decl-spots
+    c-find-decl-syntactic-pos
+    c-find-invalid-doc-markup
+    c-font-lock-<>-arglists
+    c-font-lock-c++-lambda-captures
+    c-font-lock-c++-modules
+    c-font-lock-c++-new
+    c-font-lock-c++-using
+    c-font-lock-c11-generic-clause
+    c-font-lock-complex-decl-prepare
+    c-font-lock-context
+    c-font-lock-cpp-messages
+    c-font-lock-cut-off-declarators
+    c-font-lock-declarations
+    c-font-lock-declarators
+    c-font-lock-doc-comments
+    c-font-lock-enclosing-decls
+    c-font-lock-enum-body
+    c-font-lock-enum-tail
+    c-font-lock-ids-with-dollar
+    c-font-lock-invalid-single-quotes
+    c-font-lock-keywords
+    c-font-lock-keywords-1
+    c-font-lock-keywords-2
+    c-font-lock-keywords-3
+    c-font-lock-labels
+    c-font-lock-ml-strings
+    c-font-lock-objc-method
+    c-font-lock-objc-methods
+    c-font-lock-single-decl
+    c-fontify-new-found-type
+    c-fontify-recorded-types-and-refs
+    c-fontify-types-and-refs
+    c-force-redisplay
     c-foreign-init-lit-pos-cache
     c-foreign-truncate-lit-pos-cache
     c-forward-<>-arglist
     c-forward-<>-arglist-recur
     c-forward-align-clause-throw-if-invalid
     c-forward-annotation
+    c-forward-c++-module-name
+    c-forward-c++-module-partition-name
     c-forward-c++-requires-clause
     c-forward-class-decl
     c-forward-comment-minus-1
@@ -1235,22 +1360,33 @@
     c-full-trim-near-cache
     c-get-cache-scan-pos
     c-get-char-property
+    c-get-doc-comment-style
     c-get-fallback-scan-pos
+    c-get-fontification-context
     c-get-lang-constant
+    c-get-ml-closer
     c-go-down-list-backward
     c-go-down-list-forward
     c-go-list-backward
     c-go-list-forward
     c-go-up-list-backward
     c-go-up-list-forward
+    c-got-face-at
+    c-hanging-braces-alist
+    c-hanging-colons-alist
+    c-hanging-semi&comma-criteria
     c-hungry-delete-key
     c-in-id-arglist
     c-in-knr-argdecl
     c-in-literal
     c-in-method-def-p
+    c-indent-comment-alist
+    c-indent-comments-syntactically-p
     c-indentation-style
+    c-init-bs-cache
     c-init-language-vars
     c-int-to-char
+    c-invalidate-find-decl-cache
     c-invalidate-macro-cache
     c-invalidate-state-cache
     c-invalidate-state-cache-1
@@ -1265,6 +1401,8 @@
     c-keyword-member
     c-keyword-sym
     c-kwds-lang-consts
+    c-label-face-name
+    c-label-minimum-indentation
     c-lang-const
     c-lang-constant-documentation
     c-lang-constant-names
@@ -1285,9 +1423,11 @@
     c-laomib-loop
     c-laomib-put-cache
     c-least-enclosing-brace
+    c-list-found-types
     c-lit-pos-cache
     c-lit-pos-cache-limit
     c-literal-datum?
+    c-literal-faces
     c-literal-limits
     c-literal-start
     c-literal-type
@@ -1312,19 +1452,36 @@
     c-major-mode-is
     c-make-bare-char-alt
     c-make-emacs-variables-local
+    c-make-font-lock-BO-decl-search-function
+    c-make-font-lock-context-search-function
     c-make-font-lock-extra-types-blurb
+    c-make-font-lock-search-form
+    c-make-font-lock-search-function
     c-make-init-lang-vars-fun
+    c-make-inverse-face
     c-make-keywords-re
     c-make-macro-with-semi-re
     c-make-noise-macro-regexps
+    c-make-syntactic-matcher
     c-mark-<-as-paren
     c-mark->-as-paren
+    c-matchers-1
+    c-matchers-2
+    c-matchers-3
+    c-maybe-font-lock-wrong-style-comments
+    c-maybe-stale-found-type
     c-min-property-position
+    c-ml-string-make-closer-re
+    c-ml-string-opener-around-point
+    c-ml-string-opener-at-or-around-point
     c-mode-symbol
     c-mode-var
     c-mode-var-boundp
     c-most-enclosing-brace
     c-most-enclosing-decl-block
+    c-negation-char-face-name
+    c-new-BEG
+    c-new-END
     c-new-id-end
     c-new-id-is-type
     c-new-id-start
@@ -1333,7 +1490,9 @@
     c-no-comment-end-of-macro
     c-noise-macro-name-re
     c-noise-macro-with-parens-name-re
+    c-offsets-alist
     c-on-identifier
+    c-override-default-keywords
     c-parse-ps-state-below
     c-parse-ps-state-to-cache
     c-parse-state
@@ -1342,6 +1501,7 @@
     c-parsing-error
     c-partial-ws-p
     c-point
+    c-preprocessor-face-name
     c-previous-single-property-change
     c-ps-state-cache-pos
     c-pull-open-brace
@@ -1349,13 +1509,19 @@
     c-put-c-type-property
     c-put-char-properties
     c-put-char-property
+    c-put-font-lock-face
+    c-put-font-lock-string-face
     c-put-in-sws
     c-put-is-sws
+    c-put-string-fence
     c-query-and-set-macro-start
     c-query-macro-start
+    c-re-redisplay-timer
     c-record-ref-id
     c-record-type-id
+    c-reference-face-name
     c-register-emacs-variable-reader!
+    c-remove-font-lock-face
     c-remove-in-sws
     c-remove-is-and-in-sws
     c-remove-is-sws
@@ -1363,11 +1529,18 @@
     c-remove-stale-state-cache-backwards
     c-renarrow-state-cache
     c-restore-<->-as-parens
+    c-restore-<>-properties
     c-safe
     c-safe-position
     c-safe-scan-lists
     c-save-buffer-state
+    c-search-backward-char-property
+    c-search-backward-char-property-with-value-on-char
     c-search-decl-header-end
+    c-search-forward-char-property
+    c-search-forward-char-property-with-value-on-char
+    c-search-forward-char-property-without-value-on-char
+    c-search-forward-non-nil-char-property
     c-search-uplist-for-classkey
     c-semi-get-near-cache-entry
     c-semi-lit-near-cache
@@ -1375,13 +1548,21 @@
     c-semi-pp-to-literal
     c-semi-put-near-cache-entry
     c-semi-trim-near-cache
+    c-sentence-end-with-esc-eol
+    c-set-doc-comment-char-list
+    c-set-doc-comment-re-element
+    c-set-doc-comment-res
+    c-set-stylevar-fallback
     c-shift-line-indentation
+    c-simple-decl-matchers
     c-simple-skip-symbol-backward
+    c-skip-comments-and-strings
     c-skip-conditional
     c-skip-ws-backward
     c-skip-ws-chars-backward
     c-skip-ws-chars-forward
     c-skip-ws-forward
+    c-special-indent-hook
     c-state-balance-parens-backwards
     c-state-brace-pair-desert
     c-state-cache
@@ -1413,8 +1594,13 @@
     c-state-safe-place
     c-string-limit-regexp
     c-string-list-p
+    c-string-or-string-list-p
+    c-string-par-separate
+    c-string-par-start
     c-string-syntax
     c-strip-conses
+    c-style-variables
+    c-stylevar-fallback
     c-suppress-<->-as-parens
     c-sws-lit-limits
     c-sws-lit-type
@@ -1423,15 +1609,20 @@
     c-syntactic-re-search-forward
     c-syntactic-skip-backward
     c-syntax-table-hwm
+    c-trim-found-types
     c-trim-lit-pos-cache
+    c-truncate-bs-cache
     c-truncate-lit-pos-cache
     c-truncate-lit-pos/state-cache
     c-unfind-type
     c-unmark-<-or->-as-paren
+    c-unmark-<>-around-region
     c-up-list-backward
     c-up-list-forward
+    c-update-brace-stack
     c-upper
     c-use-category
+    c-valid-offset
     c-vsemi-status-unknown-p
     c-whack-state-after
     c-whack-state-before
@@ -1441,6 +1632,7 @@
     calculate-lisp-indent
     call-interactively
     call-process
+    call-with-buffer-local
     called-interactively?
     cancel-timer
     canonically-space-region
@@ -1659,6 +1851,7 @@
     constrain-to-field
     copy-category-table
     copy-char-table
+    copy-face
     copy-file
     copy-interval-parent
     copy-intervals
@@ -1968,6 +2161,8 @@
     downcase
     downcase-region
     downcase-word
+    doxygen-font-lock-doc-comments
+    doxygen-font-lock-keywords
     draw-box!
     draw-window-cursor!
     easy-mmode-pretty-mode-name
@@ -2045,6 +2240,7 @@
     face-defface-spec
     face-differs-from-default-p
     face-documentation
+    face-inverse-video-p
     face-list
     face-metrics
     face-override-spec
@@ -2171,6 +2367,8 @@
     font-lock-apply-highlight
     font-lock-change-mode
     font-lock-choose-keywords
+    font-lock-comment-end-skip-value
+    font-lock-comment-start-skip-value
     font-lock-compile-keyword
     font-lock-compile-keywords
     font-lock-default-fontify-buffer
@@ -2292,6 +2490,7 @@
     get-buffer
     get-buffer-create
     get-buffer-window
+    get-buffer-window-list
     get-char-property
     get-free-disk-space
     get-keyelt
@@ -2355,6 +2554,9 @@
     goto-line-relative
     graft-intervals-into-buffer
     grow-mini-window
+    gtkdoc-font-lock-doc-comments
+    gtkdoc-font-lock-doc-protection
+    gtkdoc-font-lock-keywords
     gui--last-selected-text-clipboard
     gui--last-selected-text-primary
     gui-backend-get-selection
@@ -2418,6 +2620,10 @@
     icons--register
     icons--spec
     identity
+    idl-font-lock-keywords
+    idl-font-lock-keywords-1
+    idl-font-lock-keywords-2
+    idl-font-lock-keywords-3
     ignore
     image-mask-p
     image-property
@@ -2472,6 +2678,7 @@
     internal-auto-fill
     internal-complete-buffer
     internal-complete-buffer-except
+    internal-copy-lisp-face
     internal-describe-syntax-value
     internal-get-lisp-face-attribute
     internal-lisp-face-attributes
@@ -2511,6 +2718,7 @@
     invalidate-buffer-caches
     invalidate-frame-rows!
     invalidate-region-cache
+    invert-face
     isearch
     isearch-backward
     isearch-case-fold-search
@@ -2588,6 +2796,12 @@
     itree-tree-root
     itree-tree-size
     itree-tree?
+    java-font-lock-keywords
+    java-font-lock-keywords-1
+    java-font-lock-keywords-2
+    java-font-lock-keywords-3
+    javadoc-font-lock-doc-comments
+    javadoc-font-lock-keywords
     jit-lock-after-change
     jit-lock-context-fontify
     jit-lock-context-timer
@@ -2773,6 +2987,7 @@
     make-diff-context
     make-directory
     make-directory-internal
+    make-empty-face
     make-face
     make-frame
     make-frame-command
@@ -2834,6 +3049,7 @@
     match-data--translate
     match-end
     match-string
+    match-string-no-properties
     match-substitute-replacement
     matching-paren
     matrix-diff-rows
@@ -3056,6 +3272,10 @@
     nreverse
     nth
     nthcdr
+    objc-font-lock-keywords
+    objc-font-lock-keywords-1
+    objc-font-lock-keywords-2
+    objc-font-lock-keywords-3
     object-beg-position
     object-end-position
     object-intervals
@@ -3123,6 +3343,9 @@
     overwrite-mode
     overwrite-mode-hook
     pad-line
+    paragraph-ignore-fill-prefix
+    paragraph-separate
+    paragraph-start
     parse-colon-path
     parse-menu-item
     parse-modifiers-uncached
@@ -3133,6 +3356,10 @@
     pending-uarg
     percent99
     perform-replace
+    pike-font-lock-keywords
+    pike-font-lock-keywords-1
+    pike-font-lock-keywords-2
+    pike-font-lock-keywords-3
     place-undo-boundary!
     plist-get
     plist-member
@@ -3492,6 +3719,9 @@
     set!%window-start
     set!%window-start-at-line-beg
     set!%window-suspend-auto-hscroll?
+    set!adaptive-fill-first-line-regexp
+    set!adaptive-fill-mode
+    set!adaptive-fill-regexp
     set!buffer-auto-fill-function
     set!buffer-auto-hscroll-mode
     set!buffer-begv
@@ -3520,13 +3750,38 @@
     set!buffer-word-wrap
     set!buffer-zv
     set!c-auto-newline
+    set!c-backslash-column
+    set!c-backslash-max-column
+    set!c-basic-offset
+    set!c-block-comment-flag
+    set!c-block-comment-prefix
+    set!c-bs-cache
+    set!c-bs-cache-limit
+    set!c-bs-prev-pos
+    set!c-bs-prev-stack
+    set!c-cleanup-list
+    set!c-comment-only-line-offset
+    set!c-comment-prefix-regexp
     set!c-current-comment-prefix
     set!c-debug-parse-state
+    set!c-doc-bright-comment-start-re
+    set!c-doc-comment-style
+    set!c-doc-line-join-end-ch
+    set!c-doc-line-join-re
     set!c-electric-flag
+    set!c-find-decl-match-pos
+    set!c-find-decl-syntactic-pos
+    set!c-font-lock-context
     set!c-found-types
     set!c-full-lit-near-cache
     set!c-full-near-cache-limit
+    set!c-hanging-braces-alist
+    set!c-hanging-colons-alist
+    set!c-hanging-semi&comma-criteria
     set!c-hungry-delete-key
+    set!c-indent-comment-alist
+    set!c-indent-comments-syntactically-p
+    set!c-label-minimum-indentation
     set!c-laomib-cache
     set!c-lit-pos-cache
     set!c-lit-pos-cache-limit
@@ -3536,15 +3791,20 @@
     set!c-macro-cache-syntactic
     set!c-macro-names-with-semicolon
     set!c-macro-with-semi-re
+    set!c-maybe-stale-found-type
+    set!c-new-BEG
+    set!c-new-END
     set!c-new-id-end
     set!c-new-id-is-type
     set!c-new-id-start
     set!c-no-bracelist-cache
     set!c-noise-macro-name-re
     set!c-noise-macro-with-parens-name-re
+    set!c-offsets-alist
     set!c-parsing-error
     set!c-semi-lit-near-cache
     set!c-semi-near-cache-limit
+    set!c-special-indent-hook
     set!c-state-brace-pair-desert
     set!c-state-cache
     set!c-state-cache-good-pos
@@ -3610,6 +3870,9 @@
     set!mark-ring
     set!menu-items-n-panes!
     set!mode-name
+    set!paragraph-ignore-fill-prefix
+    set!paragraph-separate
+    set!paragraph-start
     set!string-intervals
     set!test-display-color-cells
     set!test-display-column-width

@@ -146,7 +146,7 @@
    match-data
    match-data--translate
    match-end
-   match-string
+   match-string match-string-no-properties
    match-substitute-replacement
    re-search-backward
    re-search-forward
@@ -810,9 +810,20 @@
              (greedy (and (pair? args) (pair? (cdr args)) (cadr args)))
              (pt (buffer-pt ed))
              (start (max (or limit (buffer-beg ed)) (buffer-beg ed)))
+             ;; **The C's test is `(looking-at (concat regexp "\\'"))',
+             ;; i.e. a match that starts HERE and reaches PT** - not
+             ;; merely one that ends at PT. The difference shows on a
+             ;; regexp like `[ \t]*\*/': at a position just before a
+             ;; non-space, a match ending at PT still exists further
+             ;; along, and the old end-only test extended the match
+             ;; over it. Measured in `font-lock''s comment-delimiter
+             ;; pass on "/* aaa */": Emacs' answer is 7..10, the
+             ;; end-only test gave 1..10.
              (match-at? (lambda (s)
-                          (and (string-match regexp (make-buffer-string ed s pt) 0)
-                               (= (match-end 0) (- pt s))))))
+                          (let ((str (make-buffer-string ed s pt)))
+                            (and (string-match regexp str 0)
+                                 (= (match-beginning 0) 0)
+                                 (= (match-end 0) (string-length str)))))))
         (let loop ((s pt))
           (cond
            ((< s start) #f)
@@ -1867,6 +1878,20 @@
                    ;; Emacs's `match-string' is `buffer-substring' for a
                    ;; buffer, which copies the properties with the text.
                    (make-buffer-string (current-buffer) beg end #t))))))
+
+    (define (match-string-no-properties num . args)
+      ;; GNU Emacs's `match-string-no-properties' (subr.el:5876):
+      ;; "Return text matched by last search, without properties."
+      ;; STRING, when given, is the string the last `string-match' ran
+      ;; on; when not, the text comes from the current buffer.  `#f'
+      ;; when the NUMth pair did not match.
+      (let ((beg (match-beginning num)))
+        (and beg
+             (let ((end (match-end num))
+                   (string (if (pair? args) (car args) #f)))
+               (if string
+                   (substring string beg end)
+                   (make-buffer-string (current-buffer) beg end #f))))))
 
     (define (match-substitute-replacement replacement . args)
       ;; GNU Emacs's `match-substitute-replacement' (subr.el:5890):

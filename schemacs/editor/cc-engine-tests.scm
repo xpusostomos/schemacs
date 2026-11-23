@@ -22,6 +22,7 @@
 
 (import
  (scheme base)
+ (only (guile) hash-ref hash-set!)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs editor buffer) allocate-buffer set-buffer current-buffer
        buffer-local-value set-buffer-local-value!)
@@ -441,10 +442,10 @@
                              (get-text-property 3 'c-in-sws))))
 
 (test-equal "the doc line-join regexp starts unmatchable"
-            "\\`a\\`" c-doc-line-join-re)
+            "\\`a\\`" (c-doc-line-join-re))
 (test-equal "and so does the bright-comment one"
-            "\\`a\\`" c-doc-bright-comment-start-re)
-(test-equal "the line-join end-char list starts nil" #f c-doc-line-join-end-ch)
+            "\\`a\\`" (c-doc-bright-comment-start-re))
+(test-equal "the line-join end-char list starts nil" #f (c-doc-line-join-end-ch))
 
 ;;----------------------------------------------------------------------
 ;; Literal positions (`c-semi-pp-to-literal', `c-full-pp-to-literal',
@@ -2031,3 +2032,144 @@
    (97 ((101 #f #f 97 #t) 105))))
 
 (test-end "schemacs_editor_cc_engine_bracelist")
+
+(test-begin "schemacs_editor_cc_engine_find_decl")
+
+;; `c-find-decl-spots' and the machinery under it. Every expectation is
+;; Emacs 31.1's own answer, measured with `emacs -Q --batch' on the same
+;; fixture (the script is in the handoff).
+(define cfd-fixture
+  "class A {\npublic:\n  void f(int x);\n  int y;\n};\n\nint g(void) { return 1; }\n")
+
+(define (cfd-buffer text thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert text)
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+    (thunk)))
+
+(cfd-buffer cfd-fixture
+ (lambda ()
+   (let ((spots '()))
+     (goto-char (point-min))
+     (c-find-decl-spots (point-max)
+                        (c-lang-const c-decl-start-re c)
+                        #f
+                        (lambda (match-pos in-macro top-level)
+                          (set! spots (cons (list match-pos in-macro
+                                                  top-level (point))
+                                            spots))
+                          #f))
+     (test-equal "c-find-decl-spots finds the declaration spots Emacs finds"
+                 '((0 #f #t 1) (10 #f #f 11) (28 #f #f 28) (35 #f #f 38)
+                   (47 #f #t 49) (55 #f #t 55) (62 #f #f 63))
+                 (reverse spots)))
+   (test-equal "the brace stack at bob is the notional all-enclosing block"
+               '(#f 1) (c-brace-stack-at 1))
+   (test-equal "inside the class brace it is two deep"
+               '(#f 2) (c-brace-stack-at 12))
+   (test-equal "...and it stays two deep at the end of the class body"
+               '(#f 2) (c-brace-stack-at 40))
+   (test-equal "c-bs-at-toplevel-p is false inside the class"
+               #f (c-bs-at-toplevel-p 12))
+   (test-equal "...and true at bob"
+               #t (c-bs-at-toplevel-p 1))))
+
+(cfd-buffer "// aaa\n// bbb\n// ccc\nint x;\n"
+ (lambda ()
+   (test-equal "a line-comment range extends over the adjacent comments"
+               (cons 1 14) (c-collect-line-comments (cons 8 14)))
+   (test-equal "a range that does not start at a comment starter is returned"
+               (cons 6 12) (c-collect-line-comments (cons 6 12)))))
+
+(cfd-buffer "foo bar"
+ (lambda ()
+   (c-clear-found-types)
+   (hash-set! (c-found-types) "B" #t)
+   (hash-set! (c-found-types) "A" #t)
+   (test-equal "c-list-found-types sorts the keys"
+               '("A" "B") (c-list-found-types))
+   (c-clear-found-types)
+   (hash-set! (c-found-types) "foo" #t)
+   (set!c-maybe-stale-found-type (list 'c-decl-id-start "foo" 1 3 " " "x"))
+   (c-trim-found-types 1 2 1)
+   (test-equal "c-trim-found-types removes the stale type"
+               #f (hash-ref (c-found-types) "foo" #f))))
+
+(test-end "schemacs_editor_cc_engine_find_decl")
+
+;;----------------------------------------------------------------------
+;; The `<'-`>' pair properties and their change functions
+;; (`cc-engine.el:7035'-`:7511')
+;;----------------------------------------------------------------------
+;; Every expectation is Emacs 31.1's, measured in a real `c++-mode'
+;; buffer with `inhibit-modification-hooks' bound and the functions
+;; called in the order `cc-mode.el''s change hooks call them (those hooks
+;; are not ported yet): `c-restore-<>-properties' is what
+;; `c-common-init' runs over the whole buffer as a mode starts.
+(define (angle-buffer text proc)
+  (parameterize ((*c-buffer-is-cc-mode* 'c++-mode))
+    (let ((b (allocate-buffer)))
+      (set-buffer b)
+      (insert text)
+      (set-buffer-local-value! b 'major-mode 'c++-mode)
+      (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+      (c-init-language-vars c++-mode)
+      (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+      (c-clear-found-types)
+      ;; "Starting a mode is a sort of change": c-common-init's block.
+      (set!c-new-BEG (point-min))
+      (set!c-new-END (point-max))
+      (c-restore-<>-properties (point-min) (point-max) 0)
+      (proc))))
+
+(test-begin "schemacs_editor_cc_engine_angle_props")
+
+(angle-buffer "void f () { static_cast<int> (x); }\n"
+ (lambda ()
+   (test-equal "the mode's init marks static_cast's angle brackets"
+               '((4 . 62) (5 . 60))
+               (list (get-text-property 24 'syntax-table)
+                     (get-text-property 28 'syntax-table)))
+   (goto-char 24)
+   (c-clear-<>-pair-props)
+   (test-equal "c-clear-<>-pair-props removes the bracket's property"
+               #f (get-text-property 24 'syntax-table))
+   (test-equal "...and its partner's" #f
+               (get-text-property 28 'syntax-table))))
+
+(angle-buffer "void f () { static_cast<int> (x); }\n"
+ (lambda ()
+   (set!c-new-BEG 28)
+   (set!c-new-END 29)
+   (c-before-change-check-<>-operators 28 29)
+   (delete-region 28 29)
+   (c-after-change-check-<>-operators 28 28)
+   (c-restore-<>-properties 28 28 1)
+   (test-equal "deleting the \">\" leaves the \"<\" marked, as Emacs does"
+               '(4 . 62) (get-text-property 24 'syntax-table))
+   (test-equal "...and the truncated text is Emacs's"
+               "void f () { static_cast<int (x); }\n"
+               (buffer-substring-no-properties 1 (point-max)))))
+
+(angle-buffer "x = \"abc\"; y = 1;\n"
+ (lambda ()
+   (test-equal "c-end-of-literal answers the end of the string literal"
+               10 (c-end-of-literal (c-semi-pp-to-literal 8) 8))))
+
+(angle-buffer "void f () { static_cast<int> (x); }\n"
+ (lambda ()
+   ;; This row is also the regression test for the `(car (cddr STATE))'
+   ;; of a state with no literal: Emacs's `(car nil)' is nil, Scheme's
+   ;; `(car '())' raised, and this was the first call to reach it.
+   (c-unmark-<>-around-region 24 24 1)
+   (test-equal "c-unmark-<>-around-region clears a pair a change splits"
+               #f (get-text-property 24 'syntax-table))
+   (test-equal "...at both ends" #f (get-text-property 28 'syntax-table))
+   (test-equal "...and leaves (c-new-BEG c-new-END) alone"
+               (list 1 37) (list (c-new-BEG) (c-new-END)))))
+
+(test-end "schemacs_editor_cc_engine_angle_props")

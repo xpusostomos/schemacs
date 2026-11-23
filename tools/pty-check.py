@@ -441,6 +441,24 @@ def drive(keys, path, settle=0.3, gap=None, term=None, background="0000/0000/000
         drain(0.02)
     while not out and time.time() < deadline:
         drain(0.02)
+    # **Ready is a drawn screen, not a byte.** ncurses writes its
+    # initialisation - the alternate screen, the clear - before the editor
+    # has loaded the user environment and reached its command loop;
+    # measured with a compiled tree, that burst is at 0.25 s and the first
+    # full screen at 0.48 s (four of the five bytes are terminal queries,
+    # which `out_extend` answers). "Any byte and then quiet" therefore
+    # ended *inside* the startup whenever the gap was longer than
+    # STARTUP_QUIET, and a key sent then was read by the command loop's
+    # first iteration instead of by the command the check was driving. A
+    # C-g sent in that window is not a key at all - its SIGINT records a
+    # quit, and the loop's own `maybe-quit` answers it as "Quit": that is
+    # the `quoted-insert` failure, "C-q C-g did not insert ^G ... Quit",
+    # which came and went with the load. The mode line is what every
+    # screen the editor draws has.
+    while time.time() < deadline:
+        if MODE_LINE_RE.search(screen_of(out.decode("utf-8", "replace"))):
+            break
+        drain(0.02)
     wait_quiet(STARTUP_QUIET, max(0.0, deadline - time.time()))
     if PROFILE:
         PROFILE_T["startup"] += time.time() - profile_t0
@@ -2181,7 +2199,26 @@ def check_completion_ui():
                         "windows, expected 2" % len(mode_lines))
 
     # C-g leaves the minibuffer *and* takes the completions window with it.
-    screen = screen_of(drive(find + [b"ap", b"\t", C_g], path))
+    # The C-g waits for the list itself: sent straight after TAB it is a
+    # race (C-g arriving while the window is still being drawn), which is
+    # the battery's documented between-key flake - this check was it.
+    #
+    # **And the list being drawn is not yet the read.** The redisplay that
+    # puts it up happens at the end of the TAB command; the command loop
+    # then reads again. A C-g landing in that few-millisecond window is not
+    # a key to the minibuffer - it is a pending quit that
+    # `read_key_sequence_vs` raises, and the minibuffer's own command loop
+    # catches it, reports `[Quit]` in the prompt, and keeps reading. That
+    # is Emacs's behaviour for the same timing, not ours: measured against
+    # our editor, 0 ms after the text appears leaves the prompt up with
+    # `[Quit]`, 5 ms aborts it. The sleep is the wait for the command to
+    # finish; a `WAIT` cannot see it, because nothing is drawn. It is 0.3 s
+    # rather than 5 ms because the redisplay that draws the list finishes
+    # *after* the text matched: under a loaded machine 0.1 s still lost one
+    # run in ten (measured 9/10 at 0.1, 10/10 at 0.3 and at 0.6).
+    screen = screen_of(drive(find + [b"ap", b"\t",
+                                     WAIT(b"possible completions:"),
+                                     ("sleep", 0.3), C_g], path))
     mode_lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
     if len(mode_lines) != 1:
         problems.append("after C-g there are %d windows, expected 1: the "
@@ -2195,7 +2232,8 @@ def check_completion_ui():
     # heading line rather than on a candidate; it is M-<down> that moves it
     # onto one. (So this RET makes a new file named `ap', which is what Emacs
     # does too.)
-    screen = screen_of(drive(find + [b"ap", b"\t", RET], path))
+    screen = screen_of(drive(find + [b"ap", b"\t",
+                                     WAIT(b"possible completions:"), RET], path))
     mode_lines = [r for r in screen.split("\n") if MODE_LINE_RE.search(r)]
     if len(mode_lines) != 1:
         problems.append("after RET there are %d windows, expected 1: the "
@@ -4788,11 +4826,20 @@ def check_query_replace_quit():
     # **The screen, not the byte stream.** With the row diff in place the
     # echo area is emitted as the cells that changed, so "Quit" need not
     # appear as a contiguous run of bytes even though it is on the screen.
+    # **Each key waits for the prompt it answers.** Sent blind, a key that
+    # outruns its prompt goes into the buffer or the wrong minibuffer and
+    # the C-g then quits something else - the battery's between-key flake,
+    # and this check has been it. The prompts are plain text on the
+    # screen; measured, the query prompt's bytes carry no face run inside.
     out = screen_of(drive([C_x + C_f, C_a, C_k, path.encode(), RET,
-                           ESC, b"%", b"apple", RET, b"pear", RET,
+                           ESC, b"%",
+                           WAIT(b"Query replace: "), b"apple", RET,
+                           WAIT(b"Query replace apple with: "), b"pear", RET,
+                           WAIT(b"Query replacing apple with pear: "),
                            C_g], path))
     if "Quit" not in out:
-        problems.append("C-g during query-replace did not report Quit")
+        problems.append("C-g during query-replace did not report Quit "
+                        "(screen %r)" % (out.split("\n")[-2:],))
     # no y was pressed, so nothing was replaced: no "Replaced N" message
     if "Replaced" in out:
         problems.append("C-g during query-replace ran a replacement")
