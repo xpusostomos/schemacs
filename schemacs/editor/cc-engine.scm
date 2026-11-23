@@ -2605,7 +2605,7 @@
 
       (c-state-cache))
 
-    (define (c-invalidate-state-cache)
+    (define (c-invalidate-state-cache here)
       ;; "This is a wrapper over `c-invalidate-state-cache-1'. It
       ;; suppresses the syntactic effect of the < and > (template)
       ;; brackets and of all parens in preprocessor constructs, except
@@ -2622,8 +2622,7 @@
       ;; the parse state where Emacs has none.
       (dynamic-wind c-suppress-<->-as-parens
                     (lambda ()
-                      (c-invalidate-state-cache-1
-                       (c-state-cache-invalid-pos)))
+                      (c-invalidate-state-cache-1 here))
                     c-restore-<->-as-parens))
 
     (define (c-parse-state)
@@ -14166,10 +14165,17 @@
                               (c-add-syntax 'statement-block-intro #f)))
                          ((save-excursion
                             (goto-char paren-pos)
-                            (set! inexpr
-                                  (c-looking-at-inexpr-block
-                                   (c-safe-position containing-sexp paren-state)
-                                   containing-sexp #f)))
+                            ;; The C's `(setq inexpr ...)' answers the new
+                            ;; value, which is the clause's test; Guile's
+                            ;; `set!' answers the unspecified value, which
+                            ;; is true - so an `inexpr' of #f would be
+                            ;; taken as a match and `(car #f)' would raise.
+                            (begin
+                              (set! inexpr
+                                    (c-looking-at-inexpr-block
+                                     (c-safe-position containing-sexp paren-state)
+                                     containing-sexp #f))
+                              inexpr))
                           (c-add-syntax (if (eq? (car inexpr) 'inlambda)
                                             'defun-block-intro
                                             'statement-block-intro)

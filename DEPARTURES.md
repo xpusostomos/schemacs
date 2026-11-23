@@ -15196,3 +15196,107 @@ through `hashv-ref`, so a removed menu item stayed live. The fix is the
 code reading `(keymap-bindings map)` must use the `hashv` accessors,
 and anything *writing* a table with a family accessor and reading it
 with the generic one - or the reverse - is silently two tables.
+
+# cc-cmds, the first tranche: the indentation command layer (2026-11-23)
+
+`schemacs/editor/cc-cmds.scm` has, in `cc-cmds.el`'s order:
+`c-fix-backslashes`, `c-indent-line`, `c-newline-and-indent`,
+`c-show-syntactic-information`, `c-syntactic-information-on-region`,
+`c-update-modeline`, the six toggles, `c-indent-command`,
+`c-indent-exp`, `c-indent-region`, `c-fn-region-is-active-p`,
+`c-indent-line-or-region`, the progress-reporting helpers and the
+`c-backslash-region` family. The electric keys, the motions, the
+defun/declaration-limit cluster and the filling half are the next
+tranches; the file's header lists them.
+
+## Representation departures
+
+* **`c-fix-backslashes`** is `let`-bound (`cc-cmds.el:57`) and set
+  inside those bodies, so it is the parameter `*c-fix-backslashes*`.
+* **`c-parsing-error`** is a buffer-local variable, and
+  `c-indent-line`/`c-indent-region` `let`-bind it - which is
+  `call-with-buffer-local` (`buffer.scm`), not `parameterize`.
+* **`(run-hooks 'c-special-indent-hook)` needs two things the tree's
+  `run-hooks` cannot do.** The value the gnu style installs is
+  `(t c-gnu-impose-minimum)`: the `t` means "run the global value too"
+  (`add-hook` LOCAL, `subr.el:2317`), and the entry is a *symbol*,
+  because the style data is Emacs's. `c-run-special-indent-hook` is
+  `run_hook_with_args` (`eval.c:2999`) for this one hook: it walks the
+  list, skips a `#t` and runs the parameter's value for it, and
+  resolves a symbol through `c-lineup-function` (the cc-engine
+  registry cc-align fills). Measured: with the gnu style and
+  `defun-block-intro` forced to 0, `c-indent-line` returns 0 and the
+  line ends at column 1 - the hook's work shows after the return value
+  is computed, exactly as in Emacs.
+* **`(floor X Y)`**: Emacs's `floor` takes an optional divisor;
+  Guile's takes one argument. `c-progress-update`'s percentage is
+  written `(floor (/ X Y))`, with the reason in the source.
+* **`(+ (current-column) 1)`** where Elisp says `1+`: `1+` is Guile
+  core but not imported by a library.
+
+## Primitives that had to land first
+
+Each is at its Emacs home: `backward-delete-char-untabify` and its
+method option (`simple.el`, in `simple.scm`), `insert-tab`
+(`indent.el`, in `indent.scm`; its `abbrev-mode` branch is dropped - no
+abbrev.el), `indent-code-rigidly` (`lisp-mode.el`, in `lisp-mode.scm`),
+`time-convert`'s four arms (`timefns.c`, in `timefns.scm`), `aset`
+(`data.c`, in `data.scm`), `set!comment-start`/`set!comment-end`
+(`newcomment.scm`), `c-font-lock-flush`, `c-put-overlay`,
+`c-delete-overlay`, `c-region-is-active-p` and `c-with-string-fences`
+(`cc-defs.el`, in `cc-defs.scm`), and the twelve defcustoms cc-cmds
+reads (`cc-vars.el`, in `cc-vars.scm`).
+
+**`c-with-string-fences` is ported with its two functions stubbed by
+seams.** `c-restore-string-fences` and `c-clear-string-fences` are
+`cc-mode.el:1411`/`:1343` and exist for the multi-line-string change
+machinery (`c-min-syn-tab-mkr`/`c-max-syn-tab-mkr`, maintained by
+`c-before-change`/`c-after-change`), which is not ported. Both begin
+`(when (and c-min-syn-tab-mkr c-max-syn-tab-mkr) ...)`, so with the
+markers unmade they are Emacs's own no-ops; `cc-defs.scm` holds
+`*c-restore-string-fences-function*`/`*c-clear-string-fences-function*`
+(default `#f`) and `cc-mode.scm` will install the real two.
+
+**`c-syntactic-indentation` is buffer-local in Emacs**
+(`make-variable-buffer-local`, `cc-vars.el:530`) and was a bare
+parameter here; it has the accessor pair now
+(`(c-syntactic-indentation)`/`(set!c-syntactic-indentation v)`), as the
+style variables do. `c-toggle-syntactic-indentation` writes the slot.
+
+## Two cc-engine bugs this tranche found, both pre-existing
+
+1. **`c-add-stmt-syntax` took the `set!`-in-test trap.** Its inexpr
+   clause is
+   `((save-excursion (goto-char paren-pos) (setq inexpr ...)) ...)`,
+   where the C's *test* is the `setq`'s value. Guile's `set!` answers
+   the unspecified value, which is true, so the clause matched with
+   `inexpr` `#f` and `(car inexpr)` raised. Found by the cc-cmds
+   differential on `fixture-align.c`; fixed with
+   `(begin (set! inexpr ...) inexpr)`.
+2. **`c-invalidate-state-cache` had lost its `here` argument.**
+   `cc-engine.el`'s is `(c-invalidate-state-cache here)` and passes
+   `here` to `-1`; the port took no argument and passed
+   `(c-state-cache-invalid-pos)`, which is a different value and made
+   the wrapper unusable from a change function. Fixed, and the two
+   test callers pass `(point)`.
+
+## The finding: cc-mode's change hooks are the gate
+
+`c-indent-line` edits the buffer, and cc-mode's caches (the
+literal-position cache, the parse-state cache and the
+syntactic-whitespace properties) are invalidated by `cc-mode.el`'s
+`c-before-change`/`c-after-change`, which `c-basic-common-init` puts on
+`before-change-functions`/`after-change-functions`. **Neither is
+ported**, so a replay that reindents line after line reads stale
+caches: the `tools/cc-cmds-diff/` differential is 75/99 identical, and
+every difference is on a fixture where a line's new indentation changes
+the next line's parse (`fixture-align.c`, `fixture-align.cpp`,
+`fixture-qt.cpp`). The per-line table (`tools/cc-indent-diff/`) agrees
+on every line, so the arithmetic is not the difference. Simulating the
+invalidation after each `c-indent-line` makes `fixture-align.c`
+identical, which names the cause; the residual `fixture-qt.cpp` access
+labels show the *before*-change half matters too.
+
+That makes the change-function tranche of `cc-mode.el` the next piece
+of the approved order, ahead of the electric keys: it is what makes
+cc-cmds' own edits safe.

@@ -21,7 +21,7 @@
     (only (schemacs editor buffer)
           buffer-local-value set-buffer-local-value! current-buffer)
     ;; `aref`'s char-table arm - `CHAR_TABLE_REF` (`char_table_ref`).
-    (only (schemacs editor chartab) char-table? char-table-ref)
+    (only (schemacs editor chartab) char-table? char-table-ref char-table-set)
     )
 
   (export
@@ -29,7 +29,7 @@
    default-value set-default default-boundp
    keywordp
    /=
-   aref
+   aref aset
    ;; `alloc.c''s `make-bool-vector' and `bool-vector', and `data.c''s
    ;; predicates and bitwise operations. See "Bool vectors" below.
    make-bool-vector bool-vector bool-vector-p bool-vector?
@@ -161,6 +161,42 @@
         (if (or (< idx 0) (>= idx (vector-length array)))
             (error "Args out of range: ~s, ~s" array idx)
             (vector-ref array idx)))
+       (else
+        (error "Wrong type argument: arrayp, ~s" array))))
+
+    (define (aset array idx newelt)
+      ;; GNU Emacs's `aset' (`data.c:2619`): "Store into the element of
+      ;; ARRAY at index IDX the value NEWELT. Return NEWELT. ARRAY may
+      ;; be a vector, a string, a char-table or a bool-vector. IDX starts
+      ;; at 0."
+      ;;
+      ;; The C's string arms write a character code; the record and
+      ;; byte-code arms are not carried, as in `aref' above.
+      ;;--------------------------------------------------------------
+      (cond
+       ((string? array)
+        (if (or (< idx 0) (>= idx (string-length array)))
+            (error "Args out of range: ~s, ~s" array idx)
+            (begin
+              ;; "If ARRAY is a multibyte string, NEWELT and the previous
+              ;; character at index IDX must both be ASCII" - this
+              ;; tree's strings hold whole characters, and a one-ASCII-
+              ;; character write is the case cc-mode makes.
+              (string-set! array idx (if (char? newelt)
+                                         newelt
+                                         (integer->char newelt)))
+              newelt)))
+       ((bool-vector? array)
+        (if (or (< idx 0) (>= idx (%bool-vector-length array)))
+            (error "Args out of range: ~s, ~s" array idx)
+            (begin (bool-vector-set! array idx newelt) newelt)))
+       ((char-table? array)
+        (char-table-set array idx newelt)
+        newelt)
+       ((vector? array)
+        (if (or (< idx 0) (>= idx (vector-length array)))
+            (error "Args out of range: ~s, ~s" array idx)
+            (begin (vector-set! array idx newelt) newelt)))
        (else
         (error "Wrong type argument: arrayp, ~s" array))))
 

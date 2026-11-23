@@ -30,6 +30,7 @@
     (schemacs editor insdel)
     (except (schemacs editor buffer)  *current-buffer*)
     (except (schemacs editor files)  default-directory)
+    (schemacs editor cc-cmds)
     (schemacs editor replace)
     (schemacs editor diredc)
     (schemacs editor help-fns)
@@ -250,6 +251,7 @@
     *auto-mode-alist*
     *auto-mode-case-fold*
     *auto-mode-interpreter-regexp*
+    *backward-delete-char-untabify-method*
     *barf-if-buffer-read-only-function*
     *before-change-functions*
     *before-init-hook*
@@ -271,18 +273,27 @@
     *byte-count-to-string-function*
     *c++-font-lock-extra-types*
     *c-asymmetry-fontification-flag*
+    *c-auto-align-backslashes*
     *c-auto-newline-analysis*
     *c-backslash-column*
     *c-backslash-max-column*
+    *c-backspace-function*
     *c-basic-offset*
     *c-block-comment-prefix*
     *c-buffer-is-cc-mode*
     *c-cleanup-list*
+    *c-clear-string-fences-function*
     *c-commas-bound-stmts*
     *c-comment-only-line-offset*
     *c-comment-prefix-regexp*
+    *c-cpp-indent-to-body-directives*
     *c-default-style*
+    *c-defun-tactic*
+    *c-delete-function*
     *c-doc-comment-style*
+    *c-echo-syntactic-information-p*
+    *c-electric-pound-behavior*
+    *c-fix-backslashes*
     *c-font-lock-extra-types*
     *c-font-lock-fontify-region-function*
     *c-fontify-new-found-type-function*
@@ -290,8 +301,10 @@
     *c-hanging-braces-alist*
     *c-hanging-colons-alist*
     *c-hanging-semi&comma-criteria*
+    *c-ignore-auto-fill*
     *c-indent-comment-alist*
     *c-indent-comments-syntactically-p*
+    *c-insert-tab-function*
     *c-label-minimum-indentation*
     *c-lang-const-expansion*
     *c-lang-var-overrides*
@@ -299,6 +312,7 @@
     *c-last-identifier-range*
     *c-macro-start*
     *c-mark-wrong-style-of-comment*
+    *c-max-one-liner-length*
     *c-maybe-labelp*
     *c-noise-macro-names*
     *c-noise-macro-with-parens-names*
@@ -308,19 +322,24 @@
     *c-offsets-alist*
     *c-old-style-variable-behavior*
     *c-parse-and-markup-<>-arglists*
+    *c-progress-interval*
     *c-promote-possible-types*
     *c-record-found-types*
     *c-record-ref-identifiers*
     *c-record-type-identifiers*
     *c-report-syntactic-errors*
+    *c-require-final-newline*
+    *c-restore-string-fences-function*
     *c-restricted-<>-arglists*
     *c-special-indent-hook*
     *c-strict-syntax-p*
+    *c-string-fences-set-flag*
     *c-style-variables-are-local-p*
     *c-syntactic-context*
     *c-syntactic-element*
     *c-syntactic-indentation*
     *c-syntactic-indentation-in-macros*
+    *c-tab-always-indent*
     *c-used-syntactic-symbols*
     *c-warn-ids-with-dollar*
     *calculate-lisp-indent-function*
@@ -1012,6 +1031,7 @@
     apply-modifiers
     apply-partially
     aref
+    aset
     assign-row
     assoc-default
     assoc-delete-all
@@ -1033,6 +1053,7 @@
     back-to-indentation
     backward-char
     backward-delete-char
+    backward-delete-char-untabify
     backward-kill-paragraph
     backward-kill-sentence
     backward-kill-sexp
@@ -1188,6 +1209,7 @@
     c-alnum
     c-alpha
     c-annotation-face
+    c-append-backslashes-forward
     c-append-lower-brace-pair-to-state-cache
     c-append-syntax
     c-append-to-state-cache
@@ -1204,6 +1226,7 @@
     c-back-over-member-initializers
     c-backslash-column
     c-backslash-max-column
+    c-backslash-region
     c-backward-<>-arglist
     c-backward-comments
     c-backward-over-enum-header
@@ -1274,6 +1297,8 @@
     c-default-value-sentence-end
     c-define-lang-constant
     c-define-lang-constant-here
+    c-delete-backslashes-forward
+    c-delete-overlay
     c-delq-from-dotted-list
     c-determine-+ve-limit
     c-determine-limit
@@ -1310,6 +1335,7 @@
     c-find-decl-spots
     c-find-decl-syntactic-pos
     c-find-invalid-doc-markup
+    c-fn-region-is-active-p
     c-font-lock-<>-arglists
     c-font-lock-c++-lambda-captures
     c-font-lock-c++-modules
@@ -1326,6 +1352,7 @@
     c-font-lock-enclosing-decls
     c-font-lock-enum-body
     c-font-lock-enum-tail
+    c-font-lock-flush
     c-font-lock-ids-with-dollar
     c-font-lock-invalid-single-quotes
     c-font-lock-keywords
@@ -1417,10 +1444,15 @@
     c-in-literal
     c-in-method-def-p
     c-in-requires-or-at-end-of-clause
+    c-indent-command
     c-indent-comment-alist
     c-indent-comments-syntactically-p
+    c-indent-exp
+    c-indent-line
+    c-indent-line-or-region
     c-indent-multi-line-block
     c-indent-one-line-block
+    c-indent-region
     c-indentation-style
     c-init-bs-cache
     c-init-language-vars
@@ -1581,6 +1613,7 @@
     c-new-id-end
     c-new-id-is-type
     c-new-id-start
+    c-newline-and-indent
     c-next-single-property-change
     c-no-bracelist-cache
     c-no-comment-end-of-macro
@@ -1599,6 +1632,10 @@
     c-point
     c-preprocessor-face-name
     c-previous-single-property-change
+    c-progress-fini
+    c-progress-info
+    c-progress-init
+    c-progress-update
     c-ps-state-cache-pos
     c-pull-open-brace
     c-punctuation-in
@@ -1609,6 +1646,7 @@
     c-put-font-lock-string-face
     c-put-in-sws
     c-put-is-sws
+    c-put-overlay
     c-put-string-fence
     c-query-and-set-macro-start
     c-query-macro-start
@@ -1618,6 +1656,7 @@
     c-record-ref-id
     c-record-type-id
     c-reference-face-name
+    c-region-is-active-p
     c-register-emacs-variable-reader!
     c-register-lineup-function!
     c-register-offset-function-name!
@@ -1630,6 +1669,7 @@
     c-renarrow-state-cache
     c-restore-<->-as-parens
     c-restore-<>-properties
+    c-run-special-indent-hook
     c-safe
     c-safe-position
     c-safe-scan-lists
@@ -1663,6 +1703,7 @@
     c-setup-filladapt
     c-setup-paragraph-variables
     c-shift-line-indentation
+    c-show-syntactic-information
     c-simple-decl-matchers
     c-simple-skip-symbol-backward
     c-skip-comments-and-strings
@@ -1723,9 +1764,17 @@
     c-sws-lit-type
     c-syntactic-content
     c-syntactic-end-of-macro
+    c-syntactic-indentation
+    c-syntactic-information-on-region
     c-syntactic-re-search-forward
     c-syntactic-skip-backward
     c-syntax-table-hwm
+    c-toggle-auto-hungry-state
+    c-toggle-auto-newline
+    c-toggle-comment-style
+    c-toggle-electric-state
+    c-toggle-hungry-state
+    c-toggle-syntactic-indentation
     c-trim-found-types
     c-trim-lit-pos-cache
     c-truncate-bs-cache
@@ -1737,12 +1786,14 @@
     c-up-list-backward
     c-up-list-forward
     c-update-brace-stack
+    c-update-modeline
     c-upper
     c-use-category
     c-valid-offset
     c-vsemi-status-unknown-p
     c-whack-state-after
     c-whack-state-before
+    c-with-string-fences
     c-with-syntax-table
     c-ws*-string-limit-regexp
     cache-long-scans
@@ -2785,6 +2836,7 @@
     image-type-available-p
     imports-path
     indent-according-to-mode
+    indent-code-rigidly
     indent-for-comment
     indent-line-function
     indent-line-ignored-functions
@@ -2821,6 +2873,7 @@
     insert-pair
     insert-pair-alist
     insert-parentheses
+    insert-tab
     install-fns-textprop!
     install-intervals-set-text-properties!
     install-ls-lisp-files!
@@ -3977,8 +4030,11 @@
     set!c-state-point-min
     set!c-state-point-min-lit-start
     set!c-state-point-min-lit-type
+    set!c-syntactic-indentation
     set!cache-long-scans
     set!cd-path
+    set!comment-end
+    set!comment-start
     set!dired-actual-switches!
     set!dired-buffers!
     set!dired-directory!
@@ -4572,6 +4628,7 @@
     textget
     texts-glyph
     texts-width
+    time-convert
     time-equal-p
     time-less-p
     time-since

@@ -92,7 +92,8 @@
     )
 
   (export
-   comment-start comment-start-skip comment-end comment-end-skip
+   comment-start set!comment-start comment-start-skip
+   comment-end set!comment-end comment-end-skip
    comment-column comment-add comment-fill-column comment-inline-offset
    comment-use-syntax *comment-use-global-state*
    comment-insert-comment-function
@@ -155,10 +156,19 @@
       ;; start a comment, or nil if comments cannot be inserted."
       (buffer-local-value (current-buffer) 'comment-start #f))
 
+    (define (set!comment-start value)
+      ;; What `(setq comment-start STRING)' does in a buffer - a
+      ;; mode's `setq-local' and cc-mode's
+      ;; `c-toggle-comment-style' (`cc-cmds.el:396') both do it.
+      (set-buffer-local-value! (current-buffer) 'comment-start value))
+
     (define (comment-end)
       ;; `comment-end' (`newcomment.el:151'): "String to insert to end a
       ;; comment, or empty if comments extend to the end of the line."
       (buffer-local-value (current-buffer) 'comment-end ""))
+
+    (define (set!comment-end value)
+      (set-buffer-local-value! (current-buffer) 'comment-end value))
 
     (define (comment-start-skip)
       ;; `comment-start-skip' (`newcomment.el:123'): "Regexp to match

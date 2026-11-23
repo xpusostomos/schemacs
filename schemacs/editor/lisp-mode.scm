@@ -69,14 +69,19 @@
     (only (schemacs editor editfns)
           bolp eobp eolp point point-max line-beginning-position
           line-end-position forward-line goto-char preceding-char
-          char-after char-before buffer-substring save-excursion point-min)
+          char-after char-before buffer-substring save-excursion point-min
+          ;; `indent-code-rigidly` (`lisp-mode.el:1650`), below.
+          delete-region point-marker)
     (only (schemacs editor marker) copy-marker markerp marker-position set-marker)
-    (only (schemacs editor indentc) current-column)
+    (only (schemacs editor indentc)
+          current-column current-indentation indent-to)
     (only (schemacs editor search) looking-at re-search-forward
           match-beginning match-end save-match-data syntax-propertize-rules)
     (only (scheme read) read)
     (only (guile) module-ref open-input-string last-pair resolve-module)
-    (only (schemacs editor subr) make-syntax-table)
+    ;; `indent-code-rigidly`'s loop: Elisp's `while` answers nil.
+    (only (schemacs syntax) while-e)
+    (only (schemacs editor subr) make-syntax-table nthcdr)
     ;; the mode's parents, and the variables it copies
     (only (schemacs editor simple) fundamental-mode)
     (only (schemacs editor prog-mode) prog-mode)
@@ -117,6 +122,7 @@
           ;; fills it, and a file can.
           lisp-indent-local-overrides
           lisp-comment-indent indent-sexp
+          indent-code-rigidly
           ;; the state `calculate-lisp-indent' leaves for the
           ;; `lisp-indent-function' variable's value to read
           *calculate-lisp-indent-last-sexp*
@@ -1940,5 +1946,45 @@ Lisps."
       (setq-local 'comment-end-skip "[ \t]*\\(\\s>\\||#\\)")
       (setq-local 'font-lock-comment-end-skip "|#")
       (setq-local 'syntax-propertize-function lisp-mode-syntax-propertize))
+
+    ;; ---------------------------------------------------------------
+    ;; `indent-code-rigidly' (`lisp-mode.el:1650'), the last function
+    ;; before `(provide 'lisp-mode)`. It is what `c-indent-command`
+    ;; (`cc-cmds.el`) calls for its numeric-argument branch.
+    ;;--------------------------------------------------------------
+    (define-command (indent-code-rigidly start end arg . rest)
+      "Indent all lines of code, starting in the region, sideways by ARG columns.
+Does not affect lines starting inside comments or strings, assuming that
+the start of the region is not inside them.
+
+Called from a program, takes args START, END, COLUMNS and NOCHANGE-REGEXP.
+The last is a regexp which, if matched at the beginning of a line,
+means don't indent that line."
+      (interactive "r\np")
+      (let ((nochange-regexp (and (pair? rest) (car rest)))
+            (state #f))
+        (save-excursion
+          (goto-char end)
+          (set! end (point-marker))
+          (goto-char start)
+          (or (bolp)
+              (set! state (parse-partial-sexp
+                           (point)
+                           (begin (forward-line 1) (point))
+                           #f #f state)))
+          (while-e (< (point) end)
+            (or (car (nthcdr 3 state))
+                (and nochange-regexp
+                     (looking-at nochange-regexp))
+                ;; If line does not start in string, indent it
+                (let ((indent (current-indentation)))
+                  (delete-region (point)
+                                 (begin (skip-chars-forward " \t") (point)))
+                  (or (eolp)
+                      (indent-to (max 0 (+ indent arg)) 0))))
+            (set! state (parse-partial-sexp
+                         (point)
+                         (begin (forward-line 1) (point))
+                         #f #f state))))))
 
     ))

@@ -69,6 +69,7 @@
           time-less-p
           time-since
           time-subtract
+          time-convert
           )
 
   (begin
@@ -185,6 +186,41 @@
       ;;--------------------------------------------------------------
       (let ((now (%now-arguments)))
         (make-lisp-time (car now) (cdr now))))
+
+    (define (time-convert time . form-args)
+      ;; GNU Emacs's `time-convert' (`timefns.c:1783'): "Convert TIME
+      ;; value to a Lisp timestamp of the given FORM. Truncate the
+      ;; returned value toward minus infinity."
+      ;;
+      ;; The four arms are `integer', `list', a positive integer and
+      ;; `t'; the C's default with no FORM is `c->t' when
+      ;; `current-time-list' is nil, which is Emacs 31's default. All of
+      ;; them are computed from the `(SECONDS . PICOSECONDS)' pair
+      ;; `lisp-time-arguments' answers, since a difference and a time
+      ;; are the same shape here.
+      ;;--------------------------------------------------------------
+      (let* ((t (lisp-time-arguments time))
+             (secs (car t))
+             (psec (cdr t))
+             (form (if (pair? form-args) (car form-args) #t)))
+        (cond
+         ((eq? form 'integer)
+          ;; `ticks_hz_seconds': floor of the time in seconds.
+          (floor (/ (+ (* secs 1000000000000) psec) 1000000000000)))
+         ((eq? form 'list)
+          ;; `ticks_hz_list4'.
+          (make-lisp-time secs (quotient psec 1000)))
+         ((eq? form #t)
+          ;; `(TICKS . PHZ)': "a suitable clock frequency in ticks per
+          ;; second". The C scales to a power of 10 that fits a fixnum;
+          ;; a picosecond resolution is the same choice here.
+          (cons (floor (/ (+ (* secs 1000000000000) psec) 1000)) 1000))
+         ((integer? form)
+          ;; `(TICKS . FORM)'.
+          (cons (floor (/ (* (+ (* secs 1000000000000) psec) form)
+                          1000000000000))
+                form))
+         (else (error "Invalid time form: ~a" form)))))
 
     (define (float-time . rest)
       ;; GNU Emacs's `float-time': "Convert TIME to a floating-point

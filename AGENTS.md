@@ -17230,3 +17230,68 @@ lists them - a named departure.
 `electric-indent-mode` does not exist here, so `c-basic-common-init`'s
 `(setq electric-indent-inhibit t)` and the two sync hooks wait for it -
 record that as a named departure when cc-mode.el lands.
+
+# Handoff - cc-mode step 10: cc-cmds' indentation command layer
+# (2026-11-23)
+
+`schemacs/editor/cc-cmds.scm` is new: `c-indent-line`,
+`c-newline-and-indent`, `c-show-syntactic-information`,
+`c-syntactic-information-on-region`, `c-update-modeline`, the six
+toggles, `c-indent-command`, `c-indent-exp`, `c-indent-region`,
+`c-fn-region-is-active-p`, `c-indent-line-or-region`, the progress
+helpers and the `c-backslash-region` family - with the prerequisites
+that had to land first (see DEPARTURES.md's same-day section). The
+electric keys, the motions, the defun/declaration cluster and the
+filling half are the next tranches; the file header lists them.
+
+## Before touching it
+
+* **`cc-cmds-tests.scm` (26) is every test passing.** Each edits a
+  *fresh* buffer - one edit per buffer - because cc-mode's caches are
+  not invalidated between edits yet (see below). The expectations are
+  Emacs 31.1's, measured first.
+* **A replay must set what `c-basic-common-init` will**: the mode's
+  `indent-line-function` (else `c-indent-command` calls
+  `indent-relative` and silently does nothing), the syntax table, the
+  language vars, the style - and `c-block-comment-flag` if the mode
+  line's `*` matters.
+* **`c-run-special-indent-hook` resolves the style hook's *symbols***:
+  a test (or a session) that never loads `(schemacs editor cc-align)`
+  has an empty line-up registry, so `c-gnu-impose-minimum` does
+  nothing. Import it.
+* **`set!` in a `while`/`and` test**: `c-indent-exp` hung on
+  `(and (set! beg ...) (set! end ...))` - a `set!` answers the
+  unspecified value, so the loop never stopped. Write
+  `(begin (set! x e) x)` wherever the C's `setq` value is the test.
+  This is the same class as the earlier `(set! ...)`-in-test fixes
+  and it cost a real hang here.
+* **`#{1+}#`/`#{1-}#`**: `1+` is Guile core but not imported by a
+  library; the compiler's warning is the only evidence. `(+ x 1)`.
+
+## The real gate: cc-mode.el's change hooks
+
+`c-indent-line` edits the buffer. cc-mode invalidates its caches - the
+literal-position cache, the parse-state cache, the syntactic-whitespace
+ladder - from `c-before-change`/`c-after-change`, which
+`c-basic-common-init` installs on the two change-hook lists. **Neither
+is ported**, so the whole-buffer differential
+(`tools/cc-cmds-diff/`) is 75/99 and every difference is on a fixture
+where one line's reindentation changes the next line's parse. Its
+README has the diagnosis and the simulation that confirms it.
+
+So the next step in the approved order is **`cc-mode.el`'s change
+functions** (`c-before-change`, `c-after-change` and the pieces they
+call that are not yet here: `c-unfind-enclosing-token`,
+`c-unfind-coalesced-tokens`, `c-before-change-de-typedef`,
+`c-clear-char-property-with-value`, `c-get-state-before-change-functions`,
+`c-just-done-before-change`, the ml-string fence machinery), then the
+electric keys, then the motions and the filling half. `cc-mode.el`'s
+mode definitions (`c-basic-common-init`, `c-common-init`, the derived
+modes) follow, and with them the `.c`/`.h` milestone.
+
+## Also landed
+
+The two cc-engine bug fixes are in the DEPARTURES section above
+(`c-add-stmt-syntax`'s set!-in-test, `c-invalidate-state-cache`'s lost
+`here`). `imports.scm` is regenerated (118 libraries, 4892 names) and
+`loadup.scm` carries cc-cmds.

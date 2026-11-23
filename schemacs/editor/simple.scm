@@ -138,6 +138,9 @@
           line-beginning-position
           line-end-position goto-char mark-marker message point point-max
           preceding-char region-beginning region-end save-excursion
+          ;; `backward-delete-char-untabify`'s hungry/all branch bounds
+          ;; its skip with it (`editfns.c`'s `constrain-to-field`).
+          constrain-to-field
           text-editor-cursor-column text-editor-get-end-of-line
           text-editor-get-start-of-line
           ;; `count-lines` narrows to its range and counts inside it -
@@ -155,6 +158,8 @@
     ;; The line options are `defcustom's in Emacs, so a user can set them
     ;; through Customize as well as by name.
     (only (schemacs editor custom) define-custom)
+    ;; `backward-delete-char-untabify`'s loop: Elisp's `while` answers nil.
+    (only (schemacs syntax) while-e)
     ;; `count-lines` is a walk of `re-search-forward` matches, wrapped in
     ;; `save-match-data` as its C counterpart's walk is wrapped by the
     ;; Lisp.
@@ -245,6 +250,7 @@
    *select-active-regions* *yank-pop-change-selection*
    *pending-undo-list* *prefix-cu* *prefix-digits* *prefix-negative*
    amalgamating-command? backward-char backward-delete-char
+   *backward-delete-char-untabify-method* backward-delete-char-untabify
    backward-kill-word backward-word backward-word-position
    beginning-of-buffer beginning-of-line clear-prefix! delete-char
    end-of-buffer end-of-line exchange-point-and-mark forward-char
@@ -784,6 +790,65 @@ This has no effect when the variable `line-move-visual' is non-nil."
       "Delete N characters before point."
       (interactive "p")
       (delete-char (- count)))
+
+    ;; `simple.el:6675' - the option `backward-delete-char-untabify'
+    ;; reads, declared beside it as Emacs declares it (Emacs 31.1's
+    ;; `defcustom' is at `:6675', the function at `:6685').
+    (define-custom *backward-delete-char-untabify-method* 'untabify
+      "The method for untabifying when deleting backward.
+Can be `untabify' -- turn a tab to many spaces, then delete one space;
+       `hungry' -- delete all whitespace, both tabs and spaces;
+       `all' -- delete all whitespace, including tabs, spaces and newlines;
+       nil -- just delete one character."
+      :type '(choice (const untabify) (const hungry) (const all) (const nil))
+      :version "20.3"
+      :group 'killing)
+
+    (define-command (backward-delete-char-untabify arg . rest)
+      ;; GNU Emacs's `backward-delete-char-untabify' (`simple.el:6685').
+      ;;
+      ;; **Departures, all of them things this tree does not have**:
+      ;;
+      ;;  * KILLP is accepted and ignored, because `backward-delete-char'
+      ;;    here takes only N (its own port records the missing killflag);
+      ;;    Emacs's callers here pass KILLP from a prefix argument, and
+      ;;    `c-electric-backspace' passes none at all. It is a rest
+      ;;    parameter because that one-argument call is the live one -
+      ;;    Emacs's `&optional killp'.
+      ;;  * the `use-region-p' + `delete-active-region' branch is not
+      ;;    carried: `delete-active-region' is not ported, and the
+      ;;    `region-extract-function' it would call is not either (the
+      ;;    same gap `backward-delete-char''s port names).
+      "Delete characters backward, changing tabs into spaces.
+The exact behavior depends on `backward-delete-char-untabify-method'.
+
+Delete ARG chars, and kill (save in kill ring) if KILLP is non-nil."
+      (interactive "*p\nP")
+      (if (eq? (*backward-delete-char-untabify-method*) 'untabify)
+          (let ((count arg))
+            (save-excursion
+              (while-e (and (> count 0) (not (bobp)))
+                (if (char=? (preceding-char) #\tab)
+                    (let ((col (current-column)))
+                      (forward-char -1)
+                      (set! col (- col (current-column)))
+                      (insert-char #\space col)
+                      (delete-char 1)))
+                (forward-char -1)
+                (set! count (- count 1))))))
+      (let* ((skip (cond ((eq? (*backward-delete-char-untabify-method*) 'hungry)
+                          " \t")
+                         ((eq? (*backward-delete-char-untabify-method*) 'all)
+                          " \t\n\r")
+                         (else #f)))
+             (n (if skip
+                    (let* ((oldpt (point))
+                           (wh (- oldpt (save-excursion
+                                          (skip-chars-backward skip)
+                                          (constrain-to-field #f oldpt)))))
+                      (+ arg (if (zero? wh) 0 (- wh 1))))
+                    arg)))
+        (backward-delete-char n)))
 
     (define-command (kill-line uarg)
       "Kill N lines at point. With no argument, kill to the end of the

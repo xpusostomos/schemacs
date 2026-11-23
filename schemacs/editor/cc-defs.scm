@@ -55,7 +55,8 @@
     ;; `-e' forms are for the places where Emacs's answer is observable.
     (only (schemacs syntax) setq when-e)
     (only (schemacs editor intervals) get put)
-    (only (schemacs editor buffer) current-buffer buffer-local-value)
+    (only (schemacs editor buffer) current-buffer buffer-local-value
+          make-overlay overlay-put delete-overlay)
     (only (schemacs editor cl-seq)
           cl-set-difference cl-intersection cl-delete-duplicates)
     (only (schemacs editor fns) mapcan)
@@ -79,6 +80,11 @@
     (only (schemacs editor subr) with-silent-modifications car-safe cdr-safe)
     ;; `c-face-name-p' asks whether a face exists.
     (only (schemacs editor faces) face-list)
+    ;; `c-font-lock-flush' (`cc-defs.el:233') is `font-lock-flush'
+    ;; whenever it exists, which is the branch Emacs compiles on any
+    ;; Emacs 24 or later. There is no cycle: `font-lock.scm' imports
+    ;; nothing from the cc-* libraries.
+    (only (schemacs editor font-lock) font-lock-flush)
     ;; The property API `c-put-char-property' and friends stand on
     ;; (`textprop.c''s), which `cc-defs.el' reaches directly in Emacs.
     (only (schemacs editor textprop) put-text-property get-text-property
@@ -88,6 +94,9 @@
     ;; character at a time and set the match data on it, as the C's
     ;; `search-forward-regexp' does.
     (only (schemacs editor search) re-search-forward re-search-backward)
+    ;; `c-region-is-active-p' (`cc-defs.el:497') is `region-active-p'
+    ;; on any Emacs that has it, which is this one (`simple.el`'s).
+    (only (schemacs editor simple) region-active-p)
     (only (schemacs regexp-opt) regexp-opt))
 
   (export
@@ -99,7 +108,7 @@
    c--mapcan c--set-difference c--intersection c--delete-duplicates
    %c-true %c-false
    c-emacs-features c-with-syntax-table c-int-to-char c-characterp
-   c-keep-region-active
+   c-keep-region-active c-region-is-active-p
    c-register-emacs-variable-reader!
    c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
    *c-lang-var-overrides*
@@ -109,6 +118,10 @@
    c-make-keywords-re c-lang-constant-documentation c-literal-datum?
    c-major-mode-is *c-langs-are-parametric* *c-lang-const-expansion*
    c-save-buffer-state
+   c-font-lock-flush
+   c-put-overlay c-delete-overlay
+   c-with-string-fences *c-string-fences-set-flag*
+   *c-restore-string-fences-function* *c-clear-string-fences-function*
    c-syntax-table-hwm
    c-intersect-lists c-lookup-lists
    c-langelem-sym c-langelem-pos c-langelem-col c-langelem-2nd-pos
@@ -177,6 +190,13 @@
 
 (define (c-characterp arg)
   (char? arg))
+
+(define (c-region-is-active-p)
+  ;; `cc-defs.el:497': "Return t when the region is active. The
+  ;; determination of region activeness is different in both Emacs and
+  ;; XEmacs." Emacs's macro compiles the `region-active-p' arm when the
+  ;; function exists, which it does here.
+  (region-active-p))
 
 (define (c-keep-region-active)
   ;; `cc-defs.el:2092': "Do whatever is necessary to keep the region
@@ -924,6 +944,14 @@
     ((_ (bindings ...) body ...)
      (with-silent-modifications (let* (bindings ...) body ...)))))
 
+;; `c-font-lock-flush' (`cc-defs.el:233'): "Declare the region
+;; BEG...END's fontification as out-of-date. On XEmacs and older Emacsen,
+;; this refontifies that region immediately." Emacs's macro picks the
+;; arm with `fboundp` at expansion time; `font-lock-flush` exists here,
+;; so the answer is the procedure Emacs's chosen arm calls.
+(define (c-font-lock-flush beg end)
+  (font-lock-flush beg end))
+
 
 ;;----------------------------------------------------------------------
 ;; The character-property helpers (`cc-defs.el:1230'-`:1478')
@@ -1450,6 +1478,64 @@
   ;; none."
   (let ((pos (car-safe (cdr-safe (cdr-safe langelem)))))
     (and pos (if (null? pos) #f pos))))
+
+
+;;----------------------------------------------------------------------
+;; `c-with-string-fences' (`cc-defs.el:1774') and the overlay pair
+;; (`:1795')
+;;----------------------------------------------------------------------
+;; Emacs's flag is `let'-bound by the macro and by nothing else, so it
+;; is a parameter here. The two functions the macro calls,
+;; `c-restore-string-fences' and `c-clear-string-fences', are
+;; `cc-mode.el:1411' and `:1343' - **not ported**, because they exist
+;; for the multi-line-string change machinery (`c-min-syn-tab-mkr' and
+;; `c-max-syn-tab-mkr', maintained by `c-before-change' and
+;; `c-after-change'), which is the one large remaining tranche in
+;; cc-engine. Both begin `(when (and c-min-syn-tab-mkr
+;; c-max-syn-tab-mkr) ...)', so with those markers unmade they are
+;; Emacs's own no-ops; the seams default to #f and the macro degenerates
+;; to the body, exactly as an Emacs with no string fences behaves.
+;; `cc-mode.scm' will install the real two when it lands.
+(define *c-string-fences-set-flag* (make-parameter #f))
+(define *c-restore-string-fences-function* (make-parameter #f))
+(define *c-clear-string-fences-function* (make-parameter #f))
+
+(define-syntax c-with-string-fences
+  (syntax-rules ()
+    ((_ forms ...)
+     ;; Emacs:
+     ;;   (unwind-protect
+     ;;        (progn (unless c-string-fences-set-flag
+     ;;                 (c-restore-string-fences))
+     ;;               (let ((c-string-fences-set-flag t)) FORMS...))
+     ;;     (unless c-string-fences-set-flag (c-clear-string-fences)))
+     ;; The cleanup's test reads the *outer* value, the protected
+     ;; form's `let' having been unwound - which is why the value is
+     ;; saved before the wind.
+     (let ((outer (*c-string-fences-set-flag*)))
+       (dynamic-wind
+        (lambda () #f)
+        (lambda ()
+          (unless outer
+            (let ((f (*c-restore-string-fences-function*)))
+              (when f (f))))
+          (parameterize ((*c-string-fences-set-flag* #t))
+            forms ...))
+        (lambda ()
+          (unless outer
+            (let ((f (*c-clear-string-fences-function*)))
+              (when f (f))))))))))
+
+;; "Macros to put overlays (Emacs) or extents (XEmacs) on buffer text."
+;; The XEmacs arm is not carried; these are procedures because the
+;; macro's only difference is expansion.
+(define (c-put-overlay from to property value)
+  (let ((ol (make-overlay from to)))
+    (overlay-put ol property value)
+    ol))
+
+(define (c-delete-overlay overlay)
+  (delete-overlay overlay))
 
 )
 )

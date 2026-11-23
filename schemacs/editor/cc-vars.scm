@@ -26,6 +26,14 @@
     (only (schemacs editor cc-defs) c-upper c-lower
           c-register-emacs-variable-reader!)
     (only (schemacs editor fns) concat)
+    ;; The defaults of the three function-valued defcustoms added for
+    ;; cc-cmds: a function is a procedure here, so the defcustom holds
+    ;; the procedure rather than Emacs's symbol (`insert-tab' is
+    ;; `indent.el`'s, `backward-delete-char-untabify' is `simple.el`'s,
+    ;; `delete-char' is `cmds.c`'s).
+    (only (schemacs editor indent) insert-tab)
+    (only (schemacs editor simple) backward-delete-char-untabify)
+    (only (schemacs editor cmds) delete-char)
     (only (schemacs editor subr) regexp-unmatchable)
     (only (schemacs editor symbol-props) put get)
     ;; `c-default-value-sentence-end' (`cc-defs.el:580') calls
@@ -36,6 +44,14 @@
 
   (export c-make-font-lock-extra-types-blurb c-string-list-p
           *c-syntactic-indentation* *c-syntactic-indentation-in-macros*
+          c-syntactic-indentation set!c-syntactic-indentation
+          *c-tab-always-indent* *c-insert-tab-function*
+          *c-ignore-auto-fill* *c-defun-tactic*
+          *c-echo-syntactic-information-p*
+          *c-auto-align-backslashes* *c-backspace-function*
+          *c-delete-function* *c-require-final-newline*
+          *c-electric-pound-behavior* *c-progress-interval*
+          *c-max-one-liner-length* *c-cpp-indent-to-body-directives*
           *c-warn-ids-with-dollar* *c-mark-wrong-style-of-comment*
           *c-asymmetry-fontification-flag*
           *c-font-lock-extra-types* *c++-font-lock-extra-types*
@@ -136,6 +152,32 @@ also elsewhere in CC Mode to tell types from other identifiers."))
     ;;------------------------------------------------------------------
     ;; The defcustoms (parameters, per the tree's convention)
     ;;------------------------------------------------------------------
+    ;; `cc-vars.el:490' and `:512' - the two options TAB's behaviour
+    ;; stands on. `c-insert-tab-function' holds a procedure here (a
+    ;; symbol is not callable in Scheme); Emacs holds `'insert-tab'.
+    (define-custom *c-tab-always-indent* #t
+      "Controls the operation of the TAB key.
+If t, hitting TAB always just indents the current line.  If nil, hitting
+TAB indents the current line if point is at the left margin or in the
+line's indentation, otherwise it inserts a `real' tab character (see
+note).  If some other value (not nil or t), then tab is inserted only
+within literals (comments and strings), but the line is always
+reindented."
+      :type '(radio
+              (const :tag "TAB key always indents, never inserts TAB" t)
+              (const :tag "TAB key indents in left margin, otherwise inserts TAB" nil)
+              (other :tag "TAB key inserts TAB in literals, otherwise indents" other))
+      :group 'c)
+
+    (define-custom *c-insert-tab-function* insert-tab
+      "Function used when inserting a tab for \\[c-indent-command].
+Only used when `c-tab-always-indent' indicates a `real' tab character
+should be inserted.  Value must be a function taking no arguments.
+The default, `insert-tab', inserts either a tab or the equivalent
+number of spaces depending on the value of `indent-tabs-mode'."
+      :type 'function
+      :group 'c)
+
     (define-custom *c-syntactic-indentation* #t
       "Whether the indentation should be controlled by the syntactic context.
 
@@ -149,6 +191,15 @@ effect in this mode, nor any of the indentation associated variables,
 e.g. `c-special-indent-hook'."
       :type 'boolean
       :group 'c)
+
+    ;; `(make-variable-buffer-local 'c-syntactic-indentation)'
+    ;; (`cc-vars.el:530'): the buffer-local entry wins over the
+    ;; parameter, the pattern the style variables use.
+    (define (c-syntactic-indentation)
+      (buffer-local-value (current-buffer) 'c-syntactic-indentation
+                          (*c-syntactic-indentation*)))
+    (define (set!c-syntactic-indentation value)
+      (set-buffer-local-value! (current-buffer) 'c-syntactic-indentation value))
 
     (define-custom *c-syntactic-indentation-in-macros* #t
       "Enable syntactic analysis inside macros.
@@ -166,6 +217,41 @@ handle this in most cases.  If this problem occurs, it's usually
 countered easily by surrounding the statements by a block (or even
 better with the \"do { ... } while (0)\" trick)."
       :type 'boolean
+      :group 'c)
+
+    (define-custom *c-defun-tactic* 'go-outward
+      "Whether functions are recognized inside, e.g., a class.
+This is used by `c-beginning-of-defun' and like functions.
+
+Its value is one of:
+ t           -- Functions are recognized only at the top level.
+ go-outward  -- Nested functions are also recognized.  Should a function
+                command hit the beginning/end of a nested scope, it will
+                carry on at the less nested level."
+      :version "24.1"
+      :type '(radio
+              (const :tag "Functions are at the top-level" t)
+              (const :tag "Functions are also recognized inside declaration scopes" go-outward))
+      :group 'c)
+
+    (define-custom *c-ignore-auto-fill* '(string cpp code)
+      "List of contexts in which automatic filling never occurs.
+If Auto Fill mode is active, it will be temporarily disabled if point
+is in any context on this list.  It's e.g. useful to enable Auto Fill
+in comments only, but not in strings or normal code.  The valid
+contexts are:
+
+ string  -- inside a string or character literal
+ c       -- inside a C style block comment
+ c++     -- inside a C++ style line comment
+ cpp     -- inside a preprocessor directive
+ code    -- anywhere else, i.e. in normal code"
+      :type '(set
+              (const :tag "String literals" string)
+              (const :tag "C style block comments" c)
+              (const :tag "C++ style line comments" c++)
+              (const :tag "Preprocessor directives" cpp)
+              (const :tag "Normal code" code))
       :group 'c)
 
     ;; The three Objective-C line-up parameters (`cc-vars.el:1169'-`:1215').
@@ -936,6 +1022,66 @@ the value set here overrides the style system (there is a variable
 
 (c-style-variable-register! 'c-backslash-max-column c-backslash-max-column set!c-backslash-max-column *c-backslash-max-column*)
 
+(define-custom *c-auto-align-backslashes* #t
+  "Align automatically inserted line continuation backslashes.
+When line continuation backslashes are inserted automatically for line
+breaks in multiline macros, e.g. by \\[c-context-line-break], they are
+aligned with the other backslashes in the same macro if this flag is
+set.  Otherwise the inserted backslashes are preceded by a single
+space."
+  :type 'boolean
+  :group 'c)
+
+(define-custom *c-backspace-function* backward-delete-char-untabify
+  "Function called by `c-electric-backspace' when deleting backwards."
+  :type 'function
+  :group 'c)
+
+(define-custom *c-delete-function* delete-char
+  "Function called by `c-electric-delete-forward' when deleting forwards."
+  :type 'function
+  :group 'c)
+
+(define-custom *c-require-final-newline*
+  '((c-mode . #t) (c++-mode . #t) (objc-mode . #t))
+  "Controls whether a final newline is ensured when the file is saved.
+The value is an association list that for each language mode specifies
+the value to give to `require-final-newline' at mode initialization;
+see that variable for details about the value.  If a language isn't
+present on the association list, CC Mode won't touch
+`require-final-newline' in buffers for that language."
+  :type 'sexp
+  :group 'c)
+
+(define-custom *c-electric-pound-behavior* #f
+  "List of behaviors for electric pound insertion.
+Only currently supported behavior is `alignleft'."
+  :type '(set (const alignleft))
+  :group 'c)
+
+(define-custom *c-progress-interval* 5
+  "Interval used to update progress status during long re-indentation.
+If a number, percentage complete gets updated after each interval of
+that many seconds.  To inhibit all messages during indentation, set
+this variable to nil."
+  :type 'integer
+  :group 'c)
+
+(define-custom *c-max-one-liner-length* 80
+  "Maximum length of line that clean-up \"one-liner-defun\" will compact to.
+Zero or nil means no limit."
+  :type 'integer
+  :group 'c)
+
+(define-custom *c-cpp-indent-to-body-directives* '("pragma")
+  "Preprocessor directives which will be indented as statements.
+
+A list of Preprocessor directives which when reindented, or newly
+typed in, will cause the \"#\" introducing the directive to be
+indented as a statement."
+  :type '(repeat string)
+  :group 'c)
+
 (define-custom *c-strict-syntax-p* #f
   "If non-nil, all syntactic symbols must be found in `c-offsets-alist'.
 If the syntactic symbol for a particular line does not match a symbol
@@ -946,6 +1092,11 @@ and the syntactic symbol is ignored.
 This variable is considered obsolete; it doesn't work well with lineup
 functions that return nil to support the feature of using lists on
 syntactic elements in `c-offsets-alist'."
+  :type 'boolean
+  :group 'c)
+
+(define-custom *c-echo-syntactic-information-p* #f
+  "If non-nil, syntactic info is echoed when the line is indented."
   :type 'boolean
   :group 'c)
 

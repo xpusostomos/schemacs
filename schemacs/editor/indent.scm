@@ -40,9 +40,10 @@
     (only (schemacs editor character) *tab-width*)
     (only (schemacs editor cmds) beginning-of-line backward-char)
     (only (schemacs editor command)
-          current-prefix-arg define-command uarg->integer)
+          current-prefix-arg define-command prefix-numeric-value uarg->integer)
     (only (schemacs editor editfns)
-          bobp bolp delete-region eobp eolp forward-line goto-char insert
+          bobp bolp delete-region eobp eolp forward-line goto-char
+          insert insert-char
           point point-marker
           region-beginning region-end line-end-position save-excursion
           ;; `indent-according-to-mode` widens first, so that indenting a
@@ -50,6 +51,7 @@
           save-restriction widen)
     (only (schemacs editor marker) copy-marker marker-position set-marker)
     (only (schemacs editor indentc)
+          *indent-tabs-mode*
           current-column current-indentation indent-to move-to-column)
     (only (schemacs editor search) looking-at regexp-quote
           re-search-backward)
@@ -70,6 +72,7 @@
    indent-to-left-margin *fill-prefix*
    indent-relative indent-relative-first-indent-point indent-relative-maybe
    indent-next-tab-stop tab-to-tab-stop tab-stop-list
+   insert-tab
    *delete-horizontal-space-function*
    )
 
@@ -136,6 +139,28 @@ non-nil."
                     (save-excursion (indent-line-to column))))
               ;; The normal case.
               (fn)))))
+
+    (define-command (insert-tab . rest)
+      ;; GNU Emacs's `insert-tab' (`indent.el:215'), which cc-mode's
+      ;; `c-insert-tab-function' names as its default. It sits here
+      ;; rather than beside `indent-rigidly` because
+      ;; `indent--default-inside-comment`, `indent-for-tab-command` and
+      ;; `indent--funcall-widened` - the three functions Emacs has
+      ;; between `indent-according-to-mode` and it - are not ported.
+      ;;
+      ;; **One departure**: `(and abbrev-mode ... (expand-abbrev))` is
+      ;; dropped, because `abbrev.el` is not ported and `abbrev-mode` is
+      ;; unbound here; Emacs's branch is a no-op in a tree with no
+      ;; abbrevs.
+      "Insert a tab character.
+If `indent-tabs-mode' is nil, insert spaces instead of a tab, up to the
+next tab stop."
+      (interactive "P")
+      (let ((count (prefix-numeric-value (if (pair? rest) (car rest) #f))))
+        (if (*indent-tabs-mode*)
+            (insert-char #\tab count)
+            (indent-to (* *tab-width*
+                          (+ count (/ (current-column) (*tab-width*))))))))
 
     (define-command (indent-rigidly start end arg)
       "Indent all lines starting in the region forward by ARG columns.
