@@ -17402,12 +17402,16 @@ it, as that library's header explains.
    DEPARTURES.md: `(null? #f)` is false (use `(or (not X) (null? X))`),
    and a while's *search conjunct* must not be stored in the loop
    variable or a failed search re-reads stale match data and spins.
-   Next: `c-before-change-check-ml-strings`,
-   `c-after-change-unmark-ml-strings` (needs a seam for
-   `c-clear-syn-tab-properties`, since `c-clear-syn-tab` and the
-   markers live in cc-mode, above cc-engine), `c-depropertize-ml-string`,
+   **The depropertize family is in** (`c-depropertize-ml-string`,
    `c-depropertize-ml-strings-in-region`,
-   `c-before-after-change-check-c++-modules`, then `c-depropertize-CPP`,
+   `c-before-after-change-check-c++-modules`, plus the two global
+   neutralize variables; group
+   `schemacs_editor_cc_engine_ml_depropertize`, 4).
+   Next: `c-before-change-check-ml-strings` and
+   `c-after-change-unmark-ml-strings` with their eight shared state
+   variables and `c-ml-string-in-end-delim`, plus
+   `c-clear-syn-tab-properties` (needs a seam to cc-mode's
+   `c-clear-syn-tab` and the markers), then `c-depropertize-CPP`,
    `c-neutralize-syntax-in-CPP`, `c-change-expand-fl-region`,
    `c-called-from-text-property-change-p`, and
    `c-before-change`/`c-after-change` themselves.

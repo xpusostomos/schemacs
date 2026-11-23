@@ -15736,3 +15736,45 @@ first.
 `c-clear-syn-tab`/the two markers), `c-depropertize-ml-string`,
 `c-depropertize-ml-strings-in-region` and
 `c-before-after-change-check-c++-modules`.
+
+## The depropertize family and the C++20 module check (2026-11-24)
+
+`c-depropertize-ml-string`, `c-depropertize-ml-strings-in-region` and
+`c-before-after-change-check-c++-modules` are in, with the two global
+`defvar`s they use (`c-neutralize-pos`, `c-neutralized-prop` - plain
+variables here, as Emacs never makes them buffer-local).
+
+Details worth knowing:
+
+- **Placement.** Emacs has the family at `cc-engine.el:8266`-`:8400`,
+  before `c-ml-string-delims-around-point`'s helpers; here they sit
+  after that trio, because `c-depropertize-ml-string` calls
+  `c-depropertize-ml-string-delims`, which the earlier pass placed with
+  the other 7.5k helpers. A forward reference would compile with a
+  warning; this order needs none.
+- **The punctuation test compares a character with an integer.** Emacs's
+  `(eq (nth 3 s) (char-after c-neutralize-pos))` compares two integers;
+  our `parse-partial-sexp` answers the terminator as an integer but
+  `char-after` answers a *character*, so the port is
+  `(eqv? (list-ref s 3) (char->integer (char-after ...)))`.
+- **`c-neutralize-pos`/`c-neutralized-prop` are global on purpose** -
+  the whole point is that consecutive strings in one region balance
+  each other across calls to `c-depropertize-ml-string`.
+
+Verified against Emacs 31.1 on a raw string whose delimiters contain
+quotes (`R"d"e(hi)d"e"`): both sides put `(1)` on positions 13 and 20,
+the region walk removes both and leaves `c-neutralize-pos` nil, and a
+tight `(8 . 9)` region around `module foo;` is extended to `(1 . 12)`
+by the module check. Four rows pinned in
+`schemacs_editor_cc_engine_ml_depropertize`.
+
+## Still to do for the ml-string half
+
+`c-before-change-check-ml-strings` and
+`c-after-change-unmark-ml-strings` (`cc-engine.el:7863`, `:7953`), with
+the eight state variables they share (`c-old-beg-ml`, `c-old-end-ml`,
+`c-old-1-beg-ml`, `c-beg-pos`, `c-end-pos`, `c-old-END-literality`,
+`c-ml-string-end-delim-disrupted`, plus the helper
+`c-ml-string-in-end-delim`), and `c-clear-syn-tab-properties`
+(`cc-defs.el:1444`), which needs `c-clear-syn-tab` and the two markers
+from cc-mode - a seam, since those live above cc-engine.

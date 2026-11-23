@@ -246,6 +246,9 @@
    c-clear-syntax-table-properties-trim-caches
    c-depropertize-ml-string-delims c-ml-string-opener-intersects-region
    c-ml-string-delims-around-point c-position-wrt-ml-delims
+   c-neutralize-pos c-neutralized-prop
+   c-depropertize-ml-string c-depropertize-ml-strings-in-region
+   c-before-after-change-check-c++-modules
    c-find-decl-syntactic-pos set!c-find-decl-syntactic-pos
    c-find-decl-match-pos set!c-find-decl-match-pos
    c-invalidate-find-decl-cache c-debug-put-decl-spot-faces
@@ -14349,6 +14352,153 @@
        ((eqv? (point) (car (cdr (cdr ml-string-delims))))
         'after-close)
        (else 'close-delim)))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-depropertize-ml-string' and its region walker
+    ;; (`cc-engine.el:8266', `:8330'), and the C++20 module check
+    ;; (`:8388'). Emacs has them before the helper trio above; they are
+    ;; placed after it here because they use `c-depropertize-ml-string-
+    ;; delims', which would otherwise be a forward reference.
+    ;;--------------------------------------------------------------
+    ;; A pair of global (not buffer-local) `defvar's in Emacs.
+    (define c-neutralize-pos #f)
+    (define c-neutralized-prop #f)
+
+    (define (c-depropertize-ml-string string-delims bound)
+      ;; "Remove any `syntax-table' text properties associated with the
+      ;; opening delimiter of a multi-line string (if it's unmatched) or
+      ;; with the entire string. Exception: A single punctuation ('(1))
+      ;; property will be left on a string character to make the entire
+      ;; set of multi-line strings syntactically neutral."
+      ;; "Handle the special case of a closing \" previously having been
+      ;; an unterminated ordinary string."
+      (when (and (cdr string-delims)
+                 (equal? (c-get-char-property
+                          (cdr (cdr (cdr string-delims))) 'syntax-table)
+                         '(15)))
+        (goto-char (cdr (cdr (cdr string-delims))))
+        (when (c-safe (c-forward-sexp))  ; "To '(15) at EOL."
+          (c-clear-syntax-table-trim-caches (- (point) 1))))
+      ;; "The '(15) in the closing delimiter will be cleared by the
+      ;; following."
+      (c-depropertize-ml-string-delims string-delims)
+      (let ((bound1 (if (cdr string-delims)
+                        (car (cdr (cdr string-delims))) ; end of closer
+                        bound))
+            (s #f))
+        (when bound1
+          (c-clear-syntax-table-properties-trim-caches
+           (car (cdr (car string-delims))) bound1))
+        (set! s (parse-partial-sexp
+                 (or c-neutralize-pos (car (car string-delims)))
+                 (or bound1 (point-max))))
+        (cond
+         ((not (list-ref s 3)) #t)       ; "Nothing changed by this ml-string."
+         ((not c-neutralize-pos)         ; "New" unbalanced quote.
+          (set! c-neutralize-pos (list-ref s 8))
+          (set! c-neutralized-prop
+                (c-get-char-property c-neutralize-pos 'syntax-table))
+          (c-put-syntax-table-trim-caches c-neutralize-pos '(1)))
+         ((eqv? (list-ref s 3) (char->integer (char-after c-neutralize-pos)))
+          ;; "New unbalanced quote balances old one."
+          (if c-neutralized-prop
+              (c-put-syntax-table-trim-caches c-neutralize-pos c-neutralized-prop)
+              (c-clear-syntax-table-trim-caches c-neutralize-pos))
+          (set! c-neutralize-pos #f))
+         (else #f))))                    ; nothing to do
+
+    (define (c-depropertize-ml-strings-in-region start finish)
+      ;; "Remove any `syntax-table' text properties associated with
+      ;; multi-line strings contained in the region (START FINISH)."
+      (set! c-neutralize-pos #f)
+      (goto-char start)
+      (while (and (< (point) finish)
+                  (re-search-forward
+                   (%c-langvar 'c-ml-string-cpp-or-opener-re) finish #t))
+        (if (match-beginning (+ (%c-langvar 'c-cpp-or-ml-match-offset) 1))
+            ;; "We've found a raw string."
+            (let ((open-delim
+                   (cons (match-beginning
+                          (+ (%c-langvar 'c-cpp-or-ml-match-offset) 1))
+                         (cons (match-end
+                                (+ (%c-langvar 'c-cpp-or-ml-match-offset) 1))
+                               (match-beginning
+                                (+ (%c-langvar 'c-cpp-or-ml-match-offset) 2))))))
+              (c-depropertize-ml-string
+               (cons open-delim
+                     (when
+                      (and
+                       (re-search-forward
+                        ((%c-lang-function
+                          (%c-langvar 'c-make-ml-string-closer-re-function))
+                         (match-string-no-properties
+                          (+ (%c-langvar 'c-cpp-or-ml-match-offset) 1)))
+                        (min (+ finish
+                                (%c-langvar 'c-ml-string-max-closer-len-no-leader))
+                             (point-max))
+                        #t)
+                       (<= (match-end 1) finish))
+                      (cons (match-beginning 1)
+                            (cons (match-end 1) (match-beginning 2)))))
+               #f))                      ; bound
+            ;; "We've found a CPP construct. Search for raw strings
+            ;; within it."
+            (begin
+              (goto-char (match-beginning 2)) ; the "#"
+              (c-end-of-macro)
+              (let ((eom (point)))
+                (goto-char (match-end 2)) ; after the "#"
+                (while (and (< (point) eom)
+                            (c-syntactic-re-search-forward
+                             (%c-langvar 'c-ml-string-opener-re) eom #t))
+                  (save-excursion
+                    (let ((open-delim
+                           (cons (match-beginning 1)
+                                 (cons (match-end 1) (match-beginning 2)))))
+                      (c-depropertize-ml-string
+                       (cons open-delim
+                             (when
+                              (re-search-forward
+                               ((%c-lang-function
+                                 (%c-langvar 'c-make-ml-string-closer-re-function))
+                                (match-string-no-properties 1))
+                               eom #t)
+                              (cons (match-beginning 1)
+                                    (cons (match-end 1) (match-beginning 2)))))
+                       eom))))))))       ; bound
+      (when c-neutralize-pos
+        (if c-neutralized-prop
+            (c-put-syntax-table-trim-caches c-neutralize-pos c-neutralized-prop)
+            (c-clear-syntax-table-trim-caches c-neutralize-pos))))
+
+    (define (c-before-after-change-check-c++-modules beg end . rest)
+      ;; "Extend the region (c-new-BEG c-new-END) as needed to enclose
+      ;; complete C++20 module statements."
+      (c-save-buffer-state
+          ((res #f) (bos #f) (lit-start #f))
+        (goto-char end)
+        (set! lit-start (c-literal-start))
+        (when lit-start (goto-char lit-start))
+        (when (>= (point) beg)
+          (set! res (c-beginning-of-statement-1 #f #t)) ; t is IGNORE-LABELS
+          (set! bos (point))
+          (when (and (memv res '(same previous))
+                     (looking-at (%c-langvar 'c-module-key)))
+            (set!c-new-BEG (min (c-new-BEG) (point)))
+            (if (c-syntactic-re-search-forward
+                 ";" (min (+ (point) 500) (point-max)) #t)
+                (set!c-new-END (max (c-new-END) (point))))))
+        (when (or (not bos) (< beg bos))
+          (goto-char beg)
+          (when (not (c-literal-start))
+            (set! res (c-beginning-of-statement-1 #f #t))
+            (set! bos (point))
+            (when (and (memv res '(same previous))
+                       (looking-at (%c-langvar 'c-module-key)))
+              (set!c-new-BEG (min (c-new-BEG) (point)))
+              (if (c-syntactic-re-search-forward
+                   ";" (min (+ (point) 500) (point-max)) #t)
+                  (set!c-new-END (max (c-new-END) (point)))))))))
 
 ;;----------------------------------------------------------------------
 ;; The indentation analysis (`cc-engine.el:14252'-`:14764')

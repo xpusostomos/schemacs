@@ -1260,6 +1260,7 @@
     c-basic-matchers-before
     c-basic-offset
     c-bc-changed-stringiness
+    c-before-after-change-check-c++-modules
     c-before-change-check-<>-operators
     c-before-change-check-unbalanced-strings
     c-before-change-de-typedef
@@ -1329,7 +1330,9 @@
     c-delete-backslashes-forward
     c-delete-overlay
     c-delq-from-dotted-list
+    c-depropertize-ml-string
     c-depropertize-ml-string-delims
+    c-depropertize-ml-strings-in-region
     c-determine-+ve-limit
     c-determine-limit
     c-determine-limit-get-base
@@ -1646,6 +1649,8 @@
     c-multiline-string-check-final-quote
     c-multiline-string-start-is-being-detached
     c-negation-char-face-name
+    c-neutralize-pos
+    c-neutralized-prop
     c-new-BEG
     c-new-END
     c-new-id-end

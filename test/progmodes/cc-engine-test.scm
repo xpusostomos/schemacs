@@ -2329,3 +2329,60 @@
      '(10 18 . 11) (c-ml-string-opener-intersects-region 13 15))))
 
 (test-end "schemacs_editor_cc_engine_ml_delims")
+
+
+;;--------------------------------------------------------------
+;; `c-depropertize-ml-string' and the C++20 module check
+;; (`cc-engine.el:8266'-`:8400')
+;;--------------------------------------------------------------
+;; Emacs 31.1's answers (`/tmp/dep-em.el'): a raw string whose
+;; delimiter contains quotes gets '(1) on those quotes, the region
+;; depropertizer removes them all, and a tight region around a C++20
+;; module statement is extended to the statement's bounds.
+(test-begin "schemacs_editor_cc_engine_ml_depropertize")
+
+(define (props-in-buffer)
+  (let loop ((p 1) (acc '()))
+    (if (> p (point-max)) (reverse acc)
+        (let ((st (get-text-property p 'syntax-table)))
+          (if st (loop (+ p 1) (cons (list p st) acc))
+              (loop (+ p 1) acc))))))
+
+(define (cpp-buffer text)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert text)
+    (set-buffer-local-value! b 'major-mode 'c++-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (c-init-language-vars c++-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+    (let loop ((p 1))
+      (when (<= p (1- (point-max)))
+        (c-clear-char-property p 'syntax-table)
+        (c-clear-char-property p 'c-fl-syn-tab)
+        (loop (+ p 1))))
+    b))
+
+;; A raw string whose delimiter contains quotes; the quotes inside
+;; the delimiters are at positions 13 and 20.
+
+(cpp-buffer (string-append "auto s = R" (string #\") "d" (string #\")
+                           "e(hi)d" (string #\") "e" (string #\") ";"
+                           (string #\newline) "int b;" (string #\newline)))
+(goto-char 12)
+(c-maybe-re-mark-ml-string)
+(test-equal "the quotes in a raw string's delimiters are punctuation"
+  (list (list 13 '(1)) (list 20 '(1))) (props-in-buffer))
+(c-depropertize-ml-strings-in-region 1 (point-max))
+(test-equal "the region depropertizer removes them all"
+  '() (props-in-buffer))
+(test-equal "... leaving no neutralized character" #f c-neutralize-pos)
+
+;; The C++20 module statement extension.
+(cpp-buffer "module foo;\nint x;\nimport bar;\n")
+(set!c-new-BEG 8) (set!c-new-END 9)
+(c-before-after-change-check-c++-modules 10 10)
+(test-equal "the region grows to the whole module statement"
+  (list 1 12) (list (c-new-BEG) (c-new-END)))
+
+(test-end "schemacs_editor_cc_engine_ml_depropertize")
