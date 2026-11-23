@@ -1,0 +1,1122 @@
+(define-library (schemacs fileio)
+  ;; This library mirrors GNU Emacs's `src/fileio.c' - the file
+  ;; primitives themselves, as against `files.el' (`(schemacs editor
+  ;; files)'), which is the file-*visiting* layer built on them.
+  ;;
+  ;; Most of these are a wrapping of what Guile already has, which is the
+  ;; substitution AGENTS.md allows for a facility that exists in Scheme
+  ;; or in a library: `stat' / `lstat' with their `stat:mode' and
+  ;; `stat:type' accessors, `access?', `readlink', `mkdir', `rmdir',
+  ;; `delete-file', `rename-file', `copy-file' and `chmod'. What is
+  ;; written here is the *Emacs contract* on top of them - which
+  ;; arguments are expanded first, what a missing file answers, what a
+  ;; symlink answers, and how much of the mode is kept.
+  ;;
+  ;; Not ported, and named rather than faked:
+  ;;
+  ;;   * file name handlers (`file-name-handler-alist'), which is what
+  ;;     makes a name like "/ssh:host:/path" work. Every function here
+  ;;     asks `find-file-name-handler' in the C, and there is no handler
+  ;;     list in this tree, so the question is not asked.
+  ;;   * `substitute-in-file-name', which is a chain of its own: it needs
+  ;;     `search_embedded_absfilename' and `substitute-env-vars'
+  ;;     (`env.el'), neither of which is here yet.
+  ;;   * `default-directory' is a buffer-local *variable* (`buffer.c')
+  ;;     that `expand-file-name' reads. It used to live in
+  ;;     `(schemacs files)', which is where the file I/O half of
+  ;;     this project started, and has moved to `(schemacs editor
+  ;;     buffer)' beside `buffer-default-directory', where it belongs.
+  ;;
+  ;; `expand-file-name', `file-exists-p' and `file-writable-p' were in
+  ;; `(schemacs files)' too, where the file I/O half of this
+  ;; project started, and have now been moved here where they belong.
+
+  (import
+    (scheme base)
+    (scheme char)
+    ;; `locate-file-internal' takes optional arguments, which is a
+    ;; `case-lambda'
+    (scheme case-lambda)
+    ;; `logand' is Guile's, not R7RS's, and `file-modes' masks with it;
+    ;; `string-rindex' is what the two name helpers find their slash
+    ;; with.
+    (only (guile) logand string-rindex)
+    ;; `statvfs' is reached through Guile's FFI - `(system foreign)'
+    ;; dlopens libc and calls the function through its pointer, so there
+    ;; is no C to write. `(rnrs bytevectors)' is here for the struct: the
+    ;; C fills a buffer we own, and its fields are read at fixed offsets.
+    ;; The FFI is two imports, split as `pgtk.sld' splits it: the
+    ;; *pointer procedures* are `(system foreign)''s, while
+    ;; `dynamic-link' and `dynamic-func' are core bindings and come from
+    ;; `(guile)'. Importing `(system foreign)' whole binds neither of those
+    ;; two - inside a `define-library' it binds nothing at all, which a
+    ;; five-line library shows - so the split is not tidiness.
+    (only (system foreign)
+          pointer->procedure string->pointer bytevector->pointer int)
+    (only (guile) dynamic-link dynamic-func)
+    (only (rnrs bytevectors) bytevector-u64-ref native-endianness)
+    ;; The operating system calls. `rename-file' and `copy-file' are
+    ;; renamed as they come in, because this library defines functions
+    ;; under those two names and would otherwise call itself.
+    (rename (only (guile) rename-file copy-file)
+            (rename-file %rename-file)
+            (copy-file %copy-file))
+    (only (guile)
+          R_OK W_OK X_OK
+          access? chmod delete-file getenv getpwnam lstat mkdir readlink rmdir
+          stat stat:mode stat:type stat:mtime stat:mtimensec stat:size)
+    ;; `substitute-env-vars' is `env.el''s, and is what
+    ;; `substitute-in-file-name' below substitutes the variables with.
+    (only (schemacs env) substitute-env-vars)
+    ;; `find-file-name-handler' matches a handler's regexp against the
+    ;; name, which is the same regexp engine `string-match' reads.
+    (only (schemacs search) string-match)
+    ;; The time a visited file's modification time is written in, which
+    ;; is `timefns.c`'s - `make_lisp_time' (`timefns.c:1068') is what the
+    ;; C's `buffer_visited_file_modtime' answers with.
+    (only (schemacs timefns) make-lisp-time lisp-time-arguments)
+    ;; `default-directory' is what a name with no directory of its own is
+    ;; expanded against - a buffer-local variable in Emacs, and so
+    ;; `buffer.c''s, which is where it now lives. The rest is the buffer
+    ;; the visited-file time is recorded on: `modtime' and `modtime_size'
+    ;; are `buffer.h`'s fields, and this library is the one that reads
+    ;; and writes them because `fileio.c' is where Emacs's functions for
+    ;; them are.
+    (only (schemacs buffer)
+          default-directory current-buffer buffer-file-name
+          %buffer-modtime set!%buffer-modtime
+          %buffer-modtime-size set!%buffer-modtime-size
+          %unknown-modtime-nsecs %nonexistent-modtime-nsecs
+          *buffer-visited-file-modtime-function*)
+    )
+
+  (export
+   file-system-info
+   *file-name-handler-alist*
+   *inhibit-file-name-handlers*
+   *inhibit-file-name-operation*
+   copy-file
+   delete-directory-internal
+   delete-file-internal
+   directory-file-name
+   directory-name-p
+   expand-file-name
+   file-directory-p
+   file-exists-p
+   file-name-case-insensitive-p
+   file-name-directory-part
+   file-name-nondirectory-part
+   file-writable-p
+   file-executable-p
+   file-modes
+   file-name-absolute-p
+   file-name-as-directory
+   file-name-concat
+   file-readable-p
+   ;; `locate-file-internal' is `lread.c''s (`:1590'), and so is the
+   ;; `openp' it wraps (`:1756'). It lives here because this is the
+   ;; library that holds the file primitives it is built from, and
+   ;; because there is no `lread.sld' - the same seam `keymap.c''s
+   ;; buffer-keymap pair sits on.
+   locate-file-internal
+   file-regular-p
+   file-symlink-p
+   find-file-name-handler
+   make-directory-internal
+   rename-file
+   set-file-modes
+   ;; The visited file's modification time, which `fileio.c` owns - it is
+   ;; what tells a buffer whether its file has moved, and what the
+   ;; `(t . TIME)' undo entry records.
+   buffer-visited-file-modtime
+   visited-file-modtime
+   set-visited-file-modtime
+   verify-visited-file-modtime
+   *buffer-visited-file-modtime-function*
+   substitute-in-file-name
+   )
+
+  (begin
+
+    (define (canonical-back-up buf o)
+      ;; The C's `while (o != target && (--o, !IS_DIRECTORY_SEP (*o)))'
+      ;; (fileio.c:1687): step O back to the separator before it, or to
+      ;; the beginning. It is the `..' of a `/..` taking back the segment
+      ;; that was written before it - which is why the canonicalization
+      ;; is a walk over one buffer rather than a rebuild from segments.
+      ;;--------------------------------------------------------------
+      (if (= o 0)
+          0
+          (if (char=? #\/ (string-ref buf (- o 1)))
+              (- o 1)
+              (canonical-back-up buf (- o 1)))))
+
+    (define (canonicalize-file-name name)
+      ;; GNU Emacs's `Fexpand_file_name''s canonicalization loop
+      ;; (fileio.c:1658-1717): "Now canonicalize by removing `//', `/.'
+      ;; and `/foo/..' if they appear." P reads and O writes over one
+      ;; buffer, which is what lets a `/..` *take back* what has already
+      ;; been written; a stack of segments can do that too, but it cannot
+      ;; say either of the two exceptions, and both of them are the
+      ;; reason this is a walk and not a split.
+      ;;
+      ;;   * Repeated slashes collapse to one, "except leave leading
+      ;;     `//' alone" (fileio.c:1710). The C's test is
+      ;;     `p != target || IS_DIRECTORY_SEP (p[2])', so a pair at the
+      ;;     very start survives unless a *third* slash follows it:
+      ;;     `/a//b' is `/a/b' and `//a//b' is `//a/b'. That leading
+      ;;     pair is not decoration - POSIX leaves the meaning of exactly
+      ;;     two leading slashes to the implementation, and that is where
+      ;;     a network host goes - so Emacs keeps it as written.
+      ;;   * `/..` backs up to the previous separator, "except" at the
+      ;;     root, where it does nothing (the `o != target' guard at
+      ;;     fileio.c:1685). So `/foo/..' is `/` and `/..' stays `/..' -
+      ;;     a segment stack pops at the root and would lose the `..'.
+      ;;
+      ;; The C's other two cases are `/.` , which goes away unless it is
+      ;; the whole name (so `/.' is `/`), and the copy of any other
+      ;; character. `/../' is left alone as well: `..' at the root is
+      ;; "the superroot on certain file systems" (fileio.c:1684).
+      ;;
+      ;; Written against a *copy* of NAME, because the C reads `*o' at
+      ;; the target even before anything has been written there - at
+      ;; `o == target' that is the name's own first character.
+      ;;--------------------------------------------------------------
+      (let* ((len (string-length name))
+             (buf (string-copy name))
+             ;; the C reads one character past P; `#f' is its NUL, and
+             ;; every test that asks for it asks `p[2] == 0' or
+             ;; `p[3] == 0'.
+             (at (lambda (i) (if (< i len) (string-ref name i) #f)))
+             (sep-at? (lambda (i) (and (< i len) (char=? #\/ (string-ref name i))))))
+        (let loop ((p 0) (o 0))
+          (if (>= p len)
+              (substring buf 0 o)
+              (let ((c (string-ref name p))
+                    (c1 (at (+ p 1)))
+                    (c2 (at (+ p 2))))
+                (cond
+                 ;; any other character is copied
+                 ((not (char=? c #\/))
+                  (string-set! buf o c)
+                  (loop (+ p 1) (+ o 1)))
+                 ;; "/." - keep the "/" only when this is the whole name
+                 ((and (eqv? c1 #\.) (or (sep-at? (+ p 2)) (not c2)))
+                  (when (and (= o 0) (not c2))
+                    (string-set! buf o c))
+                  (loop (+ p 2) (if (and (= o 0) (not c2)) (+ o 1) o)))
+                 ;; "/.." - back up to the previous separator
+                 ((and (eqv? c1 #\.) (eqv? c2 #\.)
+                       (not (= o 0))
+                       (or (sep-at? (+ p 3)) (not (at (+ p 3)))))
+                  (let ((k (canonical-back-up buf o)))
+                    ;; "Keep initial / only if this is the whole name."
+                    (loop (+ p 3)
+                          (if (and (= k 0)
+                                   (char=? #\/ (string-ref buf 0))
+                                   (not (at (+ p 3))))
+                              (+ k 1)
+                              k))))
+                 ;; collapse multiple "/", except leave leading "//" alone
+                 ((and (sep-at? (+ p 1)) (or (not (= p 0)) (sep-at? (+ p 2))))
+                  (loop (+ p 1) o))
+                 (else
+                  (string-set! buf o c)
+                  (loop (+ p 1) (+ o 1)))))))))
+
+    (define (trim-newdir-slashes dir)
+      ;; GNU Emacs's `Fexpand_file_name' (fileio.c:1609): "Ignore any
+      ;; slash at the end of newdir, unless newdir is just `/` or `//`."
+      ;; It is what makes `(expand-file-name "")' the directory itself
+      ;; with no trailing slash, while `//' stays `//'.
+      ;;--------------------------------------------------------------
+      (let loop ((len (string-length dir)))
+        (if (and (> len 1)
+                 (char=? #\/ (string-ref dir (- len 1)))
+                 (not (and (= len 2) (char=? #\/ (string-ref dir 0)))))
+            (loop (- len 1))
+            (substring dir 0 len))))
+
+    (define (user-homedir name)
+      ;; GNU Emacs's `user_homedir' (fileio.c:972): "the home directory
+      ;; of the user NAME, or a null pointer if" there is no such user
+      ;; or their home is not an absolute name. `getpwnam' is the same
+      ;; lookup the C does; the directory is the sixth field of the
+      ;; entry it answers.
+      ;;--------------------------------------------------------------
+      (guard (e (#t #f))
+        (let ((entry (getpwnam name)))
+          (and entry
+               (let ((dir (vector-ref entry 5)))
+                 (and dir
+                      (< 0 (string-length dir))
+                      (char=? #\/ (string-ref dir 0))
+                      dir))))))
+
+    (define (get-homedir)
+      ;; GNU Emacs's `get_homedir' (fileio.c:1945): the `HOME' this
+      ;; process was started with, which is what a bare `~' expands to.
+      ;;--------------------------------------------------------------
+      (or (getenv "HOME") "/"))
+
+    (define (expand-tilde name)
+      ;; GNU Emacs's `Fexpand_file_name''s leading-`~' rule
+      ;; (fileio.c:1393): "An initial \"~\" in NAME expands to your
+      ;; home directory. An initial \"~USER\" in NAME expands to
+      ;; USER's home directory." A `~' that names no user is left
+      ;; standing, which is the C's own fallback.
+      ;;--------------------------------------------------------------
+      (if (or (= 0 (string-length name))
+              (not (char=? #\~ (string-ref name 0))))
+          name
+          (let loop ((i 1))
+            (cond
+             ((or (= i (string-length name))
+                  (char=? #\/ (string-ref name i)))
+              (let ((rest (substring name i (string-length name))))
+                (if (= i 1)
+                    (string-append (get-homedir) rest)
+                    (let ((home (user-homedir (substring name 1 i))))
+                      (if home (string-append home rest) name)))))
+             (else (loop (+ i 1)))))))
+
+    (define %libc (dynamic-link))
+    ;; ^ libc itself, dlopened once.
+
+    (define %c-statvfs
+      ;; `int statvfs(const char *path, struct statvfs *buf)'
+      ;;--------------------------------------------------------------
+      (pointer->procedure int
+                          (dynamic-func "statvfs" %libc)
+                          (list '* '*)))
+
+    (define (file-system-info filename)
+      ;; GNU Emacs's `file-system-info' (fileio.c): "Return storage
+      ;; information about the file system FILENAME is on. Value is a list
+      ;; of numbers (TOTAL FREE AVAIL), where TOTAL is the total size of
+      ;; the file system, FREE is the free space in it, and AVAIL is the
+      ;; size of the free space available to an unprivileged user. ...
+      ;; If the underlying system call fails, value is nil."
+      ;;
+      ;; The C calls `statvfs' (`lib/fsusage.c':126) and multiplies by the
+      ;; *fundamental* block size - `f_frsize' when it is non-zero and
+      ;; `f_bsize' otherwise, "f_frsize isn't guaranteed to be supported"
+      ;; - which is why offset 8 is read first below and offset 0 only as
+      ;; the fallback.
+      ;;
+      ;; The struct is read at fixed offsets, and those ARE C's `struct
+      ;; statvfs' on this platform: `unsigned long' twice and then three
+      ;; `fsblkcnt_t', each 8 bytes on x86-64 glibc. That is the one
+      ;; fragile thing here and it is named rather than trusted: the
+      ;; offsets move on a 32-bit build, where `unsigned long' is 4 bytes.
+      ;; Measured against `emacs -Q --batch''s own `file-system-info' on
+      ;; the same paths, and against `df -B1'.
+      ;;--------------------------------------------------------------
+      (let* ((path (expand-file-name filename))
+             (buf (make-bytevector 128 0))
+             (res (%c-statvfs (string->pointer path)
+                              (bytevector->pointer buf))))
+        (if (not (= res 0))
+            #f
+            (let* ((endian (native-endianness))
+                   (bsize (bytevector-u64-ref buf 0 endian))   ; f_bsize
+                   (frsize (bytevector-u64-ref buf 8 endian))  ; f_frsize
+                   (blocks (bytevector-u64-ref buf 16 endian)) ; f_blocks
+                   (bfree (bytevector-u64-ref buf 24 endian))  ; f_bfree
+                   (bavail (bytevector-u64-ref buf 32 endian)) ; f_bavail
+                   (unit (if (zero? frsize) bsize frsize)))
+              (list (* unit blocks) (* unit bfree) (* unit bavail))))))
+
+    (define (expand-file-name name . args)
+      ;; GNU Emacs's `expand-file-name': NAME as an absolute file name.
+      ;; A NAME with no directory of its own - one not starting with a
+      ;; slash - is relative to DEFAULT-DIRECTORY, which is the asking
+      ;; buffer's own when no other is given; either way the `.` and `..`
+      ;; segments are resolved and repeated slashes collapsed.
+      ;;
+      ;; This is what `read-file-name' answers with, which is why a bare
+      ;; name can be typed at the prompt at all: Emacs puts the directory
+      ;; *in* the minibuffer, so its answer is absolute already, while
+      ;; this editor keeps the prompt beside the buffer rather than in it
+      ;; - so what is typed has to be joined to the directory here. A
+      ;; name typed in a buffer visiting a file is relative to that
+      ;; file's directory, which is what `default-directory' says.
+      ;;
+      ;; An initial `~' or `~USER' is expanded first, which is the C's
+      ;; own order (`Fexpand_file_name' does the home directory before it
+      ;; joins anything). Not implemented: the environment-variable,
+      ;; wildcard and remote-file syntaxes.
+      ;;--------------------------------------------------------------
+      (let* ((name (expand-tilde name))
+             (default (if (pair? args) (car args) (default-directory)))
+             ;; the C's prefix (fileio.c:1600-1650): a name that is empty
+             ;; or absolute takes *no* directory prefix - for an absolute
+             ;; one it sets `newdir' to "" outright, which is how the
+             ;; default directory is ignored - and anything else is
+             ;; joined onto the default *as a directory*. The empty name
+             ;; is the directory itself, with its trailing slashes
+             ;; trimmed, which is "Ignore any slash at the end of newdir"
+             ;; (fileio.c:1609).
+             (full (cond
+                    ((= 0 (string-length name)) (trim-newdir-slashes default))
+                    ((char=? #\/ (string-ref name 0)) name)
+                    (else (string-append (file-name-as-directory default)
+                                         name)))))
+        (canonicalize-file-name full)))
+
+    (define (file-name-directory-part name)
+      ;; The directory part of NAME, including the final slash, or "" for
+      ;; a name with none.
+      ;;
+      ;; GNU Emacs's `file-name-directory' answers *nil* in that case -
+      ;; "Return nil if FILENAME does not include a directory" - and this
+      ;; answers `""', which every caller here wants to append to. The
+      ;; difference is real and is why this is a `-part' helper and not
+      ;; the Emacs function's name; the callers are the listings, which
+      ;; hand it either a bare name or one with a slash.
+      ;;--------------------------------------------------------------
+      (let ((slash (string-rindex name #\/)))
+        (if slash (substring name 0 (+ 1 slash)) "")))
+
+    (define (file-name-nondirectory-part name)
+      ;; The part of NAME after the last slash: GNU Emacs's
+      ;; `file-name-nondirectory'.
+      ;;--------------------------------------------------------------
+      (let ((slash (string-rindex name #\/)))
+        (if slash (substring name (+ 1 slash) (string-length name)) name)))
+
+    (define (directory-name-p name)
+      ;; GNU Emacs's `directory-name-p' (fileio.c:703): whether NAME
+      ;; ends with a directory separator - "for example `usr/' and
+      ;; `usr' are both directories, but only `usr/' is a directory
+      ;; name". It is what `write-file' asks of the name the user gave,
+      ;; since a name that ends in a slash names a directory and the
+      ;; file gets the buffer's own base name in it.
+      ;;--------------------------------------------------------------
+      (and (< 0 (string-length name))
+           (char=? (string-ref name (- (string-length name) 1)) #\/)))
+
+    (define (file-writable-p path)
+      ;; GNU Emacs's `file-writable-p' (fileio.c): "t if you can write
+      ;; to file or directory PATH". A file that does not exist is
+      ;; writable when its directory is, which is Emacs's rule and the
+      ;; one `write-file' works from - a buffer made writable by the
+      ;; file it now visits.
+      ;;
+      ;; The C expands the name once, first thing - `absname =
+      ;; Fexpand_file_name (filename, Qnil);' (`fileio.c:3047') - and
+      ;; works with that from then on; so does this, since the `access?'
+      ;; below is a syscall that would otherwise resolve a relative name
+      ;; against the *process's* directory rather than the buffer's.
+      ;;--------------------------------------------------------------
+      (let ((path (expand-file-name path)))
+        (if (file-exists-p path)
+            (access? path W_OK)
+            (let ((dir (file-name-directory-part path)))
+              (access? (if (string=? dir "") "." dir) W_OK)))))
+
+    (define (file-exists-p path)
+      ;; GNU Emacs's `file-exists-p': whether PATH names something that
+      ;; exists. Emacs's is true of a directory as well as of a file, and
+      ;; so is this.
+      ;;
+      ;; **The name is expanded first.** The C does it in
+      ;; `check_file_access' (`fileio.c:2992') - the shared body of
+      ;; `file-exists-p', `file-executable-p' and `file-readable-p' -
+      ;; whose first line is `file = Fexpand_file_name (file, Qnil);'.
+      ;; Every *other* predicate in this library already expanded
+      ;; (`file-readable-p', `file-directory-p', `file-regular-p',
+      ;; `file-symlink-p', `file-modes', and diredc's `directory-files'
+      ;; and `file-attributes'), and this one did not - which nothing
+      ;; noticed while every caller passed an absolute path. A `~' is
+      ;; what finds it: `(file-exists-p "~/x")' answered nil for a file
+      ;; that is there, and the file-name completion table asks exactly
+      ;; this question to decide whether what has been typed is already a
+      ;; name - so `C-x C-f' TAB in a prompt holding an abbreviated
+      ;; directory could not tell a real name from an unknown one.
+      ;;
+      ;; `guard', not `with-exception-handler': the exception `stat'
+      ;; raises is *non-continuable*, and a handler that returns from one
+      ;; of those re-raises it - so the `with-exception-handler' spelling
+      ;; this started as answered nothing at all and let the error out.
+      ;;--------------------------------------------------------------
+      (guard (e (else #f))
+        (stat (expand-file-name path))
+        #t))
+
+    (define (%file-name-case-insensitive-err path)
+      ;; GNU Emacs's `file_name_case_insensitive_err' (fileio.c:2646):
+      ;; "Return -1 if FILE is a case-insensitive file name, 0 if not, and
+      ;; 1 if the result cannot be determined."
+      ;;
+      ;; **On this platform the C's answer is a constant, and so is
+      ;; this.** Its two ways of asking the filesystem are
+      ;; `pathconf (filename, _PC_CASE_INSENSITIVE)' and
+      ;; `pathconf (filename, _PC_CASE_SENSITIVE)', and glibc defines
+      ;; neither macro (Cygwin has the first, macOS the second), so the C
+      ;; compiles its own `#else return 0' branch: case-sensitive. The
+      ;; second reason it cannot ask is Guile's: `pathconf' is not bound
+      ;; anywhere in the tree or in the core.
+      ;;
+      ;; PATH is unused, as it is in that branch - and it is a parameter
+      ;; rather than nothing because `file-name-case-insensitive-p' below
+      ;; is the C's walk, and a walk wants a function of the name.
+      ;;--------------------------------------------------------------
+      0)
+
+    (define (file-name-case-insensitive-p filename)
+      ;; GNU Emacs's `file-name-case-insensitive-p' (fileio.c:2688):
+      ;; "Return t if file FILENAME is on a case-insensitive filesystem.
+      ;; Return nil if FILENAME does not exist or is not on a
+      ;; case-insensitive filesystem, or if there was trouble determining
+      ;; whether the filesystem is case-insensitive."
+      ;;
+      ;; The walk is the C's: it asks about FILENAME, and while the answer
+      ;; is "cannot tell" (1) it climbs to the parent - a name that does
+      ;; not exist yet has to be judged by the directory it would be
+      ;; created in - stopping at the root, where a directory has no
+      ;; parent and the C answers nil rather than looping.
+      ;;
+      ;; Where this is *used*: `abbreviate-file-name' binds
+      ;; `case-fold-search' to it, so that `~' is substituted
+      ;; case-insensitively on a filesystem that does not distinguish
+      ;; case. Answering nil here is the answer for every filesystem this
+      ;; editor runs on, so that binding is nil - which is what Emacs
+      ;; gives on the same machine.
+      ;;--------------------------------------------------------------
+      (let ((filename (expand-file-name filename)))
+        (let ((handler (find-file-name-handler
+                        filename 'file-name-case-insensitive-p)))
+          (if handler
+              (handler 'file-name-case-insensitive-p filename)
+              (let loop ((filename filename))
+                (let ((err (%file-name-case-insensitive-err filename)))
+                  (cond ((<= err 0) (< err 0))
+                        (else
+                         (let ((parent (file-name-directory-part filename)))
+                           (if (or (not (string? parent))
+                                   (string=? parent filename))
+                               #f
+                               (loop parent)))))))))))
+
+    ;;----------------------------------------------------------------
+    ;; File name handlers
+    ;;
+    ;; The hook every function below asks before it does anything, which
+    ;; is what makes a name that is not a path on this machine work -
+    ;; TRAMP's `/ssh:host:/path', `jka-compr''s transparent `.gz',
+    ;; archive entries. Emacs has no SSH code in it: a handler is
+    ;; *registered* and the primitives hand the name to it. No handler is
+    ;; registered here, so nothing is handled - but the question is
+    ;; asked, which is the difference between "no remote files" and "this
+    ;; primitive cannot".
+    ;;------------------------------------------------------------------
+
+    (define *file-name-handler-alist* (make-parameter '()))
+    ;; ^ GNU Emacs's `file-name-handler-alist': "Alist of handler
+    ;; functions for special file name constructs. Each element looks
+    ;; like (REGEXP . HANDLER)."
+
+    (define *inhibit-file-name-handlers* (make-parameter '()))
+    (define *inhibit-file-name-operation* (make-parameter #f))
+    ;; ^ GNU Emacs's two: the handlers and the operation for which they
+    ;; are skipped, which is how a handler calls the standard function
+    ;; without calling itself.
+
+    (define (find-file-name-handler filename operation)
+      ;; GNU Emacs's `find-file-name-handler' (fileio.c:370): "Return
+      ;; FILENAME's handler function for OPERATION, if it has one.
+      ;; Otherwise, return nil. A file name is handled if one of the
+      ;; regular expressions in `file-name-handler-alist' matches it."
+      ;;
+      ;; The match that reaches *furthest right* wins - the C keeps the
+      ;; largest `match_pos', not the first - which is how a handler for
+      ;; the tail of a name (`jka-compr''s `.gz', an archive entry) is
+      ;; preferred to one for its head.
+      ;;
+      ;; Not ported: the `operations' property on the handler symbol,
+      ;; which lets a handler declare which operations it serves. There
+      ;; are no symbol properties here, so a handler is asked for
+      ;; everything.
+      ;;--------------------------------------------------------------
+      (if (not (string? filename))
+          #f
+          (let ((inhibited (if (eq? operation
+                                    (*inhibit-file-name-operation*))
+                               (*inhibit-file-name-handlers*)
+                               '())))
+            (let loop ((chain (*file-name-handler-alist*))
+                       (result #f) (pos -1))
+              (cond
+               ((null? chain) result)
+               ((not (pair? (car chain))) (loop (cdr chain) result pos))
+               (else
+                (let* ((elt (car chain))
+                       (regexp (car elt))
+                       (handler (cdr elt))
+                       (at (and (string? regexp)
+                                (guard (e (#t #f))
+                                  (string-match regexp filename)))))
+                  (if (and at (> at pos) (not (memq handler inhibited)))
+                      (loop (cdr chain) handler at)
+                      (loop (cdr chain) result pos)))))))))
+
+    ;;----------------------------------------------------------------
+    ;; Asking about a file
+    ;;------------------------------------------------------------------
+
+    (define (file-readable-p filename)
+      ;; GNU Emacs's `file-readable-p' (fileio.c:3032): "Return t if
+      ;; file FILENAME exists and you can read it."
+      ;;
+      ;; The C's `check_file_access (filename, Qfile_readable_p, R_OK)',
+      ;; which is `access' and nothing else.
+      ;;--------------------------------------------------------------
+      (access? (expand-file-name filename) R_OK))
+
+    (define (file-executable-p filename)
+      ;; GNU Emacs's `file-executable-p' (fileio.c:3022): "Return t if
+      ;; FILENAME can be executed by you. For a directory, this means you
+      ;; can access files in that directory."
+      ;;--------------------------------------------------------------
+      (access? (expand-file-name filename) X_OK))
+
+    (define (file-symlink-p filename)
+      ;; GNU Emacs's `file-symlink-p' (fileio.c:3162): "Return non-nil if
+      ;; file FILENAME is the name of a symbolic link. The value is the
+      ;; link target, as a string." It "does not check whether the link
+      ;; target exists", and a name that is not a link answers nil -
+      ;; `readlink' fails for one, which is that nil.
+      ;;--------------------------------------------------------------
+      (let ((name (expand-file-name filename)))
+        (guard (e (#t #f)) (readlink name))))
+
+    (define (file-directory-p filename)
+      ;; GNU Emacs's `file-directory-p' (fileio.c:3185): "Return t if
+      ;; FILENAME names an existing directory." A symlink to a directory
+      ;; counts as one, which is why this is `stat' and not `lstat'.
+      ;;
+      ;; The empty string answers t: "As a special case, this function
+      ;; will also return t if FILENAME is the empty string ... Emacs
+      ;; interpret[ing] the empty string (in some cases) as the current
+      ;; directory."
+      ;;--------------------------------------------------------------
+      (if (= 0 (string-length filename))
+          #t
+          (let ((name (expand-file-name filename)))
+            (guard (e (#t #f))
+              (eq? 'directory (stat:type (stat name)))))))
+
+    (define (file-regular-p filename)
+      ;; GNU Emacs's `file-regular-p' (fileio.c:3359): "Return t if
+      ;; FILENAME names a regular file. This is the sort of file that
+      ;; holds an ordinary stream of data bytes." A symlink to a regular
+      ;; file counts as one.
+      ;;--------------------------------------------------------------
+      (let ((name (expand-file-name filename)))
+        (guard (e (#t #f))
+          (eq? 'regular (stat:type (stat name))))))
+
+    ;;----------------------------------------------------------------
+    ;; The mode bits
+    ;;------------------------------------------------------------------
+
+    (define (file-modes filename . rest)
+      ;; GNU Emacs's `file-modes' (fileio.c:3644): "Return mode bits of
+      ;; file named FILENAME, as an integer. Return nil if FILENAME does
+      ;; not exist. If optional FLAG is `nofollow', do not follow
+      ;; FILENAME if it is a symbolic link."
+      ;;
+      ;; The C keeps `st_mode & 07777' - the permission and setuid/setgid
+      ;; bits, without the file type - which is what the 12 low bits are.
+      ;;--------------------------------------------------------------
+      (let ((nofollow (and (pair? rest) (eq? 'nofollow (car rest))))
+            (name (expand-file-name filename)))
+        (guard (e (#t #f))
+          (logand (stat:mode ((if nofollow lstat stat) name)) #o7777))))
+
+    ;;----------------------------------------------------------------
+    ;; The visited file's modification time
+    ;;------------------------------------------------------------------
+    ;;
+    ;; This is what tells a buffer whether the file it visits has been
+    ;; changed behind it, and what the `(t . TIME)' undo entry records -
+    ;; see `record_first_change' (`undo.c:210') and the `(t . ,time)'
+    ;; branch of `primitive-undo' (`simple.el:3677'). The time is
+    ;; *recorded* on the buffer rather than asked of the file, which is
+    ;; the point: it says what the file held when the buffer was last in
+    ;; step with it, and comparing it against the file now says whether
+    ;; anything has happened since.
+
+    (define (%stat-mtime name)
+      ;; The modification time and size of NAME, as the pair
+      ;; `(SECONDS . NANOSECONDS)' and a size, or the two sentinels when
+      ;; there is no file to ask. GNU Emacs's `get_stat_mtime' beside
+      ;; `time_error_value' (`fileio.c:3972'), which answers
+      ;; `NONEXISTENT_MODTIME_NSECS' for a name that is not there and
+      ;; `UNKNOWN_MODTIME_NSECS' for any other failure.
+      ;;--------------------------------------------------------------
+      (let ((st (guard (e (#t #f)) (stat name))))
+        (if st
+            (cons (cons (stat:mtime st) (stat:mtimensec st)) (stat:size st))
+            ;; `stat' does not say which errno it was, so a name that is
+            ;; not there and one that cannot be reached are told apart by
+            ;; asking the cheaper question. Emacs has the errno and does
+            ;; not need this.
+            (cons (cons 0 (if (file-exists-p name)
+                              %unknown-modtime-nsecs
+                              %nonexistent-modtime-nsecs))
+                  -1))))
+
+    (define (buffer-visited-file-modtime buffer)
+      ;; GNU Emacs's `buffer_visited_file_modtime' (`fileio.c:6157'):
+      ;; "Return BUF's recorded visited file modification time" as a
+      ;; Lisp time. The C is
+      ;;
+      ;;     int ns = buf->modtime.tv_nsec;
+      ;;     if (ns < 0)
+      ;;       return make_fixnum (UNKNOWN_MODTIME_NSECS - ns);
+      ;;     return make_lisp_time (buf->modtime);
+      ;;
+      ;; so the two sentinel nanoseconds answer the two integers the
+      ;; interface documents - 0 for "no time is known" and -1 for "the
+      ;; file is not there" - and everything else is a real time.
+      ;;--------------------------------------------------------------
+      (let* ((mt (%buffer-modtime buffer))
+             (ns (cdr mt)))
+        (if (< ns 0)
+            (- %unknown-modtime-nsecs ns)
+            (make-lisp-time (car mt) ns))))
+
+    (define (visited-file-modtime)
+      ;; GNU Emacs's `visited-file-modtime' (`fileio.c:6165'): "Return
+      ;; the current buffer's recorded visited file modification time.
+      ;; Return a Lisp timestamp (as in `current-time') if the current
+      ;; buffer has a recorded file modification time, 0 if it doesn't,
+      ;; and -1 if the visited file doesn't exist."
+      ;;--------------------------------------------------------------
+      (buffer-visited-file-modtime (current-buffer)))
+
+    (define (set-visited-file-modtime . rest)
+      ;; GNU Emacs's `set-visited-file-modtime' (`fileio.c:6177'):
+      ;; "Update buffer's recorded modification time from the visited
+      ;; file's time. ... An argument specifies the modification time
+      ;; value to use (instead of that of the visited file), in the form
+      ;; of a time value as in `current-time' or an integer flag as
+      ;; returned by `visited-file-modtime'."
+      ;;
+      ;; This is what a save reaches - GNU Emacs's `write-region' sets
+      ;; the buffer's `modtime' from the `stat' it makes after writing
+      ;; (`fileio.c:5828'), so that the next change to the buffer records
+      ;; the *new* time as the mark of the last save and every older mark
+      ;; goes stale. It is also what the visit reaches, from
+      ;; `insert-file-contents'.
+      ;;
+      ;; The C signals if the file cannot be stat'ed - `file_attribute_errno'
+      ;; - which is the point of calling it with no argument: it is a
+      ;; claim that the file is there.
+      ;;--------------------------------------------------------------
+      (let ((time-flag (if (pair? rest) (car rest) #f))
+            (buffer (current-buffer)))
+        (if time-flag
+            (if (integer? time-flag)
+                (begin
+                  ;; the C's `check_integer_range (time_flag, -1, 0)':
+                  ;; only the two sentinels are integers here, and any
+                  ;; other one is not a time but a mistake
+                  (unless (<= -1 time-flag 0)
+                    (error "Invalid time specification" time-flag))
+                  (set!%buffer-modtime buffer
+                                       (cons 0 (- %unknown-modtime-nsecs
+                                                  time-flag)))
+                  (set!%buffer-modtime-size buffer -1))
+                (let ((t (lisp-time-arguments time-flag)))
+                  (set!%buffer-modtime buffer
+                                       (cons (car t)
+                                             (quotient (cdr t) 1000)))
+                  (set!%buffer-modtime-size buffer -1)))
+            (let ((name (expand-file-name (buffer-file-name buffer))))
+              (unless (file-exists-p name)
+                (error "Setting file modtime: No such file or directory"
+                       name))
+              (let ((mtime (%stat-mtime name)))
+                (set!%buffer-modtime buffer (car mtime))
+                (set!%buffer-modtime-size buffer (cdr mtime)))))
+        #f))
+
+    (define (verify-visited-file-modtime . rest)
+      ;; GNU Emacs's `verify-visited-file-modtime' (`fileio.c:6121'):
+      ;; "Return t if last mod time of BUF's visited file matches what
+      ;; BUF records. This means that the file has not been changed since
+      ;; it was visited or saved."
+      ;;
+      ;; The two early answers are the interesting ones: a buffer that
+      ;; visits nothing is trivially in step with its nothing, and a
+      ;; buffer whose time is *unknown* is believed rather than doubted -
+      ;; Emacs has not been told anything, so it does not claim the file
+      ;; has moved. Only a recorded time can go stale.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (if (and (pair? rest) (car rest))
+                         (car rest)
+                         (current-buffer)))
+             (name (buffer-file-name buffer)))
+        (cond
+         ((not name) #t)
+         ((= (cdr (%buffer-modtime buffer)) %unknown-modtime-nsecs) #t)
+         (else
+          (let* ((mtime (%stat-mtime (expand-file-name name)))
+                 (mt (car mtime)))
+            (and (equal? mt (%buffer-modtime buffer))
+                 (let ((size (%buffer-modtime-size buffer)))
+                   (or (< size 0) (= size (cdr mtime))))))))))
+
+
+    (define (set-file-modes filename mode . rest)
+      ;; GNU Emacs's `set-file-modes' (fileio.c:3666): "Set mode bits of
+      ;; file named FILENAME to MODE (an integer). Only the 12 low bits
+      ;; of MODE are used."
+      ;;
+      ;; The C reports "Doing chmod" on failure; `chmod' signals by
+      ;; itself here, which the command loop reports the same way.
+      ;;--------------------------------------------------------------
+      (chmod (expand-file-name filename) (logand mode #o7777)))
+
+    ;;----------------------------------------------------------------
+    ;; Naming
+    ;;------------------------------------------------------------------
+
+    (define (file-name-as-directory file)
+      ;; GNU Emacs's `file-name-as-directory' (fileio.c:634): "Return a
+      ;; string representing the file name FILE interpreted as a
+      ;; directory. ... For a Unix-syntax file name, just appends a slash
+      ;; unless a trailing slash is already present."
+      ;;
+      ;; The empty name is the C's first case and not the last: `""'
+      ;; answers `"./"' (fileio.c:314), not `""'. It is what makes
+      ;; `(expand-file-name "x" "")' a relative name rather than a
+      ;; malformed one, and it is what `"."' means.
+      ;;--------------------------------------------------------------
+      (cond ((= 0 (string-length file)) "./")
+            ((char=? #\/ (string-ref file (- (string-length file) 1))) file)
+            (else (string-append file "/"))))
+
+    (define (directory-file-name directory)
+      ;; GNU Emacs's `directory-file-name' (fileio.c:727): "Returns the
+      ;; file name of the directory named DIRECTORY. This is the name of
+      ;; the file that holds the data for the directory DIRECTORY."
+      ;;
+      ;; The slash comes off, except that the root keeps its own - the
+      ;; C stops at "the last slash that is not the first character".
+      ;;
+      ;; And `//' is the second exception, which is easy to miss because
+      ;; it is the *negation* of the whole loop: `directory_file_name'
+      ;; (fileio.c:680) says "if they are all slashes, leave `/' and `//'
+      ;; alone, and treat `///' and longer as if they were `/'", and
+      ;; writes it as `if (! (srclen == 2 && IS_DIRECTORY_SEP (src[0])))'
+      ;; around the stripping. So `directory-file-name "//"' is `//' -
+      ;; the pair is a root of its own, and stripping it to `/' would
+      ;; make a network root into the local one.
+      ;;--------------------------------------------------------------
+      (if (and (= 2 (string-length directory))
+               (char=? #\/ (string-ref directory 0)))
+          directory
+          (let loop ((end (string-length directory)))
+            (if (and (> end 1)
+                     (char=? #\/ (string-ref directory (- end 1))))
+                (loop (- end 1))
+                (substring directory 0 end)))))
+
+    (define (file-name-absolute-p filename)
+      ;; GNU Emacs's `file-name-absolute-p' (fileio.c:2967): "Return t if
+      ;; FILENAME is an absolute file name. On Unix, absolute file names
+      ;; start with `/'. In Emacs, an absolute file name can also start
+      ;; with an initial `~' or `~USER' component, where USER is a valid
+      ;; login name."
+      ;;
+      ;; The C's `file_name_absolute_p' (fileio.c:2979) asks three things
+      ;; of a leading `~': that the name ends there, that a slash follows
+      ;; it, or that a user of that name exists. The answer is `t' or
+      ;; nil - and `user_homedir' answers the *directory* it found, so
+      ;; each of those tests is wrapped to turn it into the boolean.
+      ;;--------------------------------------------------------------
+      (and (< 0 (string-length filename))
+           (or (char=? #\/ (string-ref filename 0))
+               (and (char=? #\~ (string-ref filename 0))
+                    (or (= 1 (string-length filename))
+                        (char=? #\/ (string-ref filename 1))
+                        (let loop ((i 1))
+                          (cond ((>= i (string-length filename))
+                                 (and (user-homedir (substring filename 1 i))
+                                      #t))
+                                ((char=? #\/ (string-ref filename i))
+                                 (and (user-homedir (substring filename 1 i))
+                                      #t))
+                                (else (loop (+ i 1))))))))))
+
+    (define (file-name-concat directory . components)
+      ;; GNU Emacs's `file-name-concat' (fileio.c:846): "Append
+      ;; COMPONENTS to DIRECTORY and return the resulting string. Each
+      ;; element in COMPONENTS must be a string or nil. DIRECTORY or the
+      ;; non-final elements in COMPONENTS may or may not end with a
+      ;; slash -- if they don't end with a slash, a slash will be
+      ;; inserted before concatenating."
+      ;;
+      ;; A nil component is skipped, which is what lets a caller write
+      ;; `(file-name-concat dir (and cond "sub") name)'. The C drops
+      ;; them before it starts.
+      ;;--------------------------------------------------------------
+      (let loop ((parts (cons directory components)) (acc ""))
+        (if (null? parts)
+            acc
+            (let ((part (car parts)))
+              (if (not part)
+                  (loop (cdr parts) acc)
+                  (loop (cdr parts)
+                        (cond ((= 0 (string-length acc)) part)
+                              ((char=? #\/ (string-ref acc
+                                                      (- (string-length acc) 1)))
+                               (string-append acc part))
+                              (else (string-append acc "/" part)))))))))
+
+    (define (search-embedded-absfilename name)
+      ;; GNU Emacs's `search_embedded_absfilename' (fileio.c:2033): the
+      ;; index of the first `/` that is followed by what begins an
+      ;; absolute file name - another `/', or a `~' - or #f when there
+      ;; is none. The C starts at the second character, because the
+      ;; first has nothing before it to be a slash.
+      ;;--------------------------------------------------------------
+      (let loop ((i 1))
+        (cond ((>= i (string-length name)) #f)
+              ((and (char=? #\/ (string-ref name (- i 1)))
+                    (file-name-absolute-p (substring name i (string-length name))))
+               i)
+              (else (loop (+ i 1))))))
+
+    (define (substitute-in-file-name filename)
+      ;; GNU Emacs's `substitute-in-file-name' (fileio.c:2046):
+      ;; "Substitute environment variables referred to in FILENAME. ...
+      ;; If FOO is not defined in the environment, `$FOO' is left
+      ;; unchanged in the value of this function. If `/~' appears, all of
+      ;; FILENAME through that `/' is discarded. If `//' appears,
+      ;; everything up to and including the first of those `/' is
+      ;; discarded."
+      ;;
+      ;; The C does it in two passes, and the two differ. Before the
+      ;; variables are substituted it *starts over* on the rest of the
+      ;; name, which its own comment explains is important for a name
+      ;; like "/home/foo//:/hello///there"; after them it walks on to the
+      ;; last such place instead, because starting over would need the
+      ;; dollars quoted first. Both are copied as they stand.
+      ;;--------------------------------------------------------------
+      (let ((at (search-embedded-absfilename filename)))
+        (if at
+            (substitute-in-file-name
+             (substring filename at (string-length filename)))
+            ;; `substitute-env-in-file-name' on Unix is
+            ;; `substitute-env-vars' with WHEN-UNDEFINED true, which is
+            ;; what leaves an undefined `$FOO' standing.
+            (let ((substituted (substitute-env-vars filename #t)))
+              (if (string=? substituted filename)
+                  filename
+                  (let loop ((from substituted))
+                    (let ((p (search-embedded-absfilename from)))
+                      (if p
+                          (loop (substring from p (string-length from)))
+                          from))))))))
+
+    ;;----------------------------------------------------------------
+    ;; Changing what is on disk
+    ;;------------------------------------------------------------------
+
+    (define (make-directory-internal directory)
+      ;; GNU Emacs's `make-directory-internal' (fileio.c:2562): "Create a
+      ;; new directory named DIRECTORY." The C's mode is
+      ;; `0777 & ~auto_saving_dir_umask' - the umask comes off, so what
+      ;; is asked for is 0777 and the system applies the rest.
+      ;;--------------------------------------------------------------
+      (mkdir (expand-file-name directory) #o777))
+
+    (define (delete-directory-internal directory)
+      ;; GNU Emacs's `delete-directory-internal' (fileio.c:2583): remove
+      ;; DIRECTORY itself. The C's is `rmdir', so a directory with
+      ;; anything in it is an error rather than a recursive delete -
+      ;; `delete-directory' (`files.el') is the recursive one.
+      ;;--------------------------------------------------------------
+      (rmdir (expand-file-name directory)))
+
+    (define (delete-file-internal filename)
+      ;; GNU Emacs's `delete-file-internal' (fileio.c:2602): "Delete file
+      ;; named FILENAME; internal use only. If it is a symlink, remove
+      ;; the symlink."
+      ;;
+      ;; A file that is not there is not an error - the C ignores ENOENT
+      ;; and reports every other failure - which is what makes
+      ;; `delete-file' safe to call twice.
+      ;;--------------------------------------------------------------
+      (guard (e (#t #f)) (delete-file (expand-file-name filename))))
+
+    (define (rename-file file newname . rest)
+      ;; GNU Emacs's `rename-file' (fileio.c:2724): "Rename FILE as
+      ;; NEWNAME. Both args must be strings. If NEWNAME is a directory
+      ;; name, rename FILE to a like-named file under NEWNAME. For
+      ;; NEWNAME to be recognized as a directory name, it should end in a
+      ;; slash."
+      ;;
+      ;; "Signal a `file-already-exists' error if a file NEWNAME already
+      ;; exists unless optional third argument OK-IF-ALREADY-EXISTS is
+      ;; non-nil." A non-nil integer asks the user, which is the
+      ;; interactive path and is not ported; anything else non-nil
+      ;; overwrites, which is what `rename-file' itself does.
+      ;;--------------------------------------------------------------
+      (let ((ok (and (pair? rest) (car rest))))
+        (when (and (not ok) (file-exists-p newname))
+          (error "Renaming: file already exists" newname))
+        (rename-file-internal (expand-file-name file) newname)))
+
+    (define (rename-file-internal file newname)
+      ;; The rename itself, once the already-exists question is settled.
+      ;; A NEWNAME that names a directory - one ending in a slash - takes
+      ;; the file under it, which is the C's rule and the docstring's.
+      ;;--------------------------------------------------------------
+      (let ((newname (if (and (< 0 (string-length newname))
+                               (char=? #\/ (string-ref newname
+                                                       (- (string-length newname) 1))))
+                         (string-append newname
+                                        (let loop ((i (- (string-length file) 1)))
+                                          (if (or (< i 0)
+                                                  (char=? #\/ (string-ref file i)))
+                                              (substring file (+ i 1) (string-length file))
+                                              (loop (- i 1)))))
+                         newname)))
+        (%rename-file (expand-file-name file) (expand-file-name newname))))
+
+    (define (copy-file file newname . rest)
+      ;; GNU Emacs's `copy-file' (fileio.c:2252): "Copy FILE to NEWNAME.
+      ;; Both args must be strings. If NEWNAME is a directory name, copy
+      ;; FILE to a like-named file under NEWNAME."
+      ;;
+      ;; "This function always sets the file modes of the output file to
+      ;; match the input file", which `copy-file' does by itself. The
+      ;; C's optional OK-IF-ALREADY-EXISTS and KEEP-TIME are taken and
+      ;; not honoured: there are no file times to keep here, and the
+      ;; overwrite question is the caller's.
+      ;;--------------------------------------------------------------
+      (let ((newname (if (and (< 0 (string-length newname))
+                               (char=? #\/ (string-ref newname
+                                                       (- (string-length newname) 1))))
+                         (string-append newname
+                                        (let loop ((i (- (string-length file) 1)))
+                                          (if (or (< i 0)
+                                                  (char=? #\/ (string-ref file i)))
+                                              (substring file (+ i 1) (string-length file))
+                                              (loop (- i 1)))))
+                         newname)))
+        (%copy-file (expand-file-name file) (expand-file-name newname))))
+
+    
+
+    ;;----------------------------------------------------------------
+    ;; Finding a file through a list of directories
+    ;;
+    ;; GNU Emacs's `locate-file-internal' (`lread.c:1590'), which is a
+    ;; wrapper over `openp' (`:1756'). `cd' is what this tree wants it
+    ;; for: "find the directory DIR in the CDPATH list".
+    ;;
+    ;; The C works in bytes and carries the file-name-handler machinery
+    ;; and the native-compilation `.eln' swap; neither exists here, so
+    ;; what is left is the search itself, whose shape is:
+    ;;
+    ;;   for each element of PATH:
+    ;;     filename = expand STR against it (or STR itself, when PATH is
+    ;;                nil - the C's `just_use_str' sentinel)
+    ;;     if the result is not absolute, expand it against
+    ;;       `default-directory' and give up on this element if it still
+    ;;       is not
+    ;;     for each suffix (the empty string when there are none):
+    ;;       if the name passes PREDICATE, answer it
+    ;;------------------------------------------------------------------
+
+    (define (%complete-filename-p name)
+      ;; GNU Emacs's `complete_filename_p' (`lread.c:1582'): whether NAME
+      ;; already names an absolute path. The C also accepts a DOS drive
+      ;; letter (`c:/...'); there is no such spelling here.
+      ;;--------------------------------------------------------------
+      (and (> (string-length name) 0)
+           (char=? #\/ (string-ref name 0))))
+
+    (define (%pathname-passes? name predicate)
+      ;; Whether one candidate name is the answer - the C's test
+      ;; (`lread.c:1874-1897'). With no predicate the question is
+      ;; `file-readable-p'; with one, the answer is the predicate's, and
+      ;; a predicate may answer the symbol `dir-ok' to say "a directory
+      ;; is acceptable here", which is how `cd' asks for one - without
+      ;; it a directory would be rejected, because `openp' skips them.
+      ;;--------------------------------------------------------------
+      (cond
+       ((or (not predicate) (eq? predicate #t))
+        (file-readable-p name))
+       (else
+        (let ((answer (predicate name)))
+          (cond ((not answer) #f)
+                ((eq? answer 'dir-ok) #t)
+                ((not (file-directory-p name)) #t)
+                (else #f))))))
+
+    (define locate-file-internal
+      (case-lambda
+       ((filename path) (locate-file-internal filename path '() #f))
+       ((filename path suffixes)
+        (locate-file-internal filename path suffixes #f))
+       ((filename path suffixes predicate)
+        ;; PATH nil means "look at FILENAME itself and nothing else" -
+        ;; the C replaces a nil PATH with the one-element list
+        ;; `just_use_str' and compares the *tail cell* against it, so the
+        ;; first round uses STR unexpanded (`lread.c:1799-1806').
+        ;;
+        ;; SUFFIXES nil means the one empty suffix, so the name is tried
+        ;; as it stands (`:1836').
+        ;;--------------------------------------------------------------
+        (let ((suffixes (if (pair? suffixes) suffixes (list ""))))
+          (let loop ((path (if (pair? path) path (list 'just-use-str))))
+            (if (null? path)
+                #f
+                (let* ((dir (car path))
+                       (base (if (eq? dir 'just-use-str)
+                                 filename
+                                 (expand-file-name filename dir))))
+                  (if (not (%complete-filename-p base))
+                      ;; "Of course, this could conceivably lose if luser
+                      ;; sets default-directory to be something
+                      ;; non-absolute" - `lread.c:1812'
+                      (let ((fixed (expand-file-name base (default-directory))))
+                        (if (%complete-filename-p fixed)
+                            (or (%try-suffixes fixed suffixes predicate)
+                                (loop (cdr path)))
+                            (loop (cdr path))))
+                      (or (%try-suffixes base suffixes predicate)
+                          (loop (cdr path)))))))))))
+
+    (define (%try-suffixes base suffixes predicate)
+      ;; BASE with each suffix appended, the first that passes answered.
+      ;;--------------------------------------------------------------
+      (let loop ((rest suffixes))
+        (if (null? rest)
+            #f
+            (let ((name (string-append base (car rest))))
+              (if (%pathname-passes? name predicate)
+                  name
+                  (loop (cdr rest)))))))
+
+    ;;----------------------------------------------------------------
+    ;; The seam, installed as this library loads
+    ;;------------------------------------------------------------------
+    ;;
+    ;; `(schemacs editor engine)' reads this to write the visited file's
+    ;; modification time into the `(t . TIME)' undo mark, and cannot
+    ;; import it from here: fileio.c is above insdel.c, so the parameter
+    ;; is declared in `(schemacs buffer)' - beside the record
+    ;; whose `modtime' field it reads - and filled in here. A seam
+    ;; belongs to whoever fills it.
+    (*buffer-visited-file-modtime-function* buffer-visited-file-modtime)
+
+    ))

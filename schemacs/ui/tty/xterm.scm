@@ -71,9 +71,9 @@
     (only (schemacs ui tty sysdep)
           tty-read-query-byte tty-unread-query-bytes
           tty-flush-query-input)
-    (only (schemacs editor tty-colors)
+    (only (schemacs term tty-colors)
           tty-color-clear tty-color-define *color-name-rgb-alist*)
-    (only (schemacs editor faces) *display-color-cells* *frame-background-mode*))
+    (only (schemacs faces) *display-color-cells* *frame-background-mode*))
 
   (export
    terminal-init-xterm

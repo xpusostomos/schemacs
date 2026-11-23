@@ -1,6 +1,6 @@
 # The cc-engine differential
 
-Compares the ported tranches of `schemacs/editor/cc-engine.scm` with
+Compares the ported tranches of `schemacs/progmodes/cc-engine.scm` with
 Emacs 31.1 at every position of seven fixtures.
 
     # C++ (the older fixture, the requires/lambda one), in C++ mode

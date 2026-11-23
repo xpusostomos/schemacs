@@ -1,0 +1,385 @@
+(define-library (schemacs timefns)
+  ;; This library mirrors GNU Emacs's `src/timefns.c': the time values
+  ;; and the three things asked of them so far - `current-time',
+  ;; `float-time', `time-subtract' and `format-time-string', with
+  ;; `time-less-p'.
+  ;;
+  ;; A Lisp time here is the four-element `(HIGH LOW USEC PSEC)' list the
+  ;; C's `make_lisp_time' answers with, which is what `file-attributes'
+  ;; carries and what `(current-time)' returns: "Emacs uses a Lisp
+  ;; representation of times by default, fixed-point and with some
+  ;; hacks", as `current-time-list' is true. `lisp_time_argument' is the
+  ;; read half, and it takes all the forms Emacs's does - that list, a
+  ;; `(TICKS . HZ)' pair, a plain number of seconds, or nil for now.
+  ;;
+  ;; `format-time-string' is where a Guile library is *substituted* for a
+  ;; port, which is what this project asks for when the function already
+  ;; exists: its body is `(srfi srfi-19)''s `date->string' - a strftime
+  ;; by another spelling - over an `(ice-9 i18n)' month and day table.
+  ;; That is better than a port would be, because the names are the
+  ;; *locale's*: `~b' resolves through `locale-month-short', so a German
+  ;; locale prints `Mär' where a table written out here would print
+  ;; `Mar'. SRFI-19 spells the directives with `~' where the C spells
+  ;; them with `%' and the letters are otherwise the same, so a
+  ;; `%' string is rewritten to a `~' one and handed over.
+  ;;
+  ;; `localtime''s answer carries three things SRFI-19's date wants: the
+  ;; broken-down fields, the zone's name (its last element, "+07" on
+  ;; this machine) and the zone offset. The offset element is *seconds
+  ;; west* of UTC - measured, -25200 on a UTC+7 machine - and SRFI-19
+  ;; takes seconds east, so it is negated on the way in. `%Z' is the
+  ;; name and `%z' the offset, which is how Emacs splits them.
+  ;;
+  ;; Not ported, and named rather than faked:
+  ;;
+  ;;   * the ZONE argument of `format-time-string'. Emacs's is an
+  ;;     explicit zone name, a list of zone rules, t for UTC, or an
+  ;;     offset in seconds; here the time is the machine's local time,
+  ;;     which is what a nil ZONE means and what `ls-lisp' asks for.
+  ;;   * `%g', `%G' and `%V' - the ISO week-numbering year and week,
+  ;;     which SRFI-19 does not have either and which need the week
+  ;;     arithmetic `%U' and `%W' get from the same place.
+  ;;   * `time-add', `time-equal-p', `time-convert', `encode-time',
+  ;;     `format-seconds' and the rest of the file.
+  ;;
+  ;; A departure worth naming: `time-subtract' answers a Lisp *time*,
+  ;; as Emacs 31's does with `current-time-list' true - measured,
+  ;; `(time-subtract '(27329 0 0 0) nil)' is `(0 3164 763424 551000)',
+  ;; not the `(TICKS . HZ)' pair of older Emacsen. A difference and a
+  ;; time are the same shape here, which is why `time-less-p' reads any
+  ;; of them.
+
+  (import
+    (scheme base)
+    (scheme char)
+    ;; the clock, and the local-time breakdown SRFI-19's date needs
+    (only (guile) ash cadddr caddr gettimeofday logand localtime
+          string-index tm:hour tm:mday tm:min tm:mon tm:sec tm:wday tm:year)
+    ;; the substituted implementation - see the comment above
+    (only (srfi srfi-19) date->string make-date)
+    )
+
+  (export current-time-string
+          current-time
+          float-time
+          format-time-string
+          make-lisp-time
+          lisp-time-arguments
+          time-equal-p
+          time-less-p
+          time-since
+          time-subtract
+          time-convert
+          )
+
+  (begin
+
+    ;;----------------------------------------------------------------
+    ;; The Lisp time
+    ;;------------------------------------------------------------------
+
+    (define (make-lisp-time seconds nanoseconds)
+      ;; GNU Emacs's `make_lisp_time' (timefns.c): the four-element
+      ;; `(HIGH LOW USEC PSEC)' list `current-time' answers with, where
+      ;; the time is `(+ (* HIGH 65536) LOW)' seconds and the last two
+      ;; are the nanoseconds split into microseconds and the rest.
+      ;;--------------------------------------------------------------
+      (list (ash seconds -16)
+            (logand seconds #xffff)
+            (quotient nanoseconds 1000)
+            (* 1000 (remainder nanoseconds 1000))))
+
+    (define (lisp-time-arguments time)
+      ;; GNU Emacs's `lisp_time_argument' (timefns.c): TIME read as
+      ;; `(SECONDS . PICOSECONDS)', which is the whole of what the
+      ;; functions below understand by "a time" - the C reads it into a
+      ;; `struct lisp_time' of ticks and a rate, and picoseconds is that
+      ;; struct at the rate every form here shares.
+      ;;
+      ;; A proper list is the `(HIGH LOW USEC PSEC)' form, a pair that
+      ;; is not a list is `(TICKS . HZ)', and a number is seconds.
+      ;;--------------------------------------------------------------
+      (cond
+       ((not time) (%now-arguments))
+       ;; A non-integer number is seconds *and a fraction*, and the
+       ;; picoseconds field is what holds the fraction - `(float-time)`
+       ;; is the value `tooltip-hide-time` stores and `time-since`
+       ;; subtracts. `(cons time 0)` left the fraction in the seconds
+       ;; field, and the exact `floor-quotient`/`ash` arithmetic below
+       ;; then raised "Wrong type argument ... -37.0".
+       ((number? time)
+        (if (integer? time)
+            (cons (exact time) 0)
+            ;; `exact` because `floor` of an inexact argument answers an
+            ;; inexact integer, and the arithmetic below is the C's
+            ;; integer arithmetic - `(ash 1.7e9 -16)` is a type error.
+            (let* ((secs (exact (floor time)))
+                   (psec (exact (round (* (- time secs) 1000000000000)))))
+              (if (>= psec 1000000000000)
+                  (cons (+ secs 1) (- psec 1000000000000))
+                  (cons secs psec)))))
+       ((pair? time)
+        (if (list? time)
+            (cons (+ (* (car time) 65536) (cadr time))
+                  (+ (* (caddr time) 1000000) (cadddr time)))
+            ;; `(TICKS . HZ)' is `TICKS / HZ' *seconds*, so the value in
+            ;; picoseconds is `TICKS * 10^12 / HZ', and the two fields of
+            ;; the answer are that total split - not that total taken as
+            ;; the seconds, which is what this did and which is wrong by
+            ;; 10^12. Measured against Emacs: `(1 . 1000000000000)' is
+            ;; one picosecond there, `(float-time ...)' answering 1e-12,
+            ;; and `(100 . 1)' is 100 seconds.
+            (let ((ps (floor-quotient (* (car time) 1000000000000)
+                                      (cdr time))))
+              (cons (floor-quotient ps 1000000000000)
+                    (floor-remainder ps 1000000000000)))))
+       (else (error "Invalid time" time))))
+
+    (define (%now-arguments)
+      ;; The clock as `(SECONDS . PICOSECONDS)' - `(current-time)' before
+      ;; it is dressed in the Lisp shape.
+      ;;--------------------------------------------------------------
+      (let ((now (gettimeofday)))
+        (cons (car now) (* 1000000 (cdr now)))))
+
+    (define (current-time-string . rest)
+      ;; GNU Emacs's `current-time-string' (timefns.c): "Return the current
+      ;; local time, as a human-readable string. ... The format is `Sun Sep
+      ;; 16 01:03:52 1973'."
+      ;;
+      ;; The C writes the English weekday and month names from its own
+      ;; tables rather than calling `ctime', so that a year outside
+      ;; ctime's range cannot dump core; that is copied here, names and
+      ;; all, rather than going through `strftime', whose names are the
+      ;; locale's. The C's two optional arguments (SPECIFIED-TIME and
+      ;; ZONE) are not taken - nothing here asks for a time other than
+      ;; now.
+      ;;--------------------------------------------------------------
+      (let* ((tm (localtime (car (gettimeofday))))
+             (two (lambda (n)
+                    (let ((text (number->string n)))
+                      (if (< (string-length text) 2)
+                          (string-append "0" text)
+                          text)))))
+        (string-append
+         (vector-ref '#("Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat")
+                     (tm:wday tm))
+         " "
+         (vector-ref '#("Jan" "Feb" "Mar" "Apr" "May" "Jun"
+                        "Jul" "Aug" "Sep" "Oct" "Nov" "Dec")
+                     (tm:mon tm))
+         ;; `%3d': the day of the month in three columns
+         ;; the C's `%3d': the day of the month in *three* columns, so
+         ;; the fourth is "Oct  4" and not "Oct 4"
+         (let ((day (number->string (tm:mday tm))))
+           (if (< (string-length day) 3)
+               (string-append (make-string (- 3 (string-length day)) #\space) day)
+               day))
+         " "
+         (two (tm:hour tm)) ":" (two (tm:min tm)) ":" (two (tm:sec tm))
+         " "
+         (number->string (+ 1900 (tm:year tm))))))
+
+    (define (current-time)
+      ;; GNU Emacs's `current-time': "Return the current time, as the
+      ;; number of seconds since 1970-01-01 00:00:00."
+      ;;--------------------------------------------------------------
+      (let ((now (%now-arguments)))
+        (make-lisp-time (car now) (cdr now))))
+
+    (define (time-convert time . form-args)
+      ;; GNU Emacs's `time-convert' (`timefns.c:1783'): "Convert TIME
+      ;; value to a Lisp timestamp of the given FORM. Truncate the
+      ;; returned value toward minus infinity."
+      ;;
+      ;; The four arms are `integer', `list', a positive integer and
+      ;; `t'; the C's default with no FORM is `c->t' when
+      ;; `current-time-list' is nil, which is Emacs 31's default. All of
+      ;; them are computed from the `(SECONDS . PICOSECONDS)' pair
+      ;; `lisp-time-arguments' answers, since a difference and a time
+      ;; are the same shape here.
+      ;;--------------------------------------------------------------
+      (let* ((t (lisp-time-arguments time))
+             (secs (car t))
+             (psec (cdr t))
+             (form (if (pair? form-args) (car form-args) #t)))
+        (cond
+         ((eq? form 'integer)
+          ;; `ticks_hz_seconds': floor of the time in seconds.
+          (floor (/ (+ (* secs 1000000000000) psec) 1000000000000)))
+         ((eq? form 'list)
+          ;; `ticks_hz_list4'.
+          (make-lisp-time secs (quotient psec 1000)))
+         ((eq? form #t)
+          ;; `(TICKS . PHZ)': "a suitable clock frequency in ticks per
+          ;; second". The C scales to a power of 10 that fits a fixnum;
+          ;; a picosecond resolution is the same choice here.
+          (cons (floor (/ (+ (* secs 1000000000000) psec) 1000)) 1000))
+         ((integer? form)
+          ;; `(TICKS . FORM)'.
+          (cons (floor (/ (* (+ (* secs 1000000000000) psec) form)
+                          1000000000000))
+                form))
+         (else (error "Invalid time form: ~a" form)))))
+
+    (define (float-time . rest)
+      ;; GNU Emacs's `float-time': "Convert TIME to a floating-point
+      ;; number of seconds since the epoch. If TIME is nil, use the
+      ;; current time."
+      ;;--------------------------------------------------------------
+      (let ((t (lisp-time-arguments (if (pair? rest) (car rest) #f))))
+        (+ (inexact (car t)) (/ (inexact (cdr t)) 1000000000000.0))))
+
+    (define (time-less-p a b)
+      ;; GNU Emacs's `time-less-p' (timefns.c): "Return non-nil if time
+      ;; value A is less than time value B." Either may be a time, a
+      ;; difference or a plain number of seconds, which is what
+      ;; `lisp_time_argument' is for.
+      ;;--------------------------------------------------------------
+      (let ((ta (lisp-time-arguments a))
+            (tb (lisp-time-arguments b)))
+        (if (= (car ta) (car tb))
+            (< (cdr ta) (cdr tb))
+            (< (car ta) (car tb)))))
+
+    (define (time-equal-p a b)
+      ;; GNU Emacs's `time-equal-p' (timefns.c:1296): "Return non-nil if
+      ;; A and B are equal time values."
+      ;;
+      ;; The C is `NILP (a) == NILP (b) && time_cmp (a, b) == 0', and the
+      ;; nil test is first for a reason worth keeping: nil means "the
+      ;; current time" to every other reader here, so leaving this to the
+      ;; comparison alone would make `(time-equal-p nil NOW)' true, where
+      ;; the C answers nil for a nil against anything but a nil.
+      ;;--------------------------------------------------------------
+      (cond ((and (not a) (not b)) #t)
+            ((or (not a) (not b)) #f)
+            (else
+             (let ((ta (lisp-time-arguments a))
+                   (tb (lisp-time-arguments b)))
+               (and (= (car ta) (car tb)) (= (cdr ta) (cdr tb)))))))
+
+    (define (time-subtract a . rest)
+      ;; GNU Emacs's `time-subtract': "Subtract two time values, A minus
+      ;; B. ... If B is nil, it defaults to the current time."
+      ;;
+      ;; The answer comes back through the C's `ticks_hz_list4', not
+      ;; through `make_lisp_time', and the two split the sub-second part
+      ;; *differently*: `make_lisp_time' answers `(USEC PSEC)' as
+      ;; `(ns / 1000, ns % 1000 * 1000)', where `ticks_hz_list4' takes
+      ;; the low twelve digits of the value as *picoseconds* and answers
+      ;; their high six and low six. Measured on the same pair, Emacs
+      ;; gives `(0 65532 999996 999997)' where the other split would
+      ;; give `(0 65532 999996 997000)' - so the whole subtraction is
+      ;; done in picoseconds, which is where the twelve digits are.
+      ;;--------------------------------------------------------------
+      (let* ((ta (lisp-time-arguments a))
+             (tb (lisp-time-arguments (if (pair? rest) (car rest) #f)))
+             (total (- (+ (* (car ta) 1000000000000) (cdr ta))
+                       (+ (* (car tb) 1000000000000) (cdr tb)))))
+        ;; `floor-' and not a plain quotient, so that a time before the
+        ;; epoch borrows the way the C's normalisation does
+        (let* ((secs (floor-quotient total 1000000000000))
+               (rem (floor-remainder total 1000000000000)))
+          (list (ash secs -16)
+                (logand secs #xffff)
+                (quotient rem 1000000)
+                (remainder rem 1000000)))))
+
+    (define (time-since time)
+      ;; GNU Emacs's `time-since' (`time-date.el:192'): "Return the time
+      ;; elapsed since TIME. TIME should be either a time value or a
+      ;; date-time string." `time-subtract' takes nil A as the current
+      ;; time, so the differential is the whole function; the string arm
+      ;; needs `date-to-time', which is not ported (nothing here passes
+      ;; a date string).
+      ;;
+      ;; **Placement**: `time-date.el` is not otherwise ported, and this
+      ;; is a one-line caller of `time-subtract' - the rule
+      ;; `with-buffer-unmodified-if-unchanged' took into `fill.scm'.
+      ;;--------------------------------------------------------------
+      (time-subtract #f time))
+
+    ;;----------------------------------------------------------------
+    ;; Formatting
+    ;;------------------------------------------------------------------
+
+    (define %srfi-19-directives
+      ;; The directives `(srfi srfi-19)''s `date->string' has, which are
+      ;; the C's strftime's with the letters unchanged and `~' for `%'.
+      ;; Read off its own table rather than guessed.
+      "12345ABDHIMNSTUVWXYZabcdefhjklmnprstuwxyz")
+
+    (define (format-time-string format . rest)
+      ;; GNU Emacs's `format-time-string' (timefns.c): "Format a time
+      ;; value as a string. ... The first argument is a format control
+      ;; string, and the function copies it to the output, replacing `%'
+      ;; specifications with fields of TIME as it goes."
+      ;;
+      ;; The body is SRFI-19's `date->string', for the reason the
+      ;; library comment gives: the directive letters are the same and
+      ;; its month and day names are the locale's.
+      ;;--------------------------------------------------------------
+      (let* ((time (if (pair? rest) (car rest) #f))
+             (args (lisp-time-arguments time))
+             (broken (localtime (car args)))
+             (date (make-date (quotient (cdr args) 1000)
+                              (vector-ref broken 0)          ; second
+                              (vector-ref broken 1)          ; minute
+                              (vector-ref broken 2)          ; hour
+                              (vector-ref broken 3)          ; day of month
+                              (+ 1 (vector-ref broken 4))    ; month, 1-based
+                              (+ 1900 (vector-ref broken 5)) ; year, from 1900
+                              (- (vector-ref broken 9)))))   ; east of UTC
+        (date->string date (%format-time-directives format broken))))
+
+    (define (%format-time-directives format broken)
+      ;; FORMAT with its `%' directives spelled as SRFI-19's `~' ones.
+      ;;
+      ;; Four of the C's directives are not SRFI-19's and are written
+      ;; out here: `%C' is the century, `%P' is the morning/afternoon in
+      ;; lower case where `%p' is in upper, `%F' is `%Y-%m-%d', `%q' is
+      ;; the quarter of the year, and `%Z' is the zone's *name* - which
+      ;; SRFI-19 spells as the numeric offset instead. None of the text
+      ;; written in is a `~', so putting it into the string SRFI-19 is
+      ;; about to read cannot be mistaken for a directive.
+      ;;
+      ;; "an unknown directive stands for itself" - measured: Emacs
+      ;; answers "%Q" for "%Q".
+      ;;--------------------------------------------------------------
+      (let ((year (+ 1900 (vector-ref broken 5)))
+            (month (+ 1 (vector-ref broken 4)))
+            (hour (vector-ref broken 2)))
+        (let loop ((i 0) (acc ""))
+          (if (>= i (string-length format))
+              acc
+              (let ((c (string-ref format i)))
+                (if (and (char=? c #\%)
+                         (< (+ i 1) (string-length format)))
+                    (let ((d (string-ref format (+ i 1))))
+                      (loop (+ i 2)
+                            (string-append
+                             acc
+                             (cond
+                              ;; a literal `%' - written in as itself,
+                              ;; because SRFI-19 reads `~' and not
+                              ;; `%', so there is nothing to escape
+                              ((char=? d #\%) "%")
+                              ((char=? d #\C)
+                               (let ((n (number->string (quotient year 100))))
+                                 (if (< (string-length n) 2)
+                                     (string-append "0" n)
+                                     n)))
+                              ((char=? d #\P) (if (< hour 12) "am" "pm"))
+                              ((char=? d #\F) "~Y-~m-~d")
+                              ((char=? d #\q)
+                               (number->string (+ 1 (quotient (- month 1) 3))))
+                              ((char=? d #\Z) (vector-ref broken 10))
+                              ((string-index %srfi-19-directives d)
+                               (string #\~ d))
+                              ;; "an unknown directive stands for
+                              ;; itself", as the C's copy loop leaves it
+                              (else (string #\% d))))))
+                    (loop (+ i 1) (string-append acc (string c)))))))))
+
+    ))

@@ -33,7 +33,9 @@
       ;; The UI directories are walked too: the toolkit libraries moved
       ;; there when they stopped being `(schemacs editor ...)'
       ;; (`schemacs/ui/gtk' and `schemacs/ui/tty').
-      (let loop ((dirs '("schemacs/editor" "schemacs/ui/gtk" "schemacs/ui/tty"))
+      (let loop ((dirs '("schemacs" "schemacs/core" "schemacs/progmodes"
+                           "schemacs/international" "schemacs/textmodes"
+                           "schemacs/term" "schemacs/ui/gtk" "schemacs/ui/tty"))
                  (acc '()))
         (if (null? dirs)
             (reverse acc)

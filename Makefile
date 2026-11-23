@@ -94,7 +94,7 @@ GOS     := $(patsubst %.scm,build/%.go,$(MODULES))
 #
 # **AND NOT THE TESTS.** They are part of the TREE and not of the program: the
 # editor never loads one, `make test` runs them from here, and an installed
-# `schemacs/editor/foo-tests.scm` is a file no user wants in their site
+# `test/foo-test.scm` is a file no user wants in their site
 # directory. Worse, its `.go` was INSTALLED TOO, into the site ccache - where a
 # stale compiled INTERFACE shadows the tree's source the next time `make` runs
 # and Guile resolves `(schemacs something)' through it. Measured: a rebuild

@@ -3,12 +3,12 @@
 ;; The mode replay is `tools/cc-indent-diff/ours-indent.scm''s; the
 ;; command under test is `c-indent-region' over the whole buffer.
 (import (scheme base) (scheme write)
-        (schemacs editor buffer) (schemacs editor editfns)
-        (schemacs editor syntax) (schemacs editor cmds)
-        (schemacs editor cc-defs) (schemacs editor cc-langs)
-        (schemacs editor cc-vars) (schemacs editor cc-styles)
-        (schemacs editor cc-engine) (schemacs editor cc-align)
-        (schemacs editor cc-cmds))
+        (schemacs buffer) (schemacs editfns)
+        (schemacs syntax) (schemacs cmds)
+        (schemacs progmodes cc-defs) (schemacs progmodes cc-langs)
+        (schemacs progmodes cc-vars) (schemacs progmodes cc-styles)
+        (schemacs progmodes cc-engine) (schemacs progmodes cc-align)
+        (schemacs progmodes cc-cmds))
 (define args (cdr (command-line)))
 (define style (car args))
 (define file (cadr args))

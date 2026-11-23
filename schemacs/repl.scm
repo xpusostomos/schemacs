@@ -57,14 +57,14 @@
     ;; The instance name comes from the environment, or from the pid: `(guile)'s
     ;; names, because this library is an R7RS one and takes what it names.
     (only (guile) getenv getpid number->string)
-    ;; The session's namespace, which `(schemacs editor loadup)' builds:
+    ;; The session's namespace, which `(schemacs loadup)' builds:
     ;; `$XDG_CONFIG_HOME/imports.scm' when the user has one, the whole editor
     ;; when they do not. The same environment `M-:' and the init file get,
     ;; because all three are code the editor did not write.
-    (only (schemacs editor loadup) open-user-environment!)
+    (only (schemacs loadup) open-user-environment!)
     ;; `poll-repl!' draws after it has run something, because nothing else
     ;; would - see `repl-after-poll!' below.
-    (only (schemacs editor xdisp) redisplay-frames!))
+    (only (schemacs xdisp) redisplay-frames!))
 
   (export)
 

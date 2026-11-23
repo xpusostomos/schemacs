@@ -173,7 +173,7 @@ don't want to see some weird output because you decided to
 return something that they don't want to see.
 
 if emacs has an interesting macro or syntax-rules we should implement it,
-so as to keep the same shape as emacs code. make a schemacs/syntax.scm 
+so as to keep the same shape as emacs code. make a schemacs/core/syntax-macros.scm 
 for syntax.
 
 If you implement a feature that emacs has attached to a menu or menu bar,
@@ -209,7 +209,7 @@ The layout plan (LAYOUT-PLAN.txt) is essentially executed: `apps/ncurses-editor.
 `tabulated-list-print`.
 
 Wiring already done:
-1. `(schemacs editor buffer)` registry (buffer-list, get-buffer-create, kill-buffer, …)
+1. `(schemacs buffer)` registry (buffer-list, get-buffer-create, kill-buffer, …)
 2. `keyboard.sld`'s `lookup-keymaps` consults the buffer-local keymap before the global
 3. `ncurses.sld` imports the binding-carrying libraries
 
@@ -435,8 +435,7 @@ BASIC-FUNC.md groups 11-15, per the plan in
   global command; tabulated-list-mode sets the buffer-local function).
 - **simple.sld**: `read-only-mode' now at C-x C-q (files.el:9330;
   C-x q is kbd-macro-query's, not ported).
-- Wiring: build.scm, Makefile, both platform files (`(only (schemacs
-  editor replace))' for the M-% bindings), tools/run-suites.py gained
+- Wiring: build.scm, Makefile, both platform files (`(only (schemacs replace))' for the M-% bindings), tools/run-suites.py gained
   search-tests.scm and replace-tests.scm.
 
 ## Tests
@@ -778,7 +777,7 @@ language took them, with the why on each definition:
   output procedure.
 - keyboard.sld's `abort-recursive-edit` — the minibuffer's C-g binds
   this directly (it is buffer.c's command), which is why it lives in
-  `(schemacs editor keyboard)` and not in minibuffer.sld.
+  `(schemacs keyboard)` and not in minibuffer.sld.
 
 Mechanics added to `command.sld` for this:
 
@@ -817,7 +816,7 @@ reproduced: one list element per code.
 An interactive expression evaluates in the command's *defining* module, so
 every name it uses must be imported there: `toggle-truncate-lines' in
 simple.sld was unbound on `current-prefix-arg' because simple.sld's
-`(schemacs editor command)' import did not have it - the missing-import
+`(schemacs command)' import did not have it - the missing-import
 class again, swallowed by the command loop into a key that does nothing.
 
 Horizontal scrolling landed 2026-10-01 (`hscroll', auto-hscroll-mode,
@@ -1156,7 +1155,7 @@ It has to be a leaf because of the import graph, not for style:
           \            /
      (schemacs editor engine)      <- imports both
                |
-     (schemacs editor buffer)      <- imports engine
+     (schemacs buffer)      <- imports engine
 ```
 
 `buffer.sld` imports `engine`, `engine` imports `gap-buffer`, so a helper
@@ -1306,7 +1305,7 @@ element-versus-byte unit question above gets settled.
 ## What landed
 
 `schemacs/editor/buffer-text.sld` (new) plus
-`schemacs/editor/buffer-text-tests.scm` (58 tests). Wired into `build.scm`,
+`test/buffer-text-test.scm` (58 tests). Wired into `build.scm`,
 `Makefile` and `tools/run-suites.py`. **Nothing uses it yet** — the editor
 still runs on `gap-buffer.sld` + the line editor + the CDF. This is the
 class the conversion will move onto.
@@ -1913,7 +1912,7 @@ Two details that had to be copied rather than guessed:
   *because* of that slash, so it takes the "no such directory" branch
   rather than "is not a directory". Read off Emacs.
 
-Tests: `schemacs/editor/files-tests.scm` (13), wired into
+Tests: `test/files-test.scm` (13), wired into
 `tools/run-suites.py`, and a `cd` check in `tools/pty-check.py` that
 drives M-x and reads the next `C-x C-f` prompt, since `default-directory`
 is what changed and that is where it shows.
@@ -3934,7 +3933,7 @@ auto-coding-alist          (by file name)
 and the BOM is the *second* step, not a special case after the third: a file
 whose first bytes are a mark is read as `utf-8-with-signature` whatever a tag
 says. It is wired there now, `%byte-order-mark` is deleted (Emacs has no such
-function), and `string-match` comes from `(schemacs editor search)`.
+function), and `string-match` comes from `(schemacs search)`.
 
 **The last alist entry was transcribed wrong.** Emacs's is
 `("\\`;ELC\024\0\0\0" . emacs-mule)` - an ELC magic number, `;ELC` then 0x14
@@ -4706,7 +4705,7 @@ minibuffer read Emacs's selected window *is* the minibuffer window; this
 tree has no minibuffer window, and the echo area is what stands for it.
 
 **The layering had to move for this, and that was the real blocker.**
-`(schemacs editor buffer)` imports `(schemacs editor frame)`, so `frame.sld`
+`(schemacs buffer)` imports `(schemacs frame)`, so `frame.sld`
 cannot call `set-buffer` - and that is why the previous pass left the half
 undone and named it a departure. The fix is not a hook: `*current-buffer*`
 moved *down* to `frame.sld`, beside `*current-frame*` and
@@ -5572,11 +5571,11 @@ Measured, both pokes through the same `poll-repl!`:
 | at idle, in the read | `(guile-user)` |
 | while "Find file:" was up | **unbound** - `module-name` itself was |
 
-The second is `(schemacs editor files)`: a command's interactive
+The second is `(schemacs files)`: a command's interactive
 expression is run with `(eval spec module)`, and `eval` binds the module
 for the *whole* of that evaluation - which for `find-file` includes its
 prompt's read. A library has no `import` to offer, so
-`tools/repl.py -m '(schemacs editor xdisp)' ...` worked at idle and failed
+`tools/repl.py -m '(schemacs xdisp)' ...` worked at idle and failed
 while a prompt was up.
 
 **`poll-repl!` pins it now**: `save-module-excursion` around the drain,
@@ -5618,7 +5617,7 @@ position))` and `(goto-char (posn-point position))`. That is the whole of
   `mouse-set-point`, `mouse-drag-region`, `mouse-drag-track`, `mouse-key?`,
   and mouse.el:3781's own binding line. **`posn-set-point` is `subr.el`'s
   but lives here**, because it needs `select-window` and `goto-char` and
-  `(schemacs editor frame)` imports `subr`: a definition in `subr.sld`
+  `(schemacs frame)` imports `subr`: a definition in `subr.sld`
   could not reach either. Named in both files.
 - **`xdisp.sld`** — `posn-at-x-y` (`keyboard.c:13009`, which is
   `make_lispy_position`) and `buffer-posn-from-coords` (`xdisp.c`). The
@@ -5762,7 +5761,7 @@ door's* alone: an init file imports what it needs, see the startup-screen
 section), which evaluates one `import`
 form in that module listing every `(schemacs editor ...)` library. The list
 is written out (the tree's root is not a thing a running editor knows), so
-it can go stale - and **`schemacs/editor/loadup-tests.scm` is what
+it can go stale - and **`test/loadup-test.scm` is what
 notices**: it walks `schemacs/editor/*.sld` and fails on a library that is
 neither in the list nor in `editor-excluded-libraries`. Verified by
 removing one entry: the test names it.
@@ -5867,7 +5866,7 @@ Chris committed one, `a097a69`) — `locate-file-internal`, which is
 here.** `inhibit-startup-screen` is `startup.el`'s variable (`:68`), so it
 is in `schemacs/editor/startup.sld`, and an init file that wants it says
 
-    (import (schemacs editor startup))
+    (import (schemacs startup))
     (set! inhibit-startup-screen #t)
 
 which is Emacs's `(require 'startup)' and `(setq ...)` in the same two
@@ -6418,8 +6417,7 @@ the second launcher had been hiding:
 2. **The launcher's error reporter was itself broken, and hid (1).** It
    called `(format (current-error-port) …)` by *name*, and this file is
    `load`ed into `(guile-user)` - where the user's init file imports
-   editor libraries, one of which exports `format` (`(schemacs editor
-   editfns)`, Emacs's, string-first). The reporter was then handed a port
+   editor libraries, one of which exports `format` (`(schemacs editfns)`, Emacs's, string-first). The reporter was then handed a port
    as its format string, and all the terminal showed was `Wrong type
    argument … #<output: file /dev/pts/8>`. Now captured once as
    `%guile-format` at the top of the file. **An init file can shadow the
@@ -6433,7 +6431,7 @@ the second launcher had been hiding:
 schemacs/ui/gtk/gtk-main.sld          (schemacs ui gtk gtk-main)
 schemacs/ui/gtk/pgtk.sld              (schemacs ui gtk pgtk)
 schemacs/ui/gtk/pgtk-names.scm        (schemacs ui gtk pgtk-names)
-schemacs/ui/gtk/pgtk-tests.scm
+test/ui/gtk/pgtk-test.scm
 schemacs/ui/ncurses/ncurses-main.sld  (schemacs ui ncurses ncurses-main)
 schemacs/ui/ncurses/term.sld          (schemacs ui ncurses term)
 schemacs/ui/ncurses/xterm.sld         (schemacs ui ncurses xterm)
@@ -6541,7 +6539,7 @@ user's **`init.scm`**. GNU Emacs has one obarray, so all three reach
 `find-file` with no `require`; this tree's names live one library per
 Emacs file, so they need somewhere to look.
 
-- **`schemacs/editor/imports.scm`** - `(schemacs editor imports)`, which
+- **`schemacs/imports.scm`** - `(schemacs imports)`, which
   imports all 62 `(schemacs editor ...)` libraries and re-exports their
   1712 names. **Generated**: `tools/gen-imports.scm` (with `--check`),
   because a hand-written list of that size is wrong within a week. Guile's
@@ -6569,7 +6567,7 @@ one module.
 **The editor's own libraries do not use it**, and `loadup-tests.scm`
 keeps the list honest: it walks `schemacs/editor/*.scm` and fails on a
 library that is neither in `editor-libraries` nor excluded on purpose.
-`(schemacs editor imports)` is excluded, and must be - it imports every
+`(schemacs imports)` is excluded, and must be - it imports every
 library, so a list naming it would be a cycle.
 
 Tests: `loadup-tests.scm` (16) and `pty-check.py`'s **`imports`**, which
@@ -6579,7 +6577,7 @@ read the default).
 
 ## The clash census, and the four bugs under it
 
-`(schemacs editor imports)` imports sixty libraries into one module, which
+`(schemacs imports)` imports sixty libraries into one module, which
 is the first thing that ever asked *"do two libraries export the same
 name?"*. The generator resolves the harmless case (one binding offered
 twice - `simple` re-exporting what `cmds` owns, `files` re-exporting
@@ -6591,7 +6589,7 @@ libraries that each define their own. Four were:
 1. **`casefiddle` still exported `upcase-region`/`downcase-region`** after
    the commands moved to `simple.scm`. An export of a name a library does
    not have is an **unbound variable** in every module that imports it -
-   `(import (schemacs editor casefiddle))` was handing out two of them, and
+   `(import (schemacs casefiddle))` was handing out two of them, and
    had been since the move.
 2. **`*minor-mode-alist*` was defined twice**, in `subr.scm` and in
    `xdisp.scm`, so the mode line read one alist and `add-minor-mode` wrote
@@ -6615,7 +6613,7 @@ libraries that each define their own. Four were:
 
 ## `define-custom`
 
-`schemacs/editor/custom.scm`, mirroring **`custom.el`** (Emacs 31 keeps
+`schemacs/custom.scm`, mirroring **`custom.el`** (Emacs 31 keeps
 `defcustom` there, not in `cus-edit.el`):
 
 ```scheme
@@ -6945,7 +6943,7 @@ given as the procedures they are bound as. The pty check passes again.
 
 # `menu-bar.el`, as far as the tree can back it (2026-11-09)
 
-`schemacs/editor/menu-bar.scm` is new and mirrors `lisp/menu-bar.el`.
+`schemacs/menu-bar.scm` is new and mirrors `lisp/menu-bar.el`.
 It is not the whole file: most of that file's items name commands this
 editor does not have, and an item that names one is a menu entry that
 signals when clicked. What is here is the machinery and the two menus
@@ -7575,7 +7573,7 @@ Emacs also raises the flag from `rename-buffer` (`buffer.c:1732`),
 *content-compared* when it is drawn, so a name or mode change shows without
 the flag, and nothing in this tree's major modes installs a `[menu-bar]`
 entry of its own yet - the one thing that would need it. Add them to
-`(schemacs editor buffer)` when a mode does.
+`(schemacs buffer)` when a mode does.
 
 ## Still slow, and what it needs
 
@@ -7858,13 +7856,13 @@ stands on.
 
 ## What landed
 
-- **`schemacs/editor/chartab.scm`** (NEW) - `src/chartab.c`, which is a
+- **`schemacs/chartab.scm`** (NEW) - `src/chartab.c`, which is a
   file of its own in Emacs 31. The four-level 64/16/32/128 tree over
   characters 0..`MAX-CHAR`, with Emacs's `ascii` cache, the split of a
   slot into a sub-table on a write, parent inheritance, defaults, extra
   slots, `copy-char-table` and `optimize-char-table`. `chartab-tests`
   (24) pins every case against Emacs's own answers.
-- **`schemacs/editor/syntax.scm`** - the whole of `syntax.c` this pass
+- **`schemacs/syntax.scm`** - the whole of `syntax.c` this pass
   needs, plus the `syntax.el` half, under one library because the two
   Emacs files' names would collide here:
   - the syntax descriptor (low 8 bits a class, high bits the comment
@@ -7885,7 +7883,7 @@ stands on.
     `syntax-ppss-toplevel-pos`, `syntax-ppss-context`,
     `syntax-propertize` (the function; the `syntax-propertize-rules`
     macro is not carried).
-- **`schemacs/editor/font-lock.scm`** - the syntactic pass:
+- **`schemacs/font-lock.scm`** - the syntactic pass:
   `font-lock-fontify-syntactically-region`, the default
   `font-lock-default-fontify-syntactically` (the loop Emacs writes
   around `parse-partial-sexp` with `commentstop` `syntax-table`),
@@ -7896,7 +7894,7 @@ stands on.
   keywords, as `font-lock.el:1202-1230` does. The
   `font-lock-*-face` deffaces were already in the file.
 - `loadup.scm`'s `%editor-libraries` and the generated `imports.scm`
-  carry `(schemacs editor chartab)`; `chartab-tests` and
+  carry `(schemacs chartab)`; `chartab-tests` and
   `syntax-tests` are in `tools/run-suites.py`.
 
 ## Verified against Emacs, not reasoned about
@@ -8180,7 +8178,7 @@ of its own and was not started.
 
 # The syntax-table cache, and C-g inside a long command (2026-11-15)
 
-Chris: *"I tried a big file, schemacs/editor/xdisp.scm and did a C-M-f to
+Chris: *"I tried a big file, schemacs/xdisp.scm and did a C-M-f to
 go to the end... works, that's good. Then I did a C-M-b which should go
 back to the beginning.. it gets stuck, at that point nothing can recover,
 not even C-g"*, then *"Even given a problem with the scanner, I'm curious
@@ -8552,7 +8550,7 @@ collide with the wrappers); and **`match-data` elides non-matching
 trailing registers**, so a shift must tolerate a short list.
 
 `subregexp-context-p` and `regexp-opt-depth` moved into `search.scm`
-with it - `(schemacs regexp-opt)` imports `search` (for `regexp-quote`),
+with it - `(schemacs core regexp-opt)` imports `search` (for `regexp-quote`),
 so it cannot be imported back.
 
 ## `scheme-indent-function`, its table, and `scheme-syntax-propertize`
@@ -8598,7 +8596,7 @@ bugs that porting them uncovered.
 
 ## What landed
 
-- **`schemacs/editor/cl-indent.scm`** (NEW) - a port of
+- **`schemacs/core/cl-indent.scm`** (NEW) - a port of
   `lisp/emacs-lisp/cl-indent.el`: `common-lisp-indent-function` and the
   loop special case, `common-lisp-indent-function-1`'s walk up the
   containing forms, the `lisp-indent-259` specform engine, the
@@ -8742,7 +8740,7 @@ its buttons with. The Lisp half (`tab-line.scm`) is **not written yet**.
 - **The faces**: `tab-line`, `tab-line-active`, `tab-line-inactive`
   (`faces.el:3018`) and the nine `tab-line-tab-*`/`tab-line-highlight`
   faces (`tab-line.el:67-154`).
-- **`schemacs/editor/icons.scm`** (`lisp/emacs-lisp/icons.el`):
+- **`schemacs/core/icons.scm`** (`lisp/emacs-lisp/icons.el`):
   `define-icon` (a macro that evaluates its specification once, as the
   C's `,specification` does), `icons--register`, the spec merge,
   `icon-string`, `icon-elements`. **Images are not carried** - this tree
@@ -8757,7 +8755,7 @@ height 21 and body top 1; setting the buffer's `tab-line-format` makes
 
 ## What is left, in the order it has to be done
 
-1. **`schemacs/editor/tab-line.scm`**, the Lisp half of `tab-line.el`
+1. **`schemacs/tab-line.scm`**, the Lisp half of `tab-line.el`
    (1,461 lines): the tab-list functions (`tab-line-tabs-fixed-window-buffers`
    is the default, and `window-prev-buffers` is already here), the format
    template with its cache, the auto-hscroll (needs `vertical-motion`,
@@ -9017,7 +9015,7 @@ on one thing this tree did not have: **`current-window-configuration` and
 `set-window-configuration`**. A tab is a named persistent window
 configuration, so those two came first, bottom up.
 
-## Window configurations - `window.c` in `(schemacs editor window)`
+## Window configurations - `window.c` in `(schemacs window)`
 
 `<window-configuration>` holds what the C's `struct save_window_data`
 holds - the frame, the flat vector of saved windows, the frame's selected
@@ -9470,7 +9468,7 @@ read.
 | `window.el:4318` `delete-window` | `delete-window`, over the resize engine that was already here |
 | `window.el:586`/`:614` `walk-window-tree-1`/`walk-window-tree` | same names in `window.scm`; `walk-window-subtree` is now the sub-only call Emacs makes it |
 | `window.el:325` `window-child-count`, `:914` `window-main-window` | same names |
-| `window-x.el:417` `window-get-split-combination` | **new library** `(schemacs editor window-x)` |
+| `window-x.el:417` `window-get-split-combination` | **new library** `(schemacs window-x)` |
 | `tab-bar.el:1965`/`:1978`/`:2014` | `tab-bar-move-window-to-tab`, `tab-bar-split-tab`, `tab-bar-merge-tabs`, plus the `split-tab`/`merge-tabs` aliases |
 
 Two variables changed kind: `*window-combination-limit*` (new, default
@@ -10118,7 +10116,7 @@ then reading them back - `--batch` does not redisplay, so every hook count
 comes out zero and looks like "Emacs never runs the hook". The six-row
 table (split 1, no-op restore 0, real restore 1, select-window 0,
 set-window-buffer different 1, same 0) is pinned in
-`schemacs/editor/window-tests.scm`, a new suite.
+`test/window-test.scm`, a new suite.
 
 ## Two flag sets that are this tree's, not the C's
 
@@ -10318,14 +10316,14 @@ pair, `dired`'s widen, `elisp--preceding-sexp`, `lisp-comment-indent`,
 # fill.el, and the four primitives it broke open (2026-11-17)
 
 Chris chose "narrowing first, then all of fill.el". This is that pass:
-`schemacs/editor/fill.scm` is `lisp/textmodes/fill.el` whole, on top of
+`schemacs/textmodes/fill.scm` is `lisp/textmodes/fill.el` whole, on top of
 the primitives it stands on - and the primitives were most of the work.
 DEPARTURES.md has the C and every departure; this is what the next
 session needs.
 
 ## What landed
 
-`schemacs/editor/fill.scm`: `fill-region`, `fill-region-as-paragraph`
+`schemacs/textmodes/fill.scm`: `fill-region`, `fill-region-as-paragraph`
 and its default, `fill-paragraph` (M-q), `unfill-paragraph`,
 `fill-comment-paragraph`, `canonically-space-region`,
 `current-fill-column`, the adaptive fill prefix (`fill-context-prefix`,
@@ -10389,7 +10387,7 @@ the Emacs output byte for byte. It found five bugs that reading had not:
 
 `fill.scm` binds `M-q` (and `M-g M-q`) on `*default-keymap*` at load, so
 both front ends import it - `ttk-main.scm` and `gtk-main.scm` each have
-`(only (schemacs editor fill))` beside `paragraphs`. `loadup.scm`'s
+`(only (schemacs textmodes fill))` beside `paragraphs`. `loadup.scm`'s
 library list carries it, so `imports.scm` has its names for M-:, the REPL
 and the init file; regenerate with `tools/gen-imports.scm`.
 
@@ -10604,7 +10602,7 @@ and nothing had ever bound `C-x n`.
   lookup does not descend into a submap - the `mule-keymap` departure,
   recorded again in DEPARTURES.md. `narrow-map` exists as Emacs's object
   beside them.
-- `schemacs/editor/narrow-tests.scm` (15 tests, every number Emacs
+- `test/narrow-test.scm` (15 tests, every number Emacs
   31.1's) and `tools/pty-check.py`'s `narrow`.
 
 **Not carried**: Emacs disables `narrow-to-region` by default
@@ -10795,7 +10793,7 @@ readings worth carrying forward:
   saying the Lisp one was not ported; with it ported, the Lisp name is
   `simple.el`'s and the C helper takes the `%` (`%kill-buffer`'s rule).
   Every importer is updated, and `%count-lines` moved into
-  `(only (schemacs editor fns) ...)` lists in `editfns`, `indentc`,
+  `(only (schemacs fns) ...)` lists in `editfns`, `indentc`,
   `xdisp`, `minibuffer` and `loadup`.
 * **The `ignore-invisible-lines` branch is real here** - dired writes
   the property - but **the renderer does not honour `invisible`**, so
@@ -10854,7 +10852,7 @@ its C contract, since no Emacs-level call can reach it.
 
 # `replace-region-contents`: done, with the engine under it (2026-11-18)
 
-The engine (`lib/diffseq.h`) is `schemacs/editor/diffseq.scm`; the
+The engine (`lib/diffseq.h`) is `schemacs/diffseq.scm`; the
 DEFUN is `editfns.scm`'s; `replace_range` grew the C's buffer and
 `[buf beg end]` forms; and `replace-buffer-contents`,
 `replace-string-in-region` and `replace-regexp-in-region` (subr.el's)
@@ -12026,7 +12024,7 @@ startup pass stands (hooks, the message, the mode).
 
 The bug the startup pass found - `describe-bindings` 510 ms after any
 lisp-family mode had run, 13 ms before - is closed at its root.
-`schemacs/editor/jit-lock.scm` (the core of `jit-lock.el`),
+`schemacs/jit-lock.scm` (the core of `jit-lock.el`),
 `fontification-functions` + the redisplay hook in `xdisp.scm`
 (`handle_fontified_prop`), and `font-lock`'s `font-lock-support-mode`
 wiring: an edit now **marks** the changed text `fontified` nil and the
@@ -12610,24 +12608,24 @@ Gtk build - `emacs -nw` has none either - and neither does ours.
 
 ## Where it is
 
-- `schemacs/editor/tool-bar.scm` - `tool-bar.el`: `tool-bar-mode`
+- `schemacs/tool-bar.scm` - `tool-bar.el`: `tool-bar-mode`
   (`define-minor-mode`, `:global t`, `:init-value t`), `tool-bar-map`,
   the cache-built keymap, `tool-bar-add-item`/`-from-menu` and their
   local variants, `tool-bar-setup`, `tool-bar-position` (a
   `define-custom` whose `:set` calls `modify-all-frames-parameters`),
   `tool-bar-always-show-default`, `toggle-tool-bar-mode-from-frame`.
-- `schemacs/editor/image.scm` - `find-image`, `image-search-load-path`,
+- `schemacs/image.scm` - `find-image`, `image-search-load-path`,
   `image-property`, `create-image`, `image-type(-available-p)`,
   `image-mask-p`, `display-images-p`, `*image-load-path*`. No
   `image.c`: the toolkit loads the file, so the answer is the spec, not
   an image struct.
-- `schemacs/editor/keyboard.scm` - `tool-bar-items`,
+- `schemacs/keyboard.scm` - `tool-bar-items`,
   `parse-tool-bar-item`, the twelve `TOOL_BAR_ITEM_*` slot constants,
   `tool-bar-max-label-size`.
-- `schemacs/editor/xdisp.scm` - `update-tool-bar`, the two seams
+- `schemacs/xdisp.scm` - `update-tool-bar`, the two seams
   (`*tool-bar-items-function*`, `*tool-bar-keymap-function*`),
   `tool-bar-style` and `tool-bar-get-system-style`.
-- `schemacs/editor/frame.scm` - `f->tool_bar_items` /
+- `schemacs/frame.scm` - `f->tool_bar_items` /
   `f->n_tool_bar_items` (the frame's vector and its slot count),
   `%frame-tool-bar-lines`, `*tool-bar-lines-default-function*` (the
   frame-creation default `pgtkfns.c:1532` reads from the mode
@@ -12643,9 +12641,9 @@ Gtk build - `emacs -nw` has none either - and neither does ours.
 - `schemacs/ui/gtk/pgtk-win.scm` (new) - `term/pgtk-win.el`/`x-win.el`'s
   tool bar icon map: `x-gtk-stock-map` (all of `x-win.el:1377`),
   `icon-map-list`, `x-gtk-stock-cache` and `x-gtk-map-stock`.
-- `schemacs/ui/gtk/pgtk-win-tests.scm` (10) is in
+- `test/ui/gtk/pgtk-win-test.scm` (10) is in
   `tools/run-suites.py`.
-- `schemacs/editor/files.scm` / `menu-bar.scm` / `dired.scm` -
+- `schemacs/files.scm` / `menu-bar.scm` / `dired.scm` -
   `find-file-read-args`, `find-file-existing`, `menu-find-file-existing`
   and `dired-from-menubar`, so the File menu and the Open/Directory
   buttons name the commands Emacs names.
@@ -12653,7 +12651,7 @@ Gtk build - `emacs -nw` has none either - and neither does ours.
   copied from its `etc/images`. GdkPixbuf reads XPM natively (measured);
   `find-image` resolves them through `image-load-path`, whose default is
   found on the load path exactly as `splash.txt` is.
-- `schemacs/editor/tool-bar-tests.scm` (31) is in `tools/run-suites.py`.
+- `test/tool-bar-test.scm` (31) is in `tools/run-suites.py`.
 
 ## The icons are the theme's, not the XPMs
 
@@ -13760,7 +13758,7 @@ each rule was taken from.
       import re
       src=open('schemacs/ui/gtk/pgtk.scm').read()
       methods=set(re.findall(r'\(define-method \(([^\s()]+)', src))
-      start=src.index('(only (schemacs editor dispnew)')
+      start=src.index('(only (schemacs dispnew)')
       depth=0; i=start
       while i < len(src):
           c=src[i]
@@ -13805,7 +13803,7 @@ the transient map caught the motion events, `track-mouse` became
 `dragging`. What was dead was **the pointer query**:
 `pgtk.scm`'s `define-method` for `display-mouse-absolute-pixel-position`
 (and `display-set-mouse-pixel-position`) was written without importing
-the name from `(schemacs editor dispnew)`, so it made a *private generic*
+the name from `(schemacs dispnew)`, so it made a *private generic*
 in `pgtk.scm`. The real generic kept only its default `#f` and
 `mouse-absolute-pixel-position` answered `(0 . 0)`: every drag sample was
 zero, so `growth` stayed zero and no window moved. The cursor worked
@@ -13953,7 +13951,7 @@ up/down click instead (`read_key_sequence`, `keyboard.c:12115`).
   `mouse-tests`' drag test was sending `mouse-1` as "a key the map does
   not bind", which only worked because of the old fallback; it sends
   `drag-mouse-1` now.
-- **`mode-line-tests` must import `(schemacs editor mouse)`**: the
+- **`mode-line-tests` must import `(schemacs mouse)`**: the
   `[mode-line ...]` bindings are that library's, and without it a click
   on a plain stretch has no binding at all - which looked like a bug in
   the click path for half an hour.
@@ -14055,7 +14053,7 @@ What landed, in one line each:
   answers nil for a cleared message.
 - **`timefns.scm`**: `time-since`; `lisp-time-arguments` handles a
   non-integer time exactly.
-- Both front ends import `(schemacs editor tooltip)` (preloaded in Emacs,
+- Both front ends import `(schemacs tooltip)` (preloaded in Emacs,
   and its load is what turns the mode on); `loadup.scm` lists it;
   `imports.scm` is regenerated.
 
@@ -14405,9 +14403,9 @@ and every named gap; the ones worth knowing before touching it:
   error.
 - The prompt's option list is Emacs's, less `d` (diff needs
   subprocesses): `Save file X? (y, n, !, ., q, M-~, C-r, C-f or C-h)`.
-  Measured on Emacs 31.1, and `schemacs/map-ynp-tests.scm` pins the
+  Measured on Emacs 31.1, and `test/core/map-ynp-test.scm` pins the
   string.
-- `@@ (schemacs map-ynp)` is not in `imports.scm` (only
+- `@@ (schemacs core map-ynp)` is not in `imports.scm` (only
   `(schemacs editor ...)` libraries are), so M-: cannot call
   `map-y-or-n-p`; every command that uses it imports it. The new suite
   is in `tools/run-suites.py`.
@@ -14669,11 +14667,11 @@ calls a keystroke × 0.05-1 µs = 0.01-0.6 ms.
 
 ## Steps 1 and 2, landed: bool vectors, categories, case tables
 
-See DEPARTURES.md's two 2026-11-21 sections. `(schemacs editor data)`
+See DEPARTURES.md's two 2026-11-21 sections. `(schemacs data)`
 has `make-bool-vector`/`bool-vector` and data.c's operations over one
-exact integer; `(schemacs editor category)` is `category.c` whole, with
+exact integer; `(schemacs category)` is `category.c` whole, with
 `word-boundary-p`, the standard table and `char-script-table` (empty
-until characters.el); `(schemacs editor casetab)` is `casetab.c`, with
+until characters.el); `(schemacs casetab)` is `casetab.c`, with
 `set-case-table`, the derived UP/CANON/EQV slots and the ASCII standard
 table. `category-tests.scm` (20) and `casetab-tests.scm` (13), every
 expectation Emacs's own, are in the runner; all **83 suites** pass.
@@ -14698,7 +14696,7 @@ expectation Emacs's own, are in the runner; all **83 suites** pass.
    fast paths. Operate on code points, not UTF-8 bytes: the text is a
    stored u32 code point per position, which removes the C's entire
    decode layer from the inner loop (named departure).
-4. **Integrate into `(schemacs editor search)`**: `compile-pattern`,
+4. **Integrate into `(schemacs search)`**: `compile-pattern`,
    `looking-at`, `string-match`, `re-search-*`, `match-data`,
    `replace-match`, `save-match-data` - the engine replaces glibc and
    `%emacs-ere`/the 512-char window copies; keep the existing
@@ -14713,7 +14711,7 @@ expectation Emacs's own, are in the runner; all **83 suites** pass.
 
 The engine's data structures, opcodes, text/context abstraction and
 character-class/charset objects are written in
-`schemacs/editor/regex-emacs.scm` and compile. The library is **not in
+`schemacs/regex-emacs.scm` and compile. The library is **not in
 `loadup.scm` or `imports.scm` and is imported by nothing** until the
 compiler, fastmap, searches and matcher are complete - it exports only
 what is defined so far.
@@ -14746,7 +14744,7 @@ match data), the harness `search-tests.scm` already uses.
 
 # Handoff — the Emacs regexp engine, compiler and matcher (2026-11-21)
 
-`(schemacs editor regex-emacs)` now compiles and matches Emacs's regexp
+`(schemacs regex-emacs)` now compiles and matches Emacs's regexp
 dialect. **Nothing imports it yet** - it is excluded from `loadup.scm`'s
 session list and from `imports.scm` until `search.sld` moves onto it.
 `DEPARTURES.md`'s 2026-11-21 section has the C and every departure;
@@ -14800,7 +14798,7 @@ both are exported, along with `re-compile-pattern`,
    `replace-match`, replacing `%emacs-ere`/glibc and the 512-character
    search window. Keep `search-tests.scm`'s time bounds as the gate and
    extend the differential to the full dialect. Then remove the
-   `(schemacs editor regex-emacs)` exclusion from `loadup.scm` and
+   `(schemacs regex-emacs)` exclusion from `loadup.scm` and
    regenerate `imports.scm`.
 3. **Then cc-mode** (`cc-defs` → `cc-vars` → `cc-langs` → `cc-engine`
    → `cc-fonts` → `cc-mode`, then `cc-cmds`/`cc-align`/`cc-styles`),
@@ -15013,11 +15011,11 @@ move into `tools/` when they are next touched.
 
 ## What landed
 
-`schemacs/editor/cc-defs.scm`: `c-add-language`, the seven core
+`schemacs/progmodes/cc-defs.scm`: `c-add-language`, the seven core
 language declarations, the constant registry, `c-lang-defconst`,
 `c-lang-const`, `c-get-lang-constant`, `c-find-assignment-for-mode`,
 `c-lang-defconst-eval-immediately`, `c-lang-major-mode-is`.
-`schemacs/editor/cc-defs-tests.scm` (21) is in the suite runner; the
+`test/progmodes/cc-defs-test.scm` (21) is in the suite runner; the
 library is in `loadup.scm`'s list and `imports.scm` is regenerated.
 
 **Read DEPARTURES.md's "cc-mode step 1" before touching it.** The one
@@ -15051,7 +15049,7 @@ cl-lib only for a handful of helper functions.
 
 ## cc-mode step 2: the language-variable system (2026-11-21)
 
-`schemacs/editor/cc-langs.scm` now has `c-lang-defvar`,
+`schemacs/progmodes/cc-langs.scm` now has `c-lang-defvar`,
 `c-lang-setvar`, `c-make-emacs-variables-local`,
 `c-make-init-lang-vars-fun` and `c-init-language-vars`; `cc-defs.scm`
 gained `c-mode-symbol`, `c-mode-var`, `c-concat-separated`,
@@ -15111,7 +15109,7 @@ still the one missing primitive for its menus.
 
 ## cc-mode step 4: the first of cc-vars (2026-11-21)
 
-`schemacs/editor/cc-vars.scm` has the variables the port has needed so
+`schemacs/progmodes/cc-vars.scm` has the variables the port has needed so
 far (the indentation switches, the five font-lock extra-type lists,
 `c-make-font-lock-extra-types-blurb`, `c-string-list-p`, the buffer-local
 comment-prefix and macro-regexp accessors). `cc-vars-tests.scm` (23) is
@@ -15134,7 +15132,7 @@ the same method as the syntax table.
 
 ## cc-mode step 5: the whole of the language data (2026-11-21)
 
-`schemacs/editor/cc-langs.scm` now has **every language constant in
+`schemacs/progmodes/cc-langs.scm` now has **every language constant in
 `cc-langs.el`** - 354 names across all seven languages - and the
 differential against Emacs 31.1 is **2472 of 2478 answers identical,
 the 6 others order-only**. Read DEPARTURES.md's "cc-mode step 5" before
@@ -15142,19 +15140,19 @@ touching any of it.
 
 ## What is where
 
-- `schemacs/editor/cl-seq.scm` (new) - `cl-set-difference`,
+- `schemacs/core/cl-seq.scm` (new) - `cl-set-difference`,
   `cl-intersection`, `cl-delete-duplicates`, `cl-member`: the four
   `cl-lib` functions the constants are built with, with cl-seq.el's
   own quirks (default test is `eql`/`eqv?`; the `memq`-except-numbers
   path; `cl-intersection` answers the reverse of list2's order).
-- `schemacs/editor/eval.scm` (new) - `funcall` (`eval.c:3185`); a
+- `schemacs/eval.scm` (new) - `funcall` (`eval.c:3185`); a
   function is a procedure here, not a symbol.
-- `schemacs/editor/fns.scm` - `mapcar`, `mapcan`, `elt`, `%length`,
+- `schemacs/fns.scm` - `mapcar`, `mapcan`, `elt`, `%length`,
   `%string`, `identity`, `delete`, and `nth`/`nthcdr` moved here from
   `subr.scm` (they are fns.c's). `mapcar`/`mapconcat`/`nconc` treat
   `#f` as nil.
-- `schemacs/editor/data.scm` - `aref`.
-- `schemacs/editor/cc-defs.scm` - `c--mapcan`/`c--set-difference`/
+- `schemacs/data.scm` - `aref`.
+- `schemacs/progmodes/cc-defs.scm` - `c--mapcan`/`c--set-difference`/
   `c--intersection`/`c--delete-duplicates` (Emacs's macros, procedures
   here), `c-emacs-features` (Emacs 31.1's value as a constant),
   `c-with-syntax-table`, `c-int-to-char`, `c-characterp`, `%c-true` /
@@ -15162,10 +15160,10 @@ touching any of it.
   `c-lang-constant-names`, `c-register-emacs-variable-reader!`
   (`c-mode-var`'s bridge to the starred defcustom parameters), and
   `c-lang-const-expansion`.
-- `schemacs/editor/cc-vars.scm` - registers the six
+- `schemacs/progmodes/cc-vars.scm` - registers the six
   `*-font-lock-extra-types` readers, which is what
   `c-known-type-key`'s `(boundp ...)` test is here.
-- `schemacs/editor/cc-langs.scm` - `c-filter-ops`, `c-kwds-lang-consts`,
+- `schemacs/progmodes/cc-langs.scm` - `c-filter-ops`, `c-kwds-lang-consts`,
   the hand-ported six, and the generated data block (its header comment
   explains the translation rules).
 
@@ -15222,7 +15220,7 @@ looking at any of it.
 # cc-mode step 6: the preprocessor machinery, and two scanner fixes
 # (2026-11-21)
 
-`schemacs/editor/cc-engine.scm` is new, with cc-engine.el's first
+`schemacs/progmodes/cc-engine.scm` is new, with cc-engine.el's first
 tranche in the file's own order: the internal state variables and
 `c-calculate-state`, the `c-macro-cache` family and every
 preprocessor-directive function from `c-query-and-set-macro-start` to
@@ -15298,7 +15296,7 @@ fontification probes the same cache. The differential harness
 
 ## Verified
 
-`schemacs/editor/cc-engine-tests.scm` (88) is in `tools/run-suites.py`
+`test/progmodes/cc-engine-test.scm` (88) is in `tools/run-suites.py`
 and the tree compiles with no warnings in the touched libraries.
 `imports.scm` is regenerated. The full suite battery is **88/88**
 (`cc-engine-tests` 88) and `tools/pty-check.py` is **100/100** on the
@@ -15889,7 +15887,7 @@ and `parse-sexp-lookup-properties` (not in cus-start) is nil.
   `*menu-bar-mode*`, `*use-dialog-box*`, `*use-short-answers*`) plus
   the three from `syntax.c` (`*words-include-escapes*`,
   `*parse-sexp-ignore-comments*`, `*open-paren-in-column-0-is-defun-start*`).
-- **`schemacs/editor/symbol-props.scm`** (new leaf): `fns.c`'s
+- **`schemacs/symbol-props.scm`** (new leaf): `fns.c`'s
   `Fget`/`Fput`, moved out of `intervals.scm`, which re-exports them.
   `custom.scm` imports the leaf, so `custom` now sits below
   `character` and `fns` - the two libraries whose variables were
@@ -16350,7 +16348,7 @@ with the syntax table and faces compared to Emacs.
 
 # Handoff - cc-mode: cc-fonts' first tranche (2026-11-22)
 
-`schemacs/editor/cc-fonts.scm` is new: the face-name constants,
+`schemacs/progmodes/cc-fonts.scm` is new: the face-name constants,
 `c-annotation-face`, `c-font-lock-context`, the font-lock helpers
 (`c-put-font-lock-face` and friends, `c-fontify-types-and-refs`,
 `c-skip-comments-and-strings`), the four matcher constructors and
@@ -16533,7 +16531,7 @@ Emacs's `cond` answers nil when no clause matches. My first translation
 used plain Scheme `cond` and added `(else #f)` by hand to the two that
 needed it - and the hand-added clauses were the source of a long paren
 muddle (balanced file, wrong shape; the compiler's "bad use of 'else"
-was the tell each time). **The fix was to use `(schemacs syntax)`'s
+was the tell each time). **The fix was to use `(schemacs core syntax-macros)`'s
 `cond-e`**, which is Emacs's `cond` including the nil answer, so the
 translation mirrors Emacs's text clause for clause with no added forms.
 The same applies to `when`/`unless` whose value is returned (`when-e`),
@@ -16869,7 +16867,7 @@ HEAD has. The cause is not any edit: **`/tmp/bisect.py`**, a scratch
 bisect harness from the find-decl work, has its loop at *module top
 level* and begins each iteration with
 
-    f='schemacs/editor/cc-engine.scm'
+    f='schemacs/progmodes/cc-engine.scm'
     src0=open('/tmp/cc-engine-current.scm').read()
     open(f,'w').write(src0)
 
@@ -16880,7 +16878,7 @@ directory (`/tmp`) first on `sys.path`, and Python's `tempfile` imports
 module and ran its loop. The tell in the output was a `SyntaxWarning`
 from a file nobody had run, followed by `c3 ERR c4 ERR ...` lines.
 
-Recovered from `/tmp/base/schemacs/editor/cc-engine.scm` (13,729 lines,
+Recovered from `/tmp/base/schemacs/progmodes/cc-engine.scm` (13,729 lines,
 the copy of the tree taken at 08:00 for the buffer-local baseline test -
 `cp -a`, so its mtime is the source's and it predates the clobber),
 reader-checked and compiled. The scratch script is now
@@ -16910,7 +16908,7 @@ and both had to be fixed:
    nil))` line - that binding is what makes a C-g whose SIGINT arrived
    before the read still be the quoted character. The hex-letter digit
    branch was also wrong (`code - ?0` instead of `10 + downcase - ?a`).
-2. **`schemacs/editor/imports.scm` was newer than its `.go`.** With
+2. **`schemacs/imports.scm` was newer than its `.go`.** With
    `--no-auto-compile`, Guile still prints "source file ... newer than
    compiled" and loads the *source*: every editor then interpreted the
    generated user-environment library during startup. Measured before
@@ -16929,7 +16927,7 @@ and both had to be fixed:
    empty ready set **with the handler not yet run**, so the terminal's
    wait re-blocked with the flag set and nothing to see it - a C-g
    occasionally lost until the next key (`query-replace-quit` 9/10, the
-   tight `completion-ui` C-g 9/10). `(schemacs editor keyboard)` gained
+   tight `completion-ui` C-g 9/10). `(schemacs keyboard)` gained
    `*signal-wake-function*`, called by `handle-interrupt` after setting
    the flag; the terminal installs a thunk that writes one byte to the
    pipe its wait already selects on (the back-door wake). 15/15 each
@@ -16980,7 +16978,7 @@ open and still reproducible.
 
 ## cc-styles is ported, and the four bugs under it (2026-11-23)
 
-`schemacs/editor/cc-styles.scm` is `cc-styles.el` whole, verified
+`schemacs/progmodes/cc-styles.scm` is `cc-styles.el` whole, verified
 assertion for assertion against Emacs 31.1 (`cc-styles-tests.scm`, 60).
 DEPARTURES.md's same-day "cc-styles: the style system" section has the
 C and the details; the things the next session needs:
@@ -17024,7 +17022,7 @@ C and the details; the things the next session needs:
 Test-harness notes: `c-init-language-vars` expands into `cc-langs`
 internals, so a test that imports only `c-init-language-vars` fails
 with `Unbound variable: c-lang-set-local!` at the first call - import
-`(schemacs editor cc-langs)` wholesale (as `cc-vars-tests` does). And
+`(schemacs progmodes cc-langs)` wholesale (as `cc-vars-tests` does). And
 `srfi 64` catches errors raised inside a test form and reports them as
 `actual-error`, so an unbound name in a test reads as a failure rather
 than killing the suite - useful, and one more reason to read the whole
@@ -17101,7 +17099,7 @@ registrations the offset evaluator waits for), then **easymenu**,
 
 ## cc-mode step 8: cc-align, the line-up functions (2026-11-23)
 
-`schemacs/editor/cc-align.scm` is `cc-align.el` whole, in the file's
+`schemacs/progmodes/cc-align.scm` is `cc-align.el` whole, in the file's
 order with its docstrings, and the offset evaluator's registry is
 filled at the end of it. DEPARTURES.md's 2026-11-23 "cc-align" section
 has every representation departure and the primitives the port needed;
@@ -17120,7 +17118,7 @@ this is what the next session needs.
   continuation, argcont, gcc asm, templates, lambda, the brace-list
   ones, the semi&comma criteria, gnu-min): **51 probes identical**,
   including four where Emacs itself raises.
-  `schemacs/editor/cc-align-tests.scm` pins every probe's answer (55
+  `test/progmodes/cc-align-test.scm` pins every probe's answer (55
   tests).
 
 A case table locates positions by **needles** (a substring plus a
@@ -17169,7 +17167,7 @@ needs for its eight menus), **cc-cmds**, **cc-menus/cc-guess**, and
 
 ## cc-mode step 9: easymenu, and the separator it corrected (2026-11-23)
 
-`schemacs/editor/easymenu.scm` is `lisp/emacs-lisp/easymenu.el` whole,
+`schemacs/core/easymenu.scm` is `lisp/emacs-lisp/easymenu.el` whole,
 in the file's order with its docstrings, and it is in `loadup.scm` and
 `imports.scm`. DEPARTURES.md's 2026-11-23 easymenu section has every
 representation departure; this is what the next session needs.
@@ -17179,7 +17177,7 @@ representation departure; this is what the next session needs.
 `tools/easymenu-diff/` compares `easy-menu-convert-item` on 18 item
 specs - every keyword a `easy-menu-define` item takes - plus
 `easy-menu-always-true-p` and `easy-menu-name-match`, with Emacs 31.1's
-answers: **identical**. `schemacs/editor/easymenu-tests.scm` (52 tests)
+answers: **identical**. `test/core/easymenu-test.scm` (52 tests)
 pins those answers and the define/add/change mechanics Emacs measured on
 a real definition: the variable's prompt, the downcased
 `[menu-bar test]` binding, the written display order, add-at-end,
@@ -17234,7 +17232,7 @@ record that as a named departure when cc-mode.el lands.
 # Handoff - cc-mode step 10: cc-cmds' indentation command layer
 # (2026-11-23)
 
-`schemacs/editor/cc-cmds.scm` is new: `c-indent-line`,
+`schemacs/progmodes/cc-cmds.scm` is new: `c-indent-line`,
 `c-newline-and-indent`, `c-show-syntactic-information`,
 `c-syntactic-information-on-region`, `c-update-modeline`, the six
 toggles, `c-indent-command`, `c-indent-exp`, `c-indent-region`,
@@ -17256,7 +17254,7 @@ filling half are the next tranches; the file header lists them.
   language vars, the style - and `c-block-comment-flag` if the mode
   line's `*` matters.
 * **`c-run-special-indent-hook` resolves the style hook's *symbols***:
-  a test (or a session) that never loads `(schemacs editor cc-align)`
+  a test (or a session) that never loads `(schemacs progmodes cc-align)`
   has an empty line-up registry, so `c-gnu-impose-minimum` does
   nothing. Import it.
 * **`set!` in a `while`/`and` test**: `c-indent-exp` hung on
@@ -17299,7 +17297,7 @@ The two cc-engine bug fixes are in the DEPARTURES section above
 # Handoff - cc-mode step 11: cc-mode.el's found-type change helpers
 # (2026-11-23)
 
-`schemacs/editor/cc-mode.scm` (new, partial) has the found-type half of
+`schemacs/progmodes/cc-mode.scm` (new, partial) has the found-type half of
 `cc-mode.el`'s change machinery: `c-unfind-enclosing-token`,
 `c-unfind-coalesced-tokens`, `c-before-change-de-typedef`,
 `c-after-change-de-typedef`, `c-update-new-id` and
@@ -17337,3 +17335,53 @@ Guile has no `backtrace-frame`; the tree's property writers are its
 own, so the pass that needs it should bind a flag in the
 property-change path (textprop.scm) and read it there, rather than
 imitating a backtrace.
+
+## RESUME HERE after the file rename (2026-11-23)
+
+The layout change is done and the notes above were rewritten to the new
+paths: `schemacs/editor/X.scm` is now at its Emacs-mirroring path (`schemacs/X.scm` for `src/*.c`,
+`schemacs/core/X.scm` for `lisp/emacs-lisp`, `schemacs/progmodes/X.scm`,
+`schemacs/international/X.scm`, `schemacs/textmodes/X.scm`,
+`schemacs/term/X.scm`), the tests are under `test/` mirroring the
+library tree with `-test.scm` names, and the libraries are named by
+their new paths (`(schemacs progmodes cc-engine)` etc.). `schemacs/core/
+syntax-macros.scm` is the old `(schemacs core syntax-macros)` macro library
+(Emacs's `subr.el` control macros); `schemacs/syntax.scm` is `src/syntax.c`
+(formerly `(schemacs editor syntax)`), and its `syntax.el` half rides with
+it, as that library's header explains.
+
+**cc-mode resume point, exactly:**
+
+1. `schemacs/progmodes/cc-mode.scm` is the partial cc-mode.el: the
+   found-type helpers only (`cc-mode-tests.scm` -> `test/progmodes/
+   cc-mode-test.scm`, 13 tests). Next is the string-fence layer, in
+   this order: `c-put-syn-tab`/`c-clear-syn-tab` and their
+   `c-fl-syn-tab` mirrors, the `c-min-syn-tab-mkr`/`c-max-syn-tab-mkr`
+   pair, `c-put-string-fence-trim-caches`/`c-clear-syntax-table-
+   trim-caches`, `c-restore-string-fences`/`c-clear-string-fences`,
+   then `c-before-change-check-unbalanced-strings`,
+   `c-after-change-mark-abnormal-strings`,
+   `c-after-change-escape-NL-in-string` and the ml-string functions
+   (inactive for C, active for C++ raw strings).
+2. Then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`, the
+   comment-escape pair, `c-parse-quotes-after-change`,
+   `c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,
+   and `c-called-from-text-property-change-p` (Guile has no
+   `backtrace-frame`; bind a flag in textprop.scm's property-change
+   path instead - decision recorded in DEPARTURES.md).
+3. Then `c-before-change`/`c-after-change` themselves, then
+   `c-basic-common-init`/`c-common-init` and the mode definitions.
+   That is the gate for `tools/cc-cmds-diff/`: currently 75/99, every
+   red pair a stale cc cache. Run it with:
+   `emacs -Q --batch -l tools/cc-cmds-diff/emacs-cmds.el STYLE FILE OUT [cpp]`
+   and `guile --no-auto-compile -L . -L "$SITE" -s tools/cc-cmds-diff/ours-cmds.scm STYLE FILE OUT [cpp]`
+   over the fixtures in `tools/cc-decl-diff/`, `tools/cc-cgbs-diff/`
+   and `tools/cc-align-diff/`.
+4. `cc-engine.scm`, `cc-cmds.scm`, `cc-fonts.scm`, `cc-align.scm`,
+   `cc-styles.scm` and `cc-langs.scm` are otherwise the verified state:
+   the per-line indentation differential (`tools/cc-indent-diff/`) and
+   the other cc differentials are green.
+
+Right-sized verification for a cc-only change: `test/progmodes/cc-*`,
+`test/progmodes/cc-*-test.scm`, `test/loadup-test.scm`, plus
+`python3 tools/pty-check.py imports scratch`.

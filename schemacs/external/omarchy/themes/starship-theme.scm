@@ -6,7 +6,7 @@
 ;; majority answer across omarchy.el's own themes, and the diff
 ;; backgrounds are blended from the theme's own colours.
 
-(import (schemacs editor theme))
+(import (schemacs theme))
 
 (define-theme starship
   "Starship, derived from Omarchy's colors.toml."

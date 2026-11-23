@@ -13,89 +13,89 @@
     (only (schemacs ui gtk pgtk) with-gtk-display
           pgtk-open-window pgtk-title-frame! initialize-pgtk-faces!
           pgtk-arm-timer! pgtk-main pgtk-main-quit)
-    (only (schemacs editor frame) *current-frame* new-frame new-frame-on
+    (only (schemacs frame) *current-frame* new-frame new-frame-on
           *frame-creation-function* frame-editor)
-    (only (schemacs editor buffer) *scratch-buffer-name* get-buffer-create)
-    (only (schemacs editor files) note-file-read-only!)
-    (only (schemacs editor startup) command-line-1)
-    (only (schemacs editor keyboard) event-loop-on timer-check!)
+    (only (schemacs buffer) *scratch-buffer-name* get-buffer-create)
+    (only (schemacs files) note-file-read-only!)
+    (only (schemacs startup) command-line-1)
+    (only (schemacs keyboard) event-loop-on timer-check!)
     ;; The timer module is *told* when to come back rather than polled -
     ;; see `*timer-wake*'. `redisplay-frames!' is what draws when one has
     ;; run, which is what makes a cursor blink visible with no keypress.
-    (only (schemacs editor xdisp) redisplay-frames!)
-    (only (schemacs editor timer) *timer-wake*)
+    (only (schemacs xdisp) redisplay-frames!)
+    (only (schemacs core timer) *timer-wake*)
     ;; Imported only so their `define-key' forms run at load time, which
     ;; is what installs C-x C-f, C-s, C-x 2 and C-x C-b: a binding is
     ;; made by the library that owns the command, so the library has to
     ;; be loaded even though nothing here calls it. `ncurses.sld' does
     ;; the same, for the same reason.
-    (only (schemacs editor simple))
-    (only (schemacs editor isearch))
-    (only (schemacs editor window))
-    (only (schemacs editor buff-menu))
+    (only (schemacs simple))
+    (only (schemacs isearch))
+    (only (schemacs window))
+    (only (schemacs buff-menu))
     ;; `casefiddle.c' and `paragraphs.el' - the ncurses.sld note says
     ;; why.
-    (only (schemacs editor casefiddle))
-    (only (schemacs editor paragraphs))
+    (only (schemacs casefiddle))
+    (only (schemacs textmodes paragraphs))
     ;; `fill.el`'s commands and the M-q binding it makes
-    (only (schemacs editor fill))
+    (only (schemacs textmodes fill))
     ;; Help mode installs `*help-mode-function*`, which is what puts
     ;; `*Help*` in `help-mode`; `C-h b` is bound by `help.scm`.
-    (only (schemacs editor help-mode))
+    (only (schemacs help-mode))
     ;; `describe-function`/`-variable`, whose commands `C-h f`/`-v` are
     ;; bound by that library, and the seam `describe-key` calls.
-    (only (schemacs editor help-fns))
+    (only (schemacs help-fns))
     ;; `novice.el`'s disabled-command prompt; loading it installs
     ;; `disabled-command-function` and the `query` form's asker, which
     ;; `command.scm`'s `run-command` reads.
-    (only (schemacs editor novice))
+    (only (schemacs novice))
     ;; `replace.el' - the ncurses.sld note says why.
     ;; The mouse commands, imported for their *binding*: loading
     ;; `mouse.sld' is what puts `[down-mouse-1]' in the global map,
     ;; as Emacs's own line at the end of `mouse.el' does.
-    (only (schemacs editor mouse))
-    (only (schemacs editor replace))
+    (only (schemacs mouse))
+    (only (schemacs replace))
     ;; The multilingual commands (`C-x RET ...`), which install their own
     ;; keys - `mule-cmds.el`. Not for a name: for the load.
-    (only (schemacs editor mule-cmds))
-    (only (schemacs editor mule-diag))
+    (only (schemacs international mule-cmds))
+    (only (schemacs international mule-diag))
     ;; `dired.el': C-x d binds at load, the same reason again.
-    (only (schemacs editor dired))
+    (only (schemacs dired))
     ;; `tool-bar.el`: `tool-bar-mode`, the `[tool-bar]` binding and the
     ;; default items. `tool-bar-setup` is called from `main-gtk` where
     ;; Emacs's `command-line` calls it, after the frame exists - the item
     ;; keymap's expressions ask the frame's display which image files it
     ;; can use.
-    (only (schemacs editor tool-bar) tool-bar-setup)
+    (only (schemacs tool-bar) tool-bar-setup)
     ;; `tooltip.el` is preloaded in Emacs and turning it on is its load:
     ;; the mode installs `show-help-function`, which is what turns a
     ;; `help-echo` under the pointer into a tooltip on this front end.
-    (only (schemacs editor tooltip))
+    (only (schemacs tooltip))
     ;; `scroll-bar.el`: the `[vertical-scroll-bar mouse-1]` binding and
     ;; `scroll-bar-mode`, made when the library loads. Both front ends
     ;; load it, as Emacs preloads `scroll-bar.el` in every build - a
     ;; terminal simply never sends the event.
-    (only (schemacs editor scroll-bar))
+    (only (schemacs scroll-bar))
     ;; `tab-bar.el`: `C-x t ...` and the `[tab-bar]` binding are made
     ;; when it is loaded, the same reason as every line above.
-    (only (schemacs editor tab-bar))
+    (only (schemacs tab-bar))
     ;; `face-remap.el': C-x C-M-+ and the three beside it, and the command
     ;; they call. Same reason as every line above - a binding is made by
     ;; the library that owns the command, so the front end has to load it.
     ;;
     ;; **The boot does load it, by another road**: `open-user-environment!'
-    ;; imports `(schemacs editor imports)', which imports every editor
+    ;; imports `(schemacs imports)', which imports every editor
     ;; library. That road is the *user's* environment, though - a user
     ;; with their own `imports.scm' replaces it and gets no editor
     ;; library at all - so a front end that relies on it has bindings
     ;; that depend on a config file. This line is the one that makes them
     ;; the front end's.
-    (only (schemacs editor face-remap))
+    (only (schemacs face-remap))
     ;; `custom.el`'s theme half - `M-x load-theme`, `enable-theme` and
     ;; `disable-theme` register with the command table as this library
     ;; loads. Imported for that alone, as the binding-carrying libraries
     ;; above are.
-    (only (schemacs editor theme)))
+    (only (schemacs theme)))
 
   (export main-gtk)
 

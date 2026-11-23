@@ -17,9 +17,9 @@
 
   (import (scheme base)
           (only (guile) %load-path getcwd)
-          (only (schemacs editor fileio) file-directory-p expand-file-name)
-          (only (schemacs editor subr) add-to-list)
-          (only (schemacs editor theme) *custom-theme-load-path*))
+          (only (schemacs fileio) file-directory-p expand-file-name)
+          (only (schemacs subr) add-to-list)
+          (only (schemacs theme) *custom-theme-load-path*))
 
   (export omarchy-themes--themes-directory)
 

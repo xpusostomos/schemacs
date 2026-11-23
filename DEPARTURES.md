@@ -21,7 +21,7 @@ function**. A departure on this list is a debt, not a licence.
   yet made would get, and `face-attribute`'s FRAME argument selects which.
   A frame with no font yet, or a GUI frame and a tty frame at once, each
   have their own answer for the same face.
-- **Here**: `(schemacs editor faces)` keeps one alist, `*face-attributes*`.
+- **Here**: `(schemacs faces)` keeps one alist, `*face-attributes*`.
   The FRAME argument is accepted and ignored, and `(face-attribute FACE
   ATTRIBUTE t)` - Emacs's "the defaults for new frames" - answers the
   realized value instead. Documented in the library's header as deviation 1.
@@ -319,8 +319,7 @@ answering `#f`. Only a deadline or a real end of input answers `#f` now.
    it, and `adjust_frame_size`'s no-op-for-an-unchanged-size is where the C
    gets the same answer implicitly.
 4. **The C's `redisplaying_p || dont_resize_frames` guard is not
-   enforceable here.** `*redisplay-in-progress*` is `(schemacs editor
-   xdisp)`'s and that library imports `frame`, so `change-frame-size` cannot
+   enforceable here.** `*redisplay-in-progress*` is `(schemacs xdisp)`'s and that library imports `frame`, so `change-frame-size` cannot
    read it; nothing sets `dont_resize_frames` at all. What the guard protects
    - a size change requested *during* a redisplay - is this tree's
    `sync-frame-size!` call at the top of `render!`, which wants it applied
@@ -1493,7 +1492,7 @@ most checks measure text from row 0.
 
 This is the fix for the `C-s` slowness, and it is Emacs's own fix rather
 than a new one: `src/itree.c` and `src/itree.h` are ported into
-`schemacs/editor/itree.scm`, and `buffer.c`'s overlay half is rewritten
+`schemacs/itree.scm`, and `buffer.c`'s overlay half is rewritten
 onto them.
 
 ## What was wrong
@@ -1532,7 +1531,7 @@ of it in the overlay structure, to about 2 ms plus the draw.
 
 **The old numbers are a reconstruction, not a checkout.** The list
 functions were copied into the benchmark from `git show
-HEAD:schemacs/editor/buffer.scm`; the tree was not reverted to measure
+HEAD:schemacs/buffer.scm`; the tree was not reverted to measure
 it, because the same algorithm is a dozen lines and identical either
 way.
 
@@ -1599,7 +1598,7 @@ where `insdel.c` calls them.
 
 ## Tests
 
-- `schemacs/editor/itree-tests.scm` (new, 37): the C's
+- `test/itree-test.scm` (new, 37): the C's
   `test/manual/noverlay/itree-tests.c` cases - the insert rotations,
   the eleven gap-insert and eight gap-delete cases with every
   combination of the advance flags, `itree-node-set-region`, the four
@@ -2079,7 +2078,7 @@ call**. It is two guile-gi crossings:
 
 ## `update_mode_lines`, ported
 
-`(schemacs editor dispnew)` now has Emacs's `update_mode_lines`
+`(schemacs dispnew)` now has Emacs's `update_mode_lines`
 (`xdisp.c:775`) beside `windows_or_buffers_changed`, reader and setter, and
 for the same layering reason. It is the *cheap* flag: a mode line, a frame
 title and a menu bar can change because of it, where the strong one says no
@@ -2612,7 +2611,7 @@ after `guile -c "(compile-file ...)"`.
 
 # The syntax engine and the syntactic pass (2026-11-15)
 
-Where `(schemacs editor syntax)` and font-lock's syntactic half depart
+Where `(schemacs core syntax-macros)` and font-lock's syntactic half depart
 from `syntax.c`/`syntax.el`/`font-lock.el`, and whether each should be
 fixed.
 
@@ -2945,7 +2944,7 @@ the global's values and a `.txt` file for the mode's).
 
 ## The syntax-table cache, and C-g inside a long command (2026-11-15)
 
-Chris: *"I tried a big file, schemacs/editor/xdisp.scm and did a C-M-f to
+Chris: *"I tried a big file, schemacs/xdisp.scm and did a C-M-f to
 go to the end... works, that's good. Then I did a C-M-b which should go
 back to the beginning.. it gets stuck, at that point nothing can recover,
 not even C-g"* - and then *"Even given a problem with the scanner, I'm
@@ -3415,9 +3414,9 @@ safe with `(save-match-data (syntax-propertize ...))`
 (`syntax.el:481`). The port called `syntax-propertize` bare, so the
 function's own searches overwrote the match data of the match in flight -
 the same "No match %s in highlight", and the same file. `save-match-data`
-is `search.c`'s and `(schemacs editor syntax)` is *below* that library,
+is `search.c`'s and `(schemacs core syntax-macros)` is *below* that library,
 so the save is a seam: `*internal-syntax-propertize-function*`, installed
-by `(schemacs editor search)`, which also saves `%current-group-map` and
+by `(schemacs search)`, which also saves `%current-group-map` and
 `%current-assertions` - a nested search compiles patterns too.
 
 A `syntax-propertize-chunks` (`syntax.el:473`, 2000) came with it.
@@ -3449,7 +3448,7 @@ syntax, and the keyword entries that match `` `word' `` and the
 typographic quotes matched inside strings where Emacs matches nothing
 (`checkdoc.el`, `chart.el`, `cl-print.el`).
 
-`schemacs/editor/characters.scm` - the existing char-width library, which
+`schemacs/international/characters.scm` - the existing char-width library, which
 is `characters.el`'s other half - now also carries
 `standard-syntax-runs`: **Emacs 31.1's own answers**, 234 runs emitted by
 a script that walked the standard table from `#x80` to `#x10FFFF` and kept
@@ -3552,11 +3551,11 @@ of `set!`-ed, so every rule after the first saw offset 0 and the
 legitimately shortens (it elides registers that did not match -
 `(match-data)` for `\(a\)\(b\)?' on "a" is `(0 1 0 1)` there too).
 
-**Placement**: the engine is in `(schemacs editor search)`, not
+**Placement**: the engine is in `(schemacs search)`, not
 `syntax.scm`, because the scan needs `re-search-forward`,
 `match-beginning` and `set-match-data`, and `syntax.scm` is below that
 library. `subregexp-context-p` (`subr.el`) and `regexp-opt-depth`
-(`regexp-opt.el`) moved with it - `(schemacs regexp-opt)` already
+(`regexp-opt.el`) moved with it - `(schemacs core regexp-opt)` already
 imports `search`, so importing it back would be a cycle; they live there
 as `locate-file-internal` lives in `fileio`.
 
@@ -3615,7 +3614,7 @@ Two residual differences, both measured and both on the record:
 
 ## The Common Lisp indentation engine (`cl-indent.el`)
 
-`(schemacs editor cl-indent)` is a port of `lisp/emacs-lisp/cl-indent.el`:
+`(schemacs core cl-indent)` is a port of `lisp/emacs-lisp/cl-indent.el`:
 `common-lisp-indent-function`, its specform walk (`lisp-indent-259`), the
 lambda-list aligner, the tagbody/do/defmethod helpers, and the whole
 method table. `lisp-mode` installs it as `lisp-indent-function`, as
@@ -3642,7 +3641,7 @@ method table. `lisp-mode` installs it as `lisp-indent-function`, as
 - **Here**: `cl-indent.scm` imports `lisp-mode.scm` (it needs
   `lisp-body-indent` and `lisp-indent-local-overrides`), so an import back
   would be a cycle. `lisp-mode`'s body calls `%cl-indent-function`, which
-  does `(resolve-module '(schemacs editor cl-indent) #t)` and
+  does `(resolve-module '(schemacs core cl-indent) #t)` and
   `module-ref`s the procedure - the same seam `files.scm`'s
   `%mode-autoloads` uses for a mode. The extent is Emacs's; the spelling is
   the tree's.
@@ -3691,7 +3690,7 @@ method table. `lisp-mode` installs it as `lisp-indent-function`, as
   `derived-mode-all-parents`, `derived-mode-set-parent`,
   `derived-mode-add-parents` and `derived-mode--flush` are `subr.el`'s
   (`:2984-3160`), and `merge-ordered-lists` with them.
-- **Here**: they are in `(schemacs editor derived)`, because `subr` cannot
+- **Here**: they are in `(schemacs core derived)`, because `subr` cannot
   see a buffer and `major-mode` is `buffer.c`'s. `merge-ordered-lists` is
   in `subr.scm` (it needs nothing from a buffer) and `intern-soft` beside
   `intern`. The same seam `locate-file-internal` took into `fileio.sld`.
@@ -3754,7 +3753,7 @@ Elisp-nil-versus-Scheme-`'()` or a function that had never had a caller.
 - **Emacs**: a `:global` minor mode's variable is not buffer-local; the
   command does `(setq-default ,mode)` and the getter is
   `(default-value ',mode)`, i.e. the symbol's own value cell.
-- **Here**: the value cell is `(schemacs editor data)`'s
+- **Here**: the value cell is `(schemacs data)`'s
   `*default-values*`, keyed by symbol, with `default-value`,
   `set-default` and `default-boundp` - `data.c`'s three, since the tree
   has no obarray. `default-value` takes an optional default where Emacs
@@ -4348,7 +4347,7 @@ The audit's verdict, one by one (2026-11-17):
 # Window states: the size registers, and the pixel/total split
 (2026-11-16)
 
-`schemacs/editor/window.scm` now carries the whole of Emacs's window-size
+`schemacs/window.scm` now carries the whole of Emacs's window-size
 chapter - `window-min-size`, `window-sizable`, `window-resizable`,
 `window-resize` and the `window--resize-*` engine that applies it - and
 with it the state format `window-state-get`/`window-state-put`, which a
@@ -4597,7 +4596,7 @@ function sets.
 
 ## `window-get-split-combination` is `window-x.el`'s, and only it
 
-`schemacs/editor/window-x.scm` is new and mirrors
+`schemacs/window-x.scm` is new and mirrors
 `lisp/window-x.el`. Only `window-get-split-combination` is carried: it
 is what `tab-bar-split-tab` needs. Not carried from that file, with
 what each waits for: `split-frame` and `merge-frames` (a `make-frame`
@@ -4689,10 +4688,10 @@ loop calls either by the record's `uarg` flag, which any non-#f
 specification sets.
 
 **The check arrives through a seam.** `barf-if-buffer-read-only` is
-`buffer.c`'s and lives in `(schemacs editor buffer)`, which cannot
-import `(schemacs editor command)` (the command library is a leaf
+`buffer.c`'s and lives in `(schemacs buffer)`, which cannot
+import `(schemacs command)` (the command library is a leaf
 everything above it uses). `command.scm` therefore declares
-`*barf-if-buffer-read-only-function*` and `(schemacs editor keyboard)`
+`*barf-if-buffer-read-only-function*` and `(schemacs keyboard)`
 installs it as it loads - the same pattern
 `*record-window-buffer-function*` and `*frame-creation-function*` take.
 The check is read at *call* time, because the seam is installed when the
@@ -4820,8 +4819,7 @@ give the same object. The first is the one a command could read;
 command in `lisp/` asks `marker-buffer` of a `d` argument.
 
 **The seam shape, again.** `command.scm` is a leaf: `editfns.c`'s
-`point-marker` and `mark-marker` are both in `(schemacs editor
-editfns)`, which imports this library. They arrive as
+`point-marker` and `mark-marker` are both in `(schemacs editfns)`, which imports this library. They arrive as
 `*point-marker-function*` and `*mark-marker-function*`, installed at the
 bottom of `editfns.scm` beside the functions, which is `simple.scm`'s
 arrangement for the region seams.
@@ -5409,7 +5407,7 @@ Emacs 31.1 in its comment.
 
 # fill.el, and the primitives under it (2026-11-17)
 
-`schemacs/editor/fill.scm` is `lisp/textmodes/fill.el` ported whole, on
+`schemacs/textmodes/fill.scm` is `lisp/textmodes/fill.el` ported whole, on
 top of the primitives it needed: `char-equal` and `subst-char-in-region`
 (`editfns.c:4418`, `:2294`), `insert-before-markers` and
 `insert-before-markers-and-inherit` (`editfns.c:1388`, `:1422`),
@@ -5929,7 +5927,7 @@ break ended), and `post-self-insert-hook`.
 Ported as a parameter and run at the end of `internal-self-insert` - the
 C's `run_hook (Qpost_self_insert_hook)` is its last act, after the
 auto-fill branch. It is run with a plain `for-each`, as the change hooks
-are in `insdel.scm`: `(schemacs editor subr)` is above `buffer.scm`,
+are in `insdel.scm`: `(schemacs subr)` is above `buffer.scm`,
 which `cmds.scm` imports, so `run-hooks` is not reachable from there.
 That is the same reason `auto-fill-chars` lives in `cmds.scm`.
 
@@ -6163,7 +6161,7 @@ reads Elisp's nil as either of the tree's two spellings (`#f` or `()`).
 **The rest of the tree still calls the core `assq`** - 37 files - and
 `assoc` has the identical tolerance gap. Converting them is the
 follow-up this pass did not do: it is one import line per caller
-(`(only (schemacs editor fns) %assq)`) and a careful read of the ones
+(`(only (schemacs fns) %assq)`) and a careful read of the ones
 where a non-cons element is possible. `window.scm`'s
 `window--state-assq` and `tab-bar.scm`'s `tab-bar--assq` are two
 hand-written copies of exactly this C behaviour, written because it was
@@ -6310,7 +6308,7 @@ Emacs-level test because only redisplay runs the C.
 
 # The difference engine, `lib/diffseq.h' (2026-11-18)
 
-`schemacs/editor/diffseq.scm` ports gnulib's `lib/diffseq.h` - the Myers
+`schemacs/diffseq.scm` ports gnulib's `lib/diffseq.h` - the Myers
 O(ND) engine `editfns.c` includes for `replace-region-contents`. **This
 is the engine only**; the DEFUN over it, the `replace_range` extension
 it needs and the `subr.el` callers are the next step (AGENTS.md has
@@ -6566,7 +6564,7 @@ n and `!`.
 - **`en/disable-command`'s init-file write.** Emacs edits the
   `(put 'CMD 'disabled X)` line out of `user-init-file` and appends a
   new one. This tree's init file is Scheme, so the line would also need
-  an `(import (schemacs editor intervals))`, and finding the file is
+  an `(import (schemacs intervals))`, and finding the file is
   `startup.scm`'s path discovery - the *session* effect (the `put`) is
   carried, which is what the user sees; `startup.scm` gained
   `*user-init-file*` for the day the write half is done.
@@ -6738,8 +6736,7 @@ composite `:parent` (no `make-composed-keymap` here) and
 
 **The seam**: `help-mode` is installed into `*help-mode-function*` as
 `help-mode.scm` loads, because help-mode.el requires help.el and the
-mode is above it. **A front end must import `(schemacs editor
-help-mode)` for `C-h b` to land in the mode** - both do now - which is
+mode is above it. **A front end must import `(schemacs help-mode)` for `C-h b` to land in the mode** - both do now - which is
 Emacs's autoload in this tree's spelling. A unit test that imports
 only `help` gets an unmoded `*Help*`, correctly.
 
@@ -6880,7 +6877,7 @@ reader).
 
 `C-h k`, `C-h f`, `C-h v` are flat bindings on `*default-keymap*` and
 entries in `help-map`, as `C-h b` is. Both front ends import
-`(schemacs editor help-fns)` - the library binds the keys and installs
+`(schemacs help-fns)` - the library binds the keys and installs
 the `describe-key` seam.
 
 ## Verification
@@ -7139,7 +7136,7 @@ through the backends.
 The first spec was `(read-string "Describe symbol: ")`. That called
 **Guile's port reader** - `(scheme base)` exports a `read-string` of
 its own, `(len #:optional port)`, and it wins the import against
-`(schemacs editor minibuffer)`'s prompt reader without a word. The
+`(schemacs minibuffer)`'s prompt reader without a word. The
 echo area said "Wrong type (expecting exact integer): \"Describe
 symbol: \"", which is `make-string` getting the prompt as its length.
 
@@ -7495,7 +7492,7 @@ marker, since the marker's own text contains what they wait for.
 
 The section above ("Running a lisp-family mode makes every later
 fontification 40x slower") named the missing primitive. This is it:
-`schemacs/editor/jit-lock.scm` (a port of `lisp/jit-lock.el`'s core),
+`schemacs/jit-lock.scm` (a port of `lisp/jit-lock.el`'s core),
 `fontification-functions` with the redisplay hook it stands on, and
 `font-lock.el`'s `font-lock-support-mode` / `font-lock-turn-on-thing-lock`
 wiring so `font-lock-mode` registers with jit-lock instead of fontifying
@@ -8977,7 +8974,7 @@ An item's `:enable`, `:visible` and `:filter` forms are evaluated in
 `(current-module)` - the ambient module, which in a running editor is
 `(guile-user)` after `open-user-environment!` has given it the editor's
 names. That is the obarray stand-in and it works, but it means **a
-user's `imports.scm` that omits `(schemacs editor imports)` greys the
+user's `imports.scm` that omits `(schemacs imports)` greys the
 menu bar's items out**, because their forms' names stop resolving and
 `menu-item-eval-property`'s guard reads an unbound variable as nil.
 Named here rather than fixed: Emacs's obarray has no such failure mode,
@@ -9822,7 +9819,7 @@ the same while the mode line was the body's width.
 
 `pgtk.scm` defined `display-mouse-absolute-pixel-position` and
 `display-set-mouse-pixel-position` with `define-method`, but neither name
-was in its `(schemacs editor dispnew)` import list. **`define-method` on
+was in its `(schemacs dispnew)` import list. **`define-method` on
 an unimported name silently makes a new generic in the defining module**,
 so the methods were attached to generics that nothing calls: the real
 dispnew generics kept only their default `#f`, and `frame.scm`'s
@@ -10625,7 +10622,7 @@ Every one of the three was a departure, and they had one cause:
 
 ## What landed
 
-- **`map-y-or-n-p` (`map-ynp.el:43`)** in `schemacs/map-ynp.scm`, the
+- **`map-y-or-n-p` (`map-ynp.el:43`)** in `schemacs/core/map-ynp.scm`, the
   minibuffer arm (Emacs's default; `y-or-n-p-use-read-key` is nil): the
   C's prompt format, `user-keys` built from the action alist, the
   answers map (`query-replace-map` as parent, each action key bound to
@@ -10684,7 +10681,7 @@ Every one of the three was a departure, and they had one cause:
   `current-window-configuration`. `dynamic-wind` is the C's
   `unwind-protect`.
 - `M-~`'s action marks the buffer unmodified with
-  `set-buffer-modified-p`; `@@ (schemacs map-ynp)` is not in the
+  `set-buffer-modified-p`; `@@ (schemacs core map-ynp)` is not in the
   generated `imports.scm` (that list is the `(schemacs editor ...)`
   libraries only), which is why M-: cannot see `map-y-or-n-p` - named,
   not fixed: it is a question-asker for commands, and every command that
@@ -10717,7 +10714,7 @@ lambda says `#t` out loud, which is what the C's `setq` answers.
 
 ## Verified
 
-- `schemacs/map-ynp-tests.scm` (NEW, 8 tests): `y`/`SPC` act and `n`/DEL
+- `test/core/map-ynp-test.scm` (NEW, 8 tests): `y`/`SPC` act and `n`/DEL
   skip with the action count, the exact Emacs 31.1 prompt string (`Save
   a? (y, n, !, ., q, or C-h) y` - measured on Emacs first), `q`, `!`,
   `.`, a non-string prompter acting without asking, an `M-~` action
@@ -11074,7 +11071,7 @@ the two objects that did not exist here: Emacs's **bool vector** and its
 
 ## What landed
 
-- `(schemacs editor data)` now carries `alloc.c`'s `make-bool-vector`
+- `(schemacs data)` now carries `alloc.c`'s `make-bool-vector`
   (`:2080`) and `bool-vector` (`:2093`) and `data.c`'s predicate and
   bitwise operations (`:454`, `:3824`-`:3995`): `bool-vector-p`,
   `bool-vector-ref`/`-set!`, the union/intersection/difference/xor
@@ -11085,7 +11082,7 @@ the two objects that did not exist here: Emacs's **bool vector** and its
   integer, bit I being element I. That is the same sequence with the
   same answers, without a length limit; a Word of `eql` for `equal?` is
   what `copy-sequence` needs.
-- `(schemacs editor category)` is `category.c` whole - the category set
+- `(schemacs category)` is `category.c` whole - the category set
   (`make-category-set`), the category (`define-category`,
   `category-docstring`, `get-unused-category`), the category table
   (`category-table-p`, `category-table`, `standard-category-table`,
@@ -11123,7 +11120,7 @@ the two objects that did not exist here: Emacs's **bool vector** and its
 
 ## Case tables — step 2 of the regexp engine (2026-11-21)
 
-`(schemacs editor casetab)` is `src/casetab.c`: `case-table-p`,
+`(schemacs casetab)` is `src/casetab.c`: `case-table-p`,
 `current-case-table`, `standard-case-table`, `set-case-table`,
 `set-standard-case-table`, the three derivations (`set_identity`,
 `shuffle`, `set_canon`) and `init_casetab_once`'s ASCII table. The
@@ -11143,7 +11140,7 @@ so a character with no entry translates to itself, which is
 
 # The Emacs regexp engine: compiler, fastmap, matcher (2026-11-21)
 
-**Not wired in yet.** `(schemacs editor regex-emacs)` compiles and
+**Not wired in yet.** `(schemacs regex-emacs)` compiles and
 matches Emacs's dialect, and nothing in the editor imports it: it is
 excluded from `loadup.scm`'s session list until `search.sld` is moved
 onto it. Everything below is the engine's own state.
@@ -11234,7 +11231,7 @@ Departures, all named in the source:
 
 ## The standard category table is still empty, and `\c` sees it
 
-`(schemacs editor category)` has the category *machinery* but not
+`(schemacs category)` has the category *machinery* but not
 `characters.el`'s data. Emacs's standard table gives `x` the set
 `".Lalr"`; here every set is empty. So `\c.` (category `.`) matches
 everything in Emacs and nothing here, and `\C.` the other way round:
@@ -11353,10 +11350,10 @@ hangs EQV from CANON's extra slot 2.
 
 # The engine under `search.c`, and the performance pass (2026-11-21)
 
-`(schemacs editor search)` is on the ported engine now - `string-match`,
+`(schemacs search)` is on the ported engine now - `string-match`,
 `looking-at`, `re-search-forward`, `re-search-backward` and the searches
 they stand on call `re-search`/`re-match-2` of
-`(schemacs editor regex-emacs)`. The old `%emacs-ere` translation,
+`(schemacs regex-emacs)`. The old `%emacs-ere` translation,
 its 512-character copy window and the `\_<`/`\_>` assertion simulation
 are **deleted**, with the `(ice-9 regex)` / `make-regexp` imports and
 the syntax/chartab names only they used.
@@ -11668,9 +11665,9 @@ main-loop's own compiled form. The workaround can be reduced to
 
 # cc-mode step 1: the language-constant system (2026-11-21)
 
-`schemacs/editor/cc-defs.scm` is the first piece of the cc-mode port:
+`schemacs/progmodes/cc-defs.scm` is the first piece of the cc-mode port:
 `cc-defs.el:2427-2990`, the machinery every cc-*.el file is built on.
-`schemacs/editor/cc-defs-tests.scm` (21 tests) pins it.
+`test/progmodes/cc-defs-test.scm` (21 tests) pins it.
 
 ## What is ported
 
@@ -11775,7 +11772,7 @@ dependency invalidation and `c-lang-major-mode-is`.
 
 # cc-mode step 2: the language-variable system (2026-11-21)
 
-`schemacs/editor/cc-langs.scm` is the second piece of cc-mode:
+`schemacs/progmodes/cc-langs.scm` is the second piece of cc-mode:
 `c-lang-defvar`, `c-lang-setvar`, `c-make-emacs-variables-local`,
 `c-make-init-lang-vars-fun` and `c-init-language-vars`
 (`cc-langs.el:130-205`, `:4608-4715`), plus in `cc-defs.scm` the
@@ -11924,7 +11921,7 @@ one call to it.
 
 # cc-mode step 4: the first of cc-vars (2026-11-21)
 
-`schemacs/editor/cc-vars.scm` is the part of `cc-vars.el` the rest of
+`schemacs/progmodes/cc-vars.scm` is the part of `cc-vars.el` the rest of
 the port has needed first: the syntactic-indentation switches, the
 font-lock extra-type lists, `c-make-font-lock-extra-types-blurb`,
 `c-string-list-p`, `c-indentation-style`, and the buffer-local
@@ -11959,12 +11956,12 @@ menu waits on `easy-menu-define`.
 
 # cc-mode step 5: the language data, and the primitives under it (2026-11-21)
 
-`schemacs/editor/cc-langs.scm` now carries **every language constant**
+`schemacs/progmodes/cc-langs.scm` now carries **every language constant**
 in `cc-langs.el` - 354 names (`c-lang-defconst`, `c-lang-defvar`,
 `c-lang-setvar`), for all seven languages - and the four `cl-lib`
 sequence functions they are built with live in a new
-`schemacs/editor/cl-seq.scm` (`lisp/emacs-lisp/cl-seq.el`).
-`schemacs/editor/eval.scm` is new for `funcall` (`eval.c:3185`).
+`schemacs/core/cl-seq.scm` (`lisp/emacs-lisp/cl-seq.el`).
+`schemacs/eval.scm` is new for `funcall` (`eval.c:3185`).
 `cc-langs-tests.scm` grew a 13-test `language data` group; a full
 differential harness (below) compared **all 2478 (constant, language)
 answers** against Emacs 31.1.
@@ -12095,7 +12092,7 @@ found it - not a test:
   `elt` is written on. All are in `fns.scm` now (`aref` in `data.scm`,
   `identity` and `delete` too), and `subr.scm` imports and re-exports
   `nth`/`nthcdr`.
-- **`funcall`** is `eval.c`'s; the new `(schemacs editor eval)` library
+- **`funcall`** is `eval.c`'s; the new `(schemacs eval)` library
   is `eval.c` and holds it.
 - A **Lisp-1 capture in the hand-written `c-nonsymbol-token-char-list`**:
   `(let ((list ...)) ... (list #\w ...))` applied the variable. The
@@ -12118,7 +12115,7 @@ remains.
 # cc-mode step 6: cc-engine's first tranche, and two scanner bugs under it
 # (2026-11-21)
 
-`schemacs/editor/cc-engine.scm` is new: the first tranche of
+`schemacs/progmodes/cc-engine.scm` is new: the first tranche of
 `lisp/progmodes/cc-engine.el`, in the file's own order - the internal
 state variables and `c-calculate-state`, the `c-macro-cache` family and
 every preprocessor-directive function from `c-query-and-set-macro-start`
@@ -12878,7 +12875,7 @@ twin, `c-append-to-state-cache' and
   properties, so they call `scan-lists'/`parse-partial-sexp' and that is
   what the C's Emacs build does.
 - **`c-beginning-of-defun-1' is here and calls `beginning-of-defun' and
-  `forward-sexp' from `(schemacs editor lisp)'** - Emacs has them in
+  `forward-sexp' from `(schemacs core lisp)'** - Emacs has them in
   `lisp.el', which is above `cc-engine' in this tree's graph; the
   import is the placement departure.
 
@@ -12989,7 +12986,7 @@ stay plain parameters**: `parse-sexp-lookup-properties` (`syntax.c`),
 `standard-value` and `(custom-variable-p ...)` is nil for each. Being a
 C variable is not the test; being in `cus-start.el` is.
 
-### Why the leaf `(schemacs editor symbol-props)` exists
+### Why the leaf `(schemacs symbol-props)` exists
 
 `custom.el` needs `get` and `put` (the `custom-` properties). Those
 were in `intervals.scm`, which sits above `buffer-text`, `character`
@@ -12999,7 +12996,7 @@ to import `custom` back. That is what blocked `*tab-width*`
 (`character.scm`) and `*use-dialog-box*` (`fns.scm`).
 
 `fns.c`'s `Fget`/`Fput` now live in a leaf library of their own,
-`schemacs/editor/symbol-props.scm`, named as a placement departure
+`schemacs/symbol-props.scm`, named as a placement departure
 (`fns.scm` imports `intervals.scm`, so the pair cannot live there).
 `intervals.scm` imports and **re-exports** them, so every existing
 importer is unchanged (measured: Guile re-exports an imported binding
@@ -13028,7 +13025,7 @@ parameter, as the minor-mode machinery expects.
 
 ## What landed
 
-`schemacs/editor/cc-engine.scm` has the declaration engine
+`schemacs/progmodes/cc-engine.scm` has the declaration engine
 (`cc-engine.el:8424'-`:9860'`), in Emacs's order: the `c-found-types`
 machinery (`c-new-id-start'/`-end'/`-is-type'`, the six `c-record-*`
 parameters, `c-add-type'`, `c-unfind-type'`, `c-check-type'`),
@@ -13801,7 +13798,7 @@ the find-decl cache, the brace-stack cache, `c-find-decl-prefix-search`,
 
 # cc-mode: cc-fonts, the first tranche - face names and matchers (2026-11-22)
 
-`schemacs/editor/cc-fonts.scm` is new and mirrors `lisp/progmodes/cc-fonts.el`.
+`schemacs/progmodes/cc-fonts.scm` is new and mirrors `lisp/progmodes/cc-fonts.el`.
 What is here is the file's first tranche, `cc-fonts.el:112'-`:525': the
 face-name constants, `c-annotation-face`, the `c-font-lock-context` slot and
 the helpers and matcher constructors the keyword data is built with.
@@ -13990,7 +13987,7 @@ cond. Translating them with plain Scheme `cond` made both clauses true
 when Emacs's are false - the differential showed `(decl)` where Emacs
 says `(arglist . t)` at two positions.
 
-They are translated with `cond-e` (`schemacs/syntax.scm`), which is
+They are translated with `cond-e` (`schemacs/core/syntax-macros.scm`), which is
 Emacs's `cond` including the nil answer, so no `(else #f)` is added by
 hand and the text mirrors Emacs's. The top-level cond keeps its
 `cond-e` too (it has an `else`, so either form would answer the same -
@@ -14692,7 +14689,7 @@ Ported, in the three places Emacs has them:
 
 The battery failures `quoted-insert` and `tty-menu` that led here were
 **two** problems. This one is real and is fixed above. The other was
-the harness: `schemacs/editor/imports.scm` was newer than its `.go`, so
+the harness: `schemacs/imports.scm` was newer than its `.go`, so
 every editor spent its first few hundred milliseconds interpreting the
 generated user-environment library. The pty harness treats "output and
 then quiet" as "the editor is ready", and in that window the command
@@ -14721,7 +14718,7 @@ and seen as `query-replace-quit`/`completion-ui` losing a C-g (and as
 `C-q C-g` occasionally printing "Quit" once the startup race was
 removed).
 
-`(schemacs editor keyboard)`'s `*signal-wake-function*` is the stand-in
+`(schemacs keyboard)`'s `*signal-wake-function*` is the stand-in
 for the longjmp: `handle-interrupt` sets `*quit-flag*` and then calls
 the front end's thunk, and a front end whose wait is a `select` gives
 it one that writes a byte to a pipe it selects on. The terminal already
@@ -14743,7 +14740,7 @@ wakes the wait".
 
 # cc-styles: the style system (2026-11-23)
 
-`schemacs/editor/cc-styles.scm` is `cc-styles.el` whole: the ten built-in
+`schemacs/progmodes/cc-styles.scm` is `cc-styles.el` whole: the ten built-in
 styles, `c-set-style-1`, `c-get-style-variables`, `c-set-style`,
 `c-add-style`, `c-read-offset`/`c-set-offset`,
 `c-setup-paragraph-variables`, `c-setup-filladapt`,
@@ -14972,7 +14969,7 @@ the same rule from an earlier pass; this is its second instance.
 
 ## New primitives and stand-ins
 
-* `/= ` (`data.c:2919') is in `(schemacs editor data)'; `rassq' and
+* `/= ` (`data.c:2919') is in `(schemacs data)'; `rassq' and
   `rassoc' (`fns.c:2050', `:2063') are in fns - the host has neither
   name, and `c-add-stmt-syntax' asks the first.
 * `c-langelem-sym/-pos/-col/-2nd-pos' and `c-intersect-lists'/
@@ -15001,7 +14998,7 @@ line-up-function offsets wait on cc-align, as above.
 
 # cc-align: the line-up functions (2026-11-23)
 
-`schemacs/editor/cc-align.scm` is `cc-align.el` whole - every line-up
+`schemacs/progmodes/cc-align.scm` is `cc-align.el` whole - every line-up
 function, the two one/multi-line-block offset functions, the brace
 actions (`c-snug-do-while`, `c-snug-1line-defun-close`), the GNU
 minimum-indentation hook and the three `c-semi&comma` criteria, in the
@@ -15021,7 +15018,7 @@ file's own order with its docstrings.
   `c-syntactic-context` bound - on the constructs the styles do not
   reach: **51 probes (43 C, 8 C++), identical**, including the cases
   where Emacs raises on the synthetic call (`assign-stmt`, `math-stmt`,
-  `argcont-plus`, `snug-do-while`). `schemacs/editor/cc-align-tests.scm`
+  `argcont-plus`, `snug-do-while`). `test/progmodes/cc-align-test.scm`
   pins every probe's Emacs answer.
 
 ## Representation departures
@@ -15110,7 +15107,7 @@ a porting gap.
 
 # easymenu: the menus cc-mode defines (2026-11-23)
 
-`schemacs/editor/easymenu.scm` is `lisp/emacs-lisp/easymenu.el` whole,
+`schemacs/core/easymenu.scm` is `lisp/emacs-lisp/easymenu.el` whole,
 in the file's order with its docstrings: `easy-menu-define` and
 everything it rests on (`easy-menu-do-define`, `easy-menu-create-menu`,
 `easy-menu-convert-item(-1)`, `easy-menu-binding`,
@@ -15128,7 +15125,7 @@ specs (simple, `:keys` with and without `\[cmd]`, `:active`,
 `:label` as string and as form, `:suffix` as string and as symbol,
 `:help`, `:key-sequence`, separators, plain strings), plus
 `easy-menu-always-true-p` and `easy-menu-name-match`: **identical**.
-`schemacs/editor/easymenu-tests.scm` pins the same answers and the
+`test/core/easymenu-test.scm` pins the same answers and the
 define/add/change mechanics Emacs measured on a real definition (52
 tests).
 
@@ -15199,7 +15196,7 @@ with the generic one - or the reverse - is silently two tables.
 
 # cc-cmds, the first tranche: the indentation command layer (2026-11-23)
 
-`schemacs/editor/cc-cmds.scm` has, in `cc-cmds.el`'s order:
+`schemacs/progmodes/cc-cmds.scm` has, in `cc-cmds.el`'s order:
 `c-fix-backslashes`, `c-indent-line`, `c-newline-and-indent`,
 `c-show-syntactic-information`, `c-syntactic-information-on-region`,
 `c-update-modeline`, the six toggles, `c-indent-command`,
@@ -15303,7 +15300,7 @@ cc-cmds' own edits safe.
 
 # cc-mode.el, first pass: the found-type change helpers (2026-11-23)
 
-`schemacs/editor/cc-mode.scm` is new and partial by design: the
+`schemacs/progmodes/cc-mode.scm` is new and partial by design: the
 found-type half of `cc-mode.el`'s change machinery, in the file's
 order - `c-just-done-before-change`, `c-unfind-enclosing-token`,
 `c-unfind-coalesced-tokens`, `c-before-change-de-typedef`,

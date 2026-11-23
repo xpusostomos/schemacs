@@ -638,7 +638,7 @@
         (define (line s) (display s out) (newline out))
         (line header)
         (line "")
-        (line "(import (schemacs editor theme))")
+        (line "(import (schemacs theme))")
         (line "")
         (line (format #f "(define-theme ~a" name))
         (line (string-append "  " (scheme-string (or doc ""))))

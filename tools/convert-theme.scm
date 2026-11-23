@@ -219,11 +219,11 @@
         ;; **The file imports what it uses.** `load-theme` reads a theme
         ;; with `load`, which evaluates it in whatever module is current;
         ;; `define-theme`, `custom-theme-set-faces` and `provide-theme`
-        ;; are `(schemacs editor theme)`'s. Without this line a theme
+        ;; are `(schemacs theme)`'s. Without this line a theme
         ;; loads only where those names happen to be imported already -
         ;; the hand-written test theme in `custom-tests.scm' has the same
         ;; line for the same reason.
-        (display "(import (schemacs editor theme))" port)
+        (display "(import (schemacs theme))" port)
         (newline port)
         (newline port)
         ;; (deftheme NAME DOC PROP VALUE ...)

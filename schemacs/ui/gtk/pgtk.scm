@@ -1,7 +1,7 @@
 (define-library (schemacs ui gtk pgtk)
   ;; This library mirrors the role of GNU Emacs's `src/pgtkterm.c': the
   ;; GTK display. `term.sld' is the text terminal's implementation of
-  ;; `(schemacs editor dispnew)''s interface; this is the windowed one -
+  ;; `(schemacs dispnew)''s interface; this is the windowed one -
   ;; same generics, a different surface behind them, and nothing in the
   ;; editor changed to accommodate it. That is the point of the split.
   ;;
@@ -54,7 +54,7 @@
           get-internal-real-time internal-time-units-per-second)
     ;; The tooltip's hide timer is an editor timer, as it is in Emacs's
     ;; Gtk build (`run-at-time` in `Fx_show_tip`, `pgtkfns.c:3319`).
-    (only (schemacs editor timer) run-at-time cancel-timer)
+    (only (schemacs core timer) run-at-time cancel-timer)
     (oop goops)
     ;; The drawing primitives, which guile-gi does not bind.
     (cairo)
@@ -204,7 +204,7 @@
     ;; (pgtk-names holds the typelib itself).
     (only (gi types) symbol->enum)
     ;; The display interface this implements.
-    (only (schemacs editor dispnew)
+    (only (schemacs dispnew)
           menu-show
           <display> *mouse-event-keys* clear-frame-area! clear-end-of-line!
           ensure-surface! column-width
@@ -261,22 +261,22 @@
           windows-or-buffers-changed? update-mode-lines?)
     ;; A glyph and a glyph row, which `write-glyphs!` now reads: the
     ;; pixel y is the row's, and each glyph carries its own face.
-    (only (schemacs editor glyph)
+    (only (schemacs glyph)
           glyph-char glyph-face-id glyph-pixel-width glyph-row-y)
     ;; The Lisp half of a *read* of a selection this process owns:
     ;; `pgtk-get-local-selection' looks the requested target up in
     ;; `selection-converter-alist' - the C's `Vselection_converter_alist'
     ;; - and calls the handler it finds. See `select.sld'.
-    (only (schemacs editor select)
+    (only (schemacs select)
           *selection-converter-alist*)
     ;; `decode-coding-string' turns the bytes a foreign selection arrived
     ;; as into the tree's code points; that is the half of
     ;; `gui-get-selection' that decodes a `foreign-selection' string, done
     ;; here because this is where the bytes are.
-    (only (schemacs editor coding) decode-coding-string)
+    (only (schemacs coding) decode-coding-string)
     ;; `x_new_font`'s resize: the frame keeps its rows and columns at the
     ;; new font unless `frame-inhibit-implied-resize' says otherwise.
-    (only (schemacs editor frame) adjust-frame-size! *frame-list* frame-width
+    (only (schemacs frame) adjust-frame-size! *frame-list* frame-width
           frame-height frame-output frame-set-background-mode
           frame-selected-window window-buffer
           ;; `menu-bar-mode` turns the bar off by setting this on every
@@ -293,31 +293,31 @@
           window-body-left window-body-width)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
-    (only (schemacs editor faces)
+    (only (schemacs faces)
           *display-color-cells* *display-type* *frame-background-mode*
           *window-system* face-attribute face-list face-spec-recalc
           set-face-attribute)
-    (only (schemacs editor xfaces)
+    (only (schemacs xfaces)
           attribute-value face-attributes-empty merge-face-ref)
     ;; reading a *window's* buffer, not the current one - see
     ;; `pgtk-ensure-font!`
-    (only (schemacs editor buffer) with-current-buffer)
+    (only (schemacs buffer) with-current-buffer)
     ;; The file dialog's own two questions of the file system - "does
     ;; this name a directory" and "is it absolute" - which the C asks
     ;; through `Ffile_directory_p` and `Fexpand_file_name`
     ;; (`gtkutil.c:2712-2722`).
-    (only (schemacs editor fileio)
+    (only (schemacs fileio)
           expand-file-name file-directory-p file-name-nondirectory-part)
     ;; the window being edited, which a prompt takes the selection from
-    (only (schemacs editor minibuffer) minibuffer-selected-window)
+    (only (schemacs minibuffer) minibuffer-selected-window)
     ;; How many cells a character takes - a CJK ideograph is one character
     ;; and two cells, so a run is not `string-length' wide.
-    (only (schemacs editor disp-table) char-display-width)
+    (only (schemacs disp-table) char-display-width)
     ;; The event model, in `character.sld': the modifier bits a decoder
     ;; ORs into an event, the two C functions that fold a keysym into its
     ;; event - `make_ctrl_char' and `apply_modifiers' - and
     ;; `lispy_function_keys', which names a key that is not a character.
-    (only (schemacs editor character)
+    (only (schemacs character)
           apply-modifiers char-ctl char-hyper char-meta char-shift
           char-super function-key-name make-ctrl-char)
     ;; A mouse event needs the *position* it happened at, which is the
@@ -325,7 +325,7 @@
     ;; The Gtk window-system Lisp: which icon-theme name each tool bar
     ;; image file stands for (`term/pgtk-win.el`, `x-win.el`).
     (only (schemacs ui gtk pgtk-win) x-gtk-map-stock)
-    (only (schemacs editor xdisp) posn-at-x-y remember-mouse-glyph track-mouse
+    (only (schemacs xdisp) posn-at-x-y remember-mouse-glyph track-mouse
           note-mouse-highlight
           *redisplay-in-progress* *after-redisplay-hook*
           ;; The two hooks `set_frame_menubar` runs before it recomputes
@@ -342,14 +342,14 @@
           force-mode-line-update)
     ;; `run-hooks` is `subr.el`'s, and a hook is the list of procedures
     ;; it is handed.
-    (only (schemacs editor subr) run-hooks)
+    (only (schemacs subr) run-hooks)
     ;; A tool bar item's `:image` is an image object - `(image :type ...
     ;; :file ...)` - whose plist begins after the leading symbol
     ;; (`tool-bar-make-keymap-1`).
-    (only (schemacs editor image) image-property)
+    (only (schemacs image) image-property)
     ;; The frame's focus, which the window tells us about: it decides
     ;; whether the cursor blinks and whether it is drawn hollow.
-    (only (schemacs editor frame)
+    (only (schemacs frame)
           *current-frame*
           ;; `pgtk-title-frame!' gives a window its frame's name as a
           ;; title, as Emacs's `x_window' does from `f->name'
@@ -376,7 +376,7 @@
     ;; the procedure an event is handed to and `command-loop-ready?' says
     ;; whether it can take one now; both are #f/the-loop's when a read is
     ;; outstanding instead. See `Pgtk-ENQUEUE!`.
-    (only (schemacs editor keyboard)
+    (only (schemacs keyboard)
           *dispatch-event* *unread-command-events* command-loop-ready?
           ;; a mouse event's own value, for the hand-over path above
           *last-read-event*
@@ -397,13 +397,13 @@
           tool-bar-item-type tool-bar-item-help tool-bar-item-rtl-image
           tool-bar-item-label tool-bar-item-vert-only tool-bar-item-nslots)
     ;; A menu that is cancelled signals quit, exactly as C-g does.
-    (only (schemacs editor command) signal-quit)
+    (only (schemacs command) signal-quit)
     ;; `menu-bar-open`'s toolkit branch: `pgtk-menu-bar-open`
     ;; (`term/pgtk-win.el:339`) is installed through this seam.
-    (only (schemacs editor menu-bar) *menu-bar-open-function*)
+    (only (schemacs menu-bar) *menu-bar-open-function*)
     ;; The platform-independent half of the menu: `menu_items`, the
     ;; `widget_value` tree, and the click's key sequence.
-    (only (schemacs editor menu)
+    (only (schemacs menu)
           menu-items menu-items-used menu-items-n-panes
           set!menu-items-n-panes!
           ;; The slot layout and the two flags the popup reads.
@@ -425,7 +425,7 @@
           set!widget-value-selected! set!widget-value-key
           set!widget-value-call-data)
     ;; A colour *name* means what `term/tty-colors.el' says it means.
-    (only (schemacs editor tty-colors) tty-color-standard-values))
+    (only (schemacs term tty-colors) tty-color-standard-values))
 
   (export
    <pgtk-display>
@@ -1352,7 +1352,7 @@
       ;; arrangement already made when MS is #f.
       ;;
       ;; This is how the timer module is told when to come back
-      ;; (`(schemacs editor timer)''s `*timer-wake*') once Gtk owns the
+      ;; (`(schemacs core timer)''s `*timer-wake*') once Gtk owns the
       ;; main loop - with no read to arm there is otherwise nothing to
       ;; make an idle editor fire a timer.
       ;;
@@ -2296,7 +2296,7 @@
       ;; **The generic has to be imported, or this defines a new one.** A
       ;; `define-method' on a name that is not bound makes a *fresh*
       ;; generic in this module with only this method on it, and the
-      ;; caller - `(schemacs editor frame)''s `mouse-position', through
+      ;; caller - `(schemacs frame)''s `mouse-position', through
       ;; dispnew's generic - then has none at all: "No applicable method
       ;; for #<generic> mouse-position (0>". It compiles cleanly too, and
       ;; the "possibly unbound variable" warning does not fire, because
@@ -3960,7 +3960,7 @@
     ;; GNU Emacs builds the bar in three steps that this keeps apart the
     ;; same way: `set_frame_menubar` fills `menu_items` from
     ;; `menu_bar_items` and digests it into a `widget_value` tree
-    ;; (`menu.c`, all of it in `(schemacs editor menu)`), `create_menus`
+    ;; (`menu.c`, all of it in `(schemacs menu)`), `create_menus`
     ;; turns that tree into Gtk widgets (`gtkutil.c:3405`), and
     ;; `menubar_selection_callback` turns a click back into a key
     ;; sequence (`menu.c`'s `find_and_call_menu_selection`).

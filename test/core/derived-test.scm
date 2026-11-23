@@ -1,0 +1,192 @@
+(import
+ (only (schemacs undo) record-insert record-delete text-editor-undo-boundary! text-editor-undo-disable! text-editor-undo-enable! text-editor-undo-recording? *undo-limit* undo-insertion-entry? undo-deletion-entry? undo-modified-entry? *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
+ (only (schemacs insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches)
+ (only (schemacs fns) %count-lines)
+ (scheme base)
+ (scheme char)
+ 
+ (schemacs buffer)
+ (schemacs simple)
+ (schemacs core derived)
+ (prefix (schemacs keymap) km:)
+ (only (schemacs keymap) keymap-index keymap-lookup)
+ (only (schemacs buffer) current-local-map allocate-buffer bufferp buffer-pt buffer-beg buffer-z text-editor-buffer-name set!text-editor-buffer-name text-editor-file-name set!text-editor-file-name buffer-modified-p set-buffer-modified-p buffer-read-only? set!buffer-read-only text-editor-text-props set!text-editor-text-props *inhibit-read-only* *buffer-visited-file-modtime-function* buffer-modified-tick buffer-chars-modified-tick text-editor-cache-long-scans set!text-editor-cache-long-scans show-text-editor text-editor-undo-list set!text-editor-undo-list)
+ (only (schemacs keymap) define-key)
+ (only (srfi 64) test-assert test-equal test-begin test-end)
+ )
+
+;; The mode machinery: `define-derived-mode' and the names it makes
+;; (`derived.el'), the buffer-local `major-mode' and `mode-name' and
+;; `kill-all-local-variables' (`buffer.c'), and `special-mode'
+;; (`simple.el'). What is asserted is the state a mode leaves behind,
+;; which is what every later feature - the mode line, dired, the buffer
+;; list - reads.
+
+(test-begin "derived")
+
+(define (in-buffer thunk)
+  (parameterize ((*current-buffer* (get-buffer-create "*mode-test*")))
+    (thunk)))
+
+;; ------------------------------------------------------------------
+;; the names
+
+;; `derived-mode-map-name' and its three siblings turn a mode's symbol
+;; into the names Emacs gives its parts.
+(test-equal "map name" 'foo-mode-map (derived-mode-map-name 'foo-mode))
+(test-equal "hook name" 'foo-mode-hook (derived-mode-hook-name 'foo-mode))
+(test-equal "syntax table name" 'foo-mode-syntax-table
+  (derived-mode-syntax-table-name 'foo-mode))
+(test-equal "abbrev table name" 'foo-mode-abbrev-table
+  (derived-mode-abbrev-table-name 'foo-mode))
+
+;; ------------------------------------------------------------------
+;; a buffer's mode, and `kill-all-local-variables'
+
+(test-equal "a fresh buffer is Fundamental" 'fundamental-mode
+  (in-buffer (lambda () (major-mode))))
+(test-equal "and says so" "Fundamental" (in-buffer (lambda () (mode-name))))
+
+(test-assert "kill-all-local-variables clears the buffer's own slots"
+  (in-buffer
+   (lambda ()
+     (set-buffer-local-value! (current-buffer) 'some-slot 42)
+     (set!major-mode 'foo-mode)
+     (kill-all-local-variables)
+     (and (eq? 'fundamental-mode (major-mode))
+          (not (buffer-local-value (current-buffer) 'some-slot #f))))))
+
+;; ------------------------------------------------------------------
+;; `define-derived-mode'
+
+(define test-mode-map (km:keymap '*test-mode-map*))
+(define test-mode-hook '())
+(define test-mode-ran #f)
+
+(define-derived-mode (test-mode #f "Test" test-mode-map test-mode-hook)
+  "A mode defined only to be looked at."
+  (set! test-mode-ran #t))
+
+(test-assert "the mode sets major-mode, mode-name and the keymap"
+  (in-buffer
+   (lambda ()
+     (set! test-mode-ran #f)
+     (test-mode)
+     (and (eq? 'test-mode (major-mode))
+          (string=? "Test" (mode-name))
+          (eq? test-mode-map (current-local-map))
+          test-mode-ran))))
+
+;; a mode's own hook runs. The hook is the list the mode was defined
+;; with - Emacs names a *variable* here and reads it, and a Scheme
+;; variable is what stands in for one - so it is the list that is set.
+(define test-mode-hook-ran #f)
+(test-assert "the mode runs its own hook"
+  (in-buffer
+   (lambda ()
+     (set! test-mode-ran #f)
+     (set! test-mode-hook-ran #f)
+     (set! test-mode-hook (list (lambda () (set! test-mode-hook-ran #t))))
+     (test-mode)
+     (set! test-mode-hook '())
+     (and test-mode-ran test-mode-hook-ran))))
+
+;; ------------------------------------------------------------------
+;; `special-mode'
+
+(test-equal "special-mode names itself" "Special"
+  (in-buffer (lambda () (special-mode) (mode-name))))
+(test-equal "and sets major-mode" 'special-mode
+  (in-buffer (lambda () (special-mode) (major-mode))))
+;; "These modes usually use read-only buffers" - the one thing its body
+;; does is `(setq buffer-read-only t)'.
+(test-assert "and makes the buffer read-only"
+  (in-buffer (lambda () (special-mode) (buffer-read-only? (current-buffer)))))
+(test-assert "and installs its keymap"
+  (in-buffer (lambda () (special-mode)
+               (eq? special-mode-map (current-local-map)))))
+
+;; ------------------------------------------------------------------
+;; inheritance
+
+;; A child mode's keymap takes the parent mode's as its *parent*, which
+;; is Emacs's `(unless (keymap-parent ,map) (set-keymap-parent ,map
+;; (current-local-map)))'. The bindings stay a *link*: what the parent
+;; has is reachable through the child, and the child's own bindings
+;; shadow it.
+(define-key special-mode-map (list #\g) 'parent-key)
+(define child-mode-map (km:keymap '*child-mode-map*))
+(define child-mode-hook '())
+(define-derived-mode (child-mode special-mode "Child" child-mode-map
+                                  child-mode-hook))
+(define-key child-mode-map (list #\c) 'child-key)
+
+(test-assert "a derived mode's keymap has the parent's as its parent"
+  (in-buffer
+   (lambda ()
+     (child-mode)
+     (eq? (current-local-map) child-mode-map))))
+
+(test-assert "the parent's bindings are reachable through the child"
+  (in-buffer
+   (lambda ()
+     (child-mode)
+     (and (eq? 'parent-key
+               (km:keymap-lookup child-mode-map
+                                 (km:keymap-index (list #\g))))
+          (eq? 'child-key
+               (km:keymap-lookup child-mode-map
+                                 (km:keymap-index (list #\c))))))))
+
+(test-assert "and the parent mode's own name is replaced, not inherited"
+  (in-buffer (lambda () (child-mode)
+               (and (eq? 'child-mode (major-mode))
+                    (string=? "Child" (mode-name))))))
+
+;; ------------------------------------------------------------------
+;; `derived-mode-p' and the parentage (`subr.el:2984-3160')
+;;
+;; Every expectation is Emacs 31.1's: the same two modes defined with
+;; `define-derived-mode', then `(derived-mode-p ...)' and
+;; `(derived-mode-all-parents ...)' asked there.
+
+(test-equal "the parent chain starts with the mode itself"
+  '(child-mode special-mode)
+  (derived-mode-all-parents 'child-mode))
+(test-equal "a mode with no parent is its own only parent"
+  '(special-mode)
+  (derived-mode-all-parents 'special-mode))
+(test-equal "`provided-mode-derived-p' answers the mode it matched"
+  'special-mode
+  (provided-mode-derived-p 'child-mode '(text-mode special-mode)))
+(test-assert "and #f when nothing matches"
+  (not (provided-mode-derived-p 'child-mode 'text-mode)))
+(test-assert "the current mode is derived from its parent"
+  (in-buffer (lambda () (child-mode) (derived-mode-p 'special-mode))))
+(test-assert "and from itself"
+  (in-buffer (lambda () (child-mode) (derived-mode-p 'child-mode))))
+(test-assert "but not from an unrelated mode"
+  (in-buffer (lambda () (child-mode) (not (derived-mode-p 'text-mode)))))
+(test-assert "the deprecated list form is still a list"
+  (in-buffer (lambda () (child-mode) (derived-mode-p 'text-mode 'special-mode))))
+
+(test-assert "`derived-mode-set-parent' replaces a parent and flushes the cache"
+  (begin
+    (derived-mode-set-parent 'child-mode2 'special-mode)
+    (let ((before (derived-mode-all-parents 'child-mode2)))
+      (derived-mode-set-parent 'child-mode2 'text-mode)
+      (and (equal? before '(child-mode2 special-mode))
+           (equal? (derived-mode-all-parents 'child-mode2)
+                   '(child-mode2 text-mode))))))
+
+(test-assert "`derived-mode-add-parents' keeps the parent and adds one"
+  (begin
+    (derived-mode-set-parent 'child-mode3 'special-mode)
+    (derived-mode-add-parents 'child-mode3 '(text-mode))
+    ;; Emacs: `(derived-mode-add-parents 'xx '(text-mode))' then
+    ;; `(derived-mode-all-parents 'xx)' is `(xx special-mode text-mode)' -
+    ;; the main parent's chain first, the extra one's after it.
+    (equal? (derived-mode-all-parents 'child-mode3)
+            '(child-mode3 special-mode text-mode))))
+
+(test-end "derived")

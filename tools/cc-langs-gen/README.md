@@ -1,6 +1,6 @@
 # Generating `cc-langs.scm` from Emacs's `cc-langs.el`
 
-`schemacs/editor/cc-langs.scm`'s language-data block is Emacs's own
+`schemacs/progmodes/cc-langs.scm`'s language-data block is Emacs's own
 `c-lang-defconst`/`c-lang-defvar`/`c-lang-setvar` sequence translated
 form for form, in file order. These scripts do that translation.
 

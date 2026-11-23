@@ -64,7 +64,7 @@ The session died mid-splice while moving `render!` onto glyph matrices. Three
 files were added and `xdisp.scm` was left unbalanced, so **the editor does not
 start**. `glyph.scm` and `matrix.scm` read and compile clean.
 
-The defect is localised to `schemacs/editor/xdisp.scm`, in the new
+The defect is localised to `schemacs/xdisp.scm`, in the new
 row-building block (`line-slice-glyphs`, `text-cells-width`, `build-row!`,
 `display-window!`, `update-window!`, `draw-glyph-row!`), between the last
 statement of `render-window!` (line 2677) and `render-window-mode-line!`

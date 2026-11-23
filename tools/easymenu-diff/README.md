@@ -20,5 +20,5 @@ strings with `prin1`/`write`, vectors as `[...]`, improper tails shown
 compared rather than the values because Elisp's nil is both `#f` and
 `'()` here, and `(cons key nil)` is `(key)` there but `(key . #f)` here.
 
-`schemacs/editor/easymenu-tests.scm` pins these answers in the suite
+`test/core/easymenu-test.scm` pins these answers in the suite
 runner.

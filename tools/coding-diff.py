@@ -27,7 +27,7 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # **The shared site directory is on the load path or nothing loads.**
-# `(schemacs editor keyboard)` imports `(scheme-utils repl server)` from
+# `(schemacs keyboard)` imports `(scheme-utils repl server)` from
 # there, and without `-L` the editor libraries fail to resolve and every
 # schemacs answer is `None` (measured - that is what made this tool
 # report 19 "NEW" cases against a tree that was fine).
@@ -144,8 +144,8 @@ def ask_emacs(path):
 def ask_schemacs(path):
     """schemacs's coding system for PATH, and the bytes it writes back."""
     elisp = """
-(import (scheme base) (scheme write) (schemacs editor files)
-        (schemacs editor frame) (schemacs editor buffer) (schemacs editor coding))
+(import (scheme base) (scheme write) (schemacs files)
+        (schemacs frame) (schemacs buffer) (schemacs coding))
 (parameterize ((*buffer-list* (list)) (*current-buffer* #f))
   (let* ((ed (find-file-noselect "%s"))
          (frame (new-frame ed 24 80)))

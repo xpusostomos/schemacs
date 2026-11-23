@@ -32,5 +32,5 @@ few are deliberately synthetic (the semi&comma criteria take no
 langelem), and where Emacs raises on the synthetic call both sides
 print `error`.
 
-`schemacs/editor/cc-align-tests.scm` pins these answers in the suite
+`test/progmodes/cc-align-test.scm` pins these answers in the suite
 runner.

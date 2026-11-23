@@ -1,13 +1,13 @@
 (import (scheme base) (scheme file) (scheme write)
-        (only (schemacs editor buffer) allocate-buffer set-buffer
+        (only (schemacs buffer) allocate-buffer set-buffer
               set-buffer-local-value! buffer-local-value current-buffer)
-        (only (schemacs editor editfns) insert goto-char point point-min
+        (only (schemacs editfns) insert goto-char point point-min
               point-max char-after char-before save-excursion)
-        (only (schemacs editor search) looking-at)
-        (only (schemacs editor syntax) set-syntax-table))
-(import (only (schemacs editor cc-defs) c-lang-const *c-buffer-is-cc-mode*))
-(import (schemacs editor cc-langs) (schemacs editor cc-vars)
-        (schemacs editor cc-engine))
+        (only (schemacs search) looking-at)
+        (only (schemacs syntax) set-syntax-table))
+(import (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*))
+(import (schemacs progmodes cc-langs) (schemacs progmodes cc-vars)
+        (schemacs progmodes cc-engine))
 
 (define (slurp path)
   (call-with-input-file path

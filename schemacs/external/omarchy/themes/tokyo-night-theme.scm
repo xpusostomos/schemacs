@@ -6,7 +6,7 @@
 ;; palette to in GNU Emacs - the generator itself is not
 ;; ported, only the `theme-settings' it produced.
 
-(import (schemacs editor theme))
+(import (schemacs theme))
 
 (define-theme tokyo-night
   "Tokyo Night, derived from Modus Vivendi."

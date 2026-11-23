@@ -41,12 +41,12 @@ import import_sets
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 EDITOR_LIBS = [
-    '(schemacs editor engine)', '(schemacs editor frame)',
-    '(schemacs editor command)', '(schemacs editor keymap)',
-    '(schemacs editor keyboard)', '(schemacs editor minibuffer)',
-    '(schemacs editor simple)', '(schemacs editor window)',
-    '(schemacs editor isearch)', '(schemacs editor xdisp)',
-    '(schemacs editor disp-table)', '(schemacs editor files)',
+    '(schemacs editor engine)', '(schemacs frame)',
+    '(schemacs command)', '(schemacs keymap)',
+    '(schemacs keyboard)', '(schemacs minibuffer)',
+    '(schemacs simple)', '(schemacs window)',
+    '(schemacs isearch)', '(schemacs xdisp)',
+    '(schemacs disp-table)', '(schemacs files)',
     '(schemacs ui gtk gtk-main)', '(schemacs ui gtk pgtk)',
     '(schemacs ui tty tty-main)', '(schemacs ui tty term)',
     '(schemacs ui tty xterm)',

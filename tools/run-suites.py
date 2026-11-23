@@ -36,149 +36,102 @@ from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
-    'schemacs/syntax-tests.scm',
-    'schemacs/editor/character-tests.scm',
-    'schemacs/editor/casetab-tests.scm',
-    'schemacs/editor/category-tests.scm',
-    'schemacs/editor/cc-align-tests.scm',
-    'schemacs/editor/cc-cmds-tests.scm',
-    'schemacs/editor/cc-mode-tests.scm',
-    'schemacs/editor/easymenu-tests.scm',
-    'schemacs/editor/cc-defs-tests.scm',
-    'schemacs/editor/cc-engine-tests.scm',
-    'schemacs/editor/cc-fonts-tests.scm',
-    'schemacs/editor/cc-langs-tests.scm',
-    'schemacs/editor/cc-vars-tests.scm',
-    'schemacs/editor/cc-styles-tests.scm',
-    'schemacs/editor/cl-seq-tests.scm',
-    'schemacs/editor/chartab-tests.scm',
-    'schemacs/editor/syntax-tests.scm',
-    'schemacs/editor/narrow-tests.scm',
-    'schemacs/editor/buffer-tests.scm',
-    'schemacs/editor/buffer-text-tests.scm',
-    'schemacs/editor/region-cache-tests.scm',
-    'schemacs/editor/itree-tests.scm',
-    'schemacs/editor/engine-tests.scm',
-    'schemacs/editor/derived-tests.scm',
-    'schemacs/editor/diffseq-tests.scm',
-    'schemacs/editor/filevercmp-tests.scm',
-    'schemacs/editor/dired-tests.scm',
-    'schemacs/editor/dired-mode-tests.scm',
-    'schemacs/editor/font-lock-tests.scm',
-    'schemacs/editor/jit-lock-tests.scm',
-    'schemacs/editor/lisp-mode-tests.scm',
-    'schemacs/editor/prog-mode-tests.scm',
-    'schemacs/editor/lisp-tests.scm',
-    'schemacs/editor/scheme-tests.scm',
-    'schemacs/editor/scroll-bar-tests.scm',
-    'schemacs/editor/cl-indent-tests.scm',
-    'schemacs/editor/marker-tests.scm',
-    'schemacs/editor/editfns-tests.scm',
-    'schemacs/editor/help-tests.scm',
-    'schemacs/editor/novice-tests.scm',
-    'schemacs/editor/env-tests.scm',
-    'schemacs/editor/fileio-tests.scm',
-    'schemacs/editor/files-tests.scm',
-    # `map-ynp.el` - `map-y-or-n-p`, the question-asker `save-some-buffers`
-    # asks through, its prompts and every answer key.
-    'schemacs/map-ynp-tests.scm',
-    'schemacs/editor/indentc-tests.scm',
-    # `fill.el` - the paragraph filler, its justification half and
-    # `fill-individual-paragraphs`, each expectation Emacs 31.1's own.
-    'schemacs/editor/fill-tests.scm',
-    'schemacs/editor/newcomment-tests.scm',
-    'schemacs/editor/coding-tests.scm',
-    'schemacs/editor/charset-tests.scm',
-    'schemacs/editor/mule-cmds-tests.scm',
-    'schemacs/editor/mule-diag-tests.scm',
-    # `mule-util.el`'s `truncate-string-to-width`, which the tab line's
-    # truncated tab name stands on.
-    'schemacs/editor/mule-util-tests.scm',
-    'schemacs/editor/cmds-tests.scm',
-    # `window.c`'s `current-window-configuration` and
-    # `set-window-configuration`, which the tab bar is built on.
-    'schemacs/editor/window-config-tests.scm',
-    'schemacs/editor/window-tests.scm',
-    'schemacs/editor/window-state-tests.scm',
-    # `tab-bar.el` - the frame's tabs, each a window configuration.
-    'schemacs/editor/tab-bar-tests.scm',
-    # `callint.c`'s interactive specifications as this tree reads them:
-    # the `*' marker and the read-only check it makes, `define-alias`.
-    'schemacs/editor/command-tests.scm',
-    'schemacs/editor/custom-tests.scm',
-    # `easy-mmode.el`'s two macros: `define-minor-mode` with `:global`, and
-    # `define-globalized-minor-mode` under it - plus the `default-value`
-    # primitive a global mode's variable lives in.
-    'schemacs/editor/easy-mmode-tests.scm',
-    # `tab-line.el`'s Lisp half: the format the redisplay reads, the
-    # commands that act on it, and the globalized mode that installs it.
-    'schemacs/editor/tab-line-tests.scm',
-    'schemacs/editor/tool-bar-tests.scm',
-    'schemacs/editor/casefiddle-tests.scm',
-    'schemacs/editor/mouse-tests.scm',
-    # `bindings.el`'s clickable mode-line items: the propertized
-    # constructs, the commands, and the hover face.
-    'schemacs/editor/mode-line-tests.scm',
-    # `tooltip.el` and the help-echo half of `note_mouse_highlight`.
-    'schemacs/editor/tooltip-tests.scm',
-    'schemacs/repl-client-tests.scm',
-    'schemacs/editor/loadup-tests.scm',
-    'schemacs/editor/fns-tests.scm',
-    'schemacs/editor/subr-tests.scm',
-    'schemacs/editor/textprop-tests.scm',
-    'schemacs/editor/ls-lisp-tests.scm',
-    'schemacs/editor/timefns-tests.scm',
-    'schemacs/editor/search-tests.scm',
-    'schemacs/editor/replace-tests.scm',
-    # `replace.el`'s Occur - the engine, the mode, and `isearch-occur`.
-    'schemacs/editor/occur-tests.scm',
-    'schemacs/editor/faces-tests.scm',
-    # The omarchy port's own suite - the font-height logic upstream added
-    # with its daemon font-size fix. It lives beside the library, under
-    # `external/', because that is where the port does.
-    'schemacs/external/omarchy/omarchy-tests.scm',
-    # **Three suites that were on disk and passing but were never run**
-    # (added 2026-10-13): they are listed here for the first time. A test
-    # file that is not in this list is not run by anything - the tree had
-    # four, and only `intervals-tests.scm' (still out, still failing on
-    # its pre-2026-10-05 positions) was known about.
-    'schemacs/editor/xfaces-tests.scm',
-    'schemacs/editor/face-remap-tests.scm',
-    'schemacs/editor/minibuffer-tests.scm',
-    'schemacs/editor/minibuf-tests.scm',
-    'schemacs/ui/gtk/pgtk-tests.scm',
-    'schemacs/ui/gtk/pgtk-win-tests.scm',
-    'schemacs/editor/timer-tests.scm',
-    'schemacs/editor/seq-tests.scm',
-    'schemacs/editor/select-tests.scm',
-    # The terminal's own OSC 52 selection, which came out of
-    # `select-tests.scm' when the platform libraries moved under
-    # `schemacs/ui/': an editor test that asserts the terminal's
-    # behaviour belongs beside `xterm.sld'.
-    #
-    # **These lines were `;;' until 2026-10-09** - Scheme comments pasted
-    # into a Python list, which is a SyntaxError at line 59. So this
-    # runner was dead from the "finish reorg" commit onward and *no*
-    # suite ran, whatever the handoff notes said. It failed at parse time
-    # with exit 1, which reads like a failing suite; the one thing this
-    # file must never be is the reason nobody noticed.
-    'schemacs/ui/tty/xterm-tests.scm',
-    'schemacs/ui/tty/tinfo-tests.scm',
-    'schemacs/editor/startup-tests.scm',
-    'schemacs/apps/tty-editor-tests.scm',
-    # The two suites of the top-level libraries. **They are here for the
-    # first time**: both imported `(schemacs test)`, the eighteen-line
-    # SRFI-64 re-export shim the reorg deleted, so both died at load and
-    # neither was in this list - 187 tests that had not run since. They
-    # take `(srfi 64)` directly now, as every other suite in the tree
-    # already did.
-    'schemacs/keymap-tests.scm',
-    'schemacs/editor/menu-bar-tests.scm',
-    # `menu-bar.el`'s standard menus, in a process of their own:
-    # loading the library defines entries in `global-map`, which the
-    # suite above would then see.
-    'schemacs/editor/menu-bar-menus-tests.scm',
-    'schemacs/editor/menu-tests.scm',
+    'test/apps/tty-editor-test.scm',
+    'test/buffer-test.scm',
+    'test/buffer-text-test.scm',
+    'test/casefiddle-test.scm',
+    'test/casetab-test.scm',
+    'test/category-test.scm',
+    'test/character-test.scm',
+    'test/charset-test.scm',
+    'test/chartab-test.scm',
+    'test/cmds-test.scm',
+    'test/coding-test.scm',
+    'test/command-test.scm',
+    'test/core/cl-indent-test.scm',
+    'test/core/cl-seq-test.scm',
+    'test/core/derived-test.scm',
+    'test/core/easy-mmode-test.scm',
+    'test/core/easymenu-test.scm',
+    'test/core/lisp-mode-test.scm',
+    'test/core/lisp-test.scm',
+    'test/core/map-ynp-test.scm',
+    'test/core/seq-test.scm',
+    'test/core/syntax-macros-test.scm',
+    'test/core/timer-test.scm',
+    'test/custom-test.scm',
+    'test/diffseq-test.scm',
+    'test/dired-mode-test.scm',
+    'test/dired-test.scm',
+    'test/editfns-test.scm',
+    'test/engine-test.scm',
+    'test/env-test.scm',
+    'test/external/omarchy/omarchy-test.scm',
+    'test/face-remap-test.scm',
+    'test/faces-test.scm',
+    'test/fileio-test.scm',
+    'test/files-test.scm',
+    'test/filevercmp-test.scm',
+    'test/fns-test.scm',
+    'test/font-lock-test.scm',
+    'test/help-test.scm',
+    'test/indentc-test.scm',
+    'test/international/mule-cmds-test.scm',
+    'test/international/mule-diag-test.scm',
+    'test/international/mule-util-test.scm',
+    'test/intervals-test.scm',
+    'test/itree-test.scm',
+    'test/jit-lock-test.scm',
+    'test/keymap-test.scm',
+    'test/loadup-test.scm',
+    'test/ls-lisp-test.scm',
+    'test/marker-test.scm',
+    'test/menu-bar-menus-test.scm',
+    'test/menu-bar-test.scm',
+    'test/menu-test.scm',
+    'test/minibuf-test.scm',
+    'test/minibuffer-test.scm',
+    'test/mode-line-test.scm',
+    'test/mouse-test.scm',
+    'test/narrow-test.scm',
+    'test/newcomment-test.scm',
+    'test/novice-test.scm',
+    'test/occur-test.scm',
+    'test/progmodes/cc-align-test.scm',
+    'test/progmodes/cc-cmds-test.scm',
+    'test/progmodes/cc-defs-test.scm',
+    'test/progmodes/cc-engine-test.scm',
+    'test/progmodes/cc-fonts-test.scm',
+    'test/progmodes/cc-langs-test.scm',
+    'test/progmodes/cc-mode-test.scm',
+    'test/progmodes/cc-styles-test.scm',
+    'test/progmodes/cc-vars-test.scm',
+    'test/progmodes/prog-mode-test.scm',
+    'test/progmodes/scheme-test.scm',
+    'test/region-cache-test.scm',
+    'test/repl-client-test.scm',
+    'test/replace-test.scm',
+    'test/scroll-bar-test.scm',
+    'test/search-test.scm',
+    'test/select-test.scm',
+    'test/startup-test.scm',
+    'test/subr-test.scm',
+    'test/syntax-test.scm',
+    'test/tab-bar-test.scm',
+    'test/tab-line-test.scm',
+    'test/textmodes/fill-test.scm',
+    'test/textprop-test.scm',
+    'test/timefns-test.scm',
+    'test/tool-bar-test.scm',
+    'test/tooltip-test.scm',
+    'test/ui/gtk/pgtk-test.scm',
+    'test/ui/gtk/pgtk-win-test.scm',
+    'test/ui/tty/tinfo-test.scm',
+    'test/ui/tty/xterm-test.scm',
+    'test/window-config-test.scm',
+    'test/window-state-test.scm',
+    'test/window-test.scm',
+    'test/xfaces-test.scm',
 ]
 
 

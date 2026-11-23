@@ -76,12 +76,12 @@
 ;; *init file* - which imports whatever it needs, and an editor library
 ;; that exports a name this file uses then shadows it for every later call
 ;; in this module. `format' is the one that bites: Guile's takes the
-;; DESTINATION first and `(schemacs editor editfns)'s `format' is Emacs's,
+;; DESTINATION first and `(schemacs editfns)'s `format' is Emacs's,
 ;; which takes the format *string* first - so the error message this file
 ;; prints on a bad command line became `%styled-format' being handed a
 ;; port as its format string, and the real error was never seen. Measured
 ;; by driving `se' with `SCHEMACS_REPL' set and a pty harness init file
-;; (`(import (schemacs editor startup))'): the door did not open and the
+;; (`(import (schemacs startup))'): the door did not open and the
 ;; only thing on the screen was "Wrong type argument ... #<output: file
 ;; /dev/pts/8>".
 
@@ -444,7 +444,7 @@
   ;; being started: `--repl' must not load the editor's libraries, and
   ;; this is the one thing on that path that would.
   ;;--------------------------------------------------------------
-  (module-ref (resolve-module '(schemacs editor startup)) '*init-file-user*))
+  (module-ref (resolve-module '(schemacs startup)) '*init-file-user*))
 
 (define (start-editor files window no-init-file)
   ;; Start the front end the command line asked for, with `load-init''s

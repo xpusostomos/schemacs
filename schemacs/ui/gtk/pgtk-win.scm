@@ -29,9 +29,9 @@
   (import
     (scheme base)
     (only (guile) make-hash-table hash-ref hash-set!)
-    (only (schemacs editor search) string-match match-string)
-    (only (schemacs editor files) file-name-sans-extension)
-    (only (schemacs editor custom) define-custom))
+    (only (schemacs search) string-match match-string)
+    (only (schemacs files) file-name-sans-extension)
+    (only (schemacs custom) define-custom))
 
   (export x-gtk-map-stock
           *x-gtk-stock-map* *icon-map-list* x-gtk-stock-cache)

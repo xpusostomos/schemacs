@@ -11,7 +11,7 @@ work around - it just has no diagnostic here, and neither the test suites nor
 We hit it with `newline'.  Every one of our editor libraries imports
 `(scheme base)', and Guile's `(scheme base)' exports `newline' (R7RS-small
 says it should not, but Guile's does), so `(define newline ...)' in
-`schemacs/editor/simple.scm' was dropped and the keymap ended up bound to
+`schemacs/simple.scm' was dropped and the keymap ended up bound to
 Scheme's output procedure instead of the editing command.  The suites stayed
 green; the editor inserted nothing when RET was pressed.
 
@@ -153,7 +153,7 @@ def main():
     if reported:
         print()
         print('Export such a name by rename from a differently-spelled '
-              'definition; see newline-command in schemacs/editor/simple.scm, '
+              'definition; see newline-command in schemacs/simple.scm, '
               'or except it as files.scm does for delete-file')
         return 1
     print('ok: no definition shadows an imported name (%d checked)'

@@ -15,17 +15,17 @@
 (import (scheme base)
         (only (guile) random string-contains)
         (only (oop goops) make define-class define-method)
-        (only (schemacs editor test-display) <test-display>)
-        (only (schemacs editor dispnew) current-display window-system-display?
+        (only (schemacs test-display) <test-display>)
+        (only (schemacs dispnew) current-display window-system-display?
                 display-default-scroll-bar-width)
-        (only (schemacs editor frame) *current-frame* new-frame
+        (only (schemacs frame) *current-frame* new-frame
                 frame-selected-window window-list window-left window-width
                 window-top window-height set-frame-parameter frame-width)
-        (only (schemacs editor window) split-window
+        (only (schemacs window) split-window
                 adjust-window-trailing-edge)
-        (only (schemacs editor buffer) allocate-buffer set-buffer set-point)
-        (only (schemacs editor editfns) insert)
-        (only (schemacs editor xdisp) render!))
+        (only (schemacs buffer) allocate-buffer set-buffer set-point)
+        (only (schemacs editfns) insert)
+        (only (schemacs xdisp) render!))
 
 (define-class <win-test-display> (<test-display>))
 (define-method (window-system-display? (d <win-test-display>)) #t)

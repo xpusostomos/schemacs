@@ -88,7 +88,7 @@ The original three-byte case (`2d 4e 87`) is the same shape, and so is
 
 ## What the port should do
 
-`schemacs/editor/coding.scm` ports `detect_coding_system` (the region
+`schemacs/coding.scm` ports `detect_coding_system` (the region
 function), and `files.scm`'s `coding-system-for-file` uses it. That is
 right for every file of five bytes or more and wrong for the small ones —
 and it is wrong in Emacs's direction, i.e. it is *not* the same departure
@@ -114,7 +114,7 @@ the function and shows up only as the five-byte edge.
 
 ## Implemented (2026-10-13)
 
-`schemacs/editor/coding.scm` now carries the flag, and the file layer asks
+`schemacs/coding.scm` now carries the flag, and the file layer asks
 the read-path question.
 
 - **`detect-coding-utf-8` is rewritten to the C's scan** (`coding.c:1130`),

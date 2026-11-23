@@ -57,9 +57,9 @@
           tty-read-query-byte tty-unread-query-bytes tty-flush-query-input
           tty-pushed-bytes? set-read-timeout! tty-read-byte)
     ;; The display interface this implements.
-    (schemacs editor dispnew)
-    (only (schemacs editor faces) *undefined-face-attribute*)
-    (only (schemacs editor xfaces)
+    (schemacs dispnew)
+    (only (schemacs faces) *undefined-face-attribute*)
+    (only (schemacs xfaces)
           attribute-value realize-tty-face merge-face-vectors
           ;; the realized attributes of a named face, which
           ;; `tty_menu_activate` derives its four faces from
@@ -70,8 +70,8 @@
     ;; The navigation map the menu reads its commands through, which
     ;; `tty_menu_activate` binds as `overriding-terminal-local-map`
     ;; (`term.c:4160`).
-    (only (schemacs editor menu-bar) *tty-menu-navigation-map*)
-    (only (schemacs editor menu)
+    (only (schemacs menu-bar) *tty-menu-navigation-map*)
+    (only (schemacs menu)
           menu-items menu-items-used menu-items-n-panes
           menu-items-pane-name menu-items-pane-prefix menu-items-pane-length
           menu-items-item-name menu-items-item-enable menu-items-item-value
@@ -82,7 +82,7 @@
     ;; puts the screen back when a cascade of panes is dropped, which is
     ;; the C's `screen_update` - and `*inhibit-redisplay*` is the C's
     ;; `Vinhibit_redisplay`, bound while a menu is up.
-    (only (schemacs editor xdisp)
+    (only (schemacs xdisp)
           display-tty-menu-item menu-item-width render! *inhibit-redisplay*
           ;; What the menu wrote over, so the redisplay can rewrite just
           ;; those rows - the terminal's stand-in for Emacs's saved
@@ -90,16 +90,16 @@
           invalidate-frame-rows!)
     ;; `write-glyphs!` reads the row and the glyphs it is handed, exactly
     ;; as `tty_write_glyphs_1` reads `struct glyph`.
-    (only (schemacs editor glyph)
+    (only (schemacs glyph)
           glyph-char glyph-face-id glyph-pixel-width glyph-row-y)
     ;; Opening a terminal runs `startup.el`'s color and face
     ;; initialization against it.
-    (only (schemacs editor tty-colors) tty-register-default-colors)
+    (only (schemacs term tty-colors) tty-register-default-colors)
     (only (schemacs ui tty xterm)
           *input-decode-map* terminal-init-xterm
           *xterm--set-selection*
           xterm--tty-set-selection xterm--tty-get-selection)
-    (only (schemacs editor frame) *tty-select-active-regions*
+    (only (schemacs frame) *tty-select-active-regions*
           *frame-list* frame-output change-frame-size
           do-pending-window-change
           ;; the frame the menu is laid out in, and the flag that makes
@@ -113,7 +113,7 @@
           window-body-left window-body-width)
     ;; `init_signals` and the quit flag (`keyboard.c`): C-g and C-\ are the
     ;; terminal's interrupt characters, so they arrive as signals.
-    (only (schemacs editor keyboard)
+    (only (schemacs keyboard)
           init-signals *quit-flag* quit-char *overriding-terminal-local-map*
           ;; How a signal ends this library's `select`: a byte written to
           ;; the wake pipe below, because a Scheme handler cannot longjmp
@@ -123,7 +123,7 @@
           ;; the separator test `display_tty_menu_item` asks
           ;; (`keyboard.c:8608`), and the quit a cancelled menu raises.
           read-menu-command menu-separator-name? signal-quit)
-    (only (schemacs editor faces)
+    (only (schemacs faces)
           *display-color-cells* *display-type* *frame-background-mode*
           face-list face-spec-recalc)
     ;; The clock a read's deadline is measured with.
@@ -142,7 +142,7 @@
     ;; The back door - how a client's work is handed to this thread.
     (only (scheme-utils repl server) repl-wake!)
     ;; **Nothing from the back door.** The command loop asks
-    ;; `(schemacs editor keyboard)` for a timed read when the REPL is open
+    ;; `(schemacs keyboard)` for a timed read when the REPL is open
     ;; - `read-timeout-or` with a 100 ms cap for a front end that cannot be
     ;; woken - and calls `poll-repl!` between keys. That is all a terminal
     ;; needs; the pipe this library used to install existed to shorten the
@@ -1195,7 +1195,7 @@
     ;; The display interface, for a text terminal
     ;;
     ;; Every `define-method' below is an implementation of a generic
-    ;; from `(schemacs editor dispnew)', and its body is the `term.c`
+    ;; from `(schemacs dispnew)', and its body is the `term.c`
     ;; hook of the same name.
     ;;------------------------------------------------------------------
 

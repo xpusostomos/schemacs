@@ -20,16 +20,16 @@
     ;; initialization - is `term.sld''s (the mirror of Emacs's term.c);
     ;; what is left here is the entry point that opens an editor on one.
     (only (schemacs ui tty term) with-terminal)
-    (only (schemacs editor frame) *current-frame* new-frame)
+    (only (schemacs frame) *current-frame* new-frame)
     ;; Everything this needs of the editor: the buffers named on the
     ;; command line - which is `startup.el''s job, not this one's - and
     ;; then the command loop.
     ;; The first buffer is made through the buffer list, so that it is a
     ;; buffer the editor can find again by name - `buffer.c'.
-    (only (schemacs editor buffer) *scratch-buffer-name* get-buffer-create)
-    (only (schemacs editor files) note-file-read-only!)
-    (only (schemacs editor startup) command-line-1)
-    (only (schemacs editor keyboard) event-loop)
+    (only (schemacs buffer) *scratch-buffer-name* get-buffer-create)
+    (only (schemacs files) note-file-read-only!)
+    (only (schemacs startup) command-line-1)
+    (only (schemacs keyboard) event-loop)
     ;; And the libraries that carry key bindings, imported for that alone:
     ;; a binding is installed when the library that states it is loaded
     ;; (`DEFINE-KEY' at load time, as `(define-key global-map ...)' is in
@@ -38,76 +38,76 @@
     ;; meets it the same way - `loadup.el' loads simple.el, files.el,
     ;; window.el and the rest before the first command runs. Anything that
     ;; adds bindings has to be named here too.
-    (only (schemacs editor simple))
-    (only (schemacs editor isearch))
-    (only (schemacs editor window))
-    (only (schemacs editor buff-menu))
+    (only (schemacs simple))
+    (only (schemacs isearch))
+    (only (schemacs window))
+    (only (schemacs buff-menu))
     ;; `casefiddle.c' and `paragraphs.el': M-u/M-l/M-c, C-x C-u/C-l and
     ;; M-k/M-C-k - imported for their `define-key' forms, the same
     ;; reason as the four above.
-    (only (schemacs editor casefiddle))
-    (only (schemacs editor paragraphs))
+    (only (schemacs casefiddle))
+    (only (schemacs textmodes paragraphs))
     ;; `fill.el`'s commands and the M-q binding it makes
-    (only (schemacs editor fill))
+    (only (schemacs textmodes fill))
     ;; Help mode installs `*help-mode-function*`, which is what puts
     ;; `*Help*` in `help-mode`; `C-h b` is bound by `help.scm`.
-    (only (schemacs editor help-mode))
+    (only (schemacs help-mode))
     ;; `describe-function`/`-variable`, whose commands `C-h f`/`-v` are
     ;; bound by that library, and the seam `describe-key` calls.
-    (only (schemacs editor help-fns))
+    (only (schemacs help-fns))
     ;; `novice.el`'s disabled-command prompt; loading it installs
     ;; `disabled-command-function` and the `query` form's asker, which
     ;; `command.scm`'s `run-command` reads.
-    (only (schemacs editor novice))
+    (only (schemacs novice))
     ;; `replace.el': M-% and C-M-% bind at load, the same reason as the
     ;; six above.
     ;; The mouse commands, imported for their *binding*: loading
     ;; `mouse.sld' is what puts `[down-mouse-1]' in the global map,
     ;; as Emacs's own line at the end of `mouse.el' does.
-    (only (schemacs editor mouse))
-    (only (schemacs editor replace))
+    (only (schemacs mouse))
+    (only (schemacs replace))
     ;; `tool-bar.el`: the mode and its keymap. A terminal frame draws no
     ;; tool bar in a build that has a toolkit bar (`display_tool_bar` is
     ;; compiled out under `HAVE_EXT_TOOL_BAR`, which is why `emacs -nw`
     ;; shows none either), but the mode, the parameter and the `M-x`
     ;; command exist, as they do there.
-    (only (schemacs editor tool-bar) tool-bar-setup)
+    (only (schemacs tool-bar) tool-bar-setup)
     ;; `scroll-bar.el` - the toolkit binding and `scroll-bar-mode`. A
     ;; terminal draws no bars, but Emacs preloads the file in every build
     ;; and a click from a terminal mouse would reach the same command.
-    (only (schemacs editor scroll-bar))
+    (only (schemacs scroll-bar))
     ;; `tooltip.el` is preloaded in Emacs and turning it on is its load:
     ;; the mode installs `show-help-function` and the delay timer, and
     ;; with no mouse on a terminal the echo-area half is what would show.
-    (only (schemacs editor tooltip))
+    (only (schemacs tooltip))
     ;; The multilingual commands (`C-x RET ...`), which install their own
     ;; keys - `mule-cmds.el`. Not for a name: for the load.
-    (only (schemacs editor mule-cmds))
+    (only (schemacs international mule-cmds))
     ;; `describe-coding-system`, which the mode line's coding-system
     ;; item's mouse-1 reaches through xdisp's seam.
-    (only (schemacs editor mule-diag))
+    (only (schemacs international mule-diag))
     ;; `dired.el': C-x d binds at load, the same reason again.
-    (only (schemacs editor dired))
+    (only (schemacs dired))
     ;; `tab-bar.el`: `C-x t ...` and the `[tab-bar]` binding are made
     ;; when it is loaded, the same reason as every line above.
-    (only (schemacs editor tab-bar))
+    (only (schemacs tab-bar))
     ;; `face-remap.el': C-x C-M-+ and the three beside it, and the command
     ;; they call. Same reason as every line above - a binding is made by
     ;; the library that owns the command, so the front end has to load it.
     ;;
     ;; **The boot does load it, by another road**: `open-user-environment!'
-    ;; imports `(schemacs editor imports)', which imports every editor
+    ;; imports `(schemacs imports)', which imports every editor
     ;; library. That road is the *user's* environment, though - a user
     ;; with their own `imports.scm' replaces it and gets no editor
     ;; library at all - so a front end that relies on it has bindings
     ;; that depend on a config file. This line is the one that makes them
     ;; the front end's.
-    (only (schemacs editor face-remap))
+    (only (schemacs face-remap))
     ;; `custom.el`'s theme half - `M-x load-theme`, `enable-theme` and
     ;; `disable-theme` register with the command table as this library
     ;; loads. Imported for that alone, as the binding-carrying libraries
     ;; above are.
-    (only (schemacs editor theme)))
+    (only (schemacs theme)))
 
   (export
    main-tty

@@ -109,7 +109,9 @@ def scm_counts(scm):
 
 
 missing, differ, not_ported = [], [], 0
-for scm in sorted(glob.glob(f'{REPO}/schemacs/editor/*.scm')):
+for scm in sorted(sum((glob.glob(f'{REPO}/schemacs/{d}*.scm')
+                       for d in ('', 'core/', 'progmodes/', 'international/',
+                                 'textmodes/', 'term/')), [])):
     lib = os.path.basename(scm)[:-4]
     if lib.endswith('-tests') or lib in SKIP:
         continue

@@ -11,7 +11,7 @@ That has bitten this project three times:
 
   * `newline`, in the frontend, imported from both `(scheme base)` - Guile's
     exports R7RS's output procedure under that name - and
-    `(schemacs editor simple)`, which defines the editing command. The
+    `(schemacs simple)`, which defines the editing command. The
     command lost, so RET called Scheme's `newline` and inserted nothing.
   * `define-key`, in `editor/isearch.sld`: guile-ncurses exports one, and so
     does `editor/keymap.sld`.

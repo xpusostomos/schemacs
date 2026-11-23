@@ -62,7 +62,7 @@ def mode_line_has_line(row, n):
 # **And it holds an init file that inhibits the startup screen.** The tree
 # ships a `schemacs/splash.txt', so every editor started with a file
 # argument shows the file above and the splash below
-# (`schemacs/editor/startup.sld') - which is what a user wants and what
+# (`schemacs/startup.scm') - which is what a user wants and what
 # these checks are not about. `inhibit-startup-screen' is `startup.el''s
 # variable and this tree keeps it in `startup.sld', so the init file
 # imports that library to reach it, exactly as a user's would. Every check
@@ -70,10 +70,10 @@ def mode_line_has_line(row, n):
 # checks that *are* about the splash pass their own `config=' with no init
 # file in it.
 NO_SPLASH_INIT = (
-    '(import (schemacs editor startup))\n'
-    '(import (schemacs editor frame))\n'
-    '(import (schemacs editor menu-bar))\n'
-    '(import (schemacs editor simple))\n'
+    '(import (schemacs startup))\n'
+    '(import (schemacs frame))\n'
+    '(import (schemacs menu-bar))\n'
+    '(import (schemacs simple))\n'
     '(set! inhibit-startup-screen #t)\n'
     ';; **Column Number mode is on for these checks.** Emacs\'s default\n'
     ';; mode line shows only the line number (`mode-line-position`,\n'
@@ -730,7 +730,7 @@ def check_truecolor():
     os.makedirs(os.path.join(config, "schemacs"))
     open(os.path.join(config, "schemacs", "init.scm"), "w").write(
         NO_SPLASH_INIT
-        + "(import (schemacs editor theme))\n"
+        + "(import (schemacs theme))\n"
         + '(*custom-theme-load-path* (cons "%s" (*custom-theme-load-path*)))\n' % themes
         + "(load-theme 'truecolor-probe #t)\n")
     path = "/tmp/pty-check-truecolor.txt"
@@ -1039,12 +1039,12 @@ def check_m_x():
 def check_text_scale_command():
     """`M-x global-text-scale-adjust' exists in an editor someone started.
 
-    The commands are `face-remap.el`'s and live in `(schemacs editor
+    The commands are `face-remap.el`'s and live in `(schemacs
     face-remap)`. **A library nobody imports is never loaded**, and an
     editor that never loads that one has no `global-text-scale-adjust`
     and no `text-scale-*`: this check is what notices when a front end
     leaves it off the list of libraries it loads for their bindings.
-    (The boot also loads it, through `(schemacs editor imports)` - so a
+    (The boot also loads it, through `(schemacs imports)` - so a
     plain `se` had it all along; a user with their own `imports.scm` does
     not, which is why the front ends name it themselves.)
 
@@ -2588,7 +2588,7 @@ open(os.path.join(NO_SPLASH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
 TAB_LINE_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-tabline-config-')
 os.makedirs(os.path.join(TAB_LINE_CONFIG_HOME, 'schemacs'), exist_ok=True)
 open(os.path.join(TAB_LINE_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
-    '(import (schemacs editor startup))\n'
+    '(import (schemacs startup))\n'
     '(set! inhibit-startup-screen #t)\n'
     '(global-tab-line-mode 1)\n')
 
@@ -2598,9 +2598,9 @@ os.makedirs(os.path.join(TAB_BAR_CONFIG_HOME, 'schemacs'), exist_ok=True)
 # the format that puts it there - `tab-bar-format-align-right` then
 # `tab-bar-format-global`, as Emacs's documentation describes.
 open(os.path.join(TAB_BAR_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
-    '(import (schemacs editor startup))\n'
-    '(import (schemacs editor xdisp))\n'
-    '(import (schemacs editor tab-bar))\n'
+    '(import (schemacs startup))\n'
+    '(import (schemacs xdisp))\n'
+    '(import (schemacs tab-bar))\n'
     '(set! inhibit-startup-screen #t)\n'
     '(*global-mode-string* (list "CLOCK"))\n'
     '(*tab-bar-format* (list tab-bar-format-tabs tab-bar-format-add-tab\n'
@@ -2611,12 +2611,12 @@ open(os.path.join(TAB_BAR_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
 MENUBAR_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-menubar-config-')
 os.makedirs(os.path.join(MENUBAR_CONFIG_HOME, 'schemacs'), exist_ok=True)
 open(os.path.join(MENUBAR_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
-    '(import (schemacs editor startup))\n'
+    '(import (schemacs startup))\n'
     '(set! inhibit-startup-screen #t)\n')
 
 
 def check_splash():
-    """The startup screen, from `schemacs/editor/startup.sld'.
+    """The startup screen, from `schemacs/startup.scm'.
 
     GNU Emacs's splash is Lisp that builds its own text; this one is a
     file of text, `splash.txt', looked for on the load path - and the tree
@@ -2633,7 +2633,7 @@ def check_splash():
       * `q' leaves it (`exit-splash-screen' is `quit-window'), which is
         only visible because `quit-window' now gives the window another
         buffer when it is the frame's only one;
-      * and an init file that says `(import (schemacs editor startup))'
+      * and an init file that says `(import (schemacs startup))'
         and `(set! inhibit-startup-screen #t)' - the variable is
         `startup.el''s and lives in that library, so the file imports it -
         means it never appears at all.
@@ -2674,7 +2674,7 @@ def check_splash():
     # 4. and the init file's setting inhibits it
     screen = screen_of(drive([], None, config=NO_SPLASH_CONFIG_HOME))
     if "*Schemacs*" in screen:
-        problems.append("an init file that imports `(schemacs editor startup)' "
+        problems.append("an init file that imports `(schemacs startup)' "
                         "and sets `inhibit-startup-screen' did not inhibit the "
                         "startup screen")
     return problems
@@ -2689,7 +2689,7 @@ SCRATCH_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-scratch-config-')
 os.makedirs(os.path.join(SCRATCH_CONFIG_HOME, 'schemacs'), exist_ok=True)
 SCRATCH_HOOK_LOG = os.path.join(SCRATCH_CONFIG_HOME, 'hooks.txt')
 open(os.path.join(SCRATCH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
-    '(import (schemacs editor startup))\n'
+    '(import (schemacs startup))\n'
     '(set! inhibit-startup-screen #t)\n'
     '(define (log-hook! s)\n'
     '  (let ((out (open-file "%s" "a")))\n'
@@ -3207,7 +3207,7 @@ def check_imports():
     The three consumers are code the editor did not write, and so the three
     with no library to write an import in for them. GNU Emacs has one
     obarray and they all just reach into it; this tree's names live in one
-    library per Emacs file, so `(schemacs editor loadup)' builds a module
+    library per Emacs file, so `(schemacs loadup)' builds a module
     for them - the whole editor, or `$XDG_CONFIG_HOME/imports.scm' when the
     user has one.
 
@@ -3233,7 +3233,7 @@ def check_imports():
     open(os.path.join(cfg, "schemacs", "init.scm"), "w").write(
         '(message "INIT-RAN")\n(set! inhibit-startup-screen #t)\n')
     open(os.path.join(cfg, "schemacs", "imports.scm"), "w").write(
-        "(import (schemacs editor imports))\n")
+        "(import (schemacs imports))\n")
     path = "/tmp/pty-check-imports.txt"
     open(path, "w").write("hello\n")
 

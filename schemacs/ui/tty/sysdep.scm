@@ -39,7 +39,7 @@
           ;; `quit_char` is `keyboard.c`'s, and `sysdep.c` reads it as an
           ;; `extern` - `init_sys_modes` makes it the terminal's interrupt
           ;; and quit character. The same cross-reference here.
-          (only (schemacs editor keyboard) quit-char))
+          (only (schemacs keyboard) quit-char))
 
   (export init-sys-modes reset-sys-modes get-tty-size
           tty-save-modes! tty-restore-modes!
@@ -305,7 +305,7 @@
           ;; was eating them the same way. The gap that left - `VINTR`
           ;; disabled, because there was no SIGINT handler for C-g to raise
           ;; - is closed: `handle_interrupt` and `maybe_quit` are
-          ;; `(schemacs editor keyboard)`'s now, and `init-signals` is
+          ;; `(schemacs keyboard)`'s now, and `init-signals` is
           ;; installed where the terminal is opened.
           ;; **C-g is the interrupt character, as the C has it**:
           ;; `c_cc[VINTR] = quit_char` and `VQUIT` too, so C-g and C-\

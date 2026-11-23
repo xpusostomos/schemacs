@@ -1,4 +1,4 @@
-(use-modules (schemacs editor cc-langs) (schemacs editor cc-defs) (ice-9 rdelim) (schemacs editor chartab))
+(use-modules (schemacs progmodes cc-langs) (schemacs progmodes cc-defs) (ice-9 rdelim) (schemacs chartab))
 (define (hex s)
   (let loop ((cs (string->list s)) (out ""))
     (if (null? cs) out

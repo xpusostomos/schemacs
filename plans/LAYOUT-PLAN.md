@@ -168,7 +168,7 @@ are worth making:
 2. **`new-count-command`** — the minibuffer, Windows, Kill ring and Undo all
    need it, and it was in Commands. It is the `(interactive "p")` machinery,
    which is callint.c's in Emacs, not any .el file's. **Cut:** it moved to
-   `(schemacs editor command)`, beside `new-command`. Done.
+   `(schemacs command)`, beside `new-command`. Done.
 3. **`render!` against the minibuffer** — Rendering reads
    `minibuffer-prompt`, `minibuffer-contents`, `minibufferp` and
    `minibuffer-cursor-column`, while the command loop (which the minibuffer
@@ -279,7 +279,7 @@ keep those imports narrow, as they are.)
 
 ### `editor/buffer.sld`: the buffer list, written fresh (NEW)
 
-`(schemacs editor buffer)` mirrors `buffer.c`'s *collection* half: which
+`(schemacs buffer)` mirrors `buffer.c`'s *collection* half: which
 buffers exist, what they are called, which is current, making one and
 killing one. It is new code, not a move - written from the C and the Lisp
 rather than lifted from anywhere, because the existing buffer machinery is
@@ -401,7 +401,7 @@ and `record-buffer!` - the MRU promotion Emacs does from the display code -
 is written but uncalled, because the renderer does not know about the
 buffer list yet. Two deviations are recorded in the file: the
 buffer-local slots being a side table rather than struct fields, and
-`(schemacs editor files)`'s `default-directory` still answering from the
+`(schemacs files)`'s `default-directory` still answering from the
 frame's file path rather than from the buffer.
 
 ### `editor/buffer.sld`: the buffer facility, built for the completions port
@@ -437,13 +437,13 @@ differently:
   alive by its own slots. This needed a weak *table* (as against the weak
   *set* `(schemacs weak)` already had), which was added there.
 - **`current-buffer` is maintained elsewhere, as it is in Emacs.** In Emacs
-  `window.c` sets `current_buffer`; here `(schemacs editor frame)`'s
+  `window.c` sets `current_buffer`; here `(schemacs frame)`'s
   `current-editor` answers, and `*current-buffer*` is only the dynamic
   override `set-buffer` needs.
 
 Deviations and gaps, recorded so they are not rediscovered:
 
-- `(schemacs editor files)`'s `default-directory` still answers from the
+- `(schemacs files)`'s `default-directory` still answers from the
   *frame*'s file path, so two windows showing two files have one answer
   between them. Emacs's is buffer-local; the slot exists here
   (`buffer-default-directory`) and files.el should use it.
@@ -496,11 +496,11 @@ the order), and `generate-new-buffer-name` appends `<N>` counting from 2.
 **Nothing uses it yet.** `record-buffer!` - the MRU promotion Emacs does
 from its display code - is written and not called, because our renderer
 does not know about this library; the order is only what making, killing
-and burying make it. And `(schemacs editor files)`'s `default-directory`
+and burying make it. And `(schemacs files)`'s `default-directory`
 still answers from the *frame*'s file path rather than from the buffer,
 which is a deviation the library's own docstring records.
 
-Sixteen tests in `schemacs/editor/buffer-tests.scm`, registered.
+Sixteen tests in `test/buffer-test.scm`, registered.
 
 ### Is the reorganisation finished?
 
@@ -808,7 +808,7 @@ windows are next worked on, and it will be a change confined to
   costs nothing and keeps every move a leaf.
 - **An import can be shadowed by another import, and the winner is the
   order of the list.** The frontend imported `newline` from both
-  `(scheme base)` and `(schemacs editor simple)`, and Guile warned
+  `(scheme base)` and `(schemacs simple)`, and Guile warned
   "imported from both" and let the later one win. That is the same
   mechanism that had already cost a session, so it is no longer left to
   order: the frontend takes `newline' by `rename' as `newline-command'

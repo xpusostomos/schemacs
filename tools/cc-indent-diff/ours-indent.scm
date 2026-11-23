@@ -4,12 +4,12 @@
 ;; `c-guess-basic-syntax' and `c-get-syntactic-indentation' per line
 ;; start, with `*c-syntactic-context*' bound as `c-indent-line' binds it.
 (import (scheme base) (scheme write)
-        (schemacs editor buffer) (schemacs editor editfns)
-        (schemacs editor syntax) (schemacs editor cmds)
-        (schemacs editor cc-defs) (schemacs editor cc-langs)
-        (schemacs editor cc-vars) (schemacs editor cc-styles)
-        (schemacs editor cc-engine)
-        (schemacs editor cc-align))
+        (schemacs buffer) (schemacs editfns)
+        (schemacs syntax) (schemacs cmds)
+        (schemacs progmodes cc-defs) (schemacs progmodes cc-langs)
+        (schemacs progmodes cc-vars) (schemacs progmodes cc-styles)
+        (schemacs progmodes cc-engine)
+        (schemacs progmodes cc-align))
 (define args (cdr (command-line)))
 (define style (car args))
 (define file (cadr args))

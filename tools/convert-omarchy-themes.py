@@ -318,7 +318,7 @@ def emit_theme(name, doc, props, settings, header):
         elif prop == Sym("theme-value"):
             variables.append((symbol, value))
 
-    lines = [header, "", "(import (schemacs editor theme))", ""]
+    lines = [header, "", "(import (schemacs theme))", ""]
     lines.append("(define-theme %s" % name)
     lines.append("  " + scheme_string(doc or ""))
     if props:

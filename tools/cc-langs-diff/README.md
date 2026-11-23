@@ -1,6 +1,6 @@
 # The cc-langs constant differential
 
-Compares every language constant of `schemacs/editor/cc-langs.scm`
+Compares every language constant of `schemacs/progmodes/cc-langs.scm`
 against Emacs 31.1, for all seven languages.
 
     emacs -Q --batch -l tools/cc-langs-diff/ccdiff.el     # -> emacs-vals.txt

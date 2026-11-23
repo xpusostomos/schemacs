@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate `schemacs/editor/characters.sld` from Emacs's characters.el.
+"""Generate `schemacs/international/characters.scm` from Emacs's characters.el.
 
 `char-width-table` is not something to retype by hand: it is 295 zero-width
 ranges and 133 double-width ranges, taken from the Unicode character
@@ -27,7 +27,7 @@ import sys
 DEFAULT_SOURCE = '/usr/share/emacs/31.1/lisp/international/characters.el.gz'
 
 HEADER = '''\
-(define-library (schemacs editor characters)
+(define-library (schemacs international characters)
   ;; This library mirrors GNU Emacs's `lisp/international/characters.el'
   ;; - specifically the part of it that fills in `char-width-table', the
   ;; table `src/character.c' creates with a default of 1.
