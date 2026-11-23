@@ -17295,3 +17295,45 @@ The two cc-engine bug fixes are in the DEPARTURES section above
 (`c-add-stmt-syntax`'s set!-in-test, `c-invalidate-state-cache`'s lost
 `here`). `imports.scm` is regenerated (118 libraries, 4892 names) and
 `loadup.scm` carries cc-cmds.
+
+# Handoff - cc-mode step 11: cc-mode.el's found-type change helpers
+# (2026-11-23)
+
+`schemacs/editor/cc-mode.scm` (new, partial) has the found-type half of
+`cc-mode.el`'s change machinery: `c-unfind-enclosing-token`,
+`c-unfind-coalesced-tokens`, `c-before-change-de-typedef`,
+`c-after-change-de-typedef`, `c-update-new-id` and
+`c-just-done-before-change`. `cc-mode-tests.scm` is 13, every
+expectation Emacs 31.1's (measured first), and all cc suites plus
+loadup-tests are green. `imports.scm` regenerated (119 libraries, 4899
+names).
+
+**The buffer-local flags this file touches are cc-engine's**:
+`c-maybe-stale-found-type` and `c-new-id-start/end/is-type` live there
+(the found-type table reads them); cc-mode imports them. Do not
+redefine them here - `loadup-tests`' clash census will catch it, and
+until it did the second copy was what the two libraries disagreed
+about.
+
+**What remains of the change machinery**, in dependency order, is the
+string-fence layer first (`c-put-syn-tab`/`c-clear-syn-tab` and their
+`c-fl-syn-tab` mirrors, the `c-min-syn-tab-mkr`/`c-max-syn-tab-mkr`
+pair, `c-put-string-fence-trim-caches`/`c-clear-syntax-table-trim-caches`,
+`c-restore-string-fences`/`c-clear-string-fences`, then
+`c-before-change-check-unbalanced-strings`,
+`c-after-change-mark-abnormal-strings`,
+`c-after-change-escape-NL-in-string` and the ml-string functions);
+then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`, the
+comment-escape and quote pairs, `c-extend-font-lock-region-for-macros`
+and `c-change-expand-fl-region`; then `c-before-change`/`c-after-change`
+themselves; then `c-basic-common-init`/`c-common-init` and the mode
+definitions, which is when `.c` files start opening in c-mode and the
+`tools/cc-cmds-diff/` differential's 24 red pairs can be closed.
+
+**`c-called-from-text-property-change-p` needs a decision**: Emacs
+asks `(cadr (backtrace-frame 3))` whether the invoking primitive was
+`put-text-property`/`remove-text-properties`/`remove-list-of-text-properties`.
+Guile has no `backtrace-frame`; the tree's property writers are its
+own, so the pass that needs it should bind a flag in the
+property-change path (textprop.scm) and read it there, rather than
+imitating a backtrace.

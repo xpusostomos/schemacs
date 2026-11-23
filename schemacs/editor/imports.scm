@@ -66,6 +66,7 @@
     (schemacs editor editfns)
     (schemacs editor lisp)
     (schemacs editor cc-engine)
+    (schemacs editor cc-mode)
     (schemacs editor cc-defs)
     (schemacs editor cc-langs)
     (schemacs editor cc-align)
@@ -1204,6 +1205,7 @@
     c-add-type
     c-add-type-1
     c-after-change-check-<>-operators
+    c-after-change-de-typedef
     c-after-conditional
     c-after-special-operator-id
     c-alnum
@@ -1244,6 +1246,7 @@
     c-basic-matchers-before
     c-basic-offset
     c-before-change-check-<>-operators
+    c-before-change-de-typedef
     c-beginning-of-current-token
     c-beginning-of-decl-1
     c-beginning-of-defun-1
@@ -1472,6 +1475,7 @@
     c-jump-syntax-balanced
     c-jump-syntax-unbalanced
     c-just-after-func-arglist-p
+    c-just-done-before-change
     c-keep-region-active
     c-keyword-member
     c-keyword-sym
@@ -1780,6 +1784,8 @@
     c-truncate-bs-cache
     c-truncate-lit-pos-cache
     c-truncate-lit-pos/state-cache
+    c-unfind-coalesced-tokens
+    c-unfind-enclosing-token
     c-unfind-type
     c-unmark-<-or->-as-paren
     c-unmark-<>-around-region
@@ -1787,6 +1793,7 @@
     c-up-list-forward
     c-update-brace-stack
     c-update-modeline
+    c-update-new-id
     c-upper
     c-use-category
     c-valid-offset
@@ -3992,6 +3999,7 @@
     set!c-indent-comment-alist
     set!c-indent-comments-syntactically-p
     set!c-indentation-style
+    set!c-just-done-before-change
     set!c-label-minimum-indentation
     set!c-laomib-cache
     set!c-lit-pos-cache

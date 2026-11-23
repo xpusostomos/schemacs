@@ -15300,3 +15300,44 @@ labels show the *before*-change half matters too.
 That makes the change-function tranche of `cc-mode.el` the next piece
 of the approved order, ahead of the electric keys: it is what makes
 cc-cmds' own edits safe.
+
+# cc-mode.el, first pass: the found-type change helpers (2026-11-23)
+
+`schemacs/editor/cc-mode.scm` is new and partial by design: the
+found-type half of `cc-mode.el`'s change machinery, in the file's
+order - `c-just-done-before-change`, `c-unfind-enclosing-token`,
+`c-unfind-coalesced-tokens`, `c-before-change-de-typedef`,
+`c-after-change-de-typedef`, `c-update-new-id`. `c-maybe-stale-found-type`
+and the `c-new-id-*` pair were already in cc-engine (a placement named
+there), so cc-mode imports them rather than redefining them - that
+split is what `loadup-tests`' clash census checks.
+
+Measured against Emacs 31.1 before the port: `c-unfind-enclosing-token`
+answers t inside a token and removes its name, nil at the following
+space; `c-unfind-coalesced-tokens` on "fo o" removes the two
+*fragments* ("fo" and "o") and leaves the joined name, and on
+"xfo oy" removes both whole identifiers; `c-update-new-id` at the end
+of "abc" records (5 . 9) and clears the type flag. All pinned in
+`cc-mode-tests.scm` (13).
+
+**Not carried yet, and why the library is partial**: `c-before-change`
+and `c-after-change` themselves - every entry of
+`c-get-state-before-change-functions` and
+`c-before-font-lock-functions` must resolve, and the string-fence layer
+those lists name (`c-put-syn-tab`/`c-clear-syn-tab`,
+`c-restore-string-fences`/`c-clear-string-fences`, the two `syn-tab`
+markers, `c-before-change-check-unbalanced-strings`,
+`c-after-change-mark-abnormal-strings`,
+`c-after-change-escape-NL-in-string`, the ml-string functions) is what
+they stand on. Also pending: `c-depropertize-CPP`,
+`c-neutralize-syntax-in-CPP`, the comment-escape and quote pairs,
+`c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,
+`c-called-from-text-property-change-p` (Emacs reads the backtrace's
+frame 3; Guile has no `backtrace-frame`, so this needs a small engine
+flag naming the property-change path - recorded here so the next pass
+decides it deliberately), and the mode definitions themselves.
+
+One small fidelity fix went in on the way:
+`c-search-forward-non-nil-char-property`'s LIMIT is `&optional` in
+Emacs (`cc-defs.el:1452`) and was required here;
+`c-before-change-de-typedef` calls without it.

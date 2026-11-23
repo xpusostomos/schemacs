@@ -42,6 +42,7 @@ SUITES = [
     'schemacs/editor/category-tests.scm',
     'schemacs/editor/cc-align-tests.scm',
     'schemacs/editor/cc-cmds-tests.scm',
+    'schemacs/editor/cc-mode-tests.scm',
     'schemacs/editor/easymenu-tests.scm',
     'schemacs/editor/cc-defs-tests.scm',
     'schemacs/editor/cc-engine-tests.scm',

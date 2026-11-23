@@ -149,6 +149,7 @@
         (schemacs editor cl-seq)
         (schemacs editor eval)
         (schemacs editor cc-langs)
+        (schemacs editor cc-mode)
         (schemacs editor cc-vars)
         (schemacs editor cc-styles)
         (schemacs editor character)

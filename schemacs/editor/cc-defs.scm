@@ -1103,14 +1103,17 @@
       (re-search-forward "\\(\n\\|.\\)")   ; to set the match-data.
       (point))))
 
-(define (c-search-forward-non-nil-char-property property limit)
+(define (c-search-forward-non-nil-char-property property . limit-args)
   ;; "Search forward for a text-property PROPERTY value non-nil. LIMIT
   ;; bounds the search."
   ;;
   ;; "Leave point just after the character. The match data remain
   ;; unchanged. Return the value of PROPERTY. If a non-nil value isn't
   ;; found, return nil; point is then left undefined."
-  (let* ((limit (or limit (point-max)))
+  ;;
+  ;; LIMIT is Emacs's `&optional' - `c-before-change-de-typedef' calls
+  ;; with only PROPERTY.
+  (let* ((limit (or (and (pair? limit-args) (car limit-args)) (point-max)))
          (value (c-get-char-property (point) property)))
     (cond
      ((>= (point) limit)
