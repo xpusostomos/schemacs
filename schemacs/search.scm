@@ -1328,11 +1328,16 @@
                         ed string (min from limit) fold)))
             (cond
              ((not found)
-              (if noerror
-                  #f
-                  (error "Search failed" string)))
+              ;; `search_command''s NOERROR rule (`search.c:1072'): a
+              ;; non-nil NOERROR other than `t' moves point to LIMIT
+              ;; before answering nil; `t' leaves point alone.
+              (if (and noerror (not (eq? noerror #t)))
+                  (begin (set-point ed limit) #f)
+                  (if noerror #f (error "Search failed" string))))
              ((> found limit)
-              (if noerror #f (error "Search failed" string)))
+              (if (and noerror (not (eq? noerror #t)))
+                  (begin (set-point ed limit) #f)
+                  (if noerror #f (error "Search failed" string))))
              ((> left 1) (loop (- left 1) found))
              (else
               (set-point ed found)
@@ -1368,9 +1373,14 @@
                         ed string (max from limit) fold)))
             (cond
              ((not found)
-              (if noerror #f (error "Search failed" string)))
+              ;; The C's NOERROR rule, as in `search-forward'.
+              (if (and noerror (not (eq? noerror #t)))
+                  (begin (set-point ed limit) #f)
+                  (if noerror #f (error "Search failed" string))))
              ((< found limit)
-              (if noerror #f (error "Search failed" string)))
+              (if (and noerror (not (eq? noerror #t)))
+                  (begin (set-point ed limit) #f)
+                  (if noerror #f (error "Search failed" string))))
              ((> left 1) (loop (- left 1) found))
              (else
               ;; `found' is the match's start, where the backward

@@ -777,4 +777,23 @@
        (goto-char 1)
        (looking-back #f)))))
 
+;; ------------------------------------------------------------------
+;; search-forward/search-backward NOERROR: `t' versus anything else
+;; ------------------------------------------------------------------
+;; `search_command' (search.c:1072): a non-nil NOERROR other than `t'
+;; moves point to LIMIT before answering nil; `t' leaves point where it
+;; was. Measured on Emacs 31.1 with the same buffer.
+(with-buffer
+ (lambda ()
+   (fill "abcabc")
+   (test-equal "search-forward with NOERROR t leaves point on failure"
+     (list #f 1) (list (search-forward "zzz" #f #t) (point)))
+   (test-equal "search-forward with NOERROR 'limit moves to the bound"
+     (list #f 7) (list (search-forward "zzz" 7 'limit) (point)))
+   (goto-char 6)
+   (test-equal "search-backward with NOERROR t leaves point on failure"
+     (list #f 6) (list (search-backward "zzz" #f #t) (point)))
+   (test-equal "search-backward with NOERROR 'limit moves to the bound"
+     (list #f 2) (list (search-backward "zzz" 2 'limit) (point)))))
+
 (test-end)

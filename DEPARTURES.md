@@ -15603,3 +15603,16 @@ The quote parsing (`c-quoted-number-*`, `c-parse-quotes-before-change`,
 `c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,
 `c-called-from-text-property-change-p`, `c-before-change`/`c-after-change`
 themselves, and the mode definitions.
+
+## `search-forward`/`search-backward`'s NOERROR rule (2026-11-24)
+
+Found while porting the quote parsing, which calls
+`(search-forward "'" c-new-END 'limit)`: **a non-nil NOERROR other than
+`t` moves point to LIMIT before answering nil, and `t` leaves point
+alone** (`search_command`, `search.c:1072`). The tree's string searches
+treated every non-nil NOERROR as `t` - `re-search-forward`/`-backward`
+already had the distinction, the string pair did not. Fixed in
+`search.scm`, with four measured rows in `search-test.scm` (`t` keeps
+point at 1/6, `'limit` moves it to 7/2 on the same fixture). The change
+only affects callers that pass something other than `#t`/`#f`; cc-mode's
+`'limit`/`'bound` arms are the ones that do.
