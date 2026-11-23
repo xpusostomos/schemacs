@@ -21,7 +21,7 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs buffer) allocate-buffer set-buffer current-buffer buffer-local-value
        set-buffer-local-value! buffer-z)
- (only (schemacs editfns) insert goto-char point point-min)
+ (only (schemacs editfns) insert goto-char point point-min point-max)
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs marker) marker-position)
  (only (schemacs textprop) get-text-property)
@@ -29,13 +29,18 @@
  (schemacs progmodes cc-langs)
  (only (schemacs progmodes cc-styles) c-set-style)
  (only (schemacs progmodes cc-engine) c-found-types c-add-type-1 c-clear-found-types
-       c-new-id-start c-new-id-end c-new-id-is-type)
+       c-new-id-start c-new-id-end c-new-id-is-type
+       c-new-BEG set!c-new-BEG c-new-END set!c-new-END)
  (only (schemacs progmodes cc-mode)
        c-unfind-enclosing-token c-unfind-coalesced-tokens c-update-new-id
        c-put-syn-tab c-clear-syn-tab c-clear-string-fences
        c-restore-string-fences c-remove-string-fences
        c-multiline-string-check-final-quote
-       c-min-syn-tab-mkr c-max-syn-tab-mkr))
+       c-min-syn-tab-mkr c-max-syn-tab-mkr
+       c-before-change-check-unbalanced-strings
+       c-after-change-mark-abnormal-strings
+       c-after-change-escape-NL-in-string
+       c-open-string-opener))
 
 (test-begin "schemacs_editor_cc_mode")
 
@@ -222,3 +227,90 @@
 (test-equal "... and no markers" '(#f #f) (mrk))
 
 (test-end "schemacs_editor_cc_mode_fences")
+
+
+;;--------------------------------------------------------------
+;; The string change functions (`cc-mode.el:1472'-`:1771')
+;;--------------------------------------------------------------
+;; Every expectation is Emacs 31.1's, measured with the same calls on
+;; the same buffers (`/tmp/chg-em.el' and `/tmp/chg-em2.el'), with the
+;; mode's own initial fences wiped first so both sides start empty.
+;;
+;; The fixture's positions:
+;;
+;;     "int x;\n"                       1..7
+;;     "char *s = "                     8..17   opener 18
+;;     "abc"                           19..21   newline 22
+;;     "def"                           23..25   closing quote 26
+;;     ";"                                  27   newline 28
+(test-begin "schemacs_editor_cc_mode_string_changes")
+
+(define (wipe-fences!)
+  (let loop ()
+    (when (c-min-syn-tab-mkr)
+      (c-clear-syn-tab (marker-position (c-min-syn-tab-mkr)))
+      (loop))))
+
+(define abnormal-text "int x;\nchar *s = \"abc\ndef\";\nint y;\n")
+
+(fresh abnormal-text)
+(wipe-fences!)
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-after-change-mark-abnormal-strings 1 (point-max) 0)
+(test-equal "a terminated multi-line string is fenced opener-to-newline"
+  (list (list 18 '(15) '(15)) (list 22 '(15) '(15))
+        (list 26 '(15) '(15)) (list 28 '(15) '(15)))
+  (fences))
+(test-equal "... and its markers cover the range" '(18 29) (mrk))
+(test-equal "... the region is extended over it" (list 1 36)
+  (list (c-new-BEG) (c-new-END)))
+(test-equal "... and the last opener is remembered" 26 (c-open-string-opener))
+
+(fresh "int x;\nchar *s = \"abc\ndef;\n")
+(wipe-fences!)
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-after-change-mark-abnormal-strings 1 (point-max) 0)
+(test-equal "an unterminated string is fenced at its opener and newline"
+  (list (list 18 '(15) '(15)) (list 22 '(15) '(15))) (fences))
+(test-equal "... its markers stop after the newline" '(18 23) (mrk))
+(test-equal "... and the region ends at point-max" (list 1 28)
+  (list (c-new-BEG) (c-new-END)))
+(test-equal "... remembering the first opener" 18 (c-open-string-opener))
+
+(fresh abnormal-text)
+(wipe-fences!)
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-before-change-check-unbalanced-strings 22 22)
+(test-equal "before a change with no fences nothing is added" '() (fences))
+(test-equal "... and the region is unchanged" (list 1 36)
+  (list (c-new-BEG) (c-new-END)))
+
+(fresh abnormal-text)
+(c-put-syn-tab 18 '(15)) (c-put-syn-tab 22 '(15))
+(c-put-syn-tab 26 '(15)) (c-put-syn-tab 28 '(15))
+(set!c-new-BEG 1) (set!c-new-END (point-max))
+(c-before-change-check-unbalanced-strings 22 22)
+(test-equal "a change at a fenced newline clears that fence pair only"
+  (list (list 26 '(15) '(15)) (list 28 '(15) '(15))) (fences))
+(test-equal "... and moves the markers with it" '(26 29) (mrk))
+
+(fresh "int x;\nchar *s = \"abc\\\ndef\";\nint y;\n")
+(wipe-fences!)
+(c-put-syn-tab 18 '(15))
+(c-put-syn-tab 23 '(15))
+(c-put-syn-tab 27 '(15))
+(c-after-change-escape-NL-in-string 22 23 0)
+(test-equal "escaping a newline clears the fences through the closing quote"
+  '() (fences))
+(test-equal "... and unsets the markers" '(#f #f) (mrk))
+
+(fresh "int x;\nchar *s = \"abc\\\ndef\";\nint y;\n")
+(wipe-fences!)
+(c-put-syn-tab 18 '(15))
+(c-put-syn-tab 23 '(15))
+(c-after-change-escape-NL-in-string 22 23 0)
+(test-equal "with no fenced quote ahead, escaping the newline changes nothing"
+  (list (list 18 '(15) '(15)) (list 23 '(15) '(15))) (fences))
+(test-equal "... and leaves the markers" '(18 24) (mrk))
+
+(test-end "schemacs_editor_cc_mode_string_changes")

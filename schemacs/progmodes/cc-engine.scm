@@ -242,6 +242,7 @@
    c-literal-start c-determine-limit c-beginning-of-decl-1
    %c-langvar
    c-get-ml-closer c-ml-string-opener-around-point
+   c-maybe-re-mark-ml-string c-propertize-ml-string-id c-propertize-ml-string-opener
    c-find-decl-syntactic-pos set!c-find-decl-syntactic-pos
    c-find-decl-match-pos set!c-find-decl-match-pos
    c-invalidate-find-decl-cache c-debug-put-decl-spot-faces
@@ -323,7 +324,7 @@
    c-literal-limits c-literal-start c-literal-type c-in-literal
    %c-car %c-cdr %c-cadr %c-cddr %c-caddr
    ;; cc-defs.el's, placed here because they call down from Emacs' obarray
-   c-point c-is-escaped c-benign-error
+   c-point c-is-escaped c-will-be-escaped c-will-be-unescaped c-benign-error
    ;; statement barriers (`cc-engine.el:1457')
    *c-maybe-labelp* *c-commas-bound-stmts* c-punctuation-in
    c-crosses-statement-barrier-p c-beginning-of-statement-1
@@ -3180,6 +3181,38 @@
                  (memv (char-after (point)) (list #\newline #\return)))
             (eq? (char-before) #\\)
             (not (zero? (logand (skip-chars-backward "\\\\") 1))))))
+
+    ;; `c-will-be-escaped' (`cc-defs.el:442') and `c-will-be-unescaped'
+    ;; (`:466'). Emacs has them in cc-defs beside `c-is-escaped'; they
+    ;; read `c-escaped-newline-takes-precedence', a language variable,
+    ;; so they live here with it - the same placement departure the
+    ;; docstring on `c-is-escaped' records.
+    (define (c-will-be-escaped pos beg end)
+      ;; "Will the character after POS be escaped after the removal of
+      ;; (BEG END)? It is assumed that (>= POS END)."
+      (save-excursion
+        (let ((-end- end)
+              (-pos- pos)
+              (count 0))
+          (if (and (%c-true (%c-langvar 'c-escaped-newline-takes-precedence))
+                   (memv (char-after -pos-) (list #\newline #\return)))
+              (eq? (char-before (if (= -pos- -end-) beg -pos-)) #\\)
+              (begin
+                (goto-char -pos-)
+                (set! count
+                      (if (> -pos- -end-)
+                          (skip-chars-backward "\\\\" -end-)
+                          0))
+                (when (= (point) -end-)
+                  (goto-char beg)
+                  (set! count (+ count (skip-chars-backward "\\\\"))))
+                (not (zero? (logand count 1))))))))
+
+    (define (c-will-be-unescaped beg)
+      ;; "Would the character after BEG be unescaped?"
+      (save-excursion
+        (goto-char beg)
+        (zero? (logand (skip-chars-backward "\\\\") 1))))
     ;;------------------------------------------------------------------
     ;; `c-looking-at-c++-attribute' (`cc-engine.el:721')
     ;;------------------------------------------------------------------
@@ -13923,6 +13956,120 @@
                                c-c++-make-ml-string-closer-re)
 
     ;;------------------------------------------------------------------
+    ;; `cc-engine.el:8151'-`:8260`: the ml-string propertization
+    ;;------------------------------------------------------------------
+    ;; The three functions `c-after-change-mark-abnormal-strings' calls
+    ;; for a language with multi-line strings (C++ raw strings). The
+    ;; rest of the ml-string change machinery - `c-depropertize-ml-string'
+    ;; and the `c-before-change-check-ml-strings' /
+    ;; `c-after-change-unmark-ml-strings' pair - waits on the change
+    ;; hooks, which are not ported yet.
+    (define (c-maybe-re-mark-ml-string)
+      ;; "When this function is called, point is immediately after a \"
+      ;; which opens a string. If this \" is the characteristic \" of a
+      ;; multi-line string opener, apply the pertinent `syntax-table'
+      ;; text properties to the entire ml string (when properly
+      ;; terminated) or just the delimiter (otherwise). In either of
+      ;; these cases, return t, otherwise return nil. Point is moved to
+      ;; after the terminated raw string, or to the end of the containing
+      ;; macro, or to point-max."
+      (let ((delim #f) (in-macro #f) (macro-end #f))
+        (when-e
+         (and (begin
+                (set! delim (c-ml-string-opener-at-or-around-point
+                             (- (point) 1)))
+                delim)
+              (save-excursion
+                (goto-char (car delim))
+                (not (c-in-literal))))
+         (save-excursion
+           (set! in-macro (c-beginning-of-macro))
+           (set! macro-end (and in-macro
+                                (begin (c-end-of-macro) (point)))))
+         (when-e (not (c-propertize-ml-string-opener delim macro-end))
+                  (goto-char (or macro-end (point-max))))
+         #t)))
+
+    (define (c-propertize-ml-string-id delim)
+      ;; "Apply punctuation ('(1)) syntax-table text properties to the
+      ;; opening or closing delimiter given by the three element dotted
+      ;; list DELIM, such that its \"total syntactic effect\" is that of
+      ;; a single \"."
+      (save-excursion
+        (goto-char (car delim))
+        (while (and (skip-chars-forward (%c-langvar 'c-ml-string-non-punc-skip-chars)
+                                        (cadr delim))
+                    (< (point) (cadr delim)))
+          (when (not (eqv? (point) (cddr delim)))
+            (c-put-syntax-table-trim-caches (point) '(1)))
+          (forward-char))))
+
+    (define (c-propertize-ml-string-opener delim bound)
+      ;; "DELIM defines the opening delimiter of a multi-line string in
+      ;; the way returned by `c-ml-string-opener-around-point'. Apply any
+      ;; pertinent `syntax-table' text properties to this opening
+      ;; delimiter and in the case of a terminated ml string, also to the
+      ;; innards of the string and the terminating delimiter.
+      ;;
+      ;; BOUND is the end of the macro we're inside (i.e. the position of
+      ;; the closing newline), if any, otherwise nil.
+      ;;
+      ;; Point is undefined at the function start. For a terminated ml
+      ;; string, point is left after the terminating delimiter and t is
+      ;; returned. For an unterminated string, point is left at the end
+      ;; of the macro, if any, or after the unmatched opening delimiter,
+      ;; and nil is returned."
+      (c-propertize-ml-string-id delim)
+      (goto-char (cadr delim))
+      (if (re-search-forward
+           ((%c-lang-function
+             (%c-langvar 'c-make-ml-string-closer-re-function))
+            (buffer-substring-no-properties (car delim) (cadr delim)))
+           bound #t)
+          (let ((end-delim
+                 (cons (match-beginning 1)
+                       (cons (match-end 1) (match-beginning 2)))))
+            (c-propertize-ml-string-id end-delim)
+            (goto-char (cadr delim))
+            (while (begin
+                     (skip-syntax-forward
+                      (%c-langvar 'c-ml-string-non-punc-skip-chars)
+                      (car end-delim))
+                     (< (point) (car end-delim)))
+              (c-put-syntax-table-trim-caches (point) '(1)) ; punctuation
+              (forward-char))
+            (goto-char (cadr end-delim))
+            #t)
+          (begin
+            (c-put-syntax-table-trim-caches (cddr delim) '(1))
+            (c-put-string-fence-trim-caches (- (cadr delim) 1))
+            (when bound
+              ;; "In a CPP construct, we try to apply a generic-string
+              ;; `syntax-table' text property to the last possible
+              ;; character in the string, so that only characters within
+              ;; the macro get \"stringed out\"."
+              (goto-char bound)
+              (if (save-restriction
+                    (narrow-to-region (cadr delim) (point-max))
+                    (re-search-backward
+                     ;; "This regular expression matches either an escape
+                     ;; pair (which isn't an escaped NL) (submatch 5) or a
+                     ;; non-escaped character (which isn't itself a
+                     ;; backslash) (submatch 10). The long preambles to
+                     ;; these (respectively submatches 2-4 and 6-9) ensure
+                     ;; that we have the correct parity for sequences of
+                     ;; backslashes."
+                     "\\(\\`[^\\]?\\|[^\\][^\\]\\)\\(\\\\\\(.\\|\n\\)\\)*\\(\\\\.\\)\\|\\(\\`\\|[^\\]\\|\\(\\`[^\\]?\\|[^\\][^\\]\\)\\(\\\\\\(.\\|\n\\)\\)+\\)\\([^\\]\\)\\)\\(\\\\\n\\)*\\="
+                     (cadr delim) #t))
+                  (if (match-beginning 10)
+                      (c-put-string-fence-trim-caches (match-beginning 10))
+                      (begin
+                        (c-put-syntax-table-trim-caches (match-beginning 5) '(1))
+                        (c-put-string-fence (+ (match-beginning 5) 1)))))
+              (goto-char bound))
+            #f)))
+
+    ;;------------------------------------------------------------------
     ;; `cc-engine.el:7559', `:7575': the multi-line string helpers
     ;;------------------------------------------------------------------
     ;; The `<>' bracket-property machinery (`:7000'-`:7553') is ported
@@ -13942,7 +14089,11 @@
         (goto-char (cadr open-delim))
         (and (not (equal? (c-get-char-property (1- (point)) 'syntax-table)
                           '(15)))
-             (re-search-forward ((%c-langvar 'c-make-ml-string-closer-re-function)
+             ;; Emacs `funcall's the language's function symbol; the
+             ;; registry is this tree's obarray stand-in (see
+             ;; `c-register-lang-function!').
+             (re-search-forward ((%c-lang-function
+                                  (%c-langvar 'c-make-ml-string-closer-re-function))
                                  (buffer-substring-no-properties
                                   (car open-delim) (cadr open-delim)))
                                 #f #t)

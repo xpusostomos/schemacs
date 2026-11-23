@@ -17368,11 +17368,21 @@ it, as that library's header explains.
    the *unspecified* value (true) on failure where Emacs's `when`
    answers nil; `c-clear-string-fences`'s "already unbalanced" test
    then fired on failure. They are explicit `(if ... #f)` now.
-   Next: `c-before-change-check-unbalanced-strings`,
-   `c-after-change-mark-abnormal-strings`,
-   `c-after-change-escape-NL-in-string`, `c-pps-to-string-delim`, the
-   ml-string fence machinery and `c-open-string-opener` (inactive for
-   C, active for C++ raw strings).
+   **The three string change functions are in too** - `c-before-change-
+   check-unbalanced-strings`, `c-after-change-mark-abnormal-strings`,
+   `c-after-change-escape-NL-in-string`, with `c-pps-to-string-delim`,
+   `c-unescaped-nls-in-string-p`, the two state variables and, in
+   cc-engine, the ml-string propertization for C++ raw strings
+   (`c-maybe-re-mark-ml-string` and its two callees). The differential
+   table is in DEPARTURES.md; the unit group is
+   `schemacs_editor_cc_mode_string_changes` (16). **A bug fixed on the
+   way**: `c-get-ml-closer` applied a language variable that holds a
+   function *symbol* - always resolve through `(%c-lang-function
+   (%c-langvar 'NAME))`.
+   Next: the quote parsing (`c-quoted-number-*`,
+   `c-parse-quotes-before/after-change`), the
+   `c-before/after-change-include-<>` wrappers, the comment-escape
+   pair, then the CPP functions and `c-before-change`/`c-after-change`.
 2. Then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`, the
    comment-escape pair, `c-parse-quotes-after-change`,
    `c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,

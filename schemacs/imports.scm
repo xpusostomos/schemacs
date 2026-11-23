@@ -1216,6 +1216,8 @@
     c-add-type-1
     c-after-change-check-<>-operators
     c-after-change-de-typedef
+    c-after-change-escape-NL-in-string
+    c-after-change-mark-abnormal-strings
     c-after-conditional
     c-after-special-operator-id
     c-alnum
@@ -1255,7 +1257,9 @@
     c-basic-matchers-after
     c-basic-matchers-before
     c-basic-offset
+    c-bc-changed-stringiness
     c-before-change-check-<>-operators
+    c-before-change-check-unbalanced-strings
     c-before-change-de-typedef
     c-beginning-of-current-token
     c-beginning-of-decl-1
@@ -1619,6 +1623,7 @@
     c-matchers-3
     c-max-syn-tab-mkr
     c-maybe-font-lock-wrong-style-comments
+    c-maybe-re-mark-ml-string
     c-maybe-stale-found-type
     c-min-property-position
     c-min-syn-tab-mkr
@@ -1631,6 +1636,7 @@
     c-most-enclosing-brace
     c-most-enclosing-decl-block
     c-multiline-string-check-final-quote
+    c-multiline-string-start-is-being-detached
     c-negation-char-face-name
     c-new-BEG
     c-new-END
@@ -1645,6 +1651,7 @@
     c-noise-macro-with-parens-name-re
     c-offsets-alist
     c-on-identifier
+    c-open-string-opener
     c-override-default-keywords
     c-parse-ps-state-below
     c-parse-ps-state-to-cache
@@ -1654,12 +1661,15 @@
     c-parsing-error
     c-partial-ws-p
     c-point
+    c-pps-to-string-delim
     c-preprocessor-face-name
     c-previous-single-property-change
     c-progress-fini
     c-progress-info
     c-progress-init
     c-progress-update
+    c-propertize-ml-string-id
+    c-propertize-ml-string-opener
     c-ps-state-cache-pos
     c-pull-open-brace
     c-punctuation-in
@@ -1811,6 +1821,7 @@
     c-truncate-bs-cache
     c-truncate-lit-pos-cache
     c-truncate-lit-pos/state-cache
+    c-unescaped-nls-in-string-p
     c-unfind-coalesced-tokens
     c-unfind-enclosing-token
     c-unfind-type
@@ -1827,6 +1838,8 @@
     c-vsemi-status-unknown-p
     c-whack-state-after
     c-whack-state-before
+    c-will-be-escaped
+    c-will-be-unescaped
     c-with-string-fences
     c-with-syntax-table
     c-ws*-string-limit-regexp
@@ -4017,6 +4030,7 @@
     set!c-backslash-column
     set!c-backslash-max-column
     set!c-basic-offset
+    set!c-bc-changed-stringiness
     set!c-block-comment-flag
     set!c-block-comment-prefix
     set!c-bs-cache
@@ -4069,6 +4083,7 @@
     set!c-noise-macro-name-re
     set!c-noise-macro-with-parens-name-re
     set!c-offsets-alist
+    set!c-open-string-opener
     set!c-parsing-error
     set!c-semi-lit-near-cache
     set!c-semi-near-cache-limit

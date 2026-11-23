@@ -15457,3 +15457,89 @@ change-p`, `c-before-change`/`c-after-change` themselves, and the mode
 definitions. The `c-with-string-fences` seams are installed by
 `cc-mode.scm` as it loads now, so `cc-defs.scm`'s comment about them
 saying "not ported" was corrected.
+
+# cc-mode: the string change functions, and a symbol applied as a
+# function (2026-11-23)
+
+`cc-mode.el:1472`-`:1771` is in: `c-before-change-check-unbalanced-strings`,
+`c-after-change-mark-abnormal-strings` and
+`c-after-change-escape-NL-in-string`, with the helpers they use
+(`c-unescaped-nls-in-string-p`,
+`c-multiline-string-start-is-being-detached`, `c-pps-to-string-delim`,
+`c-bc-changed-stringiness`, `c-open-string-opener`) and, in cc-engine,
+the ml-string propertization they call for C++ raw strings
+(`c-maybe-re-mark-ml-string`, `c-propertize-ml-string-id`,
+`c-propertize-ml-string-opener`).
+
+## The bug: a language variable holding a symbol, applied
+
+`c-get-ml-closer` was written
+
+    (re-search-forward ((%c-langvar 'c-make-ml-string-closer-re-function) ...))
+
+but the language variable holds the function's *symbol*
+(`'c-ml-string-make-closer-re` / `'c-c++-make-ml-string-closer-re`), as
+Emacs's does - and Emacs's `funcall` resolves a symbol through the
+obarray. Applying a symbol raises, so any C++ raw string reaching
+`c-font-lock-ml-strings` would have failed. The tree's obarray stand-in
+is `%c-lang-function` (`cc-engine.scm`'s registry, the same one
+`c-at-vsemi-p` uses), and `c-end-of-literal` already resolved it that
+way; `c-get-ml-closer` did not. Fixed.
+
+Worth generalising: **`funcall` of a language variable is
+`(%c-lang-function (%c-langvar 'NAME))`**, never a bare application of
+the variable. The registry holds the three ml-string and three vsemi
+names; a language value naming anything else resolves to #f, where
+Emacs would signal a void function.
+
+## Placement departures
+
+- `c-will-be-escaped` and `c-will-be-unescaped` are `cc-defs.el:442`/
+  `:466` and read `c-escaped-newline-takes-precedence`, a language
+  variable. They live in `cc-engine.scm` beside `c-is-escaped` (which
+  was already there for the same reason), and their comment says so.
+- `c-maybe-re-mark-ml-string` and the two propertizers are
+  `cc-engine.el:8151`-`:8260` and sit with the other ml-string helpers
+  at the end of `cc-engine.scm`, before `c-get-ml-closer`.
+- `c-bc-changed-stringiness` is a plain `defvar` in Emacs with no
+  `make-variable-buffer-local`, so it is a plain (global) variable
+  here - the one piece of cc state that is deliberately not per buffer.
+  `c-open-string-opener` *is* buffer-local and is an accessor pair.
+- The three change functions are exported though nothing in the tree
+  calls them yet: `c-before-change`/`c-after-change` will, and the
+  tests call them directly.
+
+## Verification
+
+Same-method differential as the fence layer: a real `c-mode` buffer on
+both sides, the mode's own initial fences wiped, `c-new-BEG`/
+`c-new-END` set explicitly, every probe under `inhibit-modification-
+hooks` on the Emacs side. Identical answers:
+
+| case | Emacs 31.1 | here |
+|---|---|---|
+| terminated `"abc\ndef"`: mark-abnormal | fences 18/22/26/28, markers `(18 29)`, region `(1 36)`, opener 26 | same |
+| unterminated `"abc\ndef;`: mark-abnormal | fences 18/22, markers `(18 23)`, region `(1 28)`, opener 18 | same |
+| before-change, no fences | nothing added, region unchanged | same |
+| before-change, four fences | the 18/22 pair removed, 26/28 kept, markers `(26 29)` | same |
+| escape-NL, a fenced quote ahead | every fence removed, markers unset | same |
+| escape-NL, no fenced quote ahead | unchanged | same |
+
+`test/progmodes/cc-mode-test.scm`'s
+`schemacs_editor_cc_mode_string_changes` group pins the six rows (16
+assertions). The ml-string propertization for C++ has no unit test yet:
+it is reached only through `c-after-change-mark-abnormal-strings` with
+`c-ml-string-opener-re` non-nil, and the C++ raw-string differential is
+the change-hook pass's job.
+
+## Still not carried in cc-mode.el
+
+The quote parsing (`c-quoted-number-*`, `c-parse-quotes-before/after-
+change`), the `c-before/after-change-include-<>` wrappers (they call
+the engine functions that are already here), the comment-escape pair,
+`c-depropertize-CPP`/`c-neutralize-syntax-in-CPP`,
+`c-change-expand-fl-region`, `c-called-from-text-property-change-p`,
+the ml-string change machinery (`c-before-change-check-ml-strings`,
+`c-after-change-unmark-ml-strings`, `c-depropertize-ml-string`),
+`c-before-change`/`c-after-change` themselves, and the mode
+definitions.

@@ -3,25 +3,34 @@
   ;; the change machinery's found-type half, in the file's order - the
   ;; two buffer-local flags, `c-unfind-enclosing-token',
   ;; `c-unfind-coalesced-tokens', `c-before-change-de-typedef',
-  ;; `c-after-change-de-typedef' and `c-update-new-id' - and then the
-  ;; string-fence layer those functions and the change hooks stand on:
-  ;; the `c-min-syn-tab-mkr'/`c-max-syn-tab-mkr' pair, `c-put-syn-tab',
+  ;; `c-after-change-de-typedef' and `c-update-new-id' - the
+  ;; string-fence layer those functions and the change hooks stand on
+  ;; (the `c-min-syn-tab-mkr'/`c-max-syn-tab-mkr' pair, `c-put-syn-tab',
   ;; `c-clear-syn-tab', `c-clear-string-fences',
   ;; `c-restore-string-fences', `c-multiline-string-check-final-quote'
   ;; and `c-remove-string-fences', with `c-with-string-fences'' two
-  ;; seams installed as this library loads.
+  ;; seams installed as this library loads), and the three string
+  ;; change functions of `:1472'-`:1771':
+  ;; `c-before-change-check-unbalanced-strings',
+  ;; `c-after-change-mark-abnormal-strings' and
+  ;; `c-after-change-escape-NL-in-string', with the helpers they use
+  ;; (`c-unescaped-nls-in-string-p',
+  ;; `c-multiline-string-start-is-being-detached',
+  ;; `c-pps-to-string-delim', `c-bc-changed-stringiness' and
+  ;; `c-open-string-opener').
   ;;
   ;; **Not carried yet**, and the reason this library is partial:
   ;;
-  ;;   * the string change functions
-  ;;     (`c-before-change-check-unbalanced-strings',
-  ;;     `c-after-change-mark-abnormal-strings',
-  ;;     `c-after-change-escape-NL-in-string', `c-pps-to-string-delim',
-  ;;     the ml-string fence machinery and the `c-open-string-opener'
-  ;;     variable they maintain);
+  ;;   * the ml-string change machinery (`c-before-change-check-ml-strings'
+  ;;     and `c-after-change-unmark-ml-strings' and the
+  ;;     `c-depropertize-ml-string' family). The propertization itself
+  ;;     (`c-maybe-re-mark-ml-string') is in cc-engine and is what
+  ;;     `c-after-change-mark-abnormal-strings' calls for C++;
+  ;;   * the quote parsing (`c-quoted-number-*', `c-parse-quotes-before-change',
+  ;;     `c-parse-quotes-after-change');
   ;;   * `c-depropertize-CPP', `c-neutralize-syntax-in-CPP',
   ;;     `c-before/after-change-fix-comment-escapes',
-  ;;     `c-parse-quotes-after-change',
+  ;;     `c-before/after-change-include-<>',
   ;;     `c-extend-font-lock-region-for-macros',
   ;;     `c-change-expand-fl-region', and `c-called-from-text-property-change-p';
   ;;   * `c-before-change' and `c-after-change' themselves, which call
@@ -39,27 +48,31 @@
   ;; `set!`-prefixed setter.
   (import
     (scheme base)
+    (only (guile) logand)
     (only (schemacs core syntax-macros) when-e while-e setq)
     (only (schemacs buffer) current-buffer buffer-local-value
           set-buffer-local-value!)
     (only (schemacs marker) copy-marker set-marker marker-position)
     (only (schemacs editfns) point point-max point-min goto-char
           bobp eobp char-before char-after buffer-substring-no-properties
-          save-excursion)
+          save-excursion forward-line narrow-to-region save-restriction)
     (only (schemacs search) looking-at match-end match-beginning
           re-search-forward save-match-data)
     (only (schemacs syntax) skip-syntax-backward skip-chars-backward
           parse-partial-sexp)
-    (only (schemacs cmds) backward-char forward-char)
+    (only (schemacs cmds) backward-char forward-char end-of-line)
     (only (schemacs progmodes cc-defs)
           c-search-forward-non-nil-char-property
           c-search-forward-char-property c-search-backward-char-property
+          c-search-forward-char-property-with-value-on-char
+          %c-true
           c-search-backward-char-property-with-value-on-char
           c-clear-char-property c-get-char-property c-put-char-property
           c-clear-char-properties c-clear-char-property-with-value
           c-min-property-position c-next-single-property-change
           c-previous-single-property-change
           c-<-as-paren-syntax c->-as-paren-syntax
+          c-characterp
           c-save-buffer-state
           *c-restore-string-fences-function*
           *c-clear-string-fences-function*)
@@ -70,8 +83,14 @@
           c-determine-limit c-determine-+ve-limit
           c-unfind-type c-on-identifier c-forward-token-2 c-backward-token-2
           c-beginning-of-macro %c-langvar
-          c-point c-is-escaped c-benign-error
-          c-literal-limits c-literal-type
+          c-new-BEG set!c-new-BEG c-new-END set!c-new-END
+          c-point c-is-escaped c-will-be-escaped c-will-be-unescaped
+          c-benign-error
+          c-syntactic-re-search-forward
+          c-literal-limits c-literal-start c-literal-type
+          c-end-of-macro c-in-literal
+          c-ml-string-opener-at-or-around-point
+          c-maybe-re-mark-ml-string
           c-truncate-lit-pos/state-cache
           c-put-syntax-table-trim-caches c-clear-syntax-table-trim-caches
           c-put-string-fence-trim-caches
@@ -93,7 +112,14 @@
    c-max-syn-tab-mkr set!c-max-syn-tab-mkr
    c-multiline-string-check-final-quote
    c-put-syn-tab c-clear-syn-tab
-   c-clear-string-fences c-restore-string-fences c-remove-string-fences)
+   c-clear-string-fences c-restore-string-fences c-remove-string-fences
+   c-unescaped-nls-in-string-p c-multiline-string-start-is-being-detached
+   c-pps-to-string-delim
+   c-before-change-check-unbalanced-strings
+   c-after-change-mark-abnormal-strings
+   c-after-change-escape-NL-in-string
+   c-bc-changed-stringiness set!c-bc-changed-stringiness
+   c-open-string-opener set!c-open-string-opener)
 
   (begin
 
@@ -399,6 +425,60 @@
                 (loop)))))))
 
     ;; ---------------------------------------------------------------
+    ;; `c-unescaped-nls-in-string-p' (`cc-mode.el:1213'),
+    ;; `c-multiline-string-start-is-being-detached' (`:1229') and
+    ;; `c-pps-to-string-delim' (`:1237')
+    ;;--------------------------------------------------------------
+    (define (c-unescaped-nls-in-string-p . quote-pos-args)
+      ;; "Return whether unescaped newlines can be inside strings. If the
+      ;; current language handles multi-line strings, the value of this
+      ;; function is always nil."
+      (let ((quote-pos (if (pair? quote-pos-args) (car quote-pos-args) #f)))
+        (cond
+         ((%c-langvar 'c-ml-string-opener-re) #f)
+         ((not (%c-langvar 'c-multiline-string-start-char)) #f)
+         ((c-characterp (%c-langvar 'c-multiline-string-start-char))
+          (and quote-pos
+               (eqv? (char-before quote-pos)
+                     (%c-langvar 'c-multiline-string-start-char))))
+         (else #t))))
+
+    (define (c-multiline-string-start-is-being-detached end)
+      ;; "If (e.g.), the # character in Pike is being detached from the
+      ;; string opener it applies to, return t. Else return nil. END is
+      ;; the argument supplied to every before-change function."
+      (and (memv (char-after end) (%c-langvar 'c-string-delims))
+           (c-characterp (%c-langvar 'c-multiline-string-start-char))
+           (eqv? (char-before end)
+                 (%c-langvar 'c-multiline-string-start-char))))
+
+    (define (c-pps-to-string-delim end)
+      ;; "parse-partial-sexp forward to the next string quote, which is
+      ;; deemed to be a closing quote. Return nil.
+      ;;
+      ;; We remove string-fence syntax-table text properties from
+      ;; characters we pass over."
+      (let* ((start (point))
+             (no-st-s (list 0 #f #f #\" #f #f 0 #f start #f #f))
+             (st-s (list 0 #f #f #t #f #f 0 #f start #f #f))
+             (no-st-pos #f)
+             (st-pos #f))
+        (parse-partial-sexp start end #f #f no-st-s 'syntax-table)
+        (set! no-st-pos (point))
+        (goto-char start)
+        (let loop ()
+          (when (begin
+                  (parse-partial-sexp (point) end #f #f st-s 'syntax-table)
+                  (unless (bobp)
+                    (c-clear-syn-tab (- (point) 1)))
+                  (set! st-pos (point))
+                  (and (< (point) end)
+                       (not (eqv? (char-before) #\"))))
+            (loop)))
+        (goto-char (min no-st-pos st-pos))
+        #f))
+
+    ;; ---------------------------------------------------------------
     ;; `c-multiline-string-check-final-quote' (`cc-mode.el:1258')
     ;;--------------------------------------------------------------
     (define (c-multiline-string-check-final-quote)
@@ -471,6 +551,326 @@
             (c-clear-syn-tab (point)))
            (else
             (c-benign-error "c-remove-string-fences: Wrong position"))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-bc-changed-stringiness' (`cc-mode.el:1432') and
+    ;; `c-open-string-opener' (`:1466')
+    ;;--------------------------------------------------------------
+    ;; Emacs `defvar's the first without `make-variable-buffer-local', so
+    ;; it is a plain variable here - a global that the change functions
+    ;; set and read across the two halves of one change.
+    (define c-bc-changed-stringiness #f)
+    (define (set!c-bc-changed-stringiness value)
+      (set! c-bc-changed-stringiness value))
+    ;; The second is buffer-local.
+    (define (c-open-string-opener)
+      (buffer-local-value (current-buffer) 'c-open-string-opener #f))
+    (define (set!c-open-string-opener value)
+      (set-buffer-local-value! (current-buffer) 'c-open-string-opener value))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-before-change-check-unbalanced-strings' (`cc-mode.el:1472')
+    ;;--------------------------------------------------------------
+    (define (c-before-change-check-unbalanced-strings beg end)
+      ;; "If BEG or END is inside an unbalanced string, remove the
+      ;; syntax-table text property from respectively the start or end of
+      ;; the string. Also extend the region (c-new-BEG c-new-END) as
+      ;; necessary to cope with the coming change involving the insertion
+      ;; or deletion of an odd number of quotes."
+      (c-save-buffer-state
+          ((end-limits
+            (begin
+              (goto-char (if (c-multiline-string-start-is-being-detached end)
+                             (+ end 1)
+                             end))
+              (c-literal-limits)))
+           (end-literal-type (and end-limits (c-literal-type end-limits)))
+           (beg-limits
+            (begin
+              (goto-char beg)
+              (c-literal-limits)))
+           (beg-literal-type (and beg-limits (c-literal-type beg-limits))))
+
+        (cond
+         ;; "The text about to be inserted might contain a multiline
+         ;; string opener. Set c-new-END after anything which might be
+         ;; affected. Go to the end of the putative multiline string."
+         ((and (not (%c-langvar 'c-ml-string-opener-re))
+               (c-characterp (%c-langvar 'c-multiline-string-start-char)))
+          (goto-char end)
+          (c-pps-to-string-delim (point-max))
+          (when (< (point) (point-max))
+            (let again ()
+              (when (and
+                     (begin
+                       (let skip ()
+                         (when (and
+                                (c-syntactic-re-search-forward
+                                 (if (%c-true (%c-langvar 'c-single-quotes-quote-strings))
+                                     "[\"']\\|\\s|"
+                                     "\"\\|\\s|")
+                                 (point-max) #t #t)
+                                (begin
+                                  (c-clear-syn-tab (- (point) 1))
+                                  (not (memv (char-before)
+                                             (%c-langvar 'c-string-delims)))))
+                           (skip)))
+                       (memv (char-before) (%c-langvar 'c-string-delims)))
+                     (begin
+                       (c-pps-to-string-delim (point-max))
+                       (< (point) (point-max))))
+                (again))))
+          (set!c-new-END (max (point) (c-new-END))))
+
+         ((and (not (%c-langvar 'c-ml-string-opener-re))
+               (%c-langvar 'c-multiline-string-start-char))
+          (set!c-bc-changed-stringiness
+           (not (eq? (eq? end-literal-type 'string)
+                     (eq? beg-literal-type 'string))))
+          ;; "Deal with deletion of backslashes before "s."
+          (goto-char end)
+          (if (and (looking-at (if (%c-true (%c-langvar 'c-single-quotes-quote-strings))
+                                   "\\\\*[\"']"
+                                   "\\\\*\""))
+                   (c-is-escaped (point)))
+              (set!c-bc-changed-stringiness (not (c-bc-changed-stringiness))))
+          (if (eq? beg-literal-type 'string)
+              (set!c-new-BEG (min (car beg-limits) (c-new-BEG)))))
+
+         ((< end (point-max))
+          ;; "Have we just escaped a newline by deleting characters?"
+          (if (and (eq? end-literal-type 'string)
+                   (memv (char-after end) (list #\newline #\return)))
+              (cond
+               ;; "Are we escaping a newline by deleting stuff between \
+               ;; and \n?"
+               ((and (> end beg)
+                     (c-will-be-escaped end beg end))
+                (c-remove-string-fences end)
+                (goto-char (+ end 1)))
+               ;; "Are we unescaping a newline ..."
+               ((and (c-is-escaped end)
+                     (or (= beg end)      ; "by inserting stuff between \ and \n?"
+                         (c-will-be-unescaped beg))) ; "by removing an odd number of \s?"
+                (goto-char (+ end 1)))  ; "To after the NL which is being unescaped."
+               (else
+                (goto-char end)))
+              (goto-char end))
+
+          ;; "Move to end of logical line (as it will be after the change,
+          ;; or as it was before unescaping a NL.)"
+          (let lines ()
+            (when (begin
+                    (end-of-line)
+                    (and (eqv? (char-before) #\\) (not (eobp))))
+              (forward-line)
+              (lines)))
+          ;; "We're at an EOLL or point-max."
+          (if (equal? (c-get-char-property (point) 'syntax-table) '(15))
+              (if (memv (char-after) (list #\newline #\return))
+                  ;; "Normally terminated invalid string."
+                  (c-remove-string-fences)
+                  ;; "Opening " at EOB."
+                  (c-clear-syn-tab (- (point) 1)))
+              (when (and (c-search-backward-char-property
+                          'syntax-table '(15) (c-new-BEG))
+                         (memv (char-after) (%c-langvar 'c-string-delims)))
+                ;; "Opening " on last line of text (without EOL)."
+                (c-remove-string-fences)
+                (set!c-new-BEG (min (c-new-BEG) (point))))))
+
+         (else
+          (goto-char end)               ; point-max
+          (when (and (c-search-backward-char-property
+                      'syntax-table '(15) (c-new-BEG))
+                     (memv (char-after) (%c-langvar 'c-string-delims)))
+            (c-remove-string-fences))))
+
+        (unless
+            (or (and
+                 ;; "Don't set c-new-BEG/END if we're in an ml string."
+                 (%c-langvar 'c-ml-string-opener-re)
+                 (eq? beg-literal-type 'string)
+                 (c-ml-string-opener-at-or-around-point (car beg-limits)))
+                (and (%c-langvar 'c-multiline-string-start-char)
+                     (not (%c-langvar 'c-ml-string-opener-re))
+                     (not (c-characterp (%c-langvar 'c-multiline-string-start-char)))))
+          (when (and (eq? end-literal-type 'string)
+                     (or (memv (char-before (cdr end-limits))
+                               (%c-langvar 'c-string-delims))
+                         (memv (char-before (cdr end-limits))
+                               (list #\newline #\return)))
+                     (memv (char-after (car end-limits))
+                           (%c-langvar 'c-string-delims)))
+            (set!c-new-END (max (c-new-END) (cdr end-limits)))
+            (when (equal? (c-get-char-property (car end-limits) 'syntax-table)
+                          '(15))
+              (c-remove-string-fences (car end-limits)))
+            (set!c-new-END (max (c-new-END) (cdr end-limits))))
+
+          (when (and (eq? beg-literal-type 'string)
+                     (memv (char-after (car beg-limits))
+                           (%c-langvar 'c-string-delims)))
+            (c-remove-string-fences (car beg-limits))
+            (set!c-new-BEG (min (c-new-BEG) (car beg-limits)))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-after-change-mark-abnormal-strings' (`cc-mode.el:1619')
+    ;;--------------------------------------------------------------
+    (define (c-after-change-mark-abnormal-strings beg end old-len)
+      ;; "Mark any unbalanced strings in the region (c-new-BEG c-new-END)
+      ;; with string fence syntax-table text properties."
+      (if (and (%c-langvar 'c-multiline-string-start-char)
+               (not (%c-langvar 'c-ml-string-opener-re))
+               (not (c-characterp (%c-langvar 'c-multiline-string-start-char))))
+          ;; "Only the last " might need to be marked."
+          (c-save-buffer-state
+              ((beg-literal-limits
+                (begin (goto-char beg) (c-literal-limits)))
+               (beg-literal-type (c-literal-type beg-literal-limits))
+               (end-literal-limits #f) (end-literal-type #f))
+            (when (and (eq? beg-literal-type 'string)
+                       (c-get-char-property (car beg-literal-limits) 'syntax-table))
+              (c-clear-syn-tab (car beg-literal-limits))
+              (set!c-bc-changed-stringiness (not (c-bc-changed-stringiness))))
+            (set! end-literal-limits (begin (goto-char end) (c-literal-limits)))
+            (set! end-literal-type (c-literal-type end-literal-limits))
+            ;; "Deal with the insertion of backslashes before a "."
+            (goto-char end)
+            (if (and (looking-at "\\\\*\"")
+                     (eqv? (logand (skip-chars-backward "\\\\" beg) 1) 1))
+                (set!c-bc-changed-stringiness (not (c-bc-changed-stringiness))))
+            (when (eq? (eq? (eq? beg-literal-type 'string)
+                            (eq? end-literal-type 'string))
+                       (c-bc-changed-stringiness))
+              (c-multiline-string-check-final-quote)))
+          ;; "There could be several "s needing marking."
+          (c-save-buffer-state
+              ((cll (begin (goto-char (c-new-BEG)) (c-literal-limits)))
+               (beg-literal-type (and cll (c-literal-type cll)))
+               (beg-limits
+                (cond
+                 ((and (eq? beg-literal-type 'string)
+                       (c-unescaped-nls-in-string-p (car cll)))
+                  (cons (car cll)
+                        (begin
+                          (goto-char (+ (car cll) 1))
+                          (re-search-forward
+                           (cdr (assq (char-after (car cll))
+                                      (%c-langvar 'c-string-innards-re-alist)))
+                           #f #t)
+                          (min (+ (point) 1) (point-max)))))
+                 ((and (not beg-literal-type)
+                       (begin
+                         (goto-char beg)
+                         (and (not (bobp))
+                              (not (%c-langvar 'c-ml-string-opener-re))
+                              (eqv? (char-before)
+                                    (%c-langvar 'c-multiline-string-start-char))))
+                       (memv (char-after) (%c-langvar 'c-string-delims)))
+                  (cons (point)
+                        (begin
+                          (forward-char)
+                          (re-search-forward
+                           (cdr (assq (char-before)
+                                      (%c-langvar 'c-string-innards-re-alist)))
+                           #f #t)
+                          (+ (point) 1))))
+                 (else cll)))
+               (end-hwm
+                (max
+                 (begin
+                   (goto-char
+                    (if (and (memv (char-after end) (list #\newline #\return))
+                             (c-is-escaped end))
+                        (min (+ end 1) (point-max))
+                        end))
+                   (let lines ()
+                     (when (begin
+                             (end-of-line)
+                             (and (eqv? (char-before) #\\) (not (eobp))))
+                       (forward-line)
+                       (lines)))
+                   (point))
+                 (c-new-END)))
+               (s #f))
+            (goto-char
+             (cond ((not beg-literal-type) (c-new-BEG))
+                   ((eq? beg-literal-type 'string) (car beg-limits))
+                   (else (cdr beg-limits)))) ; comment
+            ;; "Handle one string each time around the next while loop."
+            (let strings ()
+              (when (and
+                     (< (point) end-hwm)
+                     (begin
+                       ;; "Skip over any comments before the next string."
+                       (let comments ()
+                         (when (begin
+                                 (set! s (parse-partial-sexp
+                                          (point) end-hwm #f #f s 'syntax-table))
+                                 (and (< (point) end-hwm)
+                                      (or (not (list-ref s 3))
+                                          (not (memv (char-before)
+                                                     (%c-langvar 'c-string-delims))))))
+                           (comments)))
+                       ;; "We're at the start of a string."
+                       (and (memv (char-before) (%c-langvar 'c-string-delims))
+                            (not (list-ref s 4))))) ; "out of the comment"
+                (unless
+                    (and (%c-langvar 'c-ml-string-opener-re)
+                         (c-maybe-re-mark-ml-string))
+                  (if (c-unescaped-nls-in-string-p (- (point) 1))
+                      (looking-at "\\(\\\\\\(.\\|\n\\)\\|[^\"]\\)*")
+                      (looking-at
+                       (cdr (assq (char-before)
+                                  (%c-langvar 'c-string-innards-re-alist)))))
+                  (cond
+                   ((memv (char-after (match-end 0)) (list #\newline #\return))
+                    (c-put-syn-tab (- (point) 1) '(15))
+                    (c-put-syn-tab (match-end 0) '(15))
+                    (set!c-new-BEG (min (c-new-BEG) (point)))
+                    (set!c-new-END (max (c-new-END) (match-end 0)))
+                    (set!c-open-string-opener (- (point) 1)))
+                   ((or (eqv? (match-end 0) (point-max))
+                        (eqv? (char-after (match-end 0)) #\\)) ; "\ at EOB"
+                    (c-put-syn-tab (- (point) 1) '(15))
+                    (set!c-new-BEG (min (c-new-BEG) (point)))
+                    (set!c-new-END (max (c-new-END) (match-end 0)))
+                    (set!c-open-string-opener (- (point) 1))))
+                  (goto-char (min (+ (match-end 0) 1) (point-max))))
+                (set! s #f)
+                (strings))))))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-after-change-escape-NL-in-string' (`cc-mode.el:1740')
+    ;;--------------------------------------------------------------
+    (define (c-after-change-escape-NL-in-string beg end old-len)
+      ;; "If a backslash has just been inserted into a string, and this
+      ;; quotes an existing newline, remove the string fence syntax-table
+      ;; text properties on what has become the tail of the string."
+      (let ((lit-start #f) (lim #f))
+        (when
+            (and (> end beg)
+                 (memv (char-after end) (list #\newline #\return))
+                 (c-is-escaped end)
+                 (begin (goto-char end)
+                        (set! lit-start (c-literal-start))
+                        lit-start)
+                 (memv (char-after (or lit-start (point)))
+                       (%c-langvar 'c-string-delims))
+                 (or (not (%c-langvar 'c-ml-string-opener-re))
+                     (begin
+                       (goto-char lit-start)
+                       (not (c-ml-string-opener-at-or-around-point)))
+                     (save-excursion
+                       (c-beginning-of-macro))))
+          (goto-char (+ end 1))         ; "After the \"
+          (set! lim (c-point 'eoll))
+          (goto-char (+ end 1))
+          (when (c-search-forward-char-property-with-value-on-char
+                 'syntax-table '(15) #\" lim)
+            (c-remove-string-fences end)
+            (c-remove-string-fences (- (point) 1))))))
 
     ;; ---------------------------------------------------------------
     ;; `c-with-string-fences'` seams (`cc-defs.el:1774')
