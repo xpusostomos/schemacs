@@ -17696,3 +17696,88 @@ primitive for its menus and a `def-edebug-spec` stub; then the
 `c-indent-new-comment-line`'s macro branch returning what
 `c-newline-and-indent` does (nil vs unspecified) - named in the fill
 README.
+
+# Handoff - cc-mode.el recon, before the mode tranche (2026-11-24)
+
+The next tranche is `cc-mode.el`'s mode definitions. This is the
+inventory taken while starting it, so the next session does not redo
+it. `schemacs/progmodes/cc-mode.scm` already carries the whole change
+machinery; what is missing is everything after `c-after-change` plus
+the mode setup earlier in the file.
+
+## Already available (checked, not guessed)
+
+- `substitute-key-definition`/`-key` - `subr.scm`, ported for
+  `tty-menu-navigation-map`, but the tree's signature takes all five
+  arguments (`prefix` a vector, `(vector)` at top). Pass commands as
+  their *procedures*: the port's `eq?` compares values.
+- `map-keymap`, `set-keymap-parent`, `make-sparse-keymap`,
+  `define-key`, `kbd`; `easy-menu-define` (`core/easymenu.scm`);
+  `run-mode-hooks`; `c-initialize-builtin-style` and
+  `c-make-styles-buffer-local` (`cc-styles.scm`);
+  `*c-require-final-newline*` and `*mode-require-final-newline*`;
+  the `c-mode-menu` language constant; `font-lock-defaults`'s
+  buffer-local slots; `*font-lock-fontify-region-function*`,
+  `*font-lock-support-mode*` and `*font-lock-extend-region-functions*`
+  as parameters.
+- `auto-mode-alist` already maps `.c`/`.h`/`.cc`/... to
+  `c-mode`/`c++-mode`/`c-or-c++-mode`; adding them to
+  `files.scm`'s `%mode-autoloads` is the wiring step once the modes
+  exist.
+
+## Missing, and what each needs (named, not papered over)
+
+- `c-set-keymap-parent` (`cc-defs.el:518`): in Emacs 31/32 it is a
+  macro choosing the XEmacs or Emacs arm; here it is a one-line
+  procedure over `set-keymap-parent`, to add to `cc-defs.scm`.
+- **file-style machinery** (`c-count-cfss`, `c-before-hack-hook`,
+  `c-remove-any-local-eval-or-mode-variables`,
+  `c-postprocess-file-styles`): waits on `hack-local-variables`,
+  `file-local-variables-alist` and `before-hack-local-variables-hook`,
+  none ported. Emacs also installs one of these on a hook at load
+  (`cc-mode.el:983`); with no `hack-local-variables` there is nothing
+  to hang it on, so this is a named gap of the mode tranche.
+- **abbrevs** (`c-define-abbrev-table`, `c-populate-abbrev-table`,
+  `abbrev-mode` in every mode body): `abbrev.el` is not ported (the
+  electric pass already carries this as a gap).
+- **`cc-imenu-init` / `flymake-cc`** in the mode bodies: imenu and
+  flymake are not ported; the calls are named gaps, not stubs that
+  pretend.
+- **electric-indent-mode / electric-pair-mode connections**
+  (`c-initialize-cc-mode`'s hooks, `c-electric-indent-mode-hook`,
+  `c-electric-indent-local-mode-hook`,
+  `c-electric-pair-inhibit-predicate`): neither mode is ported; the
+  functions can be carried for shape but nothing calls them.
+- **`post-text-conversion-hook`** (`c-initialize-cc-mode`): not
+  ported (the function `c-post-text-conversion` is).
+- **`boundp`/`fboundp` introspection**: cc-mode.el asks about
+  `electric-pair-inhibit-predicate`, `yank-handled-properties`,
+  `text-property-default-nonsticky`, `parse-sexp-lookup-properties`,
+  `normal-erase-is-backspace`, `electric-indent-inhibit`, ...; the
+  tree has no general `boundp` for library variables, so each is
+  spelled as the fact it is (present/absent) with a comment, the way
+  `cc-fonts.scm`'s `c-valid-offset` stands in for `functionp`.
+- **A buffer-local `font-lock-fontify-region-function`**: Emacs's
+  `c-font-lock-init` sets it per buffer; this tree's font-lock reads
+  the *parameter*. Decide whether to give font-lock a buffer-local
+  slot (truest) or set the parameter (leaks across buffers) before
+  porting `c-font-lock-fontify-region`.
+- `c-post-command` wants a *local* `post-command-hook` entry; the
+  tree's hooks are global parameters. Either give hook lists a
+  buffer-local form or guard the global entry on
+  `*c-buffer-is-cc-mode*` - a decision, not a mechanical port.
+
+## Scope order when taken up
+
+1. C and C++ first (`c-mode`, `c++-mode`, `c-or-c++-mode`, their
+   syntax tables, maps and menus), with `c-basic-common-init`/
+   `c-common-init`/`c-font-lock-init` carrying the gaps above; the
+   milestone is `.c`/`.h` opening with the syntax table and faces
+   compared to Emacs (a face-run differential like
+   `tools/cc-cgbs-diff/`).
+2. objc/java/idl/pike/awk next - mechanical once the machinery works
+   (their tables/menus are in cc-langs already); awk-mode's map wants
+   the `c-awk-*` commands (`cc-awk.el`), which are not ported.
+3. `c-buffer-is-cc-mode` stays a parameter set by the mode init (the
+   documented stand-in); `c-leave-cc-mode-mode` on
+   `change-major-mode-hook` is what clears it.
