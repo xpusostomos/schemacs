@@ -8,7 +8,9 @@
         (schemacs progmodes cc-defs) (schemacs progmodes cc-langs)
         (schemacs progmodes cc-vars) (schemacs progmodes cc-styles)
         (schemacs progmodes cc-engine) (schemacs progmodes cc-align)
-        (schemacs progmodes cc-cmds))
+        (schemacs progmodes cc-cmds)
+        (only (schemacs insdel) *before-change-functions* *after-change-functions*)
+        (only (schemacs progmodes cc-mode) c-before-change c-after-change))
 (define args (cdr (command-line)))
 (define style (car args))
 (define file (cadr args))
@@ -36,6 +38,15 @@
     (set!c-new-END (point-max))
     (c-restore-<>-properties (point-min) (point-max) 0)))
 (goto-char (point-min))
-(c-indent-region (point-min) (point-max))
+;; `c-buffer-is-cc-mode' is a buffer-local in Emacs, set by
+;; `c-basic-common-init'; this tree models it as a parameter, so it must
+;; be bound for the whole command - C++-only branches (Qt access labels
+;; among them) read it.
+(parameterize ((*c-buffer-is-cc-mode* mode)
+               (*before-change-functions*
+                (cons c-before-change (*before-change-functions*)))
+               (*after-change-functions*
+                (cons c-after-change (*after-change-functions*))))
+  (c-indent-region (point-min) (point-max)))
 (call-with-output-file out
   (lambda (p) (display (buffer-substring (point-min) (point-max)) p)))

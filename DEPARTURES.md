@@ -16617,3 +16617,129 @@ stays hook-free so that an electric regression cannot hide behind it.
 - All cc suites pass, `schemacs/imports.scm` is regenerated (125
   libraries, 5099 names), and `tools/pty-check.py imports scratch' is
   2/2.
+
+# cc-mode: the change hooks on, and the seven defects they exposed
+# (2026-11-24)
+
+The electric tranche's harness now installs the mode's change hooks
+(`c-before-change`/`c-after-change`, `cc-mode.el:758'/`:763'), and the
+cc-cmds indentation differential (`tools/cc-cmds-diff/`) went with them
+from **75 of 99 fixture/style pairs to 99 of 99**. Getting there
+exposed seven real defects - five in cc-engine, one in cc-cmds and one
+in a shared primitive - each found by a named differential, not by
+reading:
+
+## 1. `c-laomib-fix-elt` ran off a nil paren-state
+
+Emacs's `(and paren-state ...)` and `(cadr paren-state)` are nil tests
+and nil reads; this tree's empty list is *true*, so the inner walk
+stepped past the end and `(cdr '())` raised - from `c-before-change`,
+on the first `{` of `int a[] = {` (the electric harness's first C++
+scenario). Both tests are `pair?` now and the reads are `%c-cadr`
+(Emacs's `(cadr nil)` is nil). `tools/cc-decl-diff/`'s bracelist
+fixtures were re-run and are unchanged; the unit tests are
+`cc-engine-tests.scm`'s bracelist group.
+
+## 2. `c-add-stmt-syntax` filled in the anchor in the wrong place
+
+Emacs runs the "Fill in the current point as the anchor for all the
+symbols added above" loop **once, after its `while`**. The port had it
+as the last form of the *go-out-of-block gate* - so it ran once per
+iteration, and never at all when the loop's first test failed. The
+symbols then kept their `nil` anchors, and the `else if` case showed
+it: `(statement-block-intro #f)` where Emacs answers
+`(statement-block-intro 18)`, and the line indented 2 where Emacs
+indents 3 (the anchor is the `else` at column 1). Moved out, as the C
+has it; `tools/cc-cgbs-diff/` (ten fixtures) and
+`tools/cc-indent-diff/` (84 runs) are identical after it.
+
+## 3. `c-guess-continued-construct` compared a character with `/='
+
+CASE G's `(/= (char-before placeholder) ?<)` became
+`(/= (char-before placeholder) #\<)` - and a character is not a number
+here, so `c-indent-region` on `fixture-align.cpp` died with
+`Wrong type argument in position 1: #\o`. It is `(not (eqv? ...))`
+now (Elisp would signal for a nil char-before; `#f` is not `#\<`).
+
+## 4. `c-looking-at-inexpr-block`'s compound-literal arm was a stub
+
+Its third `or` arm signalled "waits on `c-looking-at-statement-block`,
+which is not ported" - true when written, and stale since the
+declaration-decision pass ported it. `fixture-align.cpp`'s
+`set_line (line_t {point_t{...}})` reaches it; the arm is the C's
+expression now.
+
+## 5. Two `when`s answered the unspecified value where Emacs answers nil
+
+`c-clear-<-pair-props-if-match-after` and
+`c-clear->-pair-props-if-match-before` end in a `when` whose value the
+caller reads: `(setq <>-pos (c-clear->-pair-props-if-match-before ...))`.
+On the no-match path it answered the *unspecified* value, which is
+true, so `c-unmark-<>-around-region` set `new-beg` to it and then
+`(< #<unspecified> (c-new-BEG))` raised. Both inner `when`s are
+`when-e` (Emacs's nil) now. This is the `when`-in-value-position class
+this file already carries; what is new is that a `setq` *read* the
+value.
+
+## 6. `car-safe`/`cdr-safe` answered `'()` - which is true
+
+`subr.scm` had both return the empty list for a non-cons, with a
+comment claiming nil is `'()` "for the lists these answer". That is
+wrong where Emacs's callers *test* the answer: `c-lineup-comment`
+(`cc-align.scm`) is `(or (cdr-safe offset) (car-safe offset) -1000)`,
+and with `'()` the `or` took the empty list and the comment-intro
+offset came out 0 where Emacs answers -1000 (`jam it against the left
+side`). Both answer `#f` now. Callers that walk the result do it under
+a `pair?` test (checked across the tree); this is a shared primitive,
+so the full suite battery and the pty battery were run.
+
+## 7. `c-indent-new-comment-line`'s `if` without an `else`
+
+`comment-text-end` is
+
+    (or (and (eq lit-type 'c)
+             (save-excursion (goto-char (- (cdr lit-limits) 2))
+                             (if (looking-at "\\*/") (point))))
+        (cdr lit-limits))
+
+Elisp's `if` with no else is nil, so the `and` fails and the `or` falls
+through. Scheme's answers the *unspecified* value, which is true, so
+the `or` returned it and `(> (point) comment-text-end)` raised "Wrong
+type argument ... #<unspecified>" - `c-context-open-line` at position
+1037 of `tools/cc-fill-diff/fixture-fill.c` was one, and the same value
+leaked out as `c-indent-new-comment-line`'s return value at positions
+934-945. An explicit `#f` else, and the fill differential loses its
+1037 error and its `fixture-fill.cpp` position 190 (it now differs at
+108 and 158 only).
+
+## The harness findings, which are not the editor's
+
+- **`*c-buffer-is-cc-mode*` must be bound for the whole command in a
+  replay.** It is a buffer-local in Emacs, set by
+  `c-basic-common-init`; here it is a parameter. `ours-cmds.scm`
+  bound it only around the setup, so `c-major-mode-is 'c++-mode` was
+  false while `c-indent-region` ran - and the Qt access label
+  `public slots:` analysed as `topmost-intro` (column 2) instead of
+  `access-label` (column 0). Part of the old 24-pair "differences" was
+  this.
+- **A replay that indents line after line needs the change hooks**
+  (`parameterize` of `*before-change-functions*`/
+  `*after-change-functions*`), because the caches are invalidated from
+  them. Both harnesses install them now; the electric harness too, and
+  its one known difference (`brace-elseif`) disappeared with them plus
+  fix 2.
+
+## Verified on the settled tree
+
+- `tools/cc-cmds-diff/`: **99/99** fixture/style pairs identical.
+- `tools/cc-indent-diff/`: 84 runs, 0 differences.
+- `tools/cc-cgbs-diff/`: 10 fixtures identical.
+- `tools/cc-decl-diff/`: 8 fixtures, 0 differences.
+- `tools/cc-electric-diff/`: 60 scenarios, 0 different (hooks
+  installed; `known.txt` is empty).
+- `tools/cc-fill-diff/`: unchanged from its documented state except
+  that defect 7 removed the 1037 error and one `fixture-fill.cpp`
+  position; the current-vs-baseline comparison is identical, so none
+  of the engine fixes moved fill behaviour.
+- The cc suites pass, and `schemacs/imports.scm` is unchanged (no
+  exports moved).

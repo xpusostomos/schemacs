@@ -1577,14 +1577,20 @@
     (define (car-safe object)
       ;; GNU Emacs's `car-safe' (`data.c:670'): "Return the car of OBJECT
       ;; if it is a cons cell, or else nil." The C's `CAR_SAFE' is the
-      ;; test; nil is `'()' here, as it is for the lists these answer.
-      (if (pair? object) (car object) '()))
+      ;; test. **The nil is `#f', not `'()`**: Emacs's callers test the
+      ;; answer - `(or (car-safe X) ...)' in `c-lineup-comment'
+      ;; (`cc-align.scm') is one - and `'()` is *true* in Scheme, so a
+      ;; list here makes the `or' take the nil branch and answer it.
+      (if (pair? object) (car object) #f))
 
     (define (cdr-safe object)
       ;; GNU Emacs's `cdr-safe' (`data.c:688'): "Return the cdr of
       ;; OBJECT if it is a cons cell, or else nil." (Not `cdr', which
-      ;; signals for a non-list.)
-      (if (pair? object) (cdr object) '()))
+      ;; signals for a non-list.) The nil is `#f' for the same reason as
+      ;; `car-safe''s: `(or (cdr-safe X) ...)' must fall through, and
+      ;; `'()` is true in Scheme. Callers that walk the result under a
+      ;; `pair?' test are unaffected.
+      (if (pair? object) (cdr object) #f))
 
     (define (copy-tree tree . rest)
       ;; GNU Emacs's `copy-tree' (`subr.el:1002'): "Make a copy of TREE.

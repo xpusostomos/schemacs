@@ -12,36 +12,29 @@ Run it over the fixtures in `tools/cc-decl-diff/`,
 the cc-align differential uses (gnu, linux, k&r, bsd, stroustrup,
 whitesmith, ellemtel, java, python).
 
-## Where it stands (2026-11-23)
+## Where it stands (2026-11-24)
 
-**75 of 99 fixture/style pairs are identical.** The 24 that differ are
-all on `fixture-align.c`, `fixture-align.cpp` and `fixture-qt.cpp`, and
-the cause is not the indentation arithmetic: `c-indent-line` computes
-the same indentation as Emacs (the `tools/cc-indent-diff/` per-line
-table agrees on every line), and the divergence appears only where a
-line's **reindentation feeds the next line's parse**.
+**99 of 99 fixture/style pairs are identical.** The harness now does
+what `c-basic-common-init` does - installs `c-before-change`/
+`c-after-change` on the change-hook lists and binds
+`*c-buffer-is-cc-mode*` for the whole command - and the engine fixes
+that needed are recorded in DEPARTURES.md (2026-11-24).
 
-`c-indent-line` edits the buffer, and cc-mode keeps caches that those
-edits invalidate - the literal-position cache (`c-lit-pos-cache`), the
-parse-state cache (`c-state-cache`) and the syntactic-whitespace
-properties. The functions that invalidate them are `cc-mode.el`'s
-`c-before-change` and `c-after-change`, put on
-`before-change-functions`/`after-change-functions` by
-`c-basic-common-init`; **neither is ported yet**, so a replay that
-indents line after line reads the caches the previous edit left.
+Three things the schemacs side must do, all of which were missing at
+first and each of which produced a different symptom:
 
-The diagnosis was confirmed by simulation: a per-line loop that calls
-`c-truncate-lit-pos/state-cache` and `c-invalidate-state-cache` after
-each `c-indent-line` makes `fixture-align.c` identical, and the same
-loop still differs on `fixture-qt.cpp`'s access labels - which is
-expected, because cc-mode's invalidation runs *before* the change
-(`c-before-change`, with the change's BEG) as well as after, and the
-order matters to the syntactic-whitespace ladder.
-
-So the gate for the rest of cc-cmds' indentation verification is the
-`cc-mode.el` change-function tranche. Until it lands, `cc-cmds-tests.scm`
-tests one edit per fresh buffer, which is the case the caches cannot
-get wrong.
+* **install the two change hooks** around `c-indent-region`
+  (`parameterize` of `*before-change-functions*`/`*after-change-functions*`).
+  `c-indent-line` edits the buffer, and cc-mode's caches (the
+  literal-position cache, `c-state-cache`, the syntactic-whitespace
+  ladder) are invalidated from those hooks; a replay without them
+  reads stale state on the next line.
+* **bind `*c-buffer-is-cc-mode*` for the whole command**, not just the
+  setup. It is a buffer-local in Emacs, set by `c-basic-common-init`;
+  here it is a parameter, and C++-only branches - the Qt access label
+  `public slots:` is the one that showed - silently take the other arm
+  when it is unbound.
+* **a fresh buffer per fixture**, as before.
 
 ## The defun-movement differential (2026-11-24)
 

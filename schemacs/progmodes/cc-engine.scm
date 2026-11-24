@@ -6422,18 +6422,11 @@
                                  (c-on-identifier)))
                           (and (%c-langvar 'c-special-brace-lists)
                                (c-looking-at-special-brace-list))
-                          ;; The third arm of the C's `or' is
-                          ;;   (and c-has-compound-literals
-                          ;;        (save-excursion
-                          ;;          (goto-char block-follows)
-                          ;;          (not (c-looking-at-statement-block))))
-                          ;; `c-looking-at-statement-block' is not
-                          ;; ported (it needs the C++ declaration
-                          ;; engine); an explicit error, and no ported
-                          ;; caller reaches it - `c-beginning-of-
-                          ;; statement-1' passes a nil CONTAINING-SEXP.
+                          ;; The third arm of the C's `or'.
                           (and (%c-langvar 'c-has-compound-literals)
-                               (error "c-looking-at-inexpr-block: the compound-literal branch waits on `c-looking-at-statement-block', which is not ported")))
+                               (save-excursion
+                                 (goto-char block-follows)
+                                 (not (c-looking-at-statement-block)))))
                       #f
                       (cons 'inexpr-statement (point))))
                  (else #f))
@@ -12176,22 +12169,26 @@
         ;; `lim').  This brace will become our new 2nd element of `elt'."
         (let loop ()
           ;; "Search one brace level per iteration."
-          (when (and paren-state
+          ;; Emacs's `(and paren-state ...)' tests nil, where this tree's
+          ;; `'()` is *true*: without `pair?' the inner walk runs off the
+          ;; end and `(cdr '())' raises. And Emacs's `(cadr nil)' is nil,
+          ;; so the two reads are `%c-cadr'.
+          (when (and (pair? paren-state)
                      (begin
                        ;; "Go past non-brace levels, one per iteration."
                        (let inner ()
-                         (when (and paren-state
+                         (when (and (pair? paren-state)
                                     (not (eqv? (char-after
                                                 (c-state-cache-top-lparen paren-state))
                                                #\{)))
                            (set! paren-state (cdr paren-state))
                            (inner)))
-                       (cadr paren-state))
+                       (%c-cadr paren-state))
                      (> (c-state-cache-top-lparen (cdr paren-state))
                         (car elt)))
             (set! paren-state (cdr paren-state))
             (loop)))
-        (if (cadr paren-state)
+        (if (%c-cadr paren-state)
             (begin
               (set-car! (cdr elt) (c-state-cache-top-lparen paren-state))
               elt)
@@ -13617,9 +13614,9 @@
             ;; "ignore unbalanced [,{,(,.."
             (c-with-syntax-table (%c-langvar 'c-no-parens-syntax-table)
                                  (lambda () (c-go-list-forward)))
-            (when (and (>= (point) lim)
-                       (equal? (c-get-char-property (- (point) 1) 'syntax-table)
-                               c->-as-paren-syntax)) ; "should always be true."
+            (when-e (and (>= (point) lim)
+                         (equal? (c-get-char-property (- (point) 1) 'syntax-table)
+                                 c->-as-paren-syntax)) ; "should always be true."
               (c-unmark-<-or->-as-paren (- (point) 1))
               (c-unmark-<-or->-as-paren pos)
               (c-truncate-lit-pos/state-cache pos)
@@ -13641,9 +13638,9 @@
             ;; "ignore unbalanced [,{,(,.."
             (c-with-syntax-table (%c-langvar 'c-no-parens-syntax-table)
                                  (lambda () (c-go-up-list-backward)))
-            (when (and (<= (point) lim)
-                       (equal? (c-get-char-property (point) 'syntax-table)
-                               c-<-as-paren-syntax)) ; "should always be true."
+            (when-e (and (<= (point) lim)
+                         (equal? (c-get-char-property (point) 'syntax-table)
+                                 c-<-as-paren-syntax)) ; "should always be true."
               (c-unmark-<-or->-as-paren (point))
               (c-truncate-lit-pos/state-cache (point))
               (c-unmark-<-or->-as-paren pos)
@@ -15306,19 +15303,23 @@
                       ;; "Always done if the open brace was at boi."
                       (goto-char paren-pos)
                       (set! boi (c-point 'boi))))
-                ;; "Fill in the current point as the anchor for all the
-                ;; symbols added above."
-                (let ((p (*c-syntactic-context*)))
-                  (while (not (eq? p syntax-last))
-                    (let ((q (cdr (car p))))
-                      (while (pair? q)
-                        (unless (car q)
-                          (set-car! q (if (or (pair? (cdr p)) (not fixed-anchor))
-                                          (point)
-                                          fixed-anchor)))
-                        (set! q (cdr q))))
-                    (set! p (cdr p))))
-                (loop))))))))
+                (loop))))
+          ;; "Fill in the current point as the anchor for all the symbols
+          ;; added above." **Emacs runs this once, after its `while'
+          ;; loop.** Inside the go-out gate it never runs at all when the
+          ;; loop's first test fails, and the symbol keeps its `nil'
+          ;; anchor - which is what the `else if' block-intro hit.
+          (let ((p (*c-syntactic-context*)))
+            (while (not (eq? p syntax-last))
+              (let ((q (cdr (car p))))
+                (while (pair? q)
+                  (unless (car q)
+                    (set-car! q (if (or (pair? (cdr p)) (not fixed-anchor))
+                                    (point)
+                                    fixed-anchor)))
+                  (set! q (cdr q))))
+              (set! p (cdr p))))
+          #f))))
 
 (define (c-add-class-syntax symbol containing-decl-open containing-decl-start
                             containing-decl-kwd . args)
@@ -15455,7 +15456,11 @@
              (set! placeholder (c-up-list-backward))
              (and placeholder
                   (eqv? (char-after placeholder) #\<)
-                  (/= (char-before placeholder) #\<)
+                  ;; Emacs's `(/= (char-before placeholder) ?<)': a
+                  ;; character is not a number here, so the comparison is
+                  ;; `eqv?' (`#f' at BOB is not `#\<' either, as Elisp's
+                  ;; would only differ by signalling).
+                  (not (eqv? (char-before placeholder) #\<))
                   (begin
                     (goto-char (+ 1 placeholder))
                     (or (not (looking-at (%c-langvar 'c-<-op-cont-regexp)))

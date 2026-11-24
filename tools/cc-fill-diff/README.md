@@ -40,25 +40,30 @@ sides. `fixture-guess.c`, `fixture-guess.cpp`, `fixture-fill.c` and
   of the filled paragraph), so it is the tree's `fill-paragraph` point
   handling, not `c-mask-paragraph`.
 * `c-indent-new-comment-line`, `c-context-line-break`,
-  `c-context-open-line` on `fixture-fill.cpp`: identical except four
-  `c-context-open-line` positions (101, 108, 158, 190), all where the
-  command's inserted `x` splits a comment starter after the
-  `c-lit-limits` snapshot, so the command's transient `c-indent-line`
-  sees `/x` and `* block` text Emacs then classifies differently;
+  `c-context-open-line` on `fixture-fill.cpp`: identical except
+  `c-context-open-line` at positions 108 and 158, where the command's
+  inserted `x` splits a comment starter after the `c-lit-limits`
+  snapshot, so the command's transient `c-indent-line` sees `/x` and
+  `* block` text Emacs then classifies differently;
   `fixture-transient108.cpp` is the static state, and the indentation
   differential (`tools/cc-indent-diff/`) differs on it at position 110
   - Emacs `((topmost-intro-cont 107))` column 4, ours
   `((defun-block-intro 93) (statement-cont 93))` column 7.
 * … on `fixture-fill.c`: identical text except the multi-line
-  `#define`'s broken body lines (positions 946-970; 11-12 per command),
-  where `c-indent-new-comment-line`'s "temporarily insert another line
-  break" state makes Emacs's `c-guess-basic-syntax` answer
+  `#define`'s broken body lines (positions 949-950 and 953-959,
+  966-970), where `c-indent-new-comment-line`'s "temporarily insert
+  another line break" state makes Emacs's `c-guess-basic-syntax` answer
   `((cpp-define-intro) (statement 1))` and ours `((cpp-macro-cont 1))`.
   The command leaves the continuation line at column 2 where Emacs
   aligns it to the macro body. The backslash insertion/alignment
   itself matches (the `#define M(x) \` fixture lines are byte-identical
   once the break point is not inside the braced body), and
-  `c-fill-paragraph` over the same lines is identical.
+  `c-fill-paragraph` over the same lines is identical. Positions
+  934-945 return the *unspecified* value where Emacs returns nil (the
+  text is identical): `c-indent-new-comment-line`'s macro branch
+  returns what `c-newline-and-indent` does, and the nil/unspecified
+  difference is recorded as the remaining return-value item in
+  DEPARTURES.md.
 * Return values: after `c-indent-new-comment-line`'s tail `if` grew an
   explicit `#f` else, the remaining differences are nil/unspecified in
   the `#define` positions above (6 per run) and the two sides' *printed

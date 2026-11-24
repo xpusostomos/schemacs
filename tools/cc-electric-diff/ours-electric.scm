@@ -21,13 +21,13 @@
        c-electric-flag set!c-electric-flag
        c-auto-newline set!c-auto-newline
        c-hungry-delete-key set!c-hungry-delete-key)
- ;; **The mode's change hooks are deliberately NOT installed.** Emacs's
- ;; `c-mode' runs `c-before-change'/`c-after-change' on every edit, and
- ;; cc-mode.el is not ported; enabling them here (they are ported and
- ;; verified on their own) runs the caches through edits they have not
- ;; been exercised on yet - `c-laomib-fix-elt' raises - which is a
- ;; separate job. The electric commands are compared in isolation, as
- ;; `tools/cc-cmds-diff' compares the indentation commands.
+ ;; **The mode's change hooks ARE installed**, scoped around each
+ ;; scenario's command: Emacs's `c-mode' runs `c-before-change'/
+ ;; `c-after-change' on every edit (`cc-mode.el:758'/`:763'), and several
+ ;; of the electric commands' answers depend on them (`brace-elseif'
+ ;; below all). They are global parameters in this tree, so the run
+ ;; parameterizes them - the equivalent of Emacs's buffer-local
+ ;; `add-hook', and it cannot accumulate across scenarios.
  (schemacs progmodes cc-align)
  (only (schemacs progmodes cc-cmds)
        c-electric-brace c-electric-semi&comma c-electric-colon
@@ -35,6 +35,8 @@
        c-electric-backspace c-hungry-delete-backwards
        c-electric-delete-forward c-hungry-delete-forward
        c-electric-continued-statement c-electric-lt-gt c-indent-line)
+ (only (schemacs insdel) *before-change-functions* *after-change-functions*)
+ (only (schemacs progmodes cc-mode) c-before-change c-after-change)
  (only (schemacs newcomment) set!comment-start set!comment-end)
  (only (schemacs command) *last-command-event*))
 
@@ -167,6 +169,10 @@
     (goto-char (if (string=? point-spec "end") (point-max)
                    (string->number point-spec)))
     (parameterize ((*c-buffer-is-cc-mode* mode)
+                   (*before-change-functions*
+                    (cons c-before-change (*before-change-functions*)))
+                   (*after-change-functions*
+                    (cons c-after-change (*after-change-functions*)))
                    (*last-command-event* key))
       (cond ((string=? arg "none") (cmd))
             ((string=? arg "nil") (cmd #f))

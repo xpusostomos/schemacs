@@ -5408,7 +5408,10 @@ If a fill prefix is specified, it overrides all the above."
                                (or (and (eq? (*c-lit-type*) 'c)
                                         (save-excursion
                                           (goto-char (- (cdr (*c-lit-limits*)) 2))
-                                          (if (looking-at "\\*/") (point))))
+                                          ;; Elisp's `if' without an else is
+                                          ;; nil; Scheme's is the unspecified
+                                          ;; value, which `and' takes as true.
+                                          (if (looking-at "\\*/") (point) #f)))
                                    (cdr (*c-lit-limits*)))))
                           ;; "Skip forward past the fill prefix in case
                           ;; we're standing in it."

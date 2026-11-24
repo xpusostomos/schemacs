@@ -22,7 +22,7 @@ From the tree root:
 
 ## The result
 
-**60 scenarios, 0 different, 1 known.** The scenarios cover:
+**60 scenarios, 0 different.** The scenarios cover:
 
 - `c-electric-brace`: a defun, an `if`, a `struct`, auto-newline on
   and off, a numeric ARG, `c-electric-flag` off, every applicable
@@ -75,31 +75,23 @@ literal mode symbol, install `(c-lang-const c-make-mode-syntax-table
 block-comment flag and `indent-line-function`. When cc-mode.el lands,
 the harness should be re-pointed at the real mode and re-run.
 
-## The change hooks are deliberately not installed
+## The change hooks are installed
 
-Emacs's `c-mode` runs `c-before-change`/`c-after-change` on every edit;
-the port's are written and tested (see `cc-mode.scm`), but installing
-them in this harness is something else:
+Emacs's `c-mode` runs `c-before-change`/`c-after-change` on every edit
+(`cc-mode.el:758'/`:763'), and several electric answers depend on them
+(the `brace-elseif-brace` cleanup above all). The port's are in
+`cc-mode.scm`; the run
+parameterizes `*before-change-functions*`/`*after-change-functions*`
+with them around each scenario, which is Emacs's buffer-local
+`add-hook` spelled the way this tree can spell it.
 
-- with them installed, the C++ brace scenarios raise inside
-  `c-laomib-fix-elt` (`(cdr '())` where Emacs's `(cdr nil)` is nil) -
-  a bug in the already-ported bracelist machinery that the electric
-  path exercises but nothing had before. That is a separate cc-engine
-  fix (its own tranche, with the differential re-run), and mixing it
-  into this harness would make an electric bug indistinguishable from
-  it;
-- the one known difference below is *caused* by not installing them,
-  so its status changes on the day they are installed.
+Installing them is what exposed the two cc-engine bugs the electric
+pass's first run could not see, both since fixed and recorded in
+DEPARTURES.md: `c-laomib-fix-elt` walked a nil paren-state (`'()` is
+true in Scheme where Emacs's nil is false), and `c-add-stmt-syntax`
+filled in the anchor for the symbols it adds *inside* its go-out-of-
+block gate instead of once after the loop - which left `(topmost-intro
+#f)`-style answers, and made `brace-elseif` differ.
 
-## The one known difference: `brace-elseif`
-
-`if (x) {\n  y;\n}\nelse if (z)\n` + `{`, with `c-auto-newline` on and
-the `brace-elseif-brace` cleanup enabled: Emacs leaves the cursor at
-column 3 (indentation 2 plus point one past the `{` position), ours at
-2. **A static `c-indent-line` on the post-cleanup text gives 2 in both
-editors** - Emacs's 3 comes from its `c-after-change` hooks running
-between the cleanup's delete and its insert, while this harness's fresh
-parse after the whole command gives the settled answer. So the
-disagreement is the harness's missing hooks, not the command; it is
-listed in `known.txt` with that reason, and it is the first scenario to
-re-check when the hooks are installed.
+`known.txt` is therefore empty and kept only as the harness's format
+for a future deliberate difference.

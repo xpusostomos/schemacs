@@ -17631,3 +17631,68 @@ suite passes; `schemacs/imports.scm` is regenerated (125 libraries,
 5099 names) and `python3 tools/pty-check.py imports scratch` is 2/2.
 `cc-cmds.scm` compiles at `#:optimization-level 1` (the Guile 3.0.11
 miscompile rule still applies).
+
+# Handoff - cc-mode: the change hooks on, and the seven defects they
+# exposed (2026-11-24)
+
+The electric tranche's harness now installs the mode's change hooks,
+and the cc-cmds indentation differential went from **75 of 99
+fixture/style pairs to 99 of 99**. Seven real defects fell out, all
+recorded in DEPARTURES.md's section of this date:
+
+1. `c-laomib-fix-elt` ran off a nil paren-state (`'()` is true in
+   Scheme where Emacs's nil is false; the reads are `%c-cadr` now).
+2. `c-add-stmt-syntax` filled in the anchor *inside* its go-out gate;
+   Emacs does it once after the loop. `(statement-block-intro #f)` and
+   the `else if` indent (2 vs 3) were the symptom.
+3. `c-guess-continued-construct`'s CASE G compared a character with
+   `/=`.
+4. `c-looking-at-inexpr-block`'s compound-literal arm was a stale
+   signalling stub; it is the C's expression now.
+5. Two `when`s in `c-clear-<-pair-props-if-match-after`/
+   `c-clear->-pair-props-if-match-before` answered the unspecified
+   value where Emacs answers nil, and a caller's `setq` read it.
+6. `car-safe`/`cdr-safe` in `subr.scm` answered `'()` for a non-cons -
+   true in Scheme - where Emacs answers nil; `c-lineup-comment`'s
+   `(or (cdr-safe offset) ...)` took the empty list and the
+   comment-intro offset came out 0 instead of -1000. Both answer `#f`
+   now (shared primitive: the full batteries were run).
+7. `c-indent-new-comment-line`'s `comment-text-end` had an `if`
+   without an `else` in value position; the unspecified value is true
+   and `(> (point) #<unspecified>)` raised in `c-context-open-line`.
+
+## What a replay must do, learned the hard way
+
+- **Bind `*c-buffer-is-cc-mode*` for the whole run**, not just the
+  setup. It is a buffer-local in Emacs (set by `c-basic-common-init`);
+  here it is a parameter, and a C++ branch (`public slots:` as
+  `access-label`) silently takes the other arm when it is unbound.
+- **Install `c-before-change`/`c-after-change`** around any command
+  that edits repeatedly (`c-indent-region`): the caches are
+  invalidated from those hooks.
+- `tools/cc-cmds-diff/ours-cmds.scm` and
+  `tools/cc-electric-diff/ours-electric.scm` do both now;
+  `tools/cc-cmds-diff/README.md` and `tools/cc-electric-diff/README.md`
+  say why.
+
+## Verified
+
+`tools/cc-cmds-diff/` 99/99; `tools/cc-indent-diff/` 84/84;
+`tools/cc-cgbs-diff/` 10 fixtures identical; `tools/cc-decl-diff/`
+8 fixtures identical; `tools/cc-electric-diff/` 60 scenarios, 0
+different (`known.txt` empty). `tools/cc-fill-diff/` is unchanged from
+its documented state apart from defect 7's two improvements; its
+current-vs-baseline run is identical. The `cc-*` suites pass
+(`cc-engine-tests` 629, `cc-cmds-test` 106, `cc-align-test` 55,
+`cc-mode-test` 110), and the full suite and pty batteries were run on
+the settled tree (see the commit message for the counts).
+
+## Next
+
+`cc-mode.el`: `c-basic-common-init`/`c-common-init`/`c-font-lock-init`
+and the mode definitions, with `easy-menu-define` still the one missing
+primitive for its menus and a `def-edebug-spec` stub; then the
+`.c`/`.h` milestone (auto-mode-alist). The remaining fill item is
+`c-indent-new-comment-line`'s macro branch returning what
+`c-newline-and-indent` does (nil vs unspecified) - named in the fill
+README.

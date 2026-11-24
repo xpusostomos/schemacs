@@ -1,1 +1,0 @@
-brace-elseif	Emacs's answer after the brace-elseif-brace cleanup is 3 where a fresh parse gives 2; the difference comes from Emacs's c-after-change running during the cleanup, and this harness deliberately does not install the mode's change hooks (see ours-electric.scm). A static c-indent-line on the post-cleanup text gives 2 in both editors.
