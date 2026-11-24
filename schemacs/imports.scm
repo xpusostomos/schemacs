@@ -1229,6 +1229,7 @@
     c-after-change-unmark-ml-strings
     c-after-conditional
     c-after-special-operator-id
+    c-after-statement-terminator-p
     c-alnum
     c-alpha
     c-annotation-face
@@ -1236,6 +1237,8 @@
     c-append-lower-brace-pair-to-state-cache
     c-append-syntax
     c-append-to-state-cache
+    c-ascertain-following-literal
+    c-ascertain-preceding-literal
     c-at-bracelist-p
     c-at-enum-brace
     c-at-expression-start-p
@@ -1245,6 +1248,7 @@
     c-at-vsemi-p
     c-auto-newline
     c-back-over-compound-identifier
+    c-back-over-illiterals
     c-back-over-member-initializer-braces
     c-back-over-member-initializers
     c-backslash-column
@@ -1252,6 +1256,7 @@
     c-backslash-region
     c-backward-<>-arglist
     c-backward-comments
+    c-backward-conditional
     c-backward-into-nomenclature
     c-backward-over-enum-header
     c-backward-over-lambda-expression
@@ -1285,6 +1290,9 @@
     c-beginning-of-inheritance-list
     c-beginning-of-macro
     c-beginning-of-objc-method-header
+    c-beginning-of-sentence-in-comment
+    c-beginning-of-sentence-in-string
+    c-beginning-of-statement
     c-beginning-of-statement-1
     c-beginning-of-syntax
     c-benign-error
@@ -1302,6 +1310,7 @@
     c-c++-make-ml-string-opener-re
     c-c++-vsemi-p
     c-cache-to-parse-ps-state
+    c-calc-comment-indent
     c-calc-offset
     c-calculate-state
     c-called-from-text-property-change-p
@@ -1330,6 +1339,7 @@
     c-clear-syntax-table-with-value-on-char-trim-caches
     c-clear-syntax-table-with-value-trim-caches
     c-collect-line-comments
+    c-comment-indent
     c-comment-only-line-offset
     c-comment-prefix-regexp
     c-complex-decl-matchers
@@ -1376,6 +1386,8 @@
     c-doc-line-join-re
     c-doc-markup-face-name
     c-doc-style-property
+    c-down-conditional
+    c-down-conditional-with-else
     c-down-list-backward
     c-down-list-forward
     c-echo-parsing-error
@@ -1387,6 +1399,9 @@
     c-end-of-defun
     c-end-of-literal
     c-end-of-macro
+    c-end-of-sentence-in-comment
+    c-end-of-sentence-in-string
+    c-end-of-statement
     c-end-of-token
     c-end-pos
     c-evaluate-offset
@@ -1449,6 +1464,7 @@
     c-forward-comment-minus-1
     c-forward-comments
     c-forward-concept-fragment
+    c-forward-conditional
     c-forward-constraint-clause
     c-forward-decl-arglist
     c-forward-decl-or-cast-1
@@ -1464,6 +1480,7 @@
     c-forward-over-colon-type-list
     c-forward-over-compound-identifier
     c-forward-over-cpp-define-id
+    c-forward-over-illiterals
     c-forward-over-token
     c-forward-over-token-and-ws
     c-forward-primary-expression
@@ -1508,6 +1525,7 @@
     c-hanging-semi&comma-criteria
     c-hungry-delete-key
     c-in-after-change-fontification
+    c-in-comment-line-prefix-p
     c-in-function-trailer-p
     c-in-gcc-asm-p
     c-in-id-arglist
@@ -1694,6 +1712,7 @@
     c-most-enclosing-decl-block
     c-multiline-string-check-final-quote
     c-multiline-string-start-is-being-detached
+    c-narrow-to-comment-innards
     c-narrow-to-most-enclosing-decl-block
     c-negation-char-face-name
     c-neutralize-CPP-line
@@ -1717,7 +1736,9 @@
     c-old-beg-ml
     c-old-end-ml
     c-on-identifier
+    c-one-line-string-p
     c-open-string-opener
+    c-outline-level
     c-override-default-keywords
     c-parse-ps-state-below
     c-parse-ps-state-to-cache
@@ -1788,6 +1809,7 @@
     c-safe-position
     c-safe-scan-lists
     c-save-buffer-state
+    c-scan-conditionals
     c-scope-operator
     c-search-backward-char-property
     c-search-backward-char-property-with-value-on-char
@@ -1806,6 +1828,7 @@
     c-semi-pp-to-literal
     c-semi-put-near-cache-entry
     c-semi-trim-near-cache
+    c-sentence-end
     c-sentence-end-with-esc-eol
     c-set-doc-comment-char-list
     c-set-doc-comment-re-element
@@ -1901,6 +1924,8 @@
     c-unfind-type
     c-unmark-<-or->-as-paren
     c-unmark-<>-around-region
+    c-up-conditional
+    c-up-conditional-with-else
     c-up-list-backward
     c-up-list-forward
     c-update-brace-stack

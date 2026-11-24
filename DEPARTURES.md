@@ -16210,3 +16210,115 @@ in a real buffer `c-mode''s `:after-hook' calls it (and
 it fails with `(string=? #f "<the keywords regexp>")' from
 `c-forward-sws' at the first indent. `test/progmodes/cc-cmds-test.scm''s
 `fresh' and the differential harness call both, as the mode will.
+
+# cc-mode: movement by statements, sentences, comments and conditionals
+# (2026-11-24)
+
+`cc-cmds.el:2429'-`:3531' is in `cc-cmds.scm`: `c-in-comment-line-prefix-p`,
+`c-narrow-to-comment-innards`, `c-beginning-of-sentence-in-comment`,
+`c-end-of-sentence-in-comment`, `c-beginning-of-sentence-in-string`,
+`c-end-of-sentence-in-string`, `c-ascertain-preceding-literal`,
+`c-ascertain-following-literal`, `c-after-statement-terminator-p`,
+`c-back-over-illiterals`, `c-forward-over-illiterals`,
+`c-one-line-string-p`, `c-beginning-of-statement`, `c-end-of-statement`,
+`c-calc-comment-indent`, `c-comment-indent`, `c-outline-level`,
+`c-scan-conditionals` and the six conditional commands, plus
+`c-sentence-end` in `cc-defs.scm`. They sit in Emacs's file order -
+between the defun movements and `c-indent-command`.
+
+## The gate: `tools/cc-cmds-diff/emacs-stmt.el` / `ours-stmt.scm`
+
+Twenty-two probes at **every position** of `fixture-stmt.c`,
+`fixture-stmt.cpp`, `fixture-defuns.c`, `fixture-knr.c`, `fixture-label.c`,
+`fixture-brace.c`, `fixture-brace.cpp` and `fixture.cpp`: both statement
+movements with sentence-flag nil and t, `c-back-over-illiterals`,
+`c-forward-over-illiterals` (both ALLOW-EARLY-STOP values),
+`c-ascertain-preceding/following-literal`, `c-after-statement-terminator-p`,
+`c-one-line-string-p`, the four sentence movers, `c-comment-indent`,
+`c-outline-level`, `c-in-comment-line-prefix-p`, and four
+`c-scan-conditionals` shapes. **Identical on all eight fixtures, every
+position, both languages.**
+
+Two positions' records carry the harness's own limits and are worth
+knowing when reading it:
+
+* the `c-scan-conditionals` probes run after the other probes in the
+  same buffer, and Emacs itself errors on some of them there where a
+  fresh Emacs returns a position (`c-scan-conditionals 1` at position 1
+  is 283 fresh, an error in the harness). The two sides still agree on
+  every record; the clean table - positions 1/230/283 with counts +/-1,
+  TARGET-DEPTH and WITH-ELSE - is pinned separately in
+  `cc-cmds-tests.scm`;
+* `c-one-line-string-p` and the sentence movers are only probed when
+  `c-literal-limits` answers a literal, which is `nil` in the record
+  otherwise.
+
+## The two Elisp-nil bugs this tranche found (both changed answers)
+
+1. **`(c-indent-comments-syntactically-p)` is a style variable whose
+   value after `c-set-style` is the fallback's `()`, not `#f`.**
+   `c-comment-indent` tested it with a plain `if`, and `()` is true in
+   Scheme: every comment-only line took the *syntactic* branch, so
+   `M-x indent-for-comment` on `  // ...` answered 2 where Emacs answers
+   `comment-column`, 32. The test is `(%c-true ...)` now.
+2. **A `cond` with no matching clause is the unspecified value
+   (true).** `c-scan-conditionals`' inner `(if (cond ...) ...)` acts
+   only when a clause fires; written without an `else` it fired always,
+   and `(> dchange 0)` then raised on `#f` for an ordinary `#else`
+   line. `c-calc-comment-indent`'s outer `cond` had the same shape in
+   value position. Both have an explicit `(else #f)` now. (The third
+   instance in this pass was `(when (setq res ...))`, which is `when-e`.)
+
+## One structure bug the differential caught
+
+`c-end-of-sentence-in-comment`'s final `(goto-char (cdr range))` was
+inside its `save-restriction`. The narrowing to the comment's innards
+ends two characters before the comment's end, so `goto-char 91` was
+clipped to 89 and the probe recorded point 89 where Emacs has 91; the
+function still answered `t`, which is why only the point field showed
+it. Moving one `)` before the second `if` fixed it. `c-beginning-of-
+sentence-in-comment` is the same shape but its `(goto-char (car
+range))` is outside the narrowing in both.
+
+## Representation departures
+
+* **`c-sentence-end` is a procedure in `cc-defs.scm`** (its macro's
+  home), `(sentence-end)` from `paragraphs`. `cc-vars`' existing
+  `c-default-value-sentence-end` is the other half.
+* **The two `paragraph-start`/`paragraph-separate` bindings in the
+  string sentence movers are `call-with-buffer-local`**, because Emacs
+  `let`-binds a buffer-local variable and this tree's paragraph
+  variables are parameter + buffer-local accessor pairs.
+* **`c-outline-level` does not bind `buffer-invisibility-spec`**: there
+  is no invisibility in this tree (`indentc.scm` says so), so the
+  binding would have nothing to do.
+* **The `mapc`/`put` block after `c-end-of-statement`
+  (`cc-cmds.el:3231`) is not carried.** It marks the electric commands
+  for `delete-selection-mode` and `pending-del`, neither of which is
+  ported, and the commands themselves are the next tranche.
+* **`c-beginning-of-statement`/`c-end-of-statement`'s interactive spec
+  is an expression** - `(list (prefix-numeric-value (current-prefix-arg))
+  #f #t)` - not a code string, because it supplies three arguments and
+  the middle one is nil; `"p"` cannot say that.
+* `this-command`/`last-command` do not appear in this tranche;
+  `catch`/`throw` are `call-with-current-continuation`, as in the defun
+  movements; every `(eq (char-after) ?X)` is `%c-char-after=?`.
+
+## The Emacs harness bug worth remembering
+
+`lit-probe`'s lambda body used the name `thunk`, which is also
+`probe`'s parameter name. Emacs Lisp's dynamic binding then had
+`thunk` bound to the probe function itself when the wrapper ran, so
+`(funcall thunk range)` called the zero-argument wrapper with one
+argument: `wrong-number-of-arguments`. The schemacs side has lexical
+scope and was unaffected, so every literal probe diverged before the
+fix. Renaming the parameter to `fun` fixed it. Any Emacs-side harness
+whose thunks mention names the wrapper also binds has the same trap.
+
+## Verified
+
+All the cc suites pass - `cc-cmds-tests.scm` is 49 (its original 26,
+the defun movements' 10, and this tranche's 13) - `imports.scm` is
+regenerated (125 libraries, 5,065 names), `loadup-test.scm` passes,
+and the pty `imports`/`scratch` smoke checks pass. The statement
+harnesses and fixtures are in `tools/cc-cmds-diff/`.

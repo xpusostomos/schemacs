@@ -1,7 +1,8 @@
 (define-library (schemacs progmodes cc-cmds)
   ;; `lisp/progmodes/cc-cmds.el' - the editing commands: the indentation
-  ;; command layer and the defun movements, with the electric keys, the
-  ;; sentence motions and the paragraph-filling machinery to follow.
+  ;; command layer, the defun movements, and the statement/sentence
+  ;; movements with the comment-indent and CPP-conditional commands. The
+  ;; electric keys and the paragraph-filling half still follow.
   ;;
   ;; Ported, in Emacs's file order: `c-fix-backslashes', `c-indent-line',
   ;; `c-newline-and-indent', `c-show-syntactic-information',
@@ -17,18 +18,29 @@
   ;; `c-forward-to-nth-EOF-;-or-}', `c-end-of-defun', `c-defun-name-1',
   ;; `c-defun-name', `c-declaration-limits-1', `c-declaration-limits',
   ;; `c-defun-name-and-limits', `c-display-defun-name',
-  ;; `c-mark-function', `c-cpp-define-name' and `c-indent-defun'.
+  ;; `c-mark-function' and `c-cpp-define-name', and - the second
+  ;; 2026-11-24 pass - `c-in-comment-line-prefix-p',
+  ;; `c-narrow-to-comment-innards', the four sentence movers,
+  ;; `c-ascertain-preceding-literal'/`-following-literal',
+  ;; `c-after-statement-terminator-p', `c-back-over-illiterals',
+  ;; `c-forward-over-illiterals', `c-one-line-string-p',
+  ;; `c-beginning-of-statement', `c-end-of-statement',
+  ;; `c-calc-comment-indent', `c-comment-indent', `c-outline-level',
+  ;; `c-scan-conditionals' and the six conditional commands.
   ;;
   ;; **Not carried yet**, each with what it waits for:
   ;;
   ;;   * every `c-electric-*' command and the `c-hanging-*' machinery
   ;;     they drive (`c-point-syntax', `c-brace-newlines',
-  ;;     `c-try-one-liner', `c-do-brace-electrics') - the next tranche;
+  ;;     `c-try-one-liner', `c-do-brace-electrics') - the next tranche -
+  ;;     and with them the file's `mapc`(`put SYM 'delete-selection ...)
+  ;;     block (`cc-cmds.el:3231'), which marks those commands for
+  ;;     `delete-selection-mode`/`pending-del`, neither of which exists
+  ;;     here;
   ;;   * `c-backward-into-nomenclature' forwards to `subword.el''s
   ;;     `subword-backward' or `cc-subword.el''s `c-backward-subword',
   ;;     and neither library is ported; the command is a stub that
   ;;     names the gap (`c-beginning-of-objc-method-header''s shape);
-  ;;   * the sentence motions in comments and strings;
   ;;   * `c-indent-new-comment-line', `c-context-line-break' and the
   ;;     `c-mask-paragraph' filling half;
   ;;   * `electric-indent-mode' does not exist here, so
@@ -73,6 +85,20 @@
   ;;     special variables; the two defun-function parameters and
   ;;     `*case-fold-search*' are `parameterize'd around the macro
   ;;     instead (the plain locals stay in its let*);
+  ;;   * the two `paragraph-\(start\|separate\)' bindings in the
+  ;;     string sentence movers are `call-with-buffer-local', Emacs
+  ;;     `let'-binding a buffer-local variable;
+  ;;   * `c-calc-comment-indent''s and `c-scan-conditionals'' `cond's get
+  ;;     explicit `(else #f)': a cond with no matching clause answers the
+  ;;     unspecified value here, which is true, where Emacs's answers
+  ;;     nil. Likewise `c-comment-indent''s
+  ;;     `c-indent-comments-syntactically-p' test is `%c-true` - the
+  ;;     accessor answers the style's nil as `()`, which is true;
+  ;;   * `c-sentence-end' (`cc-defs.el:572') is in `cc-defs', as its
+  ;;     macro is, calling paragraphs' `(sentence-end)';
+  ;;   * `c-outline-level''s `buffer-invisibility-spec' binding is not
+  ;;     carried: there is no invisibility here for `current-column' to
+  ;;     ignore;
   ;;   * `(run-hooks 'c-special-indent-hook)' needs the two things the
   ;;     tree's `run-hooks' cannot do - the `t' that marks a
   ;;     buffer-local hook (`subr.el:2317') and the symbol entries the
@@ -80,16 +106,18 @@
   ;;     C's `run_hook_with_args' (`eval.c:2999') for this one hook.
   (import
     (scheme base)
+    (only (guile) caddr)
     (only (schemacs core syntax-macros) when-e unless-e while-e setq prog1)
     (only (schemacs progmodes cc-defs)
           c-save-buffer-state c-with-string-fences
           c-put-overlay c-delete-overlay c-font-lock-flush
           c-region-is-active-p c-keep-region-active
-          c-forward-sexp c-safe c-langelem-pos c-langelem-2nd-pos
+          c-forward-sexp c-backward-sexp c-safe c-langelem-pos c-langelem-2nd-pos
           c-down-list-forward c-up-list-forward
           c-looking-at-non-alphnumspace
           c-major-mode-is
-          c-go-list-forward c-go-list-backward c-go-up-list-forward)
+          c-go-list-forward c-go-list-backward c-go-up-list-forward
+          c-sentence-end c-skip-ws-forward c-skip-ws-backward %c-true)
     (only (schemacs progmodes cc-vars)
           *c-syntactic-indentation* c-syntactic-indentation
           set!c-syntactic-indentation *c-syntactic-context*
@@ -102,7 +130,11 @@
           *c-special-indent-hook* c-special-indent-hook
           c-block-comment-flag set!c-block-comment-flag
           c-basic-offset c-backslash-column c-backslash-max-column
-          *c-defun-tactic*)
+          *c-defun-tactic*
+          c-indent-comment-alist c-indent-comments-syntactically-p
+          c-comment-only-line-offset c-current-comment-prefix
+          c-string-par-start c-string-par-separate
+          c-sentence-end-with-esc-eol)
     (only (schemacs progmodes cc-engine)
           c-guess-basic-syntax c-get-syntactic-indentation
           c-shift-line-indentation c-parsing-error set!c-parsing-error
@@ -122,7 +154,11 @@
           c-forward-syntactic-ws c-backward-syntactic-ws
           c-forward-decl-or-cast-1 c-forward-declarator
           c-forward-token-2 c-backward-token-2 c-literal-start
-          c-forward-comments c-forward-single-comment c-backward-single-comment)
+          c-forward-comments c-forward-single-comment c-backward-single-comment
+          c-literal-type c-literal-limits c-collect-line-comments
+          c-looking-at-special-brace-list c-at-vsemi-p
+          c-backward-comments
+          c-string-limit-regexp c-ws*-string-limit-regexp c-add-syntax)
     (only (schemacs buffer)
           current-buffer buffer-local-value set-buffer-local-value!
           call-with-buffer-local local-variable-p mode-name set!mode-name
@@ -154,21 +190,23 @@
           *this-command* *last-command*)
     (only (schemacs core lisp-mode) indent-code-rigidly)
     (only (schemacs core lisp) forward-sexp backward-sexp down-list
-          forward-list *beginning-of-defun-function*
+          forward-list up-list *beginning-of-defun-function*
           *end-of-defun-function*)
+    (only (schemacs textmodes paragraphs)
+          forward-paragraph paragraph-start paragraph-separate)
     (only (schemacs intervals) put)
     (only (schemacs marker)
           make-marker set-marker copy-marker markerp marker-position
           set-marker-insertion-type)
     (only (schemacs newcomment)
           comment-start comment-end set!comment-start set!comment-end
-          indent-for-comment)
+          indent-for-comment comment-column)
     (only (schemacs search) looking-at match-end match-beginning match-string
-          match-string-no-properties string-match
+          match-string-no-properties string-match save-match-data
           re-search-backward re-search-forward)
     (only (schemacs syntax)
           skip-chars-forward skip-chars-backward parse-partial-sexp
-          scan-sexps char-syntax)
+          scan-sexps char-syntax skip-syntax-forward skip-syntax-backward)
     (only (schemacs subr) run-hooks car-safe cdr-safe)
     (only (schemacs data) aref aset /=)
     ;; `c-progress-*' reads the clock (`(time-convert nil 'integer)').
@@ -199,6 +237,17 @@
    c-defun-name-1 c-defun-name c-declaration-limits-1 c-declaration-limits
    c-defun-name-and-limits c-display-defun-name c-mark-function
    c-cpp-define-name c-indent-defun
+   c-in-comment-line-prefix-p c-narrow-to-comment-innards
+   c-beginning-of-sentence-in-comment c-end-of-sentence-in-comment
+   c-beginning-of-sentence-in-string c-end-of-sentence-in-string
+   c-ascertain-preceding-literal c-ascertain-following-literal
+   c-after-statement-terminator-p c-back-over-illiterals
+   c-forward-over-illiterals c-one-line-string-p
+   c-beginning-of-statement c-end-of-statement
+   c-calc-comment-indent c-comment-indent c-outline-level
+   c-up-conditional c-up-conditional-with-else c-down-conditional
+   c-down-conditional-with-else c-backward-conditional
+   c-forward-conditional c-scan-conditionals
    c-run-special-indent-hook)
 
   (begin
@@ -607,12 +656,12 @@ This action does nothing when the mode only has one comment style."
     ;; answer nil at the accessible buffer's edges, and nil is false;
     ;; `char-before' here answers #f there and `char=?' would raise.
     ;; These two are those tests, spelled so the edges are false.
-    (define (%c-char-before=? char)
-      (let ((c (char-before)))
+    (define (%c-char-before=? char . pos-args)
+      (let ((c (apply char-before pos-args)))
         (and c (char=? c char))))
 
-    (define (%c-char-after=? char)
-      (let ((c (char-after)))
+    (define (%c-char-after=? char . pos-args)
+      (let ((c (apply char-after pos-args)))
         (and c (char=? c char))))
 
     ;;--------------------------------------------------------------
@@ -1583,6 +1632,1137 @@ function does not require the declaration to contain a brace block."
                  (looking-at start)
                  (match-string-no-properties 1))))))
 
+
+    ;; ---------------------------------------------------------------
+    ;; Movement by statements (`cc-cmds.el:2429'-`:3223')
+    ;;--------------------------------------------------------------
+    ;; Emacs's `c-while-widening-to-decl-block'-style catch/throw is
+    ;; `call-with-current-continuation' here (`c-beginning-of-decl-1''s
+    ;; shape); every `when' whose value the loop test reads is `when-e'
+    ;; (Emacs's nil, not the unspecified value), and `(eq (char-after)
+    ;; ?X)' at a buffer edge is the nil-safe `%c-char-after=?' - the two
+    ;; helpers the defun movements introduced now take an optional
+    ;; position.
+    (define (c-in-comment-line-prefix-p)
+      ;; "Point is within a comment.  Is it also within a
+      ;; comment-prefix? Space at BOL which precedes a comment-prefix
+      ;; counts as part of it."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((here (point)))
+        (save-excursion
+          (beginning-of-line)
+          (skip-chars-forward " \t")
+          (and (looking-at (c-current-comment-prefix))
+               (/= (match-beginning 0) (match-end 0))
+               (< here (match-end 0))))))
+
+    (define (c-narrow-to-comment-innards range)
+      ;; "Narrow to the \"inside\" of the comment (block) defined by
+      ;; range, as follows:"
+      ;;
+      ;; "A c-style block comment has its opening \"/*\" and its closing
+      ;; \"*/\" (if present) removed.  A c++-style line comment retains
+      ;; its opening \"//\" but has any final NL removed.  If POINT is
+      ;; currently outwith these innards, move it to the appropriate
+      ;; boundary."
+      ;;
+      ;; "This narrowing simplifies the sentence movement functions,
+      ;; since it eliminates awkward things at the boundaries of the
+      ;; comment (block)."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let* ((lit-type (c-literal-type range))
+             (beg (if (eq? lit-type 'c) (+ (car range) 2) (car range)))
+             (end (if (eq? lit-type 'c)
+                      (if (and (%c-char-before=? #\/ (cdr range))
+                               (%c-char-before=? #\* (- (cdr range) 1)))
+                          (- (cdr range) 2)
+                          (point-max))
+                      (if (= (cdr range) (point-max))
+                          (point-max)
+                          (- (cdr range) 1)))))
+        (if (> (point) end)
+            (goto-char end)) ; "This would be done automatically by ..."
+        (if (< (point) beg)
+            (goto-char beg)) ; "... narrow-to-region but is not documented."
+        (narrow-to-region beg end)))
+
+    (define (c-beginning-of-sentence-in-comment range)
+      ;; "Move backwards to the \"beginning of a sentence\" within the
+      ;; comment defined by RANGE, a cons of its starting and ending
+      ;; positions.  If we find a BOS, return NIL.  Otherwise, move point
+      ;; to just before the start of the comment and return T."
+      ;;
+      ;; "The BOS is either text which follows a regexp match of
+      ;; sentence-end, or text which is a beginning of \"paragraph\".
+      ;; Comment-prefixes are treated like WS when calculating BOSes or
+      ;; BOPs."
+      ;;
+      ;; "This code was adapted from GNU Emacs's forward-sentence in
+      ;; paragraphs.el. It is not a general function, but is intended
+      ;; only for calling from `c-move-over-sentence'.  Not all
+      ;; preconditions have been explicitly stated."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-match-data
+        (let ((start-point (point)))
+          (save-restriction
+            (c-narrow-to-comment-innards range) ; "This may move point back."
+            (let* ((here (point))
+                   (last #f)
+                   (here-filler ; "matches WS and comment-prefixes at point."
+                    (concat "\\=\\(^[ \t]*\\("
+                            (c-current-comment-prefix) "\\)"
+                            "\\|[ \t\n\r\f]\\)*"))
+                   (prefix-at-bol-here ; "matches WS and prefix at BOL, just before point"
+                    (concat "^[ \t]*\\(" (c-current-comment-prefix)
+                            "\\)[ \t\n\r\f]*\\="))
+                   ;; "First, find the previous paragraph start, if any."
+                   (par-beg ; "point where non-WS/non-prefix text of paragraph starts."
+                    (save-excursion
+                      (forward-paragraph -1) ; "uses cc-mode values of
+                                              ; paragraph-\(start\|separate\)"
+                      (if (> (re-search-forward here-filler #f #t) here)
+                          (goto-char here))
+                      (when-e (>= (point) here)
+                        (forward-paragraph -2)
+                        (if (> (re-search-forward here-filler #f #t) here)
+                            (goto-char here)))
+                      (point))))
+
+              ;; "Now seek successively earlier sentence ends between PAR-BEG
+              ;; and HERE, until the \"start of sentence\" following it is
+              ;; earlier than HERE, or we hit PAR-BEG.  Beware of comment
+              ;; prefixes!"
+              (while-e (and (re-search-backward (c-sentence-end) par-beg 'limit)
+                            (setq last (point))
+                            (goto-char (match-end 0)) ; "tentative beginning of sentence"
+                            (or (>= (point) here)
+                                (and (not (bolp)) ; "Found a non-blank comment-prefix?"
+                                     (save-excursion
+                                       (if (re-search-backward
+                                            prefix-at-bol-here #f #t)
+                                           (/= (match-beginning 1)
+                                               (match-end 1))
+                                           #f)))
+                                (begin ; "Skip the crud to find a real b-o-s."
+                                  (if (c-in-comment-line-prefix-p)
+                                      (beginning-of-line))
+                                  (re-search-forward here-filler) ; "always succeeds."
+                                  (>= (point) here))))
+                (goto-char last))
+              (re-search-forward here-filler)))
+
+          (if (< (point) start-point)
+              #f
+              (begin (goto-char (car range))
+                     #t)))))
+
+    (define (c-end-of-sentence-in-comment range)
+      ;; "Move forward to the \"end of a sentence\" within the comment
+      ;; defined by RANGE, a cons of its starting and ending positions
+      ;; (enclosing the opening comment delimiter and the terminating */
+      ;; or newline).  If we find an EOS, return NIL.  Otherwise, move
+      ;; point to just after the end of the comment and return T."
+      ;;
+      ;; "The EOS is just after the non-WS part of the next match of the
+      ;; regexp sentence-end.  Typically, this is just after one of
+      ;; [.!?].  If there is no sentence-end match following point, any
+      ;; WS before the end of the comment will count as EOS, providing
+      ;; we're not already in it."
+      ;;
+      ;; "This code was adapted from GNU Emacs's forward-sentence in
+      ;; paragraphs.el. It is not a general function, but is intended
+      ;; only for calling from `c-move-over-sentence'."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-match-data
+        (let ((start-point (point)))
+          (save-restriction
+            (c-narrow-to-comment-innards range) ; "This might move point forwards."
+            (let* ((here (point))
+                   (par-end ; "EOL position of last text in current/next paragraph."
+                    (save-excursion
+                      ;; "The cc-mode values of paragraph-\(start\|separate\),
+                      ;; set in c-setup-paragraph-variables, are used in
+                      ;; the following."
+                      (forward-paragraph 1)
+                      (if (and (char-before) (char=? (char-before) #\newline))
+                          (forward-char -1))
+                      (when-e (<= (point) here) ; "can happen, e.g., when HERE is at EOL."
+                        (goto-char here)
+                        (forward-paragraph 2)
+                        (if (and (char-before)
+                                 (char=? (char-before) #\newline))
+                            (forward-char -1)))
+                      (point)))
+
+                   (last #f)
+                   (prefix-at-bol-here
+                    (concat "^[ \t]*\\(" (c-current-comment-prefix) "\\)\\=")))
+              ;; "Go forward one \"comment-prefix which looks like
+              ;; sentence-end\" each time round the following:"
+              (while-e (and (re-search-forward (c-sentence-end) par-end 'limit)
+                            (begin
+                              (setq last (point))
+                              (skip-chars-backward " \t\n")
+                              (or (and (not (bolp))
+                                       (re-search-backward prefix-at-bol-here #f #t)
+                                       (/= (match-beginning 1) (match-end 1)))
+                                  (<= (point) here))))
+                (goto-char last))
+
+              ;; "Take special action if we're up against the end of a
+              ;; comment (of either sort): Leave point just after the
+              ;; last non-ws text."
+              (if (= (point) (point-max))
+                  (while-e (or (/= (skip-chars-backward " \t\n") 0)
+                               (and (re-search-backward prefix-at-bol-here #f #t)
+                                    (/= (match-beginning 1) (match-end 1))))
+                    #t))))
+
+          (if (> (point) start-point)
+              #f
+              (begin (goto-char (cdr range))
+                     #t)))))
+
+    (define (c-beginning-of-sentence-in-string range)
+      ;; "Move backwards to the \"beginning of a sentence\" within the
+      ;; string defined by RANGE, a cons of its starting and ending
+      ;; positions (enclosing the string quotes).  If we find a BOS,
+      ;; return NIL.  Otherwise, move point to just before the start of
+      ;; the string and return T."
+      ;;
+      ;; "The BOS is either the text which follows a regexp match of
+      ;; sentence-end or text which is a beginning of \"paragraph\".  For
+      ;; the purposes of determining paragraph boundaries, escaped
+      ;; newlines are treated as ordinary newlines."
+      ;;
+      ;; "This code was adapted from GNU Emacs's forward-sentence in
+      ;; paragraphs.el. It is not a general function, but is intended
+      ;; only for calling from `c-move-over-sentence'."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-match-data
+        (call-with-buffer-local
+         'paragraph-start c-string-par-start
+         (lambda ()
+           (call-with-buffer-local
+            'paragraph-separate c-string-par-separate
+            (lambda ()
+              (let* ((here (point)) (last #f)
+                     (end (- (cdr range) 1))
+                     (here-filler ; "matches WS and escaped newlines at point."
+                      "\\=\\([ \t\n\r\f]\\|\\\\[\n\r]\\)*")
+                     ;; "Enhance paragraph-start and paragraph-separate
+                     ;; also to recognize blank lines terminated by
+                     ;; escaped EOLs. ..."
+                     (par-beg ; "beginning of current (or previous) paragraph."
+                      (save-excursion
+                        (save-restriction
+                          (narrow-to-region (+ (car range) 1) end)
+                          (forward-paragraph -1) ; "uses above values of
+                                                  ; paragraph-\(start\|separate\)"
+                          (if (> (re-search-forward here-filler #f #t) here)
+                              (goto-char here))
+                          (when-e (>= (point) here)
+                            (forward-paragraph -2)
+                            (if (> (re-search-forward here-filler #f #t) here)
+                                (goto-char here)))
+                          (point)))))
+                ;; "Now see if we can find a sentence end after PAR-BEG."
+                (while-e (and (re-search-backward
+                               c-sentence-end-with-esc-eol par-beg 'limit)
+                              (setq last (point))
+                              (goto-char (match-end 0))
+                              (or (> (point) end)
+                                  (begin
+                                    (re-search-forward
+                                     here-filler end #t) ; "always succeeds.  Use end rather
+                                                         ; than here, in case point starts
+                                                         ; beyond the closing quote."
+                                    (>= (point) here))))
+                  (goto-char last))
+                (re-search-forward here-filler here #t)
+                (if (< (point) here)
+                    #f
+                    (begin (goto-char (car range))
+                           #t)))))))))
+
+    (define (c-end-of-sentence-in-string range)
+      ;; "Move forward to the \"end of a sentence\" within the string
+      ;; defined by RANGE, a cons of its starting and ending positions.
+      ;; If we find an EOS, return NIL.  Otherwise, move point to just
+      ;; after the end of the string and return T."
+      ;;
+      ;; "The EOS is just after the non-WS part of the next match of the
+      ;; regexp sentence-end.  Typically, this is just after one of
+      ;; [.!?].  If there is no sentence-end match following point, any
+      ;; WS before the end of the string will count as EOS, providing
+      ;; we're not already in it."
+      ;;
+      ;; "This code was adapted from GNU Emacs's forward-sentence in
+      ;; paragraphs.el. It is not a general function, but is intended
+      ;; only for calling from `c-move-over-sentence'."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-match-data
+        (call-with-buffer-local
+         'paragraph-start c-string-par-start
+         (lambda ()
+           (call-with-buffer-local
+            'paragraph-separate c-string-par-separate
+            (lambda ()
+              (let* ((here (point))
+                     (last #f)
+                     ;; "Enhance paragraph-start and paragraph-separate
+                     ;; to recognize blank lines terminated by escaped
+                     ;; EOLs."
+                     (par-end ; "EOL position of last text in current/next paragraph."
+                      (save-excursion
+                        (save-restriction
+                          (narrow-to-region (car range) (- (cdr range) 1))
+                          ;; "The above values of paragraph-\(start\|separate\)
+                          ;; are used in the following."
+                          (forward-paragraph 1)
+                          (setq last (point))
+                          ;; "(re-search-backward filler-here nil t) would
+                          ;; find an empty string.  Therefore we simulate
+                          ;; it by the following:"
+                          (while-e (or (/= (skip-chars-backward " \t\n\r\f") 0)
+                                       (re-search-backward "\\\\\\($\\)\\=" #f #t))
+                            #t)
+                          (unless (> (point) here)
+                            (goto-char last)
+                            (forward-paragraph 1)
+                            (while-e (or (/= (skip-chars-backward " \t\n\r\f") 0)
+                                         (re-search-backward "\\\\\\($\\)\\=" #f #t))
+                              #t))
+                          (point)))))
+                ;; "Try to go forward a sentence."
+                (when-e (re-search-forward c-sentence-end-with-esc-eol
+                                           par-end 'limit)
+                  (setq last (point))
+                  (while-e (or (/= (skip-chars-backward " \t\n") 0)
+                               (re-search-backward "\\\\\\($\\)\\=" #f #t))
+                    #t))
+                ;; "Did we move a sentence, or did we hit the end of the
+                ;; string?"
+                (if (> (point) here)
+                    #f
+                    (begin (goto-char (cdr range))
+                           #t)))))))))
+
+    (define (c-ascertain-preceding-literal)
+      ;; "Point is not in a literal (i.e. comment or string (include AWK
+      ;; regexp)). If a literal is the next thing (aside from whitespace)
+      ;; to be found before point, return a cons of its start.end
+      ;; positions (enclosing the delimiters).  Otherwise return NIL."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-excursion
+        (c-collect-line-comments
+         (let ((here (point))
+               (pos #f))
+           (if (c-backward-single-comment)
+               (cons (point) (begin (c-forward-single-comment) (point)))
+               (save-restriction
+                 ;; "to prevent `looking-at' seeing a \" at point."
+                 (narrow-to-region (point-min) here)
+                 (when-e
+                     (or
+                      ;; "An EOL can act as an \"open string\" terminator
+                      ;; in AWK."
+                      (looking-at c-ws*-string-limit-regexp)
+                      (and (not (bobp))
+                           (begin (backward-char 1)
+                                  (looking-at c-string-limit-regexp))))
+                   (goto-char (match-end 0)) ; "just after the string terminator."
+                   (setq pos (point))
+                   (c-safe (c-backward-sexp 1) ; "move back over the string."
+                           (cons (point) pos)))))))))
+
+    (define (c-ascertain-following-literal)
+      ;; "Point is not in a literal (i.e. comment or string (include AWK
+      ;; regexp)). If a literal is the next thing (aside from whitespace)
+      ;; following point, return a cons of its start.end positions
+      ;; (enclosing the delimiters).  Otherwise return NIL."
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-excursion
+        (c-collect-line-comments
+         (let ((pos #f))
+           (c-skip-ws-forward)
+           (if (looking-at c-string-limit-regexp) ; "string-delimiter."
+               (cons (point) (or (c-safe (begin (c-forward-sexp 1) (point)))
+                                 (point-max)))
+               (begin
+                 (setq pos (point))
+                 (if (c-forward-single-comment)
+                     (cons pos (point))
+                     #f)))))))
+
+    (define (c-after-statement-terminator-p) ; "Should we pass in LIM here?"
+      ;; "Does point immediately follow a statement \"terminator\"?  A
+      ;; virtual semicolon is regarded here as such.  So is an opening
+      ;; brace ;-)"
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (or (save-excursion
+            (backward-char 1)
+            (and (looking-at "[;{}]")
+                 (not (and (%c-langvar 'c-special-brace-lists) ; "Pike special brace lists."
+                           (%c-char-after=? #\{)
+                           (c-looking-at-special-brace-list)))))
+          (c-at-vsemi-p)
+          ;; "The following (for macros) is not strict about exactly
+          ;; where we are wrt white space at the end of the macro.
+          ;; Doesn't seem to matter too much.  ACM 2004/3/29."
+          (let ((eom #f))
+            (save-excursion
+              (if (c-beginning-of-macro)
+                  (setq eom (begin (c-end-of-macro) (point)))))
+            (when-e eom
+              (save-excursion
+                (c-forward-comments)
+                (>= (point) eom))))))
+
+    (define (c-back-over-illiterals macro-start)
+      ;; "Move backwards over code which isn't a literal (i.e. comment
+      ;; or string), stopping before reaching BOB or a literal or the
+      ;; boundary of a preprocessor statement or the \"beginning of a
+      ;; statement\".  MACRO-START is the position of the '#' beginning
+      ;; the current preprocessor directive, or NIL if we're not in
+      ;; such."
+      ;;
+      ;; "Return a cons (A.B), where A is NIL if we moved back to a BOS
+      ;; (and know it), T otherwise (we didn't move, or we hit a
+      ;; literal, or we're not sure about BOS).  B is MACRO-BOUNDARY if
+      ;; we are about to cross the boundary out of or into a macro,
+      ;; otherwise LITERAL if we've hit a literal, otherwise NIL"
+      ;;
+      ;; ... (the full comment is Emacs's; see cc-cmds.el)
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-match-data
+        (let ((here (point))
+              (last #f)) ; "marks the position of non-ws code, what'll be BOS if,
+                          ; say, a semicolon precedes it."
+          (call-with-current-continuation
+           (lambda (done)
+             (let loop () ; "We go back one \"token\" each iteration of the loop."
+               (setq last (point))
+               (cond
+                ;; "Stop at the token after a comment."
+                ((c-backward-single-comment) ; "Also functions as backwards-ws."
+                 (goto-char last)
+                 (done (cons #t 'literal)))
+
+                ;; "If we've gone back over a LF, we might have moved
+                ;; into or out of a preprocessor line."
+                ((and (save-excursion
+                        (beginning-of-line)
+                        (re-search-forward "\\(^\\|[^\\]\\)[\n\r]" last #t))
+                      (if macro-start
+                          (< (point) macro-start)
+                          (c-beginning-of-macro)))
+                 (goto-char last)
+                 ;; "Return a car of NIL ONLY if we've hit the opening
+                 ;; # of a macro."
+                 (done (cons (or (= (point) here)
+                                 (not macro-start))
+                             'macro-boundary)))
+
+                ;; "Have we found a virtual semicolon?  If so, stop,
+                ;; unless the next statement is where we started from."
+                ((and (c-at-vsemi-p)
+                      (< last here)
+                      ;; "we've moved back from ) or }"
+                      (not (memq (char-after last) (list #\) #\}))))
+                 (goto-char last)
+                 (done (cons #f '())))
+
+                ;; "Hit the beginning of the buffer/region?"
+                ((bobp)
+                 (if (/= here last)
+                     (goto-char last))
+                 (done (cons #f '())))
+
+                ;; "Move back a character."
+                ((begin (backward-char 1) #f))
+
+                ;; "Stop at \"{\" (unless it's a PIKE special brace
+                ;; list.)"
+                ((%c-char-after=? #\{)
+                 (if (and (%c-langvar 'c-special-brace-lists)
+                          (c-looking-at-special-brace-list))
+                     (skip-syntax-backward "w_") ; "Speedup only."
+                     (begin
+                       (if (/= here last)
+                           (goto-char last))
+                       (done (cons #f '())))))
+
+                ;; "Have we reached the start of a macro?  This always
+                ;; counts as BOS.  (N.B. I don't think (eq (point) here)
+                ;; can ever be true here. FIXME!!! ACM 2004/3/29)"
+                ((and macro-start (= (point) macro-start))
+                 (done (cons (= (point) here) 'macro-boundary)))
+
+                ;; "Stop at token just after \"}\" or \";\"."
+                ((looking-at "[;}]")
+                 ;; "If we've gone back over ;, {, or }, we're done."
+                 (if (or (= here last)
+                         (memq (char-after last) (list #\) #\}))) ; "we've moved back from ) or }"
+                     (if (and (%c-char-before=? #\}) ; "If };, treat them as a unit."
+                              (%c-char-after=? #\;))
+                         (backward-char 1))
+                     (begin
+                       (goto-char last) ; "To the statement starting after the ; or }."
+                       (done (cons #f '())))))
+
+                ;; "Stop at the token after a string."
+                ((looking-at c-string-limit-regexp) ; "Just gone back over a string terminator?"
+                 (goto-char last)
+                 (done (cons #t 'literal)))
+
+                ;; "Nothing special: go back word characters."
+                (else (skip-syntax-backward "w_"))) ; "Speedup only."
+               (loop)))))))
+
+    (define (c-forward-over-illiterals macro-end allow-early-stop)
+      ;; "Move forwards over code, stopping before reaching EOB or a
+      ;; literal (i.e. a comment/string) or the boundary of a
+      ;; preprocessor statement or the \"end of a statement\".  MACRO-END
+      ;; is the position of the EOL/EOB which terminates the current
+      ;; preprocessor directive, or NIL if we're not in such."
+      ;;
+      ;; "ALLOW-EARLY-STOP is non-nil if it is permissible to return
+      ;; without moving forward at all, should we encounter a `{'. ..."
+      ;;
+      ;; ... (the full comment is Emacs's; see cc-cmds.el)
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (let ((here (point))
+            (last #f))
+        (call-with-current-continuation
+         (lambda (done)
+           (let loop () ; "We go one \"token\" forward each time round this loop."
+             (setq last (point))
+
+             ;; "If we've moved forward to a virtual semicolon, we're done."
+             (if (and (> last here) ; "Should we check ALLOW-EARLY-STOP, here? 2004/4/3"
+                      (c-at-vsemi-p))
+                 (done (cons #f '())))
+
+             (c-skip-ws-forward)
+             (cond
+              ;; "Gone past the end of a macro?"
+              ((and macro-end (> (point) macro-end))
+               (goto-char last)
+               (done (cons (= (point) here) 'macro-boundary)))
+
+              ;; "About to hit a comment?"
+              ((save-excursion (c-forward-single-comment))
+               (goto-char last)
+               (done (cons #t 'literal)))
+
+              ;; "End of buffer?"
+              ((eobp)
+               (if (/= here last)
+                   (goto-char last))
+               (done (cons #f '())))
+
+              ;; "If we encounter a '{', stop just after the previous
+              ;; token."
+              ((and (%c-char-after=? #\{)
+                    (not (and (%c-langvar 'c-special-brace-lists)
+                              (c-looking-at-special-brace-list)))
+                    (or allow-early-stop (/= here last))
+                    (save-excursion ; "Is this a check that we're NOT at top level?"
+                      (or (not (c-safe (up-list -1) #t))
+                          (%c-char-after=? #\{))))
+               (goto-char last)
+               (done (cons #f '())))
+
+              ;; "End of a PIKE special brace list?  If so, step over it
+              ;; and continue."
+              ((and (%c-langvar 'c-special-brace-lists)
+                    (%c-char-after=? #\})
+                    (save-excursion
+                      (and (c-safe (up-list -1) #t)
+                           (c-looking-at-special-brace-list))))
+               (forward-char 1)
+               (skip-syntax-forward "w_")) ; "Speedup only."
+
+              ;; "Have we got a '}' after having moved?  If so, stop
+              ;; after the previous token."
+              ((and (%c-char-after=? #\})
+                    (/= here last))
+               (goto-char last)
+               (done (cons #f '())))
+
+              ;; "Stop if we encounter a preprocessor line.  Continue if
+              ;; we hit a naked #"
+              ((and (%c-langvar 'c-opt-cpp-prefix)
+                    (not macro-end)
+                    (%c-char-after=? #\#)
+                    (= (point) (c-point 'boi)))
+               (if (= (point) here) ; "Not a macro, therefore naked #."
+                   (forward-char 1)
+                   (done (cons #t 'macro-boundary))))
+
+              ;; "Stop after a ';', '}', or \"};\""
+              ((looking-at ";\\|};?")
+               (goto-char (match-end 0))
+               (done (cons #f '())))
+
+              ;; "Found a string (this subsumes AWK regexps)?"
+              ((looking-at c-string-limit-regexp)
+               (goto-char last)
+               (done (cons #t 'literal)))
+
+              (else
+               (forward-char 1) ; "Can't fail - we checked (eobp) earlier on."
+               (skip-syntax-forward "w_") ; "Speedup only."
+               (when-e (and macro-end (> (point) macro-end))
+                 (goto-char last)
+                 (done (cons (= (point) here) 'macro-boundary)))))
+             (loop))))))
+
+    (define (c-one-line-string-p range)
+      ;; "Is the literal defined by RANGE a string contained in a single
+      ;; line?"
+      ;;
+      ;; "This function might do hidden buffer changes."
+      (save-excursion
+        (goto-char (car range))
+        (and (looking-at c-string-limit-regexp)
+             (begin (skip-chars-forward "^\n" (cdr range))
+                    (= (point) (cdr range))))))
+
+    (define-command (c-beginning-of-statement . rest)
+      "Go to the beginning of the innermost C statement.
+With prefix arg, go back N - 1 statements.  If already at the
+beginning of a statement then go to the beginning of the closest
+preceding one, moving into nested blocks if necessary (use
+\\[backward-sexp] to skip over a block).  If within or next to a
+comment or multiline string, move by sentences instead of statements.
+
+When called from a program, this function takes 3 optional args: the
+repetition count, a buffer position limit which is the farthest back
+to search for the syntactic context, and a flag saying whether to do
+sentence motion in or near comments and multiline strings.
+
+Note that for use in programs, `c-beginning-of-statement-1' is
+usually better.  It has much better defined semantics than this one,
+which is intended for interactive use, and might therefore change to
+be more \"DWIM:ey\"."
+      (interactive (list (prefix-numeric-value (current-prefix-arg))
+                         #f #t))
+      (let ((count (if (pair? rest) (car rest) #f))
+            (lim (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+            (sentence-flag (if (and (pair? rest) (pair? (cdr rest))
+                                    (pair? (cddr rest)))
+                               (caddr rest)
+                               #f)))
+        (if (< count 0)
+            (c-end-of-statement (- count) lim sentence-flag)
+            (c-with-string-fences
+             (c-save-buffer-state
+                 ((count (or count 1))
+                  (last #f) ; "start point for going back ONE chunk.  Updated each chunk movement."
+                  (macro-fence
+                   (save-excursion (and (not (bobp)) (c-beginning-of-macro)
+                                        (point))))
+                  (res #f) ; "result from sub-function call"
+                  (not-bos #f) ; "\"not beginning-of-statement\""
+                  (range (c-collect-line-comments (c-literal-limits lim))))
+               ;; "(start.end) of current literal or NIL"
+
+               ;; "Go back one statement at each iteration of the following loop."
+               (while-e (and (/= count 0)
+                             (or (not lim) (> (point) lim)))
+                 ;; "Go back one \"chunk\" each time round the following
+                 ;; loop, stopping when we reach a statement boundary, etc."
+                 (setq last (point))
+                 (while-e
+                     (cond ; "Each arm of this cond returns NIL on reaching a
+                            ; desired statement boundary, non-NIL otherwise."
+                      ((bobp)
+                       (setq count 0)
+                       #f)
+
+                      ((and range (%c-true range)) ; "point is within or approaching a literal."
+                       (cond
+                        ;; "Single line string or sentence-flag is null =>
+                        ;; skip the entire literal."
+                        ((or (not sentence-flag)
+                             (c-one-line-string-p range))
+                         (goto-char (car range))
+                         (setq range (c-ascertain-preceding-literal))
+                         ;; "N.B. The following is essentially testing
+                         ;; for an AWK regexp at BOS: Was the previous
+                         ;; non-ws thing an end of statement?"
+                         (save-excursion
+                           (if macro-fence
+                               (c-backward-comments)
+                               (c-backward-syntactic-ws))
+                           (not (or (bobp) (c-after-statement-terminator-p)))))
+
+                        ;; "Comment inside a statement or a multi-line string."
+                        (else
+                         (when-e (setq res ; "returns non-nil when we go out of the literal"
+                                       (if (eq? (c-literal-type range) 'string)
+                                           (c-beginning-of-sentence-in-string range)
+                                           (c-beginning-of-sentence-in-comment range)))
+                           (setq range (c-ascertain-preceding-literal)))
+                         res)))
+
+                      ;; "Non-literal code."
+                      (else
+                       (setq res (c-back-over-illiterals macro-fence))
+                       (setq not-bos ; "\"not reached beginning-of-statement\"."
+                             (or (= (point) last)
+                                 (memq (char-after) (list #\) #\}))
+                                 (and
+                                  (car res)
+                                  ;; "We're at a tentative BOS.  The next
+                                  ;; form goes back over WS looking for an
+                                  ;; end of previous statement."
+                                  (not (save-excursion
+                                         (if macro-fence
+                                             (c-backward-comments)
+                                             (c-backward-syntactic-ws))
+                                         (or (bobp)
+                                             (c-after-statement-terminator-p)))))))
+                       ;; "Are we about to move backwards into or out of a
+                       ;; preprocessor command?  If so, locate its
+                       ;; beginning."
+                       (when-e (eq? (cdr res) 'macro-boundary)
+                         (save-excursion
+                           (beginning-of-line)
+                           (setq macro-fence
+                                 (and (not (bobp))
+                                      (begin (c-skip-ws-backward)
+                                             (c-beginning-of-macro))
+                                      (point)))))
+                       ;; "Are we about to move backwards into a literal?"
+                       (when-e (memq (cdr res) '(macro-boundary literal))
+                         (setq range (c-ascertain-preceding-literal)))
+                       not-bos))
+                   (setq last (point)))
+
+                 (if (/= count 0) (setq count (- count 1))))
+               (c-keep-region-active))))))
+
+    (define-command (c-end-of-statement . rest)
+      "Go to the end of the innermost C statement.
+With prefix arg, go forward N - 1 statements.  Move forward to the end
+of the next statement if already at end, and move into nested blocks
+\\(use \\[forward-sexp] to skip over a block).  If within or next to a
+comment or multiline string, move by sentences instead of statements.
+
+When called from a program, this function takes 3 optional args: the
+repetition count, a buffer position limit which is the farthest back
+to search for the syntactic context, and a flag saying whether to do
+sentence motion in or near comments and multiline strings."
+      (interactive (list (prefix-numeric-value (current-prefix-arg))
+                         #f #t))
+      (let ((count (if (pair? rest) (car rest) #f))
+            (lim (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+            (sentence-flag (if (and (pair? rest) (pair? (cdr rest))
+                                    (pair? (cddr rest)))
+                               (caddr rest)
+                               #f)))
+        (setq count (or count 1))
+        (if (< count 0)
+            (c-beginning-of-statement (- count) lim sentence-flag)
+            (c-with-string-fences
+             (c-save-buffer-state
+                 ((here #f) ; "start point for going forward ONE statement.  Updated each statement."
+                  (macro-fence
+                   (save-excursion
+                     (and (not (eobp)) (c-beginning-of-macro)
+                          (begin (c-end-of-macro) (point)))))
+                  (res #f)
+                  (range (c-collect-line-comments (c-literal-limits lim))))
+               ;; "(start.end) of current literal or NIL"
+
+               ;; "Go back/forward one statement at each iteration of the
+               ;; following loop."
+               (while-e (and (/= count 0)
+                             (or (not lim) (< (point) lim)))
+                 (setq here (point)) ; "ONLY HERE is HERE updated"
+
+                 ;; "Go forward one \"chunk\" each time round the
+                 ;; following loop, stopping when we reach a statement
+                 ;; boundary, etc."
+                 (while-e
+                     (cond ; "Each arm of this cond returns NIL on reaching
+                            ; a desired statement boundary, non-NIL otherwise."
+                      ((eobp)
+                       (setq count 0)
+                       #f)
+
+                      ((and range (%c-true range)) ; "point is within a literal."
+                       (cond
+                        ;; "sentence-flag is null => skip the entire
+                        ;; literal. or a Single line string."
+                        ((or (not sentence-flag)
+                             (c-one-line-string-p range))
+                         (goto-char (cdr range))
+                         (setq range (c-ascertain-following-literal))
+                         ;; "Is there a virtual semicolon here (e.g. for AWK)?"
+                         (not (c-at-vsemi-p)))
+
+                        ;; "Comment or multi-line string."
+                        (else
+                         (when-e (setq res ; "gets non-nil when we go out of the literal"
+                                       (if (eq? (c-literal-type range) 'string)
+                                           (c-end-of-sentence-in-string range)
+                                           (c-end-of-sentence-in-comment range)))
+                           (setq range (c-ascertain-following-literal)))
+                         ;; "If we've just come forward out of a literal,
+                         ;; check for vsemi.  (N.B. AWK can't have a
+                         ;; vsemi after a comment, but some other language
+                         ;; may do in the future)"
+                         (and res
+                              (not (c-at-vsemi-p))))))
+
+                      ;; "Non-literal code."
+                      (else
+                       (setq res (c-forward-over-illiterals macro-fence
+                                                            (> (point) here)))
+                       ;; "Are we about to move forward into or out of a
+                       ;; preprocessor command?"
+                       (when-e (eq? (cdr res) 'macro-boundary)
+                         (setq macro-fence
+                               (save-excursion
+                                 (if macro-fence
+                                     (begin
+                                       (end-of-line)
+                                       (and (not (eobp))
+                                            (begin (c-skip-ws-forward)
+                                                   (c-beginning-of-macro))
+                                            (begin (c-end-of-macro)
+                                                   (point))))
+                                     (and (not (eobp))
+                                          (c-beginning-of-macro)
+                                          (begin (c-end-of-macro)
+                                                 (point)))))))
+                       ;; "Are we about to move forward into a literal?"
+                       (when-e (memq (cdr res) '(macro-boundary literal))
+                         (setq range (c-ascertain-following-literal)))
+                       (car res)))
+                   #t)
+
+                 (if (/= count 0) (setq count (- count 1))))
+               (c-keep-region-active))))))
+
+    ;; ---------------------------------------------------------------
+    ;; Inserting/indenting comments (`cc-cmds.el:3260'-`:3353')
+    ;;--------------------------------------------------------------
+    (define (c-calc-comment-indent entry)
+      ;; "This function might do hidden buffer changes."
+      (if (symbol? entry)
+          (setq entry (or (assq entry (c-indent-comment-alist))
+                          (assq 'other (c-indent-comment-alist))
+                          '(default . (column . #f)))))
+      (let ((action (car (cdr entry)))
+            (value (cdr (cdr entry)))
+            (col (current-column)))
+        (cond ((eq? action 'space)
+               (+ col value))
+              ((eq? action 'column)
+               (unless value (setq value (comment-column)))
+               (if (bolp)
+                   ;; "Do not pad with one space if we're at bol."
+                   value
+                   (max (+ col 1) value)))
+              ((eq? action 'align)
+               (or (save-excursion
+                     (beginning-of-line)
+                     (unless (bobp)
+                       (backward-char 1)
+                       (let ((lim (c-literal-limits (c-point 'bol) #t)))
+                         (when-e (pair? lim)
+                           (goto-char (car lim))
+                           (when-e (looking-at "/[/*]") ; "FIXME!!!  Adapt for AWK! (ACM, 2005/11/18)"
+                             ;; "Found comment to align with."
+                             (if (bolp)
+                                 ;; "Do not pad with one space if we're at bol."
+                                 0
+                                 (max (+ col 1) (current-column))))))))
+                   ;; "Recurse to handle value as a new spec."
+                   (c-calc-comment-indent (cdr entry))))
+              (else #f))))
+
+    (define (c-comment-indent)
+      "Used by `indent-for-comment' to create and indent comments.
+See `c-indent-comment-alist' for a description."
+      (save-excursion
+        (end-of-line)
+        (parameterize ((*case-fold-search* #f))
+          (c-save-buffer-state
+              ((eot (let ((lim (c-literal-limits (c-point 'bol) #t)))
+                      (or (when-e (pair? lim)
+                            (goto-char (car lim))
+                            (when-e (looking-at "/[/*]")
+                              (skip-chars-backward " \t")
+                              (point)))
+                          (begin
+                            (skip-chars-backward " \t")
+                            (point)))))
+               (line-type
+                (cond ((looking-at "^/[/*]")
+                       'anchored-comment)
+                      ((begin (beginning-of-line)
+                              (= (point) eot))
+                       'empty-line)
+                      ((begin (back-to-indentation)
+                              (and (%c-char-after=? #\})
+                                   (= (point) (- eot 1))))
+                       'end-block)
+                      ((and (looking-at "#[ \t]*\\(endif\\|else\\)")
+                            (= (match-end 0) eot))
+                       'cpp-end-block)
+                      (else
+                       'other))))
+            (if (and (memq line-type '(anchored-comment empty-line))
+                     ;; The accessor answers Elisp's nil as `() - true
+                     ;; here - so ask `%c-true`, not `if`.
+                     (%c-true (c-indent-comments-syntactically-p)))
+                (parameterize ((*c-syntactic-context* (c-guess-basic-syntax)))
+                  ;; "BOGOSITY ALERT: if we're looking at the eol, its
+                  ;; because indent-for-comment hasn't put the
+                  ;; comment-start in the buffer yet.  this will screw up
+                  ;; the syntactic analysis so we kludge in the necessary
+                  ;; info.  Another kludge is that if we're at the bol,
+                  ;; then we really want to ignore any anchoring as
+                  ;; specified by c-comment-only-line-offset since it
+                  ;; doesn't apply here."
+                  (if (eolp)
+                      (c-add-syntax 'comment-intro))
+                  (let ((c-comment-only-line-offset
+                         (let ((o (c-comment-only-line-offset)))
+                           (if (pair? o)
+                               o
+                               (cons o o)))))
+                    (c-get-syntactic-indentation (*c-syntactic-context*))))
+                (begin
+                  (goto-char eot)
+                  (c-calc-comment-indent line-type)))))))
+
+    (define (c-outline-level)
+      ;; "used by outline-minor-mode"
+      ;;
+      ;; Emacs binds `buffer-invisibility-spec' nil here so
+      ;; `current-column' ignores invisible text; there is no
+      ;; invisibility in this tree (see `indentc.scm'), so the binding
+      ;; has nothing to do.
+      (save-excursion
+        (skip-chars-forward "\t ")
+        (current-column)))
+
+    ;; ---------------------------------------------------------------
+    ;; Movement by CPP conditionals (`cc-cmds.el:3357'-`:3531')
+    ;;--------------------------------------------------------------
+    (define-command (c-up-conditional count)
+      "Move back to the containing preprocessor conditional, leaving mark behind.
+A prefix argument acts as a repeat count.  With a negative argument,
+move forward to the end of the containing preprocessor conditional.
+
+\"#elif\" is treated like \"#else\" followed by \"#if\", so the
+function stops at them when going backward, but not when going
+forward."
+      (interactive "p")
+      (let ((new-point (c-scan-conditionals (- count) -1)))
+        (push-mark)
+        (goto-char new-point))
+      (c-keep-region-active))
+
+    (define-command (c-up-conditional-with-else count)
+      "Move back to the containing preprocessor conditional, including \"#else\".
+Just like `c-up-conditional', except it also stops at \"#else\"
+directives."
+      (interactive "p")
+      (let ((new-point (c-scan-conditionals (- count) -1 #t)))
+        (push-mark)
+        (goto-char new-point))
+      (c-keep-region-active))
+
+    (define-command (c-down-conditional count)
+      "Move forward into the next preprocessor conditional, leaving mark behind.
+A prefix argument acts as a repeat count.  With a negative argument,
+move backward into the previous preprocessor conditional.
+
+\"#elif\" is treated like \"#else\" followed by \"#if\", so the
+function stops at them when going forward, but not when going
+backward."
+      (interactive "p")
+      (let ((new-point (c-scan-conditionals count 1)))
+        (push-mark)
+        (goto-char new-point))
+      (c-keep-region-active))
+
+    (define-command (c-down-conditional-with-else count)
+      "Move forward into the next preprocessor conditional, including \"#else\".
+Just like `c-down-conditional', except it also stops at \"#else\"
+directives."
+      (interactive "p")
+      (let ((new-point (c-scan-conditionals count 1 #t)))
+        (push-mark)
+        (goto-char new-point))
+      (c-keep-region-active))
+
+    (define-command (c-backward-conditional count . rest)
+      "Move back across a preprocessor conditional, leaving mark behind.
+A prefix argument acts as a repeat COUNT.  With a negative argument,
+move forward across a preprocessor conditional.
+
+The optional arguments TARGET-DEPTH and WITH-ELSE are historical,
+and have the same meanings as in `c-scan-conditionals'.  If you
+are calling `c-forward-conditional' from a program, you might want
+to call `c-scan-conditionals' directly instead."
+      (interactive "p")
+      (let ((target-depth (if (pair? rest) (car rest) #f))
+            (with-else (if (and (pair? rest) (pair? (cdr rest)))
+                           (cadr rest)
+                           #f)))
+        (let ((new-point (c-scan-conditionals (- count)
+                                              target-depth with-else)))
+          (push-mark)
+          (goto-char new-point))
+        (c-keep-region-active)))
+
+    (define-command (c-forward-conditional count . rest)
+      "Move forward across a preprocessor conditional, leaving mark behind.
+A prefix argument acts as a repeat count.  With a negative argument,
+move backward across a preprocessor conditional.
+
+If there aren't enough conditionals after (or before) point, an
+error is signaled.
+
+\"#elif\" is treated like \"#else\" followed by \"#if\", except that
+the nesting level isn't changed when tracking subconditionals.
+
+The optional arguments TARGET-DEPTH and WITH-ELSE are historical,
+and have the same meanings as in `c-scan-conditionals'.  If you
+are calling c-forward-conditional from a program, you might want
+to call `c-scan-conditionals' directly instead."
+      (interactive "p")
+      (let ((target-depth (if (pair? rest) (car rest) #f))
+            (with-else (if (and (pair? rest) (pair? (cdr rest)))
+                           (cadr rest)
+                           #f)))
+        (let ((new-point (c-scan-conditionals count target-depth with-else)))
+          (push-mark)
+          (goto-char new-point))
+        (c-keep-region-active)))
+
+    (define (c-scan-conditionals count . rest)
+      "Scan forward across COUNT preprocessor conditionals.
+With a negative argument, scan backward across preprocessor
+conditionals.  Return the end position.  Point is not moved.
+
+If there aren't enough preprocessor conditionals, throw an error.
+
+\"#elif\" is treated like \"#else\" followed by \"#if\", except that
+the nesting level isn't changed when tracking subconditionals.
+
+The optional argument TARGET-DEPTH specifies the wanted nesting depth
+after each scan.  E.g. if TARGET-DEPTH is -1, the end position will be
+outside the enclosing conditional.  A non-integer non-nil TARGET-DEPTH
+counts as -1.
+
+If the optional argument WITH-ELSE is non-nil, \"#else\" directives
+are treated as conditional clause limits.  Normally they are ignored."
+      (let* ((target-depth (if (pair? rest) (car rest) #f))
+             (with-else (if (and (pair? rest) (pair? (cdr rest)))
+                            (cadr rest)
+                            #f))
+             (forward (> count 0))
+             (increment (if forward -1 1))
+             (search-function (if forward re-search-forward
+                                  re-search-backward))
+             (new #f))
+        (unless (integer? target-depth)
+          (setq target-depth (if target-depth -1 0)))
+        (save-excursion
+          (while-e (/= count 0)
+            (let ((depth 0)
+                  ;; "subdepth is the depth in \"uninteresting\"
+                  ;; subtrees, i.e. those that takes us farther from the
+                  ;; target depth instead of closer."
+                  (subdepth 0)
+                  (found #f))
+              (save-excursion
+                ;; "Find the \"next\" significant line in the proper
+                ;; direction."
+                (while-e (and (not found)
+                              ;; "Rather than searching for a # sign that
+                              ;; comes at the beginning of a line aside
+                              ;; from whitespace, search first for a
+                              ;; string starting with # sign.  Then
+                              ;; verify what precedes it.  This is faster
+                              ;; on account of the fastmap feature of the
+                              ;; regexp matcher."
+                              (search-function
+                               "#[ \t]*\\(if\\|elif\\|endif\\|else\\)"
+                               #f #t))
+                  (beginning-of-line)
+                  ;; "Now verify it is really a preproc line."
+                  (if (looking-at "^[ \t]*#[ \t]*\\(if\\|elif\\|endif\\|else\\)")
+                      (let ((dchange #f)
+                            (directive (match-string 1)))
+                        (cond ((string=? directive "if")
+                               (setq dchange (- increment)))
+                              ((string=? directive "endif")
+                               (setq dchange increment))
+                              ((= subdepth 0)
+                               ;; "When we're not in an \"uninteresting\"
+                               ;; subtree, we might want to act on
+                               ;; \"elif\" and \"else\" too."
+                               (if (cond (with-else
+                                          ;; "Always move toward the
+                                          ;; target depth."
+                                          (setq dchange
+                                                (if (> target-depth 0) 1 -1)))
+                                         ((string=? directive "elif")
+                                          (setq dchange (- increment)))
+                                         (else #f))
+                                   ;; "Ignore the change if it'd take us
+                                   ;; into an \"uninteresting\" subtree."
+                                   (if (eq? (> dchange 0) (<= target-depth 0))
+                                       (setq dchange #f)))))
+                        (when-e dchange
+                          (when-e (or (/= subdepth 0)
+                                      (eq? (> dchange 0) (<= target-depth 0)))
+                            (setq subdepth (+ subdepth dchange)))
+                          (setq depth (+ depth dchange))
+                          ;; "If we are trying to move across, and we find
+                          ;; an end before we find a beginning, get an
+                          ;; error."
+                          (if (and (< depth target-depth) (< dchange 0))
+                              (error (if forward
+                                         "No following conditional at this level"
+                                         "No previous conditional at this level"))))
+                        ;; "When searching forward, start from next line
+                        ;; so that we don't find the same line again."
+                        (if forward (forward-line 1))
+                        ;; "We found something if we've arrived at the
+                        ;; target depth."
+                        (if (and dchange (= depth target-depth))
+                            (setq found (point))))
+                      ;; "else"
+                      (if forward (forward-line 1)))))
+              (or found
+                  (error "No containing preprocessor conditional"))
+              (goto-char (setq new found)))
+            (setq count (+ count increment))))
+        (c-keep-region-active)
+        new))
 
     ;; ---------------------------------------------------------------
     ;; `c-indent-command' (`cc-cmds.el:3535')

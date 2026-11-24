@@ -98,6 +98,9 @@
     ;; `c-region-is-active-p' (`cc-defs.el:497') is `region-active-p'
     ;; on any Emacs that has it, which is this one (`simple.el`'s).
     (only (schemacs simple) region-active-p)
+    ;; `c-sentence-end' (`cc-defs.el:572') is Emacs's
+    ;; `(sentence-end)', paragraphs.el's function.
+    (only (schemacs textmodes paragraphs) sentence-end)
     (only (schemacs core regexp-opt) regexp-opt))
 
   (export
@@ -142,7 +145,8 @@
    c-suppress-<->-as-parens c-restore-<->-as-parens
    c-skip-ws-chars-forward c-skip-ws-chars-backward
    c-skip-ws-forward c-skip-ws-backward
-   c-safe c-last-command-char c-forward-sexp c-backward-sexp c-safe-scan-lists
+   c-safe c-last-command-char c-sentence-end c-forward-sexp
+   c-backward-sexp c-safe-scan-lists
    c-go-list-forward c-go-list-backward
    c-up-list-forward c-up-list-backward
    c-down-list-forward c-down-list-backward
@@ -1426,6 +1430,13 @@
   ;; arm), which is this tree's `*last-command-event*' parameter - a
   ;; character for a keypress, an event cons for a click.
   (*last-command-event*))
+
+(define (c-sentence-end)
+  ;; `cc-defs.el:572': "Get the regular expression `sentence-end'."
+  ;; Emacs's macro takes its Emacs-22 arm, `(sentence-end)'; paragraphs
+  ;; is where that function lives here. `c-default-value-sentence-end'
+  ;; (cc-vars) is the other half, with the variable bound to nil.
+  (sentence-end))
 
 ;;----------------------------------------------------------------------
 ;; The `scan-lists' wrappers (`cc-defs.el:541', `:780'-`:930')

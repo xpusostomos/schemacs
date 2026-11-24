@@ -17472,17 +17472,25 @@ it, as that library's header explains.
    editing probe in its own fresh buffer. A replay of the mode must
    call `c-make-noise-macro-regexps` and `c-make-macro-with-semi-re`
    (the mode's `:after-hook`) or `c-forward-sws` looks up a #f regexp.
+   **The statement, sentence, comment-indent and conditional commands
+   are in too** (`cc-cmds.el:2429'-`:3531'`, plus `c-sentence-end` in
+   `cc-defs`). The gate is
+   `tools/cc-cmds-diff/emacs-stmt.el` / `ours-stmt.scm`: twenty-two
+   probes at every position, identical on eight fixtures in both
+   languages; `cc-cmds-tests.scm`'s `schemacs_editor_cc_cmds_statements`
+   group pins 13 rows plus the clean `c-scan-conditionals` table. Two
+   nil-answer bugs were found and fixed: the style accessor's `()` must
+   be tested with `%c-true`, and two `cond`s in value position need
+   `(else #f)`.
    Next is the rest of cc-cmds, which `c-basic-common-init` waits on:
-   the statement and sentence motions (`cc-cmds.el:2429'-`:3260'`),
-   `c-comment-indent` (`:3294`) and `c-outline-level` (`:3348`), the
-   conditionals (`:3357'-`:3534`), then the filling half
-   (`:4057'-`:5152`: `c-indent-new-comment-line`,
-   `c-context-line-break`/`-open-line`, `c-fill-paragraph`,
-   `c-do-auto-fill`, `c-mask-paragraph`, `c-guess-fill-prefix`), and
-   the electric keys (`:409'-`:1568`). After that
-   `c-basic-common-init`/`c-common-init`/`c-font-lock-init` (whose
-   `c-setup-doc-comment-style` is what sets `c-doc-line-join-re` for
-   real sessions) and the mode definitions.
+   the filling half (`cc-cmds.el:4057'-`:5152`:
+   `c-indent-new-comment-line`, `c-context-line-break`/`-open-line`,
+   `c-fill-paragraph`, `c-do-auto-fill`, `c-mask-paragraph`,
+   `c-guess-fill-prefix`), then the electric keys
+   (`:409'-`:1568'`, with the file's `put 'delete-selection` block).
+   After that `c-basic-common-init`/`c-common-init`/`c-font-lock-init`
+   (whose `c-setup-doc-comment-style` is what sets `c-doc-line-join-re`
+   for real sessions) and the mode definitions.
 3. Then `c-basic-common-init`/`c-common-init` and the mode definitions
    (with `c-font-lock-init`/`c-font-lock-fontify-region`, and the
    language function registry filled for every symbol the change

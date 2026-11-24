@@ -25,7 +25,8 @@
  (only (schemacs buffer) allocate-buffer set-buffer current-buffer
        buffer-local-value set-buffer-local-value!)
  (only (schemacs editfns) insert goto-char point point-min point-max
-       forward-line buffer-substring line-beginning-position save-excursion)
+       forward-line buffer-substring line-beginning-position save-excursion
+       bobp eobp)
  (only (schemacs cmds) end-of-line)
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*)
@@ -38,7 +39,8 @@
  (only (schemacs progmodes cc-styles) c-set-style c-set-offset)
  (only (schemacs progmodes cc-engine)
        c-parsing-error c-electric-flag c-auto-newline c-hungry-delete-key
-       c-clear-found-types)
+       c-clear-found-types c-literal-limits c-literal-type
+       c-beginning-of-macro c-end-of-macro)
  ;; The line-up registry `c-run-special-indent-hook' resolves the
  ;; style's `c-gnu-impose-minimum' through is filled when this loads.
  (schemacs progmodes cc-align)
@@ -51,7 +53,15 @@
        c-where-wrt-brace-construct c-in-function-trailer-p
        c-defun-name c-cpp-define-name c-declaration-limits
        c-defun-name-and-limits c-beginning-of-defun c-end-of-defun
-       c-indent-defun)
+       c-indent-defun
+       c-beginning-of-statement c-end-of-statement
+       c-back-over-illiterals c-forward-over-illiterals
+       c-ascertain-preceding-literal c-ascertain-following-literal
+       c-after-statement-terminator-p c-one-line-string-p
+       c-beginning-of-sentence-in-comment c-end-of-sentence-in-comment
+       c-beginning-of-sentence-in-string c-end-of-sentence-in-string
+       c-comment-indent c-outline-level c-in-comment-line-prefix-p
+       c-scan-conditionals)
  (only (schemacs newcomment) comment-start comment-end))
 
 (test-begin "schemacs_editor_cc_cmds")
@@ -344,3 +354,151 @@
     (list (contents) (point))))
 
 (test-end "schemacs_editor_cc_cmds_defuns")
+
+
+;;--------------------------------------------------------------
+;; Movement by statements, sentences and conditionals
+;;--------------------------------------------------------------
+;; Rows measured with `tools/cc-cmds-diff/emacs-stmt.el' on the same
+;; text in a real `c-mode' buffer; the whole-position differential is
+;; identical on seven fixtures in both languages.
+(test-begin "schemacs_editor_cc_cmds_statements")
+
+(define stmt-text
+  (string-append
+   "#include <stdio.h>\n"
+   "/* A block comment. It has two sentences.\n"
+   "   Another sentence here.  */\n"
+   "static int g (int a)\n"
+   "{\n"
+   "  // A line comment. With a sentence.\n"
+   "  const char *s = \"A string. With two sentences. \\\n"
+   "continued here.\";\n"
+   "#if FOO\n"
+   "  if (a) { return 1; }\n"
+   "#else\n"
+   "  a = 2; // done\n"
+   "#endif\n"
+   "  switch (a) {\n"
+   "  case 1: a++; break;\n"
+   "  default: a--;\n"
+   "  }\n"
+   "  return a;\n"
+   "}\n"))
+
+(define (stmt-mv pos thunk)
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+    (save-excursion
+      (goto-char pos)
+      (let ((ret (thunk)))
+        (list (point) ret)))))
+
+(define (stmt-lit-probe pos pred thunk)
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+    (save-excursion
+      (goto-char pos)
+      (let ((range (c-literal-limits)))
+        (if (and (pair? range) (pred (c-literal-type range)))
+            (let ((ret (thunk range)))
+              (list (point) ret))
+            #f)))))
+
+(define (stmt-row pos)
+  (fresh stmt-text)
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+    (list (stmt-mv pos (lambda () (c-beginning-of-statement 1 #f #f)))
+          (stmt-mv pos (lambda () (c-beginning-of-statement 1 #f #t)))
+          (stmt-mv pos (lambda () (c-end-of-statement 1 #f #f)))
+          (stmt-mv pos (lambda () (c-end-of-statement 1 #f #t)))
+          (stmt-mv pos (lambda ()
+                         (c-back-over-illiterals
+                          (save-excursion
+                            (and (not (bobp)) (c-beginning-of-macro)
+                                 (point))))))
+          (stmt-mv pos (lambda ()
+                         (c-forward-over-illiterals
+                          (save-excursion
+                            (and (not (eobp)) (c-beginning-of-macro)
+                                 (begin (c-end-of-macro) (point))))
+                          #f)))
+          (stmt-mv pos (lambda () (c-ascertain-preceding-literal)))
+          (stmt-mv pos (lambda () (c-ascertain-following-literal)))
+          (stmt-mv pos (lambda () (c-comment-indent)))
+          (stmt-mv pos (lambda () (c-outline-level)))
+          (stmt-mv pos (lambda () (c-in-comment-line-prefix-p)))
+          (stmt-lit-probe pos (lambda (ty) (memq ty '(c c++)))
+                          (lambda (r) (c-beginning-of-sentence-in-comment r)))
+          (stmt-lit-probe pos (lambda (ty) (memq ty '(c c++)))
+                          (lambda (r) (c-end-of-sentence-in-comment r))))))
+
+(test-equal "at the #include, position 1"
+  (list (list 1 #f) (list 1 #f) (list 19 #f) (list 19 #f)
+        (list 1 (list #f))
+        (list 19 (cons #f 'macro-boundary))
+        (list 1 #f) (list 1 #f) (list 1 32) (list 1 0) (list 1 #f)
+        #f #f)
+  (stmt-row 1))
+
+(test-equal "inside the block comment, position 21"
+  (list (list 20 #f) (list 1 #f) (list 112 #f) (list 61 #f)
+        (list 20 (cons #t 'macro-boundary))
+        (list 112 (list #f))
+        (list 21 #f) (list 21 #f) (list 21 0) (list 21 1) (list 21 #f)
+        (list 20 #t) (list 61 #f))
+  (stmt-row 21))
+
+(test-equal "mid-comment, position 65"
+  (list (list 20 #f) (list 23 #f) (list 112 #f) (list 87 #f)
+        (list 20 (cons #t 'macro-boundary))
+        (list 112 (list #f))
+        (list 65 #f) (list 65 #f) (list 65 0) (list 65 3) (list 65 #f)
+        (list 23 #f) (list 87 #f))
+  (stmt-row 65))
+
+(test-equal "at the comment's end, position 87"
+  (list (list 20 #f) (list 65 #f) (list 112 #f) (list 112 #f)
+        (list 20 (cons #t 'macro-boundary))
+        (list 112 (list #f))
+        (list 87 #f) (list 87 #f) (list 87 0) (list 87 27) (list 87 #f)
+        (list 65 #f) (list 91 #t))
+  (stmt-row 87))
+
+(test-equal "on the line comment, position 115"
+  (list (list 113 #f) (list 113 #f) (list 221 #f) (list 152 #f)
+        (list 113 (list #f))
+        (list 115 (cons #t 'literal))
+        (list 115 #f) (list 115 (cons 117 153))
+        (list 115 32) (list 115 2) (list 115 #t)
+        #f #f)
+  (stmt-row 115))
+
+(test-equal "at #else, position 255"
+  (list (list 253 #f) (list 253 #f) (list 258 #f) (list 258 #f)
+        (list 253 (cons #f 'macro-boundary))
+        (list 258 (cons #f 'macro-boundary))
+        (list 255 #f) (list 255 #f) (list 255 7) (list 255 2) (list 255 #f)
+        #f #f)
+  (stmt-row 255))
+
+(test-equal "at return a, position 350"
+  (list (list 342 #f) (list 342 #f) (list 351 #f) (list 351 #f)
+        (list 342 (list #f))
+        (list 351 (list #f))
+        (list 350 #f) (list 350 #f) (list 350 32) (list 350 10) (list 350 #f)
+        #f #f)
+  (stmt-row 350))
+
+(define (stmt-scan pos . args)
+  (fresh stmt-text)
+  (goto-char pos)
+  (guard (e (else 'error))
+    (apply c-scan-conditionals args)))
+
+(test-equal "conditional scan forward from 1" 283 (stmt-scan 1 1))
+(test-equal "conditional scan backward from 283" 222 (stmt-scan 283 -1))
+(test-equal "conditional scan forward from inside #if" 'error (stmt-scan 230 1))
+(test-equal "conditional scan backward from 230" 'error (stmt-scan 230 -1))
+(test-equal "conditional scan with target depth" 'error (stmt-scan 1 1 -1))
+(test-equal "conditional scan with-else" 283 (stmt-scan 1 1 #f #t))
+
+(test-end "schemacs_editor_cc_cmds_statements")
