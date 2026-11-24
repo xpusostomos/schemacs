@@ -17,25 +17,31 @@
 
 (import
  (scheme base)
- (only (guile) hash-ref hash-set!)
+ (only (guile) hash-ref hash-set! make-hash-table hash-for-each sort string<?)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs buffer) allocate-buffer set-buffer current-buffer buffer-local-value
        set-buffer-local-value! buffer-z)
- (only (schemacs editfns) insert goto-char point point-min point-max)
+ (only (schemacs editfns) insert goto-char point point-min point-max widen
+       save-restriction save-excursion)
  (only (schemacs search) match-beginning match-end)
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs marker) marker-position)
  (only (schemacs insdel) *before-change-functions*)
- (only (schemacs textprop) get-text-property put-text-property)
+ (only (schemacs textprop) get-text-property put-text-property
+       remove-text-properties)
+ (only (schemacs cmds) delete-char)
  (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*
        c-clear-char-property c-get-char-property
        c-mark-<-as-paren c-mark->-as-paren
        c-clear-char-property-with-value-on-char)
  (schemacs progmodes cc-langs)
  (only (schemacs progmodes cc-styles) c-set-style)
- (only (schemacs progmodes cc-engine) c-found-types c-add-type-1 c-clear-found-types
+ (only (schemacs progmodes cc-engine) c-found-types set!c-found-types
+       c-add-type-1 c-clear-found-types
        c-new-id-start c-new-id-end c-new-id-is-type
        c-new-BEG set!c-new-BEG c-new-END set!c-new-END
+       %c-langvar %c-lang-function
+       c-maybe-stale-found-type c-old-END-literality
        c-put-syntax-table-trim-caches c-clear-syn-tab-properties
        c-clear-syntax-table-with-value-on-char-trim-caches)
  (only (schemacs progmodes cc-mode)
@@ -57,7 +63,8 @@
        c-locate-first-punctuation-prop
        c-depropertize-CPP c-extend-region-for-CPP c-depropertize-new-text
        c-extend-font-lock-region-for-macros
-       c-neutralize-CPP-line c-neutralize-syntax-in-CPP))
+       c-neutralize-CPP-line c-neutralize-syntax-in-CPP
+       c-before-change c-just-done-before-change c-open-string-opener))
 
 (test-begin "schemacs_editor_cc_mode")
 
@@ -621,3 +628,99 @@
   (list (c-locate-first-punctuation-prop 1) (point)))
 
 (test-end "schemacs_editor_cc_mode_cpp")
+
+;;--------------------------------------------------------------
+;; `c-before-change' (`cc-mode.el:2224')
+;;--------------------------------------------------------------
+;; Driven through the real hook, as cc-mode installs it, with the buffer
+;; set up the way `c-common-init''s replay leaves it. Every expectation
+;; is Emacs 31.1's answer for the same edit (the probes are
+;; `/tmp/before-em.el' and `/tmp/before-ours.scm'); Emacs spells the two
+;; nils `nil' where this tree spells them `#f' and `()'.
+(test-begin "schemacs_editor_cc_mode_before_change")
+
+(define before-fx
+  (string-append "typedef int myint;\nmyint x;\n#define A (y\n"
+                 "char *s = R" (string #\") "d(hi)d" (string #\") ";\n// c\n"))
+
+(define (before-wipe!)
+  (let loop ((p 1))
+    (when (<= p (1- (point-max)))
+      (remove-text-properties p (+ p 1)
+        (list 'syntax-table #f 'c-fl-syn-tab #f 'category #f 'c-type #f
+              'c-is-sws #f 'c-in-sws #f))
+      (loop (+ p 1)))))
+
+(define (before-buffer)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert before-fx)
+    (set-buffer-local-value! b 'major-mode 'c++-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (c-init-language-vars c++-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))
+    (before-wipe!)
+    (set!c-found-types (make-hash-table))
+    (c-add-type-1 13 18)               ; "myint"
+    (save-restriction
+      (widen)
+      (set!c-new-BEG (point-min)) (set!c-new-END (point-max))
+      (save-excursion
+        (parameterize ((*before-change-functions* '()))
+          (for-each (lambda (fn)
+                      ((%c-lang-function fn) (point-min) (point-max)))
+                    (%c-langvar 'c-get-state-before-change-functions))
+          (before-wipe!))))
+    b))
+
+(define (found-types)
+  (let ((h (c-found-types)) (acc '()))
+    (hash-for-each (lambda (k v) (set! acc (cons k acc))) h)
+    (sort acc string<?)))
+
+(define (before-props)
+  (let loop ((p 1) (acc '()))
+    (if (> p (1- (point-max)))
+        (reverse acc)
+        (let ((v (get-text-property p 'syntax-table)))
+          (loop (+ p 1) (if v (cons (list p v) acc) acc))))))
+
+(define (before-report)
+  (list (c-new-BEG) (c-new-END) (c-just-done-before-change)
+        (c-maybe-stale-found-type) (c-open-string-opener)
+        c-old-END-literality (found-types) (before-props)))
+
+(define (before-edit beg text)
+  (goto-char beg)
+  (parameterize ((*before-change-functions* (list c-before-change)))
+    (if text (insert text) (delete-char 1))
+    (before-report)))
+
+(test-equal "typing inside an identifier drops it from the found types"
+  (list 14 14 #t #f #f #f '() '())
+  (begin (before-buffer) (before-edit 14 "z")))
+
+(test-equal "a change in a macro extends the region over the whole macro"
+  (list 29 43 #t #f #f #f '("myint") '())
+  (begin (before-buffer) (before-edit 30 #f)))
+
+(test-equal "a change at a raw string's end records the literal and the region"
+  (list 52 61 #t #f #f 'string '("myint") '())
+  (begin (before-buffer) (before-edit 60 (string #\"))))
+
+(test-equal "a change at the start of the buffer clears the found types"
+  (list 1 1 #t #f #f #f '() '())
+  (begin (before-buffer) (before-edit 1 "x")))
+
+(test-equal "deleting the typedef prefix clears them too"
+  (list 1 2 #t #f #f #f '() '())
+  (begin (before-buffer) (before-edit 1 #f)))
+
+(test-equal "a c-type property beside the change is recorded as possibly stale"
+  (list 20 20 #t '(c-decl-id-start #f 20 27 "myint x" "") #f #f
+        '("myint") '())
+  (begin (before-buffer)
+         (put-text-property 19 20 'c-type 'c-decl-id-start)
+         (before-edit 20 "z")))
+
+(test-end "schemacs_editor_cc_mode_before_change")

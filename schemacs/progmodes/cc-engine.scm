@@ -402,6 +402,7 @@
    c-foreign-truncate-lit-pos-cache c-foreign-init-lit-pos-cache
    c-invalidate-state-cache-1 c-parse-state-1
    c-invalidate-state-cache c-parse-state
+   c-register-lang-function! %c-lang-function
    c-whack-state-before c-whack-state-after
    c-most-enclosing-brace c-least-enclosing-brace c-safe-position
    c-beginning-of-syntax
@@ -569,7 +570,12 @@
           (set!c-macro-cache-start-pos #f)
           (set!c-macro-cache-syntactic #f)
           (set!c-macro-cache-no-comment #f))
-         ((and (cdr cache) (< beg (cdr cache)))
+         ;; Emacs's `(cdr cache)' nil test. The cdr is first a number
+         ;; (the macro's end) and later `nil' once a change has dropped
+         ;; it - and the tree spells that nil `'()', which is *true* in
+         ;; Scheme, so the test is `%c-true': a `pair?` test would also
+         ;; reject the number.
+         ((and (%c-true (cdr cache)) (< beg (cdr cache)))
           (set-cdr! cache '())
           (set!c-macro-cache-start-pos beg)
           (set!c-macro-cache-syntactic #f)
@@ -2694,11 +2700,16 @@
 
       (c-state-cache))
 
-    (define (c-invalidate-state-cache here)
+    (define (c-invalidate-state-cache)
       ;; "This is a wrapper over `c-invalidate-state-cache-1'. It
       ;; suppresses the syntactic effect of the < and > (template)
       ;; brackets and of all parens in preprocessor constructs, except
       ;; for any such construct containing point."
+      ;;
+      ;; Emacs's wrapper takes no argument: it invalidates from
+      ;; `c-state-cache-invalid-pos', which `c-parse-state' maintains.
+      ;; This port used to take a position rather than read that
+      ;; variable, which no Emacs caller ever passes.
       ;;
       ;; The suppression is `c-with-<->-as-parens-suppressed'
       ;; (`cc-engine.el:4540'): the template brackets are marked through
@@ -2711,7 +2722,7 @@
       ;; the parse state where Emacs has none.
       (dynamic-wind c-suppress-<->-as-parens
                     (lambda ()
-                      (c-invalidate-state-cache-1 here))
+                      (c-invalidate-state-cache-1 (c-state-cache-invalid-pos)))
                     c-restore-<->-as-parens))
 
     (define (c-parse-state)
@@ -17282,5 +17293,24 @@
                     (goto-char anchor)
                     (current-column)))
         indent)))
+
+    ;; The language constants name functions; Emacs `funcall's the
+    ;; symbol through the obarray, and this registry is the tree's
+    ;; stand-in (see `c-register-lang-function!'). These are the
+    ;; `cc-engine' members of `c-get-state-before-change-functions' and
+    ;; `c-before-font-lock-functions'.
+    (c-register-lang-function! 'c-unmark-<>-around-region
+                               c-unmark-<>-around-region)
+    (c-register-lang-function! 'c-before-change-check-<>-operators
+                               c-before-change-check-<>-operators)
+    (c-register-lang-function! 'c-before-after-change-check-c++-modules
+                               c-before-after-change-check-c++-modules)
+    (c-register-lang-function! 'c-truncate-bs-cache c-truncate-bs-cache)
+    (c-register-lang-function! 'c-restore-<>-properties
+                               c-restore-<>-properties)
+    (c-register-lang-function! 'c-before-change-check-ml-strings
+                               c-before-change-check-ml-strings)
+    (c-register-lang-function! 'c-after-change-unmark-ml-strings
+                               c-after-change-unmark-ml-strings)
 
 ))

@@ -17435,13 +17435,22 @@ it, as that library's header explains.
    (`*in-property-change-p*`, bound in `textprop.scm`'s
    `modify-text-properties`) where Emacs walks its stack; the
    after-change side of Emacs's signal is a named gap.
-   Next: `c-before-change`/`c-after-change` themselves (every function
-   their language lists name is now ported except the `c-fl-decl-*`
-   pair behind `c-change-expand-fl-region`), then
-   `c-change-expand-fl-region`.
-2. `c-change-expand-fl-region` needs the `c-fl-decl-start`/`-end`
-   pair and the `c-doc-fl-decl-start`/`-end` pair (and
-   `c-beginning-of-objc-method-header`, which has no mode here).
+   **`c-before-change` is in** (`cc-mode.el:2224`), with the language
+   function registry filled for both libraries' members. Its port fixed
+   a pre-existing arity departure (`c-invalidate-state-cache` takes no
+   argument in Emacs) and found two bugs: literal states read with
+   plain `cadr`/`caddr` (a one-element answer crashes `(car '())` -
+   `%c-cadr`/`%c-caddr` now) and `c-invalidate-macro-cache`'s
+   `(cdr cache)` nil test, which needs `%c-true` (the cdr is normally a
+   *number*). Eight-row real-hook differential identical; group
+   `schemacs_editor_cc_mode_before_change`, 6.
+   Next: the `c-fl-decl-start`/`-end` pair and the
+   `c-doc-fl-decl-start`/`-end` pair with
+   `c-change-expand-fl-region` (and
+   `c-beginning-of-objc-method-header`, which has no mode here), then
+   `c-after-change`.
+2. Then `c-after-change` maps over `c-before-font-lock-functions`, so
+   the fl-decl pair above must come first.
 3. Then `c-basic-common-init`/`c-common-init` and the mode definitions
    (with `c-font-lock-init`/`c-font-lock-fontify-region`, and the
    language function registry filled for every symbol the change

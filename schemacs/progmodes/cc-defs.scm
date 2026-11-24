@@ -123,7 +123,7 @@
    c-put-overlay c-delete-overlay
    c-with-string-fences *c-string-fences-set-flag*
    *c-restore-string-fences-function* *c-clear-string-fences-function*
-   c-syntax-table-hwm
+   c-syntax-table-hwm set!c-syntax-table-hwm
    c-intersect-lists c-lookup-lists
    c-langelem-sym c-langelem-pos c-langelem-col c-langelem-2nd-pos
    c-put-char-property c-get-char-property c-clear-char-property
@@ -974,6 +974,13 @@
 ;; position": `most-positive-fixnum', not nil.
 (define c-syntax-table-hwm most-positive-fixnum)
 
+(define (set!c-syntax-table-hwm value)
+  ;; The setter, because a library cannot `set!' another library's
+  ;; imported binding. `c-before-change' resets it before every change
+  ;; ("A workaround for syntax-ppss's failure to notice syntax-table
+  ;; text property changes").
+  (set! c-syntax-table-hwm value))
+
 (define (c-put-char-property pos property value)
   ;; "Put the given property with the given value on the character at
   ;; POS." This macro does a hidden buffer change.
@@ -994,10 +1001,16 @@
     (set! c-syntax-table-hwm (min c-syntax-table-hwm pos)))
   (remove-text-properties pos (+ pos 1) (list property #f)))
 
-(define (c-next-single-property-change position prop object limit)
+(define (c-next-single-property-change position prop . rest)
   ;; `cc-defs.el:477': Emacs's `next-single-property-change', with the
-  ;; XEmacs `next-single-char-property-change' arm not carried.
-  (next-single-property-change position prop object limit))
+  ;; XEmacs `next-single-char-property-change' arm not carried. OBJECT
+  ;; and LIMIT are Emacs's `&optional', so a caller may give neither,
+  ;; either or both.
+  (next-single-property-change position prop
+                               (if (pair? rest) (car rest) #f)
+                               (if (and (pair? rest) (pair? (cdr rest)))
+                                   (cadr rest)
+                                   #f)))
 
 (define (c-min-property-position from to property)
   ;; "Return the first position in the range [FROM TO) where the text
@@ -1397,10 +1410,15 @@
             (backward-char)
             (loop))))))
 
-(define (c-previous-single-property-change position prop object limit)
+(define (c-previous-single-property-change position prop . rest)
   ;; `cc-defs.el:487': Emacs's `previous-single-property-change', with
   ;; the XEmacs `previous-single-char-property-change' arm not carried.
-  (previous-single-property-change position prop object limit))
+  ;; OBJECT and LIMIT are Emacs's `&optional'.
+  (previous-single-property-change position prop
+                                   (if (pair? rest) (car rest) #f)
+                                   (if (and (pair? rest) (pair? (cdr rest)))
+                                       (cadr rest)
+                                       #f)))
 
 (define (c-last-command-char)
   ;; `cc-defs.el:565': "The last character just typed." Emacs's macro

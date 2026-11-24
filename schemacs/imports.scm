@@ -168,6 +168,7 @@
     %c-cdr
     %c-clear-syn-tab-properties-full
     %c-false
+    %c-lang-function
     %c-langvar
     %c-true
     %class-in
@@ -1266,6 +1267,7 @@
     c-basic-offset
     c-bc-changed-stringiness
     c-before-after-change-check-c++-modules
+    c-before-change
     c-before-change-check-<>-operators
     c-before-change-check-ml-strings
     c-before-change-check-unbalanced-strings
@@ -1742,6 +1744,7 @@
     c-reference-face-name
     c-region-is-active-p
     c-register-emacs-variable-reader!
+    c-register-lang-function!
     c-register-lineup-function!
     c-register-offset-function-name!
     c-remove-font-lock-face
@@ -4148,6 +4151,7 @@
     set!c-state-point-min-lit-start
     set!c-state-point-min-lit-type
     set!c-syntactic-indentation
+    set!c-syntax-table-hwm
     set!cache-long-scans
     set!cd-path
     set!comment-end

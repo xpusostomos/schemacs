@@ -46,11 +46,12 @@
   ;; `set!`-prefixed setter.
   (import
     (scheme base)
-    (only (guile) logand caddr while)
+    (only (guile) logand caddr while most-positive-fixnum)
     (only (schemacs core syntax-macros) when-e while-e setq prog1)
     (only (schemacs buffer) current-buffer buffer-local-value
           set-buffer-local-value! *case-fold-search*)
     (only (schemacs marker) copy-marker set-marker marker-position)
+    (only (schemacs data) /=)
     (only (schemacs editfns) point point-max point-min goto-char
           bobp eobp char-before char-after buffer-substring-no-properties
           save-excursion forward-line narrow-to-region save-restriction
@@ -60,7 +61,7 @@
     (only (schemacs syntax) skip-syntax-backward skip-chars-backward skip-chars-forward
           parse-partial-sexp)
     (only (schemacs cmds) backward-char forward-char end-of-line beginning-of-line)
-    (only (schemacs textprop) *in-property-change-p*)
+    (only (schemacs textprop) *in-property-change-p* get-text-property)
     (only (schemacs progmodes cc-defs)
           c-search-forward-non-nil-char-property
           c-search-forward-char-property c-search-backward-char-property
@@ -76,7 +77,8 @@
           c-<-as-paren-syntax c->-as-paren-syntax
           c-characterp
           c-mark-<-as-paren c-mark->-as-paren c-unmark-<-or->-as-paren
-          c-save-buffer-state
+          c-save-buffer-state c-with-string-fences
+          set!c-syntax-table-hwm
           *c-restore-string-fences-function*
           *c-clear-string-fences-function*)
     (only (schemacs progmodes cc-engine)
@@ -99,6 +101,12 @@
           c-depropertize-ml-strings-in-region
           c-clear->-pair-props c-clear-<-pair-props
           c-no-comment-end-of-macro
+          %c-car %c-cdr %c-cadr %c-caddr
+          c-invalidate-sws-region-before c-laomib-invalidate-cache
+          c-invalidate-macro-cache c-whack-state-after
+          c-no-bracelist-cache set!c-no-bracelist-cache
+          c-register-lang-function! %c-lang-function
+          c-clear-found-types c-invalidate-state-cache
           *c-clear-syn-tab-properties-function*
           *c-remove-string-fences-function*
           c-truncate-lit-pos/state-cache
@@ -145,6 +153,8 @@
    c-depropertize-CPP c-extend-region-for-CPP c-depropertize-new-text
    c-extend-font-lock-region-for-macros
    c-neutralize-CPP-line c-neutralize-syntax-in-CPP
+   ;; `cc-mode.el:2224': the before-change function
+   c-before-change
    %c-clear-syn-tab-properties-full)
 
   (begin
@@ -1200,15 +1210,15 @@
       (c-save-buffer-state
           ((end-state #f))
         (set! end-state (c-full-pp-to-literal end))
-        (when (memv (cadr end-state) '(c c++))
+        (when (memv (%c-cadr end-state) '(c c++))
           (goto-char (max (- beg 2) (point-min)))
-          (if (eq? (cadr end-state) 'c)
+          (if (eq? (%c-cadr end-state) 'c)
               (when (search-forward "\\*/"
-                                    (or (cdr (caddr end-state)) (point-max)) #t)
+                                    (or (%c-cdr (%c-caddr end-state)) (point-max)) #t)
                 (c-clear-syntax-table-trim-caches (match-beginning 0)))
               (let loop ()
                 (when (search-forward "\\\\\n"
-                                      (or (cdr (caddr end-state)) (point-max))
+                                      (or (%c-cdr (%c-caddr end-state)) (point-max))
                                       #t)
                   (c-clear-syntax-table-trim-caches (match-beginning 0))
                   (loop)))))))
@@ -1224,28 +1234,28 @@
         ;; the `syntax-table' text properties after point are not yet in
         ;; a consistent state."
         (set! state (c-semi-pp-to-literal beg))
-        (goto-char (if (memv (cadr state) '(c c++))
-                       (caddr state)
+        (goto-char (if (memv (%c-cadr state) '(c c++))
+                       (%c-caddr state)
                        (max (- beg 2) (point-min))))
         (while-e (re-search-forward "\\\\\\(\\(\\\\\n\\)\\|\\(\\*/\\)\\)"
                                   (min (+ end 2) (point-max)) #t)
           (set! state (c-semi-pp-to-literal (match-beginning 0)))
           (when (cond
-                 ((eq? (cadr state) 'c)
+                 ((eq? (%c-cadr state) 'c)
                   (match-beginning 3))
-                 ((eq? (cadr state) 'c++)
+                 ((eq? (%c-cadr state) 'c++)
                   (match-beginning 2)))
             (c-put-syntax-table-trim-caches (match-beginning 0) '(1))))
 
         (goto-char end)
         (set! state (c-semi-pp-to-literal (point)))
         (cond
-         ((eq? (cadr state) 'c)
+         ((eq? (%c-cadr state) 'c)
           (when (search-forward "*/" #f #t)
             (when (eqv? (char-before (match-beginning 0)) #\\)
               (c-put-syntax-table-trim-caches
                (- (match-beginning 0) 1) '(1)))))
-         ((eq? (cadr state) 'c++)
+         ((eq? (%c-cadr state) 'c++)
           (let loop ()
             (when (begin
                     (end-of-line)
@@ -1491,6 +1501,143 @@
                  (forward-line))))))                 ; "no infinite loop with, e.g., \"#//\""
 )
 
+    (define (c-before-change beg end)
+      ;; "Function to be put on `before-change-functions'. Primarily,
+      ;; this calls the language dependent
+      ;; `c-get-state-before-change-functions'. It is otherwise used
+      ;; only to remove stale entries from the `c-found-types' cache,
+      ;; and to record entries which a `c-after-change' function might
+      ;; confirm as stale.
+      ;;
+      ;; Note that this function must be FAST rather than accurate. Note
+      ;; also that it only has any effect when font locking is enabled.
+      ;; We exploit this by checking for font-lock-*-face instead of
+      ;; doing rigorous syntactic analysis."
+      ;;
+      ;; "If either change boundary is wholly inside an identifier,
+      ;; delete it/them from the cache. Don't worry about being inside a
+      ;; string or a comment - \"wrongly\" removing a symbol from
+      ;; `c-found-types' isn't critical."
+      (unless (c-called-from-text-property-change-p)
+        (c-with-string-fences
+         (save-restriction
+           (widen)
+           ;; "Clear the list of found types if we make a change at the
+           ;; start of the buffer, to make it easier to get rid of
+           ;; misspelled types and variables that have gotten recognized
+           ;; as types in malformed code."
+           (when (= beg (point-min))
+             (c-clear-found-types))
+           (if (c-just-done-before-change)
+               ;; "We have two consecutive calls to
+               ;; `before-change-functions' without an intervening
+               ;; `after-change-functions'. ... To protect CC Mode,
+               ;; assume that the entire buffer has changed."
+               (begin
+                 (set! beg (point-min))
+                 (set! end (point-max))
+                 (set!c-just-done-before-change 'whole-buffer))
+               (set!c-just-done-before-change #t))
+           ;; "`(c-new-BEG c-new-END)' will be the region to fontify."
+           (set!c-new-BEG beg) (set!c-new-END end)
+           (set!c-maybe-stale-found-type #f)
+           (set!c-open-string-opener #f)
+           ;; "A workaround for syntax-ppss's failure to notice
+           ;; syntax-table text property changes."
+           (set!c-syntax-table-hwm most-positive-fixnum)
+           (save-match-data
+            (save-excursion
+              ;; "Are we inserting/deleting stuff in the middle of an
+              ;; identifier?"
+              (c-unfind-enclosing-token beg)
+              (c-unfind-enclosing-token end)
+              ;; "Are we coalescing two tokens together, e.g. \"fo o\"
+              ;; -> \"foo\"?"
+              (when (< beg end)
+                (c-unfind-coalesced-tokens beg end))
+              (c-invalidate-sws-region-before beg end)
+              ;; "Are we (potentially) disrupting the syntactic context
+              ;; which makes a type a type? ..."
+              (let ((lim #f) (lim-2 #f) (type #f) (type-pos #f)
+                    (marked-id #f) (term-pos #f)
+                    (end1
+                     (or (and (eq? (get-text-property end 'face)
+                                   'font-lock-comment-face)
+                              (c-previous-single-property-change end 'face))
+                         end)))
+                (when (>= end1 beg) ; "Don't hassle about changes entirely
+                                    ; in comments."
+                  ;; "Find a limit for the search for a `c-type'
+                  ;; property. Point is currently undefined. A
+                  ;; `goto-char' somewhere is needed. (2020-12-06)."
+                  (set! lim-2 (c-determine-limit 1000 (point)))
+                  (while
+                   (and (/= (skip-chars-backward "^;{}" lim-2) 0)
+                        (> (point) (point-min))
+                        (memv (c-get-char-property (- (point) 1) 'face)
+                              (list 'font-lock-comment-face
+                                    'font-lock-string-face))))
+                  (set! lim (max (point-min) (- (point) 1)))
+
+                  ;; "Look for the latest `c-type' property before end1"
+                  (when (and (> end1 (point-min))
+                             (begin
+                               (set! type-pos
+                                     (if (get-text-property (- end1 1) 'c-type)
+                                         end1
+                                         (c-previous-single-property-change
+                                          end1 'c-type #f lim)))
+                               type-pos))
+                    (set! type
+                          (get-text-property (max (- type-pos 1) lim) 'c-type))
+
+                    (when (memv type '(c-decl-id-start c-decl-type-start))
+                      ;; "Get the identifier, if any, that the property
+                      ;; is on."
+                      (goto-char (- type-pos 1))
+                      (set! marked-id
+                            (when-e (looking-at "\\(\\sw\\|\\s_\\)")
+                              (c-beginning-of-current-token)
+                              (buffer-substring-no-properties (point)
+                                                              type-pos)))
+
+                      (goto-char end1)
+                      (set! lim-2 (c-determine-+ve-limit 1000))
+                      (skip-chars-forward "^;{}" lim-2) ; "FIXME!!! loop for
+                                                        ; comment, maybe"
+                      (set! lim (point))
+                      (set! term-pos
+                            (or (c-next-single-property-change end 'c-type
+                                                               #f lim)
+                                lim))
+                      (set!c-maybe-stale-found-type
+                       (list type marked-id type-pos term-pos
+                             (buffer-substring-no-properties type-pos term-pos)
+                             (buffer-substring-no-properties beg end)))))))
+
+              ;; "If we're about to delete \"typedef\"s, clear the
+              ;; identifiers from `c-found-types'."
+              (c-before-change-de-typedef beg end)
+
+              (let ((fns (%c-langvar 'c-get-state-before-change-functions)))
+                (when (pair? fns)
+                  (for-each (lambda (fn)
+                              ((%c-lang-function fn) beg end))
+                            fns)))
+
+              (c-laomib-invalidate-cache beg end))))
+         (c-truncate-lit-pos/state-cache beg)
+         ;; "The following must be done here rather than in
+         ;; `c-after-change' because newly inserted parens would foul up
+         ;; the invalidation algorithm."
+         (c-invalidate-state-cache)
+         ;; "The following must happen after the previous, which likely
+         ;; alters the macro cache."
+         (when (%c-langvar 'c-opt-cpp-symbol)
+           (c-invalidate-macro-cache beg end))
+         (set!c-no-bracelist-cache
+          (c-whack-state-after beg (c-no-bracelist-cache))))))
+
     ;; ---------------------------------------------------------------
     ;; `c-with-string-fences'` seams (`cc-defs.el:1774')
     ;; ---------------------------------------------------------------
@@ -1504,5 +1651,36 @@
     ;; `c-after-change-unmark-ml-strings' are cc-engine's and reach this
     ;; library's remover through the parameter.
     (*c-remove-string-fences-function* c-remove-string-fences)
+
+    ;; The `cc-mode' members of `c-get-state-before-change-functions'
+    ;; and `c-before-font-lock-functions' (see
+    ;; `c-register-lang-function!').
+    (c-register-lang-function! 'c-before-change-include-<>
+                               c-before-change-include-<>)
+    (c-register-lang-function! 'c-before-change-check-unbalanced-strings
+                               c-before-change-check-unbalanced-strings)
+    (c-register-lang-function! 'c-parse-quotes-before-change
+                               c-parse-quotes-before-change)
+    (c-register-lang-function! 'c-before-change-fix-comment-escapes
+                               c-before-change-fix-comment-escapes)
+    (c-register-lang-function! 'c-depropertize-new-text
+                               c-depropertize-new-text)
+    (c-register-lang-function! 'c-after-change-mark-abnormal-strings
+                               c-after-change-mark-abnormal-strings)
+    (c-register-lang-function! 'c-after-change-escape-NL-in-string
+                               c-after-change-escape-NL-in-string)
+    (c-register-lang-function! 'c-after-change-include-<>
+                               c-after-change-include-<>)
+    (c-register-lang-function! 'c-after-change-fix-comment-escapes
+                               c-after-change-fix-comment-escapes)
+    (c-register-lang-function! 'c-parse-quotes-after-change
+                               c-parse-quotes-after-change)
+    (c-register-lang-function! 'c-extend-region-for-CPP
+                               c-extend-region-for-CPP)
+    (c-register-lang-function! 'c-depropertize-CPP c-depropertize-CPP)
+    (c-register-lang-function! 'c-extend-font-lock-region-for-macros
+                               c-extend-font-lock-region-for-macros)
+    (c-register-lang-function! 'c-neutralize-syntax-in-CPP
+                               c-neutralize-syntax-in-CPP)
 
     ))

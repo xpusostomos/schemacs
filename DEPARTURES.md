@@ -15954,3 +15954,53 @@ point. The probes are `/tmp/cpp-em.el` and `/tmp/cpp-ours.scm`;
 Next, in cc-mode.el's order: `c-before-change` and `c-after-change`
 themselves - every function their language lists name is now ported,
 except the `c-fl-decl-*` pair behind `c-change-expand-fl-region`.
+
+## `c-before-change`, and the arity it exposed (2026-11-24)
+
+`c-before-change` (`cc-mode.el:2224`) is in `cc-mode.scm`, driven by the
+two language lists through the function registry. Every `cc-engine` and
+`cc-mode` member of `c-get-state-before-change-functions` and
+`c-before-font-lock-functions` is now registered at load
+(`c-register-lang-function!`, exported), so the lists resolve by symbol
+as they do through Emacs's obarray.
+
+**A pre-existing arity departure was fixed first**:
+`c-invalidate-state-cache` took a position here. Emacs's wrapper takes
+*none* and invalidates from `c-state-cache-invalid-pos`; no Emacs caller
+passes a position. The two test call sites now call it as Emacs does,
+and the Emacs measurement with the zero-arg form reproduces the
+existing rows exactly - the expectations were right and only the
+signature was wrong.
+
+Also to support it: `c-next-single-property-change` /
+`c-previous-single-property-change` take Emacs's optional OBJECT and
+LIMIT now (a library cannot rely on every caller passing `#f`), and
+`cc-defs` gained `set!c-syntax-table-hwm` (a library cannot `set!`
+another library's binding).
+
+**Two bugs the port found, both in already-ported code:**
+
+1. The comment-escape pair read literal states with plain `cadr` /
+   `caddr` / `cdr`. `c-semi-pp-to-literal` and `c-full-pp-to-literal`
+   answer a *one-element* list when there is nothing to say, so
+   `(caddr state)` was `(car '())` - a crash the earlier unit
+   differential never reached. They are `%c-cadr` / `%c-caddr` /
+   `%c-cdr` now.
+2. `c-invalidate-macro-cache`'s `(and (cdr cache) ...)` is Emacs's
+   *nil* test, and the cache's cdr is normally a **number** (the macro's
+   end), not a pair - so neither the raw test (`'()` is true there) nor
+   a `pair?` test is right. It is `(%c-true (cdr cache))`.
+
+Verified against Emacs 31.1 with the real hook: eight edits on a
+fixture with a typedef, a macro, a raw string and a comment, recording
+the grown region, the just-done flag, the stale-type record, the
+opener, the old literal type, the found types and the properties - all
+identical. The probes are `/tmp/before-em.el` and
+`/tmp/before-ours.scm`; six rows are pinned in
+`schemacs_editor_cc_mode_before_change`.
+
+**The differential's one shortening**: `c-common-init`'s replay of
+`c-before-font-lock-functions` was left out of it, because
+`c-change-expand-fl-region` is not ported yet; the get-state list alone
+is replayed on both sides. That pair is the next tranche and is what
+`c-after-change` maps over.
