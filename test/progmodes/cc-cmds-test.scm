@@ -40,7 +40,8 @@
  (only (schemacs progmodes cc-engine)
        c-parsing-error c-electric-flag c-auto-newline c-hungry-delete-key
        c-clear-found-types c-literal-limits c-literal-type
-       c-beginning-of-macro c-end-of-macro)
+       c-beginning-of-macro c-end-of-macro c-query-and-set-macro-start
+       *c-macro-start*)
  ;; The line-up registry `c-run-special-indent-hook' resolves the
  ;; style's `c-gnu-impose-minimum' through is filled when this loads.
  (schemacs progmodes cc-align)
@@ -61,8 +62,10 @@
        c-beginning-of-sentence-in-comment c-end-of-sentence-in-comment
        c-beginning-of-sentence-in-string c-end-of-sentence-in-string
        c-comment-indent c-outline-level c-in-comment-line-prefix-p
-       c-scan-conditionals)
- (only (schemacs newcomment) comment-start comment-end))
+       c-scan-conditionals
+       c-fill-paragraph c-do-auto-fill c-indent-new-comment-line
+       c-context-line-break c-context-open-line)
+ (only (schemacs newcomment) comment-start comment-end *comment-multi-line*))
 
 (test-begin "schemacs_editor_cc_cmds")
 
@@ -502,3 +505,143 @@
 (test-equal "conditional scan with-else" 283 (stmt-scan 1 1 #f #t))
 
 (test-end "schemacs_editor_cc_cmds_statements")
+
+;;--------------------------------------------------------------
+;; The filling half
+;;--------------------------------------------------------------
+;; Every expectation is Emacs 31.1's answer for the same text and
+;; point, measured with `emacs -Q --batch' (`/tmp/measure-fill.el').
+;; The mode replay sets `comment-multi-line' t around the commands, as
+;; `c-basic-common-init' does for the real mode.
+(test-begin "schemacs_editor_cc_cmds_filling")
+
+(define (filling-case text pos thunk)
+  (fresh text)
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode)
+                 (*comment-multi-line* #t))
+    (goto-char pos)
+    (let ((ret (thunk)))
+      (list ret (point) (contents)))))
+
+(let* ((text "int a;\n\n/* This is a long block comment which should be filled when point is inside it, because it is wider than seventy characters. */\nint b;\n")
+       (r (filling-case text 60 (lambda () (c-fill-paragraph #f)))))
+  (test-equal "c-fill-paragraph fills a block comment" #t (car r))
+  (test-equal "c-fill-paragraph leaves point where it was" 60 (cadr r))
+  (test-equal "c-fill-paragraph block comment text"
+              "int a;\n\n/* This is a long block comment which should be filled when point is\n   inside it, because it is wider than seventy characters. */\nint b;\n"
+              (caddr r)))
+
+(let* ((text "int a; // a line comment which is long enough that filling it will wrap the text onto another line and keep the prefix\nint b;\n")
+       (r (filling-case text 30 (lambda () (c-fill-paragraph #f)))))
+  (test-equal "c-fill-paragraph fills a line comment" #t (car r))
+  (test-equal "c-fill-paragraph line comment text"
+              "int a; // a line comment which is long enough that filling it will\n       // wrap the text onto another line and keep the prefix\nint b;\n"
+              (caddr r)))
+
+(let* ((text "int a;\nint b;\n")
+       (r (filling-case text 5 (lambda () (c-fill-paragraph #f)))))
+  (test-equal "c-fill-paragraph answers t in code" #t (car r))
+  (test-equal "c-fill-paragraph leaves code alone" text (caddr r)))
+
+(let* ((text "char *s = \"a long string literal which should be filled when point is inside it, because it is wider than seventy\";\n")
+       (r (filling-case text 20 (lambda () (c-fill-paragraph #f)))))
+  (test-equal "c-fill-paragraph fills a string"
+              "char *s = \"a long string literal which should be filled when point is inside it,\nbecause it is wider than seventy\";\n"
+              (caddr r)))
+
+(let* ((text "int a;\nint b; // line comment here\nint c;\n")
+       (r (filling-case text 30 (lambda () (c-indent-new-comment-line)))))
+  (test-equal "c-indent-new-comment-line continues a line comment" #f (car r))
+  (test-equal "c-indent-new-comment-line line comment text"
+              "int a;\nint b; // line comment\n       // here\nint c;\n"
+              (caddr r)))
+
+(let* ((text "/* block comment text here */\nint a;\n")
+       (r (filling-case text 10 (lambda () (c-indent-new-comment-line)))))
+  (test-equal "c-indent-new-comment-line breaks a block comment" #f (car r))
+  (test-equal "c-indent-new-comment-line block comment text"
+              "/* block\n   comment text here */\nint a;\n"
+              (caddr r)))
+
+(let* ((text "int x = 1; int y;\n")
+       (r (filling-case text 11 (lambda () (c-indent-new-comment-line)))))
+  (test-equal "c-indent-new-comment-line answers the indentation in code" 0 (car r))
+  (test-equal "c-indent-new-comment-line in code text"
+              "int x = 1;\nint y;\n" (caddr r)))
+
+(let* ((text "int x = 1; int y;\n")
+       (r (filling-case text 11 (lambda () (c-context-line-break)))))
+  (test-equal "c-context-line-break answers the indentation in code" 0 (car r))
+  (test-equal "c-context-line-break in code text"
+              "int x = 1;\nint y;\n" (caddr r)))
+
+(let* ((text "int a;\nint b; // line comment here\nint c;\n")
+       (r (filling-case text 30 (lambda () (c-context-line-break)))))
+  (test-equal "c-context-line-break in a line comment" #f (car r))
+  (test-equal "c-context-line-break in a line comment text"
+              "int a;\nint b; // line comment\n       // here\nint c;\n"
+              (caddr r)))
+
+(let* ((text "/* block comment text */\nint a;\n")
+       (r (filling-case text 10 (lambda () (c-context-line-break)))))
+  (test-equal "c-context-line-break in a block comment" #f (car r))
+  (test-equal "c-context-line-break in a block comment text"
+              "/* block\n   comment text */\nint a;\n" (caddr r)))
+
+(let* ((text "char *s = \"some string text\";\n")
+       (r (filling-case text 20 (lambda () (c-context-line-break)))))
+  (test-equal "c-context-line-break in a string" #f (car r))
+  (test-equal "c-context-line-break in a string text"
+              "char *s = \"some str\ning text\";\n" (caddr r)))
+
+(let* ((text "int x = 1; int y;\n")
+       (r (filling-case text 11 (lambda () (c-context-open-line)))))
+  (test-equal "c-context-open-line answers the indentation in code" 0 (car r))
+  (test-equal "c-context-open-line leaves point before the new line" 11 (cadr r))
+  (test-equal "c-context-open-line in code text"
+              "int x = 1;\nint y;\n" (caddr r)))
+
+(let* ((text "int a; // comment here\n")
+       (r (filling-case text 20 (lambda () (c-context-open-line)))))
+  (test-equal "c-context-open-line in a comment" #f (car r))
+  (test-equal "c-context-open-line in a comment text"
+              "int a; // comment h\n       // ere\n" (caddr r)))
+
+;; The macro-start cache: `c-query-and-set-macro-start' must answer the
+;; position on *every* call, and nil outside a macro. A parameter's
+;; setter answers the OLD value (measured), so the port's write and
+;; answer are two steps; the second call is what catches a one-step
+;; translation, and `(symbolp nil)' is true in Elisp, so the nil case
+;; must be recomputed rather than returned.
+(let* ((text "#define M(x) do { x; } while (0)\nint a;\n")
+       (b (fresh text)))
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+    (goto-char 20)
+    (test-equal "c-query-and-set-macro-start answers the macro start"
+                1 (c-query-and-set-macro-start))
+    (goto-char 20)
+    (test-equal "c-query-and-set-macro-start answers it again"
+                1 (c-query-and-set-macro-start))
+    (goto-char 1)
+    (test-equal "c-query-and-set-macro-start at the macro's first line"
+                1 (c-query-and-set-macro-start))))
+
+(let* ((text "int a;\n")
+       (b (fresh text)))
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode)
+                 (*c-macro-start* 'unknown))
+    (test-equal "c-query-and-set-macro-start is nil in plain code"
+                #f (c-query-and-set-macro-start))))
+
+;; Elisp's `(symbolp nil)' is true, so a cache left NIL is recomputed
+;; when point comes to a macro. The one-line translation - `(symbol?)'
+;; - answers the stale nil instead; this is that case.
+(let* ((text "#define M(x) do { x; } while (0)\nint a;\n")
+       (b (fresh text)))
+  (parameterize ((*c-buffer-is-cc-mode* 'c-mode)
+                 (*c-macro-start* #f))
+    (goto-char 20)
+    (test-equal "c-query-and-set-macro-start recomputes from a nil cache"
+                1 (c-query-and-set-macro-start))))
+
+(test-end "schemacs_editor_cc_cmds_filling")

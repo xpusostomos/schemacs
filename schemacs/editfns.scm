@@ -339,7 +339,14 @@ point-marker
       ;; `validate_region' (`editfns.c`) puts the two in order and checks
       ;; them against the buffer; `del_range_1` clips them to it, which
       ;; covers the second half - the raising is not ported.
+      ;;
+      ;; Both arguments go through `CHECK_FIXNUM_COERCE_MARKER' in the
+      ;; C's `validate_region' (`buffer.c:2504`), so a marker is
+      ;; accepted here as it is there - `fix-position` is this tree's
+      ;; spelling of that coercion (`editfns.scm:1087`).
       ;;--------------------------------------------------------------
+      (set! start (fix-position start))
+      (set! end (fix-position end))
       (when (> start end)
         (let ((swap start)) (set! start end) (set! end swap)))
       ;; `validate_region` (`buffer.c:2504') sorts the two ends and

@@ -510,18 +510,42 @@
     ;; parameter (the tree's rule for a dynamically bound variable).
     (define *c-macro-start* (make-parameter 'unknown))
 
+    (define (%c-macro-start-unknown? value)
+      ;; Elisp's `(symbolp c-macro-start)' - and **nil is a symbol in
+      ;; Elisp**, so a cache left nil by a query outside a macro is
+      ;; recomputed on the next call. Spelled as a procedure because
+      ;; `(symbol? #f)' is false here, and the one-line translation made
+      ;; the second call in a buffer answer a stale nil: the filling
+      ;; commands then took the "code" branch inside a macro.
+      (or (not value) (symbol? value)))
+
     (define (c-query-and-set-macro-start)
-      ;; `cc-engine.el:247'.
-      (if (symbol? (*c-macro-start*))
-          (*c-macro-start*
-           (save-excursion
-             (c-save-buffer-state ()
-               (if (c-beginning-of-macro) (point) #f))))
+      ;; `cc-engine.el:247':
+      ;;
+      ;;   (defun c-query-and-set-macro-start ()
+      ;;     (if (symbolp c-macro-start)
+      ;;         (setq c-macro-start
+      ;;               (save-excursion ...))
+      ;;       c-macro-start))
+      ;;
+      ;; **A parameter's setter answers the OLD value, not the new one**
+      ;; (measured on Guile 3.0.11: `(p 2)' above a parameter holding 1
+      ;; answers 1), where Elisp's `setq' answers the value it set. The
+      ;; write and the answer are therefore two steps here; written as
+      ;; one, the first call in a buffer answered the initial `unknown'
+      ;; symbol and every caller read that truthy value as "in a macro".
+      ;;--------------------------------------------------------------
+      (if (%c-macro-start-unknown? (*c-macro-start*))
+          (let ((start (save-excursion
+                         (c-save-buffer-state ()
+                           (if (c-beginning-of-macro) (point) #f)))))
+            (*c-macro-start* start)
+            start)
           (*c-macro-start*)))
 
     (define (c-query-macro-start)
       ;; `cc-engine.el:255'.
-      (if (symbol? (*c-macro-start*))
+      (if (%c-macro-start-unknown? (*c-macro-start*))
           (save-excursion
             (c-save-buffer-state ()
               (if (c-beginning-of-macro) (point) #f)))
@@ -15601,7 +15625,7 @@
                             (c-safe (c-backward-sexp) #t)
                             #t))
                    (looking-at "\\(try\\|catch\\)\\_>")
-                   (set! placeholder (point))))
+                   (begin (set! placeholder (point)) placeholder)))
             (goto-char placeholder)
             (c-add-stmt-syntax 'catch-clause '() #t
                                containing-sexp paren-state))
@@ -15809,7 +15833,7 @@
                        (begin
                          (set! tmp-pos (c-looking-at-decl-block #t))
                          tmp-pos)
-                       (set! placeholder (point))))
+                       (begin (set! placeholder (point)) placeholder)))
                 (c-add-syntax 'class-open placeholder (c-point 'boi tmp-pos)))
                ;; "CASE 5A.3: brace-list/enum open"
                ((save-excursion
@@ -15852,7 +15876,7 @@
                        (begin (c-backward-syntactic-ws lim)
                               (= 0 (c-backward-token-2 #f #f lim)))
                        (looking-at (%c-langvar 'c-fun-name-substitute-key))
-                       (set! placeholder (point))))
+                       (begin (set! placeholder (point)) placeholder)))
                 (goto-char placeholder)
                 (back-to-indentation)
                 (c-add-syntax 'defun-open (point)))
@@ -16814,7 +16838,7 @@
                      (begin
                        (goto-char lim)
                        (c-looking-at-decl-block #f))
-                     (set! placeholder (point))))
+                     (begin (set! placeholder (point)) placeholder)))
               (c-backward-to-decl-anchor lim)
               (back-to-indentation)
               (if (save-excursion

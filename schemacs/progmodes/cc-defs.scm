@@ -67,7 +67,7 @@
     ;; narrow.
     (only (schemacs editfns) point goto-char point-min point-max
           save-restriction narrow-to-region char-after char-before eolp
-          save-excursion)
+          save-excursion delete-and-extract-region)
     (only (schemacs cmds) forward-char backward-char)
     ;; `c-langelem-col' reads the column of an anchor position.
     (only (schemacs indentc) current-column)
@@ -145,7 +145,8 @@
    c-suppress-<->-as-parens c-restore-<->-as-parens
    c-skip-ws-chars-forward c-skip-ws-chars-backward
    c-skip-ws-forward c-skip-ws-backward
-   c-safe c-last-command-char c-sentence-end c-forward-sexp
+   c-safe c-last-command-char c-sentence-end c-delete-and-extract-region
+   c-forward-sexp
    c-backward-sexp c-safe-scan-lists
    c-go-list-forward c-go-list-backward
    c-up-list-forward c-up-list-backward
@@ -958,6 +959,20 @@
 ;; so the answer is the procedure Emacs's chosen arm calls.
 (define (c-font-lock-flush beg end)
   (font-lock-flush beg end))
+
+(define (c-delete-and-extract-region start end)
+  ;; `cc-defs.el:530':
+  ;;
+  ;;   (defmacro c-delete-and-extract-region (start end)
+  ;;     "Delete the text between START and END and return it."
+  ;;     (if (cc-bytecomp-fboundp 'delete-and-extract-region)
+  ;;         ;; Emacs 21.1 and later
+  ;;         `(delete-and-extract-region ,start ,end)
+  ;;       ...))
+  ;;
+  ;; The `fboundp` picks the Emacs 21 arm, and `delete-and-extract-region`
+  ;; is `editfns.scm`'s (`editfns.c:2709').
+  (delete-and-extract-region start end))
 
 
 ;;----------------------------------------------------------------------

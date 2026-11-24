@@ -3289,14 +3289,20 @@ If N is omitted or nil, move point 1 character to the left."
             #f
             (insert " "))))
 
-    (define-command (delete-horizontal-space backward-only)
+    (define-command (delete-horizontal-space . rest)
       ;; GNU Emacs's `delete-horizontal-space' (simple.el:1135): "Delete
       ;; all spaces and tabs around point." BACKWARD-ONLY is the prefix
       ;; argument, which Emacs passes to `delete-space--internal' the
       ;; same way.
+      ;;
+      ;; The DEFUN is `(delete-horizontal-space &optional backward-only)'
+      ;; - a nil argument means absent - so this takes a rest parameter:
+      ;; `(delete-horizontal-space)' is ordinary Elisp, and the ported
+      ;; `c-indent-new-comment-line' and `cc-cmds`' line-break helpers
+      ;; call it that way.
       "Delete all spaces and tabs around point."
       (interactive (list (current-prefix-arg)))
-      (delete-space--internal " \t" backward-only))
+      (delete-space--internal " \t" (and (pair? rest) (car rest))))
 
     (define-command (delete-all-space backward-only)
       ;; GNU Emacs's `delete-all-space' (simple.el:1140): "Delete all

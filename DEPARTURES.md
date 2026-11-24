@@ -16322,3 +16322,151 @@ the defun movements' 10, and this tranche's 13) - `imports.scm` is
 regenerated (125 libraries, 5,065 names), `loadup-test.scm` passes,
 and the pty `imports`/`scratch` smoke checks pass. The statement
 harnesses and fixtures are in `tools/cc-cmds-diff/`.
+
+# cc-mode: the filling half of cc-cmds, and the Guile miscompile under it
+# (2026-11-24)
+
+`c-guess-fill-prefix`, `c-mask-paragraph`, `c-fill-paragraph`,
+`c-do-auto-fill`, `c-indent-new-comment-line` (with
+`c-comment-line-break-function` as its `define-alias`),
+`c-context-line-break` and `c-context-open-line` are in
+`schemacs/progmodes/cc-cmds.scm`, and `c-delete-and-extract-region`
+(`cc-defs.el:530`) is in `cc-defs.scm`. The differential
+(`tools/cc-fill-diff/`, README there) is exact for
+`c-guess-fill-prefix` at every position of four fixtures and for
+`c-fill-paragraph` on both fill fixtures, and the other three commands
+agree everywhere except the transient states named at the end.
+
+## The four primitive bugs the differential found
+
+1. **A parameter's setter answers the OLD value.** Measured on Guile
+   3.0.11: with a parameter holding 1, `(p 2)` answers **1**, where
+   Elisp's `setq` answers the value it set. `c-query-and-set-macro-start`
+   (`cc-engine.el:243`) is `(setq c-macro-start (save-excursion ...))`,
+   so the one-line translation answered the initial `unknown` symbol on
+   the first call in a buffer; every caller read that truthy value as
+   "in a macro", and `c-indent-new-comment-line`/`c-context-line-break`
+   took the macro branch in ordinary code. The write and the answer are
+   two steps now. This is the parameter analogue of the `set!`-answers-
+   unspecified trap, and it should be looked for at every ported
+   `(setq PARAM ...)` whose value is used.
+2. **`(symbolp nil)` is true in Elisp; `(symbol? #f)` is false here.**
+   The same function's condition decides whether the cache must be
+   recomputed; after a nil answer a one-line translation returns the
+   stale nil for ever, where Emacs recomputes on every call until the
+   cache holds a number. `%c-macro-start-unknown?` is the spelling.
+3. **`(set! x ...)` as the last operand of an `and` returns ZERO
+   values in this Guile**, and `c-guess-basic-syntax`'s CASE 5A.2 (the
+   class-open test), CASE 18 (catch/throw), CASE 5A.4 (defun-open) and
+   CASE 16B (inline close) all ended an `and` with
+   `(set! placeholder (point))` - Elisp's `setq`-as-value. The symptom
+   was a running editor failing with "Zero values returned to
+   single-valued continuation" from `c-context-line-break` in a C++
+   block comment. All four are `(begin (set! ...) placeholder)` now.
+   This is the earlier `set!`-in-value trap in its `and`-operand form;
+   grep for a `(set!` that is the last form before an `and`'s close.
+4. **`skip-chars-forward`/`-backward`'s BOUND is a number or a
+   marker** (`CHECK_FIXNUM_COERCE_MARKER`, `buffer.h`; `skip_chars`,
+   `syntax.c:1618`). Ours raised "Wrong type argument:
+   integer-or-marker-p" for a marker, which `c-backslash-region` hits
+   with a marker bound on a string literal's backslash-continued line -
+   a hard error from `c-context-line-break` there. `%skip-chars` now
+   coerces via `%coerce-marker-pos` (a marker's charpos, in any buffer,
+   as the C does; `marker.scm` is imported for it).
+
+Also fixed: `delete-horizontal-space` took BACKWARD-ONLY as a required
+parameter, and its DEFUN is `(delete-horizontal-space &optional
+backward-only)`; `c-indent-new-comment-line` calls it with no argument,
+which was an arity error inside `c-mask-paragraph`'s callers. It takes
+a rest parameter now (`simple.scm`).
+
+## The Guile 3.0.11 miscompilation, and the -O1 rule
+
+**`c-append-backslashes-forward` compiled at the default optimization
+level segfaults in `vm_regular_engine`** when point is on a string
+literal's backslash-continued line (it reaches `skip-chars-backward`
+with a marker bound - see bug 4 - and the crash survives the fix, so
+the skip-chars coercion is a separate bug that was hiding under it).
+Measured facts:
+
+* compiled at levels 0 and 1: correct; levels 2 and 3 (the default
+  is 2): SIGSEGV;
+* the same crash is on the tree **before** this work (HEAD, with the
+  filling half stashed), so it is a Guile bug, not the port's;
+* forcing `cc-cmds.scm` to load from source while everything else stays
+  compiled also avoids it - which is how the culprit library was
+  identified;
+* within the function, the crash needs the `(< col column)` branch of
+  its `cond` to be compiled into the body; removing that branch (or the
+  whole `cond`) avoids it even though the branch is not taken at the
+  crashing position. Marking the binding assigned (`(set! f f)`, the
+  `regex-emacs.scm` workaround for `main-loop`) did **not** help, nor
+  did moving the local `%pos` closure to a top-level procedure, nor
+  `cond-e`.
+
+So the workaround is at the build level: `Makefile` has an explicit
+rule compiling `build/schemacs/progmodes/cc-cmds.go` with
+`#:optimization-level 1`, and a hand compile of that file must pass the
+same keyword. Every other library compiles at the default. The crash
+does not occur under interpretation, which is why the suite runner (a
+fresh cache, source loads) never sees it.
+
+## Residual engine differences (named, not fixed)
+
+Both are `c-guess-basic-syntax` answering differently in a *transient*
+state that the command creates, with static reproducers:
+
+1. **A braced body inside a multi-line `#define`.** After a break
+   inside `#define M(x) do { x; } while (0)`, Emacs's
+   `c-indent-new-comment-line` leaves the continuation at the macro
+   body's column (18 in the small case); ours leaves it at 2. At the
+   transient position (the extra line break the function inserts, then
+   removes) Emacs answers `((cpp-define-intro) (statement 1))` and ours
+   `((cpp-macro-cont 1))` - our `c-forward-to-cpp-define-body`/CASE 3
+   decision lands the other way there, and `c-add-stmt-syntax`'s
+   `in-macro-expr` branch answers `cpp-macro-cont`. On the *static*
+   post-edit text both editors' indentation differentials agree, so it
+   is the transient state, not the text.
+2. **A broken comment starter.** `c-context-open-line` inserts an `x`
+   before breaking; when that splits `/*` the command's `c-indent-line`
+   sees `/x` and `* block`. `tools/cc-fill-diff/fixture-transient108.cpp`
+   is that state: Emacs `((topmost-intro-cont 107))` column 4, ours
+   `((defun-block-intro 93) (statement-cont 93))` column 7.
+
+Both are in `c-guess-basic-syntax`'s statement analysis, not in the
+filling code; they want a cc-engine pass with the static reproducers,
+not a workaround here.
+
+3. **`c-fill-paragraph` leaves point unmoved where Emacs moves it** on
+   a short `//` comment paragraph (three positions in
+   `fixture-fill.c`: 794-796; Emacs leaves point at 797, ours where it
+   was). Text and return value are identical. `fill-paragraph` called
+   directly on the same buffer shows the same difference, so it is the
+   tree's `fill-paragraph` point handling (fill.el level) and not
+   `c-mask-paragraph`.
+
+## Return values
+
+The commands' return values were compared at every position.
+`c-fill-paragraph` answers `t` in all four modes (code, string, line
+comment, block comment) - identical. `c-indent-new-comment-line` and
+`c-context-line-break` return their last form's value, as Emacs does:
+the indentation column in code (0), the marker `c-newline-and-indent`
+leaves in the macro branch, nil in the comment branches (the tail `if`
+needed an explicit `#f` else - Elisp's `if` without an else is nil,
+Scheme's is unspecified). The remaining differences are nil vs
+unspecified in the `#define` transient positions above, and the two
+sides' printed forms of the same marker object.
+
+## Tests
+
+`test/progmodes/cc-cmds-test.scm` gained the
+`schemacs_editor_cc_cmds_filling` group (19 tests): the four
+`c-fill-paragraph` cases, `c-indent-new-comment-line` in a line
+comment / block comment / code, `c-context-line-break` in each of
+those, a string and code again, `c-context-open-line` in code and in a
+comment, and the `c-query-and-set-macro-start` cache tests (the
+parameter-setter trap and the `(symbolp nil)` trap). Every expectation
+is Emacs 31.1's, measured by `/tmp/measure-fill.el`'s method.
+`test/syntax-test.scm` gained the `schemacs_editor_skip_chars_bound`
+group (4): the marker-bound behaviour of both scans, and no-bound.

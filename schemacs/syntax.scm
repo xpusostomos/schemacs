@@ -65,6 +65,11 @@
     ;; standard table - see `%standard-syntax-table'.
     (only (schemacs international characters) standard-syntax-runs)
 
+    ;; `%skip-chars`'s BOUND is a number or a marker - `CHECK_FIXNUM_
+    ;; COERCE_MARKER` (`buffer.h`) - and so are the other scans'
+    ;; positions; `marker.scm` is above `buffer.scm` and below this
+    ;; library, so the coercion comes from there.
+    (only (schemacs marker) markerp marker-position)
     (only (schemacs buffer) current-buffer
           fetch-char set-point buffer-pt buffer-beg buffer-z
           *inhibit-read-only*
@@ -1171,14 +1176,20 @@ by `find-word-boundary-function-table'.  It is also not interactive."
               ((and (>= c (car (car rest))) (<= c (cdr (car rest)))) #t)
               (else (loop (cdr rest))))))
 
+    (define (%coerce-marker-pos x)
+      ;; `CHECK_FIXNUM_COERCE_MARKER` (`buffer.h`): a marker is replaced
+      ;; by its charpos - the C does not ask which buffer it is in - and
+      ;; anything else must be a fixnum.
+      (cond ((markerp x) (marker-position x))
+            ((integer? x) x)
+            (else (error "Wrong type argument: integer-or-marker-p" x))))
+
     (define (%skip-chars forwardp set lim)
       (let* ((ed (current-buffer))
              (beg (buffer-beg ed))
              (end (buffer-z ed))
              (limit (min (max (cond ((not lim) (if forwardp end beg))
-                                    ((integer? lim) lim)
-                                    (else (error "Wrong type argument: integer-or-marker-p"
-                                                 lim)))
+                                    (else (%coerce-marker-pos lim)))
                               beg)
                          end))
              (start (buffer-pt ed)))

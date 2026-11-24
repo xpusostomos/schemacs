@@ -285,6 +285,7 @@
     *c++-font-lock-extra-types*
     *c-asymmetry-fontification-flag*
     *c-auto-align-backslashes*
+    *c-auto-fill-prefix*
     *c-auto-newline-analysis*
     *c-backslash-column*
     *c-backslash-max-column*
@@ -322,6 +323,8 @@
     *c-lang-var-overrides*
     *c-langs-are-parametric*
     *c-last-identifier-range*
+    *c-lit-limits*
+    *c-lit-type*
     *c-macro-start*
     *c-mark-wrong-style-of-comment*
     *c-max-one-liner-length*
@@ -1340,12 +1343,15 @@
     c-clear-syntax-table-with-value-trim-caches
     c-collect-line-comments
     c-comment-indent
+    c-comment-line-break-function
     c-comment-only-line-offset
     c-comment-prefix-regexp
     c-complex-decl-matchers
     c-compose-keywords-list
     c-concat-separated
     c-constant-face-name
+    c-context-line-break
+    c-context-open-line
     c-cpp-define-name
     c-cpp-matchers
     c-crosses-statement-barrier-p
@@ -1361,6 +1367,7 @@
     c-defun-name
     c-defun-name-1
     c-defun-name-and-limits
+    c-delete-and-extract-region
     c-delete-backslashes-forward
     c-delete-overlay
     c-delq-from-dotted-list
@@ -1376,6 +1383,7 @@
     c-digit
     c-directly-in-class-called-p
     c-display-defun-name
+    c-do-auto-fill
     c-do-declarators
     c-doc-bright-comment-start-re
     c-doc-comment-style
@@ -1409,6 +1417,7 @@
     c-extend-region-for-CPP
     c-face-name-p
     c-fallback-style
+    c-fill-paragraph
     c-filter-ops
     c-find-assignment-for-mode
     c-find-decl-match-pos
@@ -1520,6 +1529,7 @@
     c-got-face-at
     c-guess-basic-syntax
     c-guess-continued-construct
+    c-guess-fill-prefix
     c-hanging-braces-alist
     c-hanging-colons-alist
     c-hanging-semi&comma-criteria
@@ -1541,6 +1551,7 @@
     c-indent-line
     c-indent-line-or-region
     c-indent-multi-line-block
+    c-indent-new-comment-line
     c-indent-one-line-block
     c-indent-region
     c-indentation-style
@@ -1687,6 +1698,7 @@
     c-mark-<-as-paren
     c-mark->-as-paren
     c-mark-function
+    c-mask-paragraph
     c-matchers-1
     c-matchers-2
     c-matchers-3

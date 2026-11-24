@@ -111,6 +111,18 @@ build/%.go: %.scm
 	@mkdir -p $(dir $@)
 	$(GUILD) compile $(LOADPATH_FLAGS) -o $@ $<
 
+# **cc-cmds is compiled at -O1, on purpose.**  Guile 3.0.11's optimizer
+# miscompiles `c-append-backslashes-forward' at its default level (2): the
+# compiled procedure segfaults in `vm_regular_engine' when point is on a
+# string literal's backslash-continued line.  Levels 0 and 1 are correct;
+# measured, the crash needs the `(< col column)' branch of the function's
+# cond to be compiled into it.  The same miscompilation is in the tree
+# before this note (HEAD crashes too), so it is a Guile bug and not the
+# port's; see DEPARTURES.md's "c-append-backslashes-forward" section.
+build/schemacs/progmodes/cc-cmds.go: schemacs/progmodes/cc-cmds.scm
+	@mkdir -p $(dir $@)
+	$(GUILE) $(LOADPATH_FLAGS) -c '(compile-file "schemacs/progmodes/cc-cmds.scm" #:output-file "$@" #:optimization-level 1)'
+
 # The per-file prerequisites come from Guile's own dependency tool.  They are
 # conservative -- a .go is rebuilt when any module it uses changes, not only
 # when a macro did -- which is the safe direction to be wrong in.  The prelude

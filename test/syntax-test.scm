@@ -8,14 +8,16 @@
         *current-buffer* allocate-buffer get-buffer-create set-buffer
         erase-buffer buffer-z set-point buffer-pt set-buffer-local-value!)
   (only (schemacs editfns)
-        insert point-max save-restriction narrow-to-region)
+        insert point point-max goto-char save-restriction narrow-to-region)
   (only (schemacs frame) *current-frame* new-frame)
   (only (schemacs syntax)
         char-syntax string-to-syntax matching-paren modify-syntax-entry
         parse-partial-sexp syntax-ppss syntax-table standard-syntax-table
         copy-syntax-table set-syntax-table with-syntax-table
         forward-word-position backward-word-position scan-sexps scan-lists
+        skip-chars-forward skip-chars-backward
         *parse-sexp-ignore-comments*)
+  (only (schemacs marker) make-marker marker-position set-marker)
   (only (schemacs font-lock)
         font-lock-set-defaults font-lock-fontify-buffer set!font-lock-defaults!)
   (only (schemacs textprop) get-text-property put-text-property))
@@ -527,3 +529,37 @@
               (parameterize ((*parse-sexp-ignore-comments* #f))
                 (scan-lists 1 1 -1))))
 (test-end "schemacs_editor_parse_sexp_ignore_comments")
+
+;;--------------------------------------------------------------
+;; `skip-chars-forward'/`skip-chars-backward': BOUND is a number or a
+;; marker (`CHECK_FIXNUM_COERCE_MARKER', `buffer.h'). A marker bound
+;; used to raise "Wrong type argument: integer-or-marker-p", which
+;; c-mode's `c-backslash-region' hit on a string literal's
+;; backslash-continued line. Expectations measured on Emacs 31.1.
+;;--------------------------------------------------------------
+(test-begin "schemacs_editor_skip_chars_bound")
+
+(with-buffer
+ (lambda (b)
+   (insert "abcabcabc")
+   (goto-char 1)
+   (let ((m (make-marker)))
+     (set-marker m 4)
+     (test-equal "skip-chars-forward stops at a marker bound"
+                 3 (skip-chars-forward "abc" m))
+     (test-equal "skip-chars-forward leaves point at the marker bound"
+                 4 (point)))
+   (let ((m (make-marker)))
+     (set-marker m 5)
+     (goto-char 9)
+     (test-equal "skip-chars-backward stops at a marker bound"
+                 -4 (skip-chars-backward "abc" m))
+     (test-equal "skip-chars-backward leaves point at the marker bound"
+                 5 (point)))
+   (goto-char 1)
+   (test-equal "skip-chars-forward with no bound crosses the buffer"
+               9 (skip-chars-forward "abc" #f))
+   (test-equal "skip-chars-forward with no bound ends at eob"
+               10 (point))))
+
+(test-end "schemacs_editor_skip_chars_bound")

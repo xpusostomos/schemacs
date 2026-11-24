@@ -17509,3 +17509,63 @@ it, as that library's header explains.
 Right-sized verification for a cc-only change: `test/progmodes/cc-*`,
 `test/progmodes/cc-*-test.scm`, `test/loadup-test.scm`, plus
 `python3 tools/pty-check.py imports scratch`.
+
+# Handoff - cc-mode: the filling half of cc-cmds (2026-11-24)
+
+The paragraph-filling half of `cc-cmds.el` is ported and verified:
+`c-guess-fill-prefix`, `c-mask-paragraph`, `c-fill-paragraph`,
+`c-do-auto-fill`, `c-indent-new-comment-line` (with the
+`c-comment-line-break-function` alias), `c-context-line-break` and
+`c-context-open-line`, plus `c-delete-and-extract-region` in
+`cc-defs.scm`. The differential is `tools/cc-fill-diff/` (README has
+the commands and the results); `c-fill-paragraph` and
+`c-guess-fill-prefix` are exact at every position of four fixtures,
+and the other three commands agree except in two transient states,
+named with static reproducers at the end of DEPARTURES.md's
+"cc-mode: the filling half" section - both are `c-guess-basic-syntax`
+answer differences at states the command creates (`cpp-define-intro`
+inside a braced `#define` body, and `/x` splitting a comment starter),
+not filling-code bugs.
+
+**Compile `schemacs/progmodes/cc-cmds.scm` at optimization level 1.**
+Guile 3.0.11 miscompiles `c-append-backslashes-forward` at the default
+level (2): a compiled build segfaults in `vm_regular_engine` when point
+is on a string literal's backslash-continued line. Levels 0/1 are
+correct; the crash is on HEAD before this work too. The Makefile has an
+explicit `#:optimization-level 1` rule for that file; a hand compile
+must pass `#:optimization-level 1` too. Every other library stays at
+the default. DEPARTURES.md has the evidence.
+
+Four primitive bugs the differential found, each fixed at its own
+level: a **parameter's setter answers the OLD value** (measured; the
+`setq`-as-value analogue - `c-query-and-set-macro-start`), **Elisp's
+`(symbolp nil)` is true and `(symbol? #f)` is not** (the macro-start
+cache), **`set!` as the last `and` operand returns zero values** (four
+sites in `c-guess-basic-syntax`), and **`skip-chars-*`'s BOUND takes a
+marker** (`CHECK_FIXNUM_COERCE_MARKER`, `c-backslash-region`'s crash).
+`delete-horizontal-space`'s BACKWARD-ONLY is optional now.
+
+State after this tranche, in the approved order:
+
+1. **The electric keys** (`cc-cmds.el:409'-`:1568'`): every
+   `c-electric-*` command and the `c-hanging-*` machinery they drive
+   (`c-point-syntax', `c-brace-newlines', `c-try-one-liner',
+   `c-do-brace-electrics'), the file's `put SYM 'delete-selection`
+   block, and then `c-post-text-conversion` (`:5152'), which is a
+   dispatch over them. `c-electric-flag`/`c-auto-newline`/
+   `c-hungry-delete-key` and `c-syntactic-indentation-in-macros' are
+   already in cc-engine.
+2. `c-basic-common-init`/`c-common-init`/`c-font-lock-init` and the
+   mode definitions (with `c-setup-doc-comment-style`, the
+   `electric-indent-inhibit` named departure, and `easy-menu-define'
+   still the one missing primitive for cc-mode.el's menus), then the
+   `.c`/`.h` milestone and driving `tools/cc-cmds-diff/` to 99/99.
+3. The two residual engine differences above, as a cc-engine pass
+   using the static reproducers (`fixture-transient108.cpp` and the
+   `#define` body case).
+
+`test/progmodes/cc-cmds-test.scm` is 63 tests (a filling group of 19
+plus the existing groups), `test/syntax-test.scm` gained the
+`skip_chars_bound` group, `imports.scm` is regenerated, and the full
+suite and pty batteries were run on the settled tree (see the commit
+message for their counts).
