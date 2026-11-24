@@ -16743,3 +16743,58 @@ leaked out as `c-indent-new-comment-line`'s return value at positions
   of the engine fixes moved fill behaviour.
 - The cc suites pass, and `schemacs/imports.scm` is unchanged (no
   exports moved).
+
+## imenu (`imenu.el`), 2026-11-24
+
+`schemacs/imenu.scm` is the core of `lisp/imenu.el`: the mode-set
+buffer-locals, the generic index builder, the index alist and its
+cleanup, the completion chooser and the `imenu` command. It is the
+primitive cc-mode.el's mode bodies call, and `(schemacs imenu)` is in
+`loadup.scm`, `imports.scm` and the suite runner
+(`test/imenu-test.scm`, 13, every expectation Emacs 31.1's).
+
+### The bug the test found: `listp` is not `list?`
+
+`imenu--subalist-p` (`imenu.el:302`) tests `(listp (cadr item))`. In
+Elisp `listp` is true for *any* cons, including the dotted
+`(NAME . POSITION)` entry a nested index holds; Scheme's `list?` is
+true only for a proper list. The first port used `list?`, so
+
+    (imenu--subalist-p '("Funcs" ("foo" . 1)))   ; Emacs: t
+
+answered nil here, and `imenu--in-alist` then never recursed into a
+titled index (measured on Emacs: `(imenu--in-alist "bar" '(("Funcs"
+("foo" . 1) ("bar" . 10))))` is `("bar" . 10)`). The port tests
+`(or (null? x) (pair? x))`, which is Elisp's `listp`, and the two test
+rows pin both answers.
+
+### Departures
+
+1. **The variables are parameter + buffer-local slot**, as every
+   `defvar-local` is in this tree (the `font-lock-buffer-local`
+   pattern); `imenu--index-alist` included.
+2. **`imenu-default-goto-function` is two names in Emacs** - the
+   variable and the function - which one Scheme binding cannot be. The
+   variable's accessor is `imenu-default-goto-function-variable`; the
+   function keeps the Emacs spelling.
+3. **`imenu--assoc` stands in for `assoc`.** Emacs's `assoc` walks a
+   list whose elements are not all conses (an index may hold a bare
+   symbol) and simply does not match them; Scheme's `assoc` raises.
+   The helper skips non-conses, which is the C's comparison over
+   `(car elt)`.
+4. **`imenu--history-list` is a `<history>` record**, not a list:
+   `completing-read` takes a record here.
+5. **Not carried**: the mouse menu and the menu-bar entry
+   (`imenu--create-keymap`, `imenu--mouse-menu`, `imenu-add-to-menubar`,
+   `imenu-update-menubar`) - this tree's keymaps are records and the
+   menu is rebuilt by `setcdr` in Emacs, which a record has no shape
+   for; the `imenu-flatten` annotation/group values (the tree's
+   `completing-read` carries no completion metadata; the variable is
+   present so a mode setting it does not error); the `thing-at-point`
+   default candidate guess (`thing-at-point` is not ported, so the
+   default is the empty string); and the invisible-text skip (the
+   renderer does not honour `invisible`, so treating the text as
+   visible is the consistent answer).
+6. **`imenu--make-index-alist`'s index shape is Emacs's**: the rescan
+   item is consed on the front when `imenu-auto-rescan` is nil, and
+   `imenu--cleanup` detaches the markers, both measured and pinned.

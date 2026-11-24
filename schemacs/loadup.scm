@@ -205,6 +205,7 @@
         (schemacs glyph)
         (schemacs core icons)
         (schemacs image)
+        (schemacs imenu)
         (schemacs indent)
         (schemacs indentc)
         (schemacs insdel)

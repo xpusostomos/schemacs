@@ -76,6 +76,7 @@ SUITES = [
     'test/fns-test.scm',
     'test/font-lock-test.scm',
     'test/help-test.scm',
+    'test/imenu-test.scm',
     'test/indentc-test.scm',
     'test/international/mule-cmds-test.scm',
     'test/international/mule-diag-test.scm',

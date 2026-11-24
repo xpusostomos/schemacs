@@ -83,6 +83,7 @@
     (schemacs help-macro)
     (schemacs help-mode)
     (schemacs image)
+    (schemacs imenu)
     (schemacs indent)
     (except (schemacs indentc)  window-start)
     (schemacs insdel)
@@ -586,6 +587,21 @@
     *idl-font-lock-extra-types*
     *ignored-local-variable-values*
     *image-load-path*
+    *imenu-after-jump-hook*
+    *imenu-allow-duplicate-menu-items*
+    *imenu-auto-rescan*
+    *imenu-auto-rescan-maxout*
+    *imenu-eager-completion-buffer*
+    *imenu-flatten*
+    *imenu-generic-skip-comments-and-strings*
+    *imenu-level-separator*
+    *imenu-max-index-time*
+    *imenu-max-item-length*
+    *imenu-max-items*
+    *imenu-sort-function*
+    *imenu-space-replacement*
+    *imenu-use-markers*
+    *imenu-use-popup-menu*
     *in-property-change-p*
     *indent-tabs-mode*
     *inhibit-auto-fill*
@@ -3074,6 +3090,38 @@
     image-search-load-path
     image-type
     image-type-available-p
+    imenu
+    imenu--cleanup
+    imenu--completion-buffer
+    imenu--generic-function
+    imenu--history-list
+    imenu--in-alist
+    imenu--index-alist
+    imenu--make-index-alist
+    imenu--relative-position
+    imenu--rescan-item
+    imenu--sort-by-name
+    imenu--sort-by-position
+    imenu--split
+    imenu--split-menu
+    imenu--split-submenus
+    imenu--subalist-p
+    imenu--truncate-items
+    imenu-case-fold-search
+    imenu-choose-buffer-index
+    imenu-create-index-function
+    imenu-default-create-index-function
+    imenu-default-goto-function
+    imenu-default-goto-function-variable
+    imenu-extract-index-name-function
+    imenu-find-default
+    imenu-flush-cache
+    imenu-generic-expression
+    imenu-name-lookup-function
+    imenu-prev-index-position-function
+    imenu-submenus-on-top
+    imenu-syntax-alist
+    imenu-unavailable-error
     imports-path
     incf
     indent-according-to-mode
@@ -4342,6 +4390,16 @@
     set!frame-window-change
     set!frame-windows
     set!history-entries
+    set!imenu--index-alist
+    set!imenu-case-fold-search
+    set!imenu-create-index-function
+    set!imenu-default-goto-function-variable!
+    set!imenu-extract-index-name-function
+    set!imenu-generic-expression
+    set!imenu-name-lookup-function
+    set!imenu-prev-index-position-function
+    set!imenu-submenus-on-top
+    set!imenu-syntax-alist
     set!interval-left
     set!interval-plist
     set!interval-position
