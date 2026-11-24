@@ -190,3 +190,28 @@
             '(child-mode3 special-mode text-mode))))
 
 (test-end "derived")
+
+;; ------------------------------------------------------------------
+;; :after-hook
+;;
+;; Emacs's ordering, measured: the body runs inside `delay-mode-hooks`,
+;; `run-mode-hooks` runs the mode's hook, and then the after-hook.
+;; `(body hook after)` is `emacs -Q --batch`'s answer.
+
+(test-begin "derived_after_hook")
+(define *after-hook-log* '())
+(define after-hook-test-map (km:make-sparse-keymap))
+(define after-hook-test-hook '())
+(define-derived-mode (after-hook-test-mode fundamental-mode "AfterHook"
+                                           after-hook-test-map
+                                           after-hook-test-hook)
+  "A mode whose after-hook is the test."
+  :after-hook (set! *after-hook-log* (cons 'after *after-hook-log*))
+  (set! *after-hook-log* (cons 'body *after-hook-log*)))
+(set! after-hook-test-hook
+      (list (lambda () (set! *after-hook-log* (cons 'hook *after-hook-log*)))))
+(in-buffer (lambda () (after-hook-test-mode)))
+(test-equal "body, then the mode hook, then the after-hook"
+            '(body hook after)
+            (reverse *after-hook-log*))
+(test-end "derived_after_hook")

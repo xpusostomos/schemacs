@@ -1897,6 +1897,7 @@
     c-set-doc-comment-char-list
     c-set-doc-comment-re-element
     c-set-doc-comment-res
+    c-set-keymap-parent
     c-set-offset
     c-set-region-active
     c-set-style
@@ -2822,6 +2823,7 @@
     font-lock-fontify-buffer-function
     font-lock-fontify-keywords-region
     font-lock-fontify-region
+    font-lock-fontify-region-function
     font-lock-fontify-syntactically-region
     font-lock-initial-fontify
     font-lock-keywords
@@ -2839,6 +2841,7 @@
     font-lock-turn-on-thing-lock
     font-lock-unfontify-buffer
     font-lock-unfontify-region
+    font-lock-unfontify-region-function
     font-lock-value-in-major-mode
     fontification-functions
     force-mode-line-update
@@ -4313,8 +4316,10 @@
     set!dired-subdir-alist!
     set!file-local-variables-alist
     set!font-lock-defaults!
+    set!font-lock-fontify-region-function!
     set!font-lock-keywords!
     set!font-lock-mode!
+    set!font-lock-unfontify-region-function!
     set!fontification-functions!
     set!frame-change-stamp
     set!frame-editor

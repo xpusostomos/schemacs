@@ -110,7 +110,8 @@
   (export
    *font-lock-defaults*
    *font-lock-extra-managed-props*
-   *font-lock-fontify-region-function*
+   *font-lock-fontify-region-function* font-lock-fontify-region-function
+   set!font-lock-fontify-region-function!
    *font-lock-fontified*
    *font-lock-keywords*
    *font-lock-keywords-only*
@@ -127,7 +128,8 @@
    *font-lock-set-defaults*
    *font-lock-major-mode*
    *font-lock-support-mode*
-   *font-lock-unfontify-region-function*
+   *font-lock-unfontify-region-function* font-lock-unfontify-region-function
+   set!font-lock-unfontify-region-function!
    font-lock-add-keywords
    font-lock-after-change-function
    font-lock-append-text-property
@@ -588,6 +590,22 @@
     (define *font-lock-ensure-function* (make-parameter #f))
     (define *font-lock-fontify-buffer-function* (make-parameter #f))
     (define *font-lock-extend-after-change-region-function* (make-parameter #f))
+    ;; `font-lock-fontify-region-function' and
+    ;; `font-lock-unfontify-region-function' are `defvar's with the
+    ;; default function as their value, and `font-lock-set-defaults' sets
+    ;; them *buffer-locally* (`font-lock.el:958`, `:964`: "major modes can
+    ;; modify the values of, e.g., font-lock-fontify-region-function").
+    ;; The parameters are the global default and the slot wins - which is
+    ;; what lets cc-mode's `c-font-lock-fontify-region` be one buffer's.
+    (define (font-lock-fontify-region-function)
+      (font-lock-buffer-local *font-lock-fontify-region-function*))
+    (define (set!font-lock-fontify-region-function! value)
+      (set!font-lock-buffer-local! *font-lock-fontify-region-function* value))
+    (define (font-lock-unfontify-region-function)
+      (font-lock-buffer-local *font-lock-unfontify-region-function*))
+    (define (set!font-lock-unfontify-region-function! value)
+      (set!font-lock-buffer-local! *font-lock-unfontify-region-function* value))
+
     (define (font-lock-flush-function)
       (font-lock-buffer-local *font-lock-flush-function*))
     (define (font-lock-ensure-function)
@@ -1007,7 +1025,7 @@
       ;; read-only.
       ;;--------------------------------------------------------------
       (with-silent-modifications
-       ((*font-lock-unfontify-region-function*) beg end)))
+       ((font-lock-unfontify-region-function) beg end)))
 
     (define (font-lock-extend-region-wholelines)
       ;; GNU Emacs's `font-lock-extend-region-wholelines'
@@ -1190,12 +1208,19 @@
                 (font-lock-fontify-keywords-region beg end loudly))))))
         #f))
 
+    ;; The global values the two `defvar`s have in Emacs
+    ;; (`font-lock.el:649`): a buffer gets the buffer-local entry
+    ;; `font-lock-set-defaults` sets, and a buffer that never ran it gets
+    ;; these.
+    (*font-lock-fontify-region-function* font-lock-default-fontify-region)
+    (*font-lock-unfontify-region-function* font-lock-default-unfontify-region)
+
     (define (font-lock-fontify-region beg end . args)
       ;; GNU Emacs's `font-lock-fontify-region' (font-lock.el:1032):
       ;; "Fontify the text between BEG and END."
       ;;--------------------------------------------------------------
-      ((*font-lock-fontify-region-function*) beg end
-                                             (if (pair? args) (car args) #f)))
+      ((font-lock-fontify-region-function) beg end
+                                          (if (pair? args) (car args) #f)))
 
     (define (font-lock-default-unfontify-buffer)
       ;; GNU Emacs's `font-lock-default-unfontify-buffer'
@@ -1206,7 +1231,7 @@
     (define (font-lock-unfontify-buffer)
       ;; GNU Emacs's `font-lock-unfontify-buffer' (font-lock.el:1029).
       ;;--------------------------------------------------------------
-      ((*font-lock-unfontify-region-function*) (point-min) (point-max))
+      ((font-lock-unfontify-region-function) (point-min) (point-max))
       (set!font-lock-fontified! #f))
 
     (define (font-lock-default-fontify-buffer)
@@ -1538,8 +1563,10 @@
            (font-lock-compile-keywords (font-lock-keywords))))
         (*font-lock-fontify-syntactically-function*
          font-lock-default-fontify-syntactically)
-        (*font-lock-fontify-region-function* font-lock-default-fontify-region)
-        (*font-lock-unfontify-region-function* font-lock-default-unfontify-region)
+        (set!font-lock-fontify-region-function!
+         font-lock-default-fontify-region)
+        (set!font-lock-unfontify-region-function!
+         font-lock-default-unfontify-region)
         (*font-lock-extend-region-functions*
          (list font-lock-extend-region-wholelines
                font-lock-extend-region-multiline))

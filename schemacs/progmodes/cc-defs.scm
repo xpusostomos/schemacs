@@ -104,7 +104,10 @@
     ;; `c-sentence-end' (`cc-defs.el:572') is Emacs's
     ;; `(sentence-end)', paragraphs.el's function.
     (only (schemacs textmodes paragraphs) sentence-end)
-    (only (schemacs core regexp-opt) regexp-opt))
+    (only (schemacs core regexp-opt) regexp-opt)
+    ;; `c-set-keymap-parent` (`cc-defs.el:518`) is the Emacs arm of
+    ;; Emacs/XEmacs compatibility, and this is Emacs.
+    (only (schemacs keymap) set-keymap-parent))
 
   (export
    c-lang-defconst c-lang-const c-lang-defconst-eval-immediately
@@ -116,6 +119,7 @@
    %c-true %c-false
    c-emacs-features c-with-syntax-table c-int-to-char c-characterp
    c-keep-region-active c-region-is-active-p c-set-region-active
+   c-set-keymap-parent
    c-benign-error
    c-register-emacs-variable-reader!
    c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
@@ -473,6 +477,14 @@
         (let ((s (char-syntax-in table (string-ref elt i))))
           (and (or (char=? s #\w) (char=? s #\_))
                (loop (+ i 1)))))))
+
+(define (c-set-keymap-parent map parent)
+  ;; GNU Emacs's `c-set-keymap-parent` (`cc-defs.el:518`): "Set MAP's
+  ;; parent map to PARENT. In Emacs this is `set-keymap-parent`; the
+  ;; XEmacs half of the macro (`set-keymap-parents`, with a list) is not
+  ;; carried, there being no XEmacs here.
+  ;;--------------------------------------------------------------
+  (set-keymap-parent map parent))
 
 (define (c-make-keywords-re adorn list . rest)
   ;; "Make a regexp that matches any string in LIST. Duplicates and nil

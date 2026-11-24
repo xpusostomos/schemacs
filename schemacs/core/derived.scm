@@ -39,7 +39,7 @@
     (only (schemacs intervals) get put)
     (only (schemacs keymap) keymap-parent set-keymap-parent)
     (only (schemacs subr) delay-mode-hooks merge-ordered-lists
-          run-mode-hooks)
+          run-mode-hooks *delayed-after-hook-functions*)
     (only (schemacs search) string-match)
     (only (schemacs syntax) set-syntax-table)
     )
@@ -312,11 +312,100 @@
       ;; Emacs's nil, and means the mode starts from
       ;; `kill-all-local-variables'.
       ;;
-      ;; Not ported: the abbrev table argument (`:abbrev-table'), and
-      ;; `:group', `:after-hook', `:interactive', the `mode-class'
-      ;; property, and `derived-mode-make-docstring'.
+      ;; **`:after-hook` is read when it is the first body form**, which
+      ;; is where every real use has it (all seven cc modes). Emacs's
+      ;; macro walks any leading keyword list; a `syntax-rules` pattern
+      ;; cannot, so the other keywords remain unported: the abbrev table
+      ;; argument (`:abbrev-table'), `:group', `:interactive', the
+      ;; `mode-class' property and `derived-mode-make-docstring'.
+      ;;
+      ;; The hook is pushed onto `delayed-after-hook-functions` *after*
+      ;; the `delay-mode-hooks` body and before `run-mode-hooks`, which
+      ;; is Emacs's `(push (lambda () ,after-hook)
+      ;; delayed-after-hook-functions)` (`derived.el:294`); `run-mode-hooks`
+      ;; runs the delayed thunks after the mode's own hook.
       ;;--------------------------------------------------------------
       (syntax-rules ()
+        ((_ (child parent name map hook syntax) docstring :after-hook after body ...)
+         (begin
+           (derived-mode-set-parent 'child (if (eq? 'parent 'fundamental-mode) #f 'parent))
+           (define (child)
+             docstring
+             (delay-mode-hooks
+              (lambda ()
+                (if (and parent (not (eq? 'parent 'fundamental-mode)))
+                    (parent)
+                    (kill-all-local-variables))
+                (set!major-mode 'child)
+                (set!mode-name name)
+                (when (and parent (not (keymap-parent map)))
+                  (set-keymap-parent map (current-local-map)))
+                (use-local-map map)
+                (when syntax (set-syntax-table syntax))
+                body ...))
+             (*delayed-after-hook-functions*
+              (cons (lambda () after) (*delayed-after-hook-functions*)))
+             (run-mode-hooks hook))
+           (register-command! child #f)))
+        ((_ (child parent name map hook syntax) :after-hook after body ...)
+         (begin
+           (derived-mode-set-parent 'child (if (eq? 'parent 'fundamental-mode) #f 'parent))
+           (define (child)
+             (delay-mode-hooks
+              (lambda ()
+                (if (and parent (not (eq? 'parent 'fundamental-mode)))
+                    (parent)
+                    (kill-all-local-variables))
+                (set!major-mode 'child)
+                (set!mode-name name)
+                (when (and parent (not (keymap-parent map)))
+                  (set-keymap-parent map (current-local-map)))
+                (use-local-map map)
+                (when syntax (set-syntax-table syntax))
+                body ...))
+             (*delayed-after-hook-functions*
+              (cons (lambda () after) (*delayed-after-hook-functions*)))
+             (run-mode-hooks hook))
+           (register-command! child #f)))
+        ((_ (child parent name map hook) docstring :after-hook after body ...)
+         (begin
+           (derived-mode-set-parent 'child (if (eq? 'parent 'fundamental-mode) #f 'parent))
+           (define (child)
+             docstring
+             (delay-mode-hooks
+              (lambda ()
+                (if (and parent (not (eq? 'parent 'fundamental-mode)))
+                    (parent)
+                    (kill-all-local-variables))
+                (set!major-mode 'child)
+                (set!mode-name name)
+                (when (and parent (not (keymap-parent map)))
+                  (set-keymap-parent map (current-local-map)))
+                (use-local-map map)
+                body ...))
+             (*delayed-after-hook-functions*
+              (cons (lambda () after) (*delayed-after-hook-functions*)))
+             (run-mode-hooks hook))
+           (register-command! child #f)))
+        ((_ (child parent name map hook) :after-hook after body ...)
+         (begin
+           (derived-mode-set-parent 'child (if (eq? 'parent 'fundamental-mode) #f 'parent))
+           (define (child)
+             (delay-mode-hooks
+              (lambda ()
+                (if (and parent (not (eq? 'parent 'fundamental-mode)))
+                    (parent)
+                    (kill-all-local-variables))
+                (set!major-mode 'child)
+                (set!mode-name name)
+                (when (and parent (not (keymap-parent map)))
+                  (set-keymap-parent map (current-local-map)))
+                (use-local-map map)
+                body ...))
+             (*delayed-after-hook-functions*
+              (cons (lambda () after) (*delayed-after-hook-functions*)))
+             (run-mode-hooks hook))
+           (register-command! child #f)))
         ((_ (child parent name map hook) docstring body ...)
          (begin
            (derived-mode-set-parent 'child (if (eq? 'parent 'fundamental-mode) #f 'parent))

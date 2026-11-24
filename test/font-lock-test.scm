@@ -6,7 +6,7 @@
  
  (only (schemacs frame) *current-frame* new-frame)
  (only (schemacs buffer) current-buffer erase-buffer allocate-buffer
-       set-buffer-local-value!)
+       set-buffer set-buffer-local-value!)
  (only (schemacs editfns)
        buffer-string goto-char insert point point-max point-min)
  (only (schemacs textprop)
@@ -263,3 +263,29 @@
             (assq 'face (*char-property-alias-alist*))))))
 
 (test-end "schemacs_editor_font_lock")
+
+;; ------------------------------------------------------------------
+;; font-lock-fontify-region-function is buffer-local
+;;
+;; A major mode can install its own region fontifier for its buffers only
+;; (`font-lock.el:958`: "major modes can modify the values of, e.g.,
+;; font-lock-fontify-region-function"). cc-mode's `c-font-lock-init` is
+;; the caller this exists for.
+
+(test-begin "font_lock_region_function")
+(let ((b1 (allocate-buffer)) (b2 (allocate-buffer)) (called '()))
+  (set-buffer b1)
+  (insert "abc")
+  (let ((custom (lambda (beg end loudly)
+                  (set! called (cons (list beg end) called)))))
+    (set!font-lock-fontify-region-function! custom)
+    (test-assert "the buffer's own function is what it answers"
+                 (eq? (font-lock-fontify-region-function) custom))
+    (font-lock-fontify-region 1 4)
+    (test-equal "and font-lock-fontify-region calls it" '((1 4)) called)
+    (set-buffer b2)
+    (test-assert "another buffer keeps the global default"
+                 (eq? (font-lock-fontify-region-function)
+                      font-lock-default-fontify-region))
+    (test-equal "and a buffer-local entry does not leak" '((1 4)) called)))
+(test-end "font_lock_region_function")
