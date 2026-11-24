@@ -338,9 +338,15 @@
           ;; so a REUSE given to a session with no search is returned
           ;; as it stands by neither branch: the C's early return is
           ;; `return Qnil' (`search.c:2849').
-          '())
+          #f)
          ((not reuse)
-          (%regs->match-data integers))
+          ;; The C returns a *zero-length list* when every register is
+          ;; unanswered (the trailing-nil trim reaches index 0), and
+          ;; Emacs's empty list is `nil'. Here `'()` is a true value,
+          ;; so the empty answer is `#f' - ported Emacs code tests
+          ;; `(match-data)' for nil (`c-ml-string-in-end-delim' does).
+          (let ((v (%regs->match-data integers)))
+            (if (null? v) #f v)))
          (else
           ;; REUSE is destructively filled; if the values do not fill
           ;; it the rest is set to nil, and if it is too short the

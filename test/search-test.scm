@@ -260,6 +260,19 @@
   (begin (string-match "b" "abc")
          (set-match-data #f)
          (match-beginning 0)))
+;; "`(match-data)' answers nil when there is none to give" - Emacs's
+;; trailing-nil trim reaches index 0 and a zero-length list is nil
+;; there. Here `'()` is a true value, so the empty answer is `#f';
+;; `c-ml-string-in-end-delim' tests `(match-data)' for exactly this.
+(test-equal "match-data answers nil once the registers are cleared"
+  #f
+  (begin (string-match "b" "abc")
+         (set-match-data #f)
+         (match-data)))
+(test-equal "... and nil before any search has happened"
+  #f
+  (parameterize ((*search-regs* #f) (*last-thing-searched* #f))
+    (match-data)))
 (test-error "replace-match with no match data"
   #t
   (parameterize ((*search-regs* #f)) (replace-match "x" #t #t)))

@@ -338,6 +338,7 @@
     *c-record-found-types*
     *c-record-ref-identifiers*
     *c-record-type-identifiers*
+    *c-remove-string-fences-function*
     *c-report-syntactic-errors*
     *c-require-final-newline*
     *c-restore-string-fences-function*
@@ -1222,6 +1223,7 @@
     c-after-change-fix-comment-escapes
     c-after-change-include-<>
     c-after-change-mark-abnormal-strings
+    c-after-change-unmark-ml-strings
     c-after-conditional
     c-after-special-operator-id
     c-alnum
@@ -1264,6 +1266,7 @@
     c-bc-changed-stringiness
     c-before-after-change-check-c++-modules
     c-before-change-check-<>-operators
+    c-before-change-check-ml-strings
     c-before-change-check-unbalanced-strings
     c-before-change-de-typedef
     c-before-change-fix-comment-escapes
@@ -1288,6 +1291,7 @@
     c-bs-prev-pos
     c-bs-prev-stack
     c-c++-make-ml-string-closer-re
+    c-c++-make-ml-string-opener-re
     c-c++-vsemi-p
     c-cache-to-parse-ps-state
     c-calc-offset
@@ -1646,6 +1650,7 @@
     c-ml-string-end-delim-disrupted
     c-ml-string-in-end-delim
     c-ml-string-make-closer-re
+    c-ml-string-make-opener-re
     c-ml-string-opener-around-point
     c-ml-string-opener-at-or-around-point
     c-ml-string-opener-intersects-region

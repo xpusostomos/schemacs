@@ -166,7 +166,8 @@
     (only (schemacs faces) facep)
     ;; The Emacs macros the find-decl machinery is written with: the
     ;; `-e' forms are used only where Emacs's answer is observable.
-    (only (schemacs core syntax-macros) setq push prog1 when-e dolist)
+    (only (schemacs core syntax-macros) setq push prog1 when-e dolist
+          unwind-protect)
     (only (schemacs search) re-search-forward re-search-backward
           search-forward looking-at string-match regexp-quote
           match-beginning match-end match-string match-string-no-properties
@@ -180,6 +181,7 @@
     (only (schemacs subr) regexp-unmatchable last delq copy-tree
           intern with-silent-modifications remq butlast car-safe cdr-safe)
     (only (schemacs progmodes cc-defs) c-emacs-features c-save-buffer-state
+          c-search-forward-char-property-with-value-on-char
           c-put-char-property c-clear-char-property c-get-char-property
           c-put-char-properties c-clear-char-properties
           c-clear-char-property-with-value
@@ -234,7 +236,8 @@
    c-end-of-literal c-unmark-<>-around-region
    c-before-change-check-<>-operators c-after-change-check-<>-operators
    c-<>-get-restricted c-restore-<>-properties
-   c-ml-string-make-closer-re c-c++-make-ml-string-closer-re
+   c-ml-string-make-closer-re c-ml-string-make-opener-re
+   c-c++-make-ml-string-closer-re c-c++-make-ml-string-opener-re
    c-ml-string-opener-at-or-around-point
    ;; `cc-engine.el:5805'-`:7000': the find-decl machinery and the
    ;; brace stack
@@ -250,6 +253,8 @@
    c-beg-pos c-end-pos c-ml-string-end-delim-disrupted
    c-ml-string-back-to-neutral
    c-ml-string-in-end-delim
+   c-before-change-check-ml-strings c-after-change-unmark-ml-strings
+   *c-remove-string-fences-function*
    *c-clear-syn-tab-properties-function* c-clear-syn-tab-properties
    c-neutralize-pos c-neutralized-prop
    c-depropertize-ml-string c-depropertize-ml-strings-in-region
@@ -13962,27 +13967,42 @@
       ;; languages with multi-line strings (but not C++, for example)."
       (%c-langvar 'c-ml-string-any-closer-re))
 
+    (define (c-ml-string-make-opener-re closer)
+      ;; "Return `c-ml-string-opener-re'. This is a suitable language
+      ;; specific value of `c-make-ml-string-opener-re-function' for most
+      ;; languages with multi-line strings (but not C++, for example)."
+      (%c-langvar 'c-ml-string-opener-re))
+
     (define (c-c++-make-ml-string-closer-re opener)
       ;; "Construct a regexp for a C++ raw string closer matching OPENER."
       (concat "\\()" (regexp-quote (%substring opener 2 -1)) "\\(\"\\)\\)"))
+
+    (define (c-c++-make-ml-string-opener-re closer)
+      ;; "Construct a regexp for a C++ raw string opener matching CLOSER."
+      (concat "\\(R\\(\"\\)" (regexp-quote (%substring closer 1 -1)) "(\\)"))
 
     ;; The language's value is the function's symbol; Emacs resolves it
     ;; through the obarray, and this registry is the tree's stand-in (see
     ;; `c-register-lang-function!').
     (c-register-lang-function! 'c-ml-string-make-closer-re
                                c-ml-string-make-closer-re)
+    (c-register-lang-function! 'c-ml-string-make-opener-re
+                               c-ml-string-make-opener-re)
     (c-register-lang-function! 'c-c++-make-ml-string-closer-re
                                c-c++-make-ml-string-closer-re)
+    (c-register-lang-function! 'c-c++-make-ml-string-opener-re
+                               c-c++-make-ml-string-opener-re)
 
     ;;------------------------------------------------------------------
     ;; `cc-engine.el:8151'-`:8260`: the ml-string propertization
     ;;------------------------------------------------------------------
     ;; The three functions `c-after-change-mark-abnormal-strings' calls
     ;; for a language with multi-line strings (C++ raw strings). The
-    ;; rest of the ml-string change machinery - `c-depropertize-ml-string'
-    ;; and the `c-before-change-check-ml-strings' /
-    ;; `c-after-change-unmark-ml-strings' pair - waits on the change
-    ;; hooks, which are not ported yet.
+    ;; rest of the ml-string change machinery -
+    ;; `c-before-change-check-ml-strings' and
+    ;; `c-after-change-unmark-ml-strings' - is beside
+    ;; `c-ml-string-in-end-delim' below; what calls it is cc-mode's
+    ;; `c-before-change' / `c-after-change', not ported yet.
     (define (c-maybe-re-mark-ml-string)
       ;; "When this function is called, point is immediately after a \"
       ;; which opens a string. If this \" is the characteristic \" of a
@@ -14453,6 +14473,336 @@
             #f
             (cons (match-beginning 1) (match-end 1)))))
 
+    ;; ---------------------------------------------------------------
+    ;; The two ml-string change functions (`cc-engine.el:7863', `:7953')
+    ;;--------------------------------------------------------------
+    ;; `c-remove-string-fences' is `cc-mode.el:1437''s - it removes the
+    ;; `syntax-table' and `c-fl-syn-tab' pair with `c-clear-syn-tab',
+    ;; which lives above this library - so it arrives through this
+    ;; parameter, as the string-fence pair does. Before cc-mode loads
+    ;; there are no fences for it to remove.
+    (define *c-remove-string-fences-function* (make-parameter #f))
+    (define (%c-remove-string-fences pos)
+      (let ((f (*c-remove-string-fences-function*)))
+        (when f (f pos))))
+
+    (define (c-before-change-check-ml-strings beg end)
+      ;; "This function clears `syntax-table' text properties from
+      ;; multi-line strings whose delimiters are about to change in the
+      ;; region (c-new-BEG c-new-END). BEG and END are the standard
+      ;; arguments supplied to any before-change function.
+      ;;
+      ;; Point is undefined on both entry and exit, and the return value
+      ;; has no significance.
+      ;;
+      ;; This function is called as a before-change function solely due
+      ;; to its membership of mode-specific value of
+      ;; `c-get-state-before-change-functions'."
+      (goto-char end)
+      (set! c-ml-string-end-delim-disrupted #f)
+      ;; "We use the following to detect a R\"<id>( being swallowed into
+      ;; a string by the pending change."
+      (set! c-old-END-literality (c-in-literal))
+      (goto-char beg)
+      (set! c-old-beg-ml (c-ml-string-delims-around-point))
+      (set! c-beg-pos (c-position-wrt-ml-delims c-old-beg-ml))
+      (set! c-old-1-beg-ml
+            (and (not (or c-old-beg-ml (bobp)))
+                 (begin (goto-char (- beg 1)) #t)
+                 (c-ml-string-delims-around-point)))
+      (goto-char end)
+      (set! c-old-end-ml
+            (if (or (eqv? end beg)
+                    (and c-old-beg-ml
+                         (>= end (car (car c-old-beg-ml)))
+                         (or (not (cdr c-old-beg-ml))
+                             (< end (car (cdr (cdr c-old-beg-ml)))))))
+                c-old-beg-ml
+                (c-ml-string-delims-around-point)))
+      (set! c-end-pos (c-position-wrt-ml-delims c-old-end-ml))
+
+      (c-save-buffer-state
+       ((term-del (c-ml-string-in-end-delim beg end (%c-car c-old-beg-ml)))
+        (Rquote #f) (close-quote #f))
+       (cond
+        ;; "We're not changing, or we're obliterating ml strings."
+        ((and (not c-beg-pos) (not c-end-pos))
+         #f)
+        ;; "We're changing the putative terminating delimiter of an ml
+        ;; string containing BEG."
+        ((and c-beg-pos term-del
+              (or (not (cdr c-old-beg-ml))
+                  (<= (car term-del) (car (cdr c-old-beg-ml)))))
+         (set! Rquote (car (car c-old-beg-ml)))
+         (set! close-quote (cdr term-del))
+         (set! c-ml-string-end-delim-disrupted #t)
+         (c-depropertize-ml-strings-in-region Rquote close-quote)
+         (set!c-new-BEG (min (c-new-BEG) Rquote))
+         (set!c-new-END (max (c-new-END) close-quote)))
+        ;; "We're breaking an escaped NL in a raw string in a macro."
+        ((and c-old-end-ml
+              (< beg end)
+              (begin (goto-char end) #t)
+              (eqv? (char-before) #\\)
+              (c-beginning-of-macro))
+         ;; Emacs's `let' evaluates its inits left to right and so
+         ;; leaves BOM before the macro end; Scheme's `let' order is
+         ;; unspecified, so this is a `let*'.
+         (let* ((bom (point))
+                (eom (begin (c-end-of-macro) (point))))
+           (c-depropertize-ml-strings-in-region bom eom)
+           (set!c-new-BEG (min (c-new-BEG) bom))
+           (set!c-new-END (max (c-new-END) eom))))
+        ;; "We're changing only the contents of a raw string. Any
+        ;; critical deletion of \"s will be handled in
+        ;; `c-after-change-unmark-ml-strings'."
+        ((and (equal? c-old-beg-ml c-old-end-ml)
+              (eq? c-beg-pos 'string) (eq? c-end-pos 'string))
+         #f)
+        ((or
+          ;; "We're removing (at least part of) the R\" of the starting
+          ;; delim of a raw string:"
+          (not c-old-beg-ml)
+          (and (eqv? beg (car (car c-old-beg-ml))) (< beg end))
+          ;; "Or we're removing the ( of the starting delim of a raw
+          ;; string."
+          (and (eq? c-beg-pos 'open-delim)
+               (or (not c-old-end-ml)
+                   (not (eq? c-end-pos 'open-delim))
+                   (not (equal? c-old-beg-ml c-old-end-ml))))
+          ;; "Or we're disrupting a starting delim by typing into it, or
+          ;; removing characters from it."
+          (and (eq? c-beg-pos 'open-delim)
+               (eq? c-end-pos 'open-delim)
+               (equal? c-old-beg-ml c-old-end-ml)))
+         (let ((delims (or c-old-end-ml c-old-beg-ml)))
+           (set! Rquote (car (car delims)))
+           ;; Emacs's `(caddr DELIMS)' - and `(cdr nil)' is nil in
+           ;; Elisp, so a delims with no closer answers nil here too.
+           (set! close-quote
+                 (or (%c-caddr delims) (point-max))))
+         (c-depropertize-ml-strings-in-region Rquote close-quote)
+         (set!c-new-BEG (min (c-new-BEG) Rquote))
+         (set!c-new-END (max (c-new-END) close-quote))))))
+
+    (define (c-after-change-unmark-ml-strings beg end old-len)
+      ;; "This function removes `syntax-table' text properties from any
+      ;; ml strings which have been affected by the current change.
+      ;; These are those which have been \"stringed out\" and from newly
+      ;; formed ml strings, or any existing ml string which the new text
+      ;; terminates. BEG, END, and OLD-LEN are the standard arguments
+      ;; supplied to any after-change-function.
+      ;;
+      ;; Point is undefined on both entry and exit, and the return value
+      ;; has no significance.
+      ;;
+      ;; This functions is called as an after-change function by virtue
+      ;; of its membership of the mode's value of
+      ;; `c-before-font-lock-functions'."
+      ;;
+      ;; "Maintainers' note: Be careful with the use of `c-old-beg-ml'
+      ;; and `c-old-end-ml'; since text has been inserted or removed,
+      ;; most of the components in these variables will no longer be
+      ;; valid. (caar c-old-beg-ml) is normally OK, (cadar c-old-beg-ml)
+      ;; often is, any others will need adjustments."
+      (c-save-buffer-state
+       ((found #f) (eoll #f) (state #f) (opener #f))
+       ;; "Has an inserted \" swallowed up a R\"(, turning it into
+       ;; \"...R\"(?"
+       (goto-char end)
+       (set! eoll (c-point 'eoll))
+       (when-e
+        (and (not c-old-END-literality)
+             (re-search-forward (%c-langvar 'c-ml-string-opener-re) eoll #t))
+        (set! state (c-semi-pp-to-literal end))
+        (when (eq? (%c-cadr state) 'string)
+          (unwind-protect
+           (begin
+             ;; "Temporarily insert a closing string delimiter...."
+             (goto-char end)
+             (cond
+              ((integer? (nth 3 (car state)))
+               (insert (nth 3 (car state))))
+              ((eq? (nth 3 (car state)) #t)
+               (insert #\")
+               (c-put-string-fence end)))
+             (c-truncate-lit-pos/state-cache end)
+             ;; "....ensure c-new-END extends right to the end of the
+             ;; about to be un-stringed raw string...."
+             (save-excursion
+               (goto-char (+ 1 (match-end 1))) ; "Count inserted " too."
+               (set!c-new-END
+                (max (c-new-END)
+                     (if (re-search-forward
+                          ((%c-lang-function
+                            (%c-langvar 'c-make-ml-string-closer-re-function))
+                           (match-string-no-properties 1))
+                          #f #t)
+                         (- (match-end 1) 1) ; "1- For the inserted \"."
+                         eoll))))
+             ;; "...and clear `syntax-table' text properties from the
+             ;; following raw strings."
+             (c-depropertize-ml-strings-in-region (point) (+ 1 eoll)))
+           ;; "Remove the temporary string delimiter."
+           (goto-char end)
+           (delete-char 1)
+           (c-truncate-lit-pos/state-cache end))))
+
+       ;; "Have we just created a new starting id?"
+       (goto-char beg)
+       (set! opener
+             (if (eqv? beg end)
+                 (c-ml-string-opener-at-or-around-point end)
+                 (c-ml-string-opener-intersects-region beg end)))
+       (when-e
+        (and opener (<= (car opener) end)
+             (begin
+               (set! state (c-semi-pp-to-literal (car opener)))
+               state)
+             (not (%c-cadr state)))
+        (set!c-new-BEG (min (c-new-BEG) (car opener)))
+        (goto-char (car (cdr opener)))
+        (when (re-search-forward
+               ((%c-lang-function
+                 (%c-langvar 'c-make-ml-string-closer-re-function))
+                (buffer-substring-no-properties (car opener)
+                                                (car (cdr opener))))
+               #f #t)                   ; "No bound"
+          (set!c-new-END (max (c-new-END) (match-end 1))))
+        (goto-char (c-new-BEG))
+        (while (c-search-forward-char-property-with-value-on-char
+                'syntax-table '(15) #\" (c-new-END))
+          (%c-remove-string-fences (- (point) 1)))
+        (c-depropertize-ml-strings-in-region (c-new-BEG) (c-new-END)))
+
+       ;; "Have we matched up with an existing terminator by typing into
+       ;; or deleting from an opening delimiter? ... or by messing up a
+       ;; raw string's terminator so that it now matches a later
+       ;; terminator?"
+       (when
+        (cond
+         ((or c-ml-string-end-delim-disrupted
+              (and c-old-beg-ml
+                   (eq? c-beg-pos 'open-delim)))
+          (goto-char (car (car c-old-beg-ml))))
+         ((and (< beg end)
+               (not c-old-beg-ml)
+               c-old-1-beg-ml
+               (save-excursion
+                 (goto-char (- beg 1))
+                 (c-ml-string-back-to-neutral (car (car c-old-1-beg-ml)))
+                 (re-search-forward
+                  ((%c-lang-function
+                    (%c-langvar 'c-make-ml-string-closer-re-function))
+                   (buffer-substring-no-properties
+                    (car (car c-old-1-beg-ml))
+                    (car (cdr (car c-old-1-beg-ml)))))
+                  #f 'bound)
+                 (> (point) beg)))
+          (goto-char (car (car c-old-1-beg-ml)))
+          (set!c-new-BEG (min (c-new-BEG) (point)))
+          (c-truncate-lit-pos/state-cache (point)))
+         (else #f))
+        (when (looking-at (%c-langvar 'c-ml-string-opener-re))
+          (goto-char (match-end 1))
+          (when (re-search-forward
+                 ((%c-lang-function
+                   (%c-langvar 'c-make-ml-string-closer-re-function))
+                  (match-string-no-properties 1))
+                 #f #t)                ; "No bound"
+            ;; "If what is to be the new delimiter was previously an
+            ;; unterminated ordinary string, clear the c-fl-syn-tab
+            ;; properties from this old string."
+            (when (c-get-char-property (match-beginning 2) 'c-fl-syn-tab)
+              (%c-remove-string-fences (match-beginning 2)))
+            (set!c-new-END (point-max))
+            (c-clear-syntax-table-properties-trim-caches
+             (car (car (or c-old-beg-ml c-old-1-beg-ml))) (c-new-END)))))
+
+       ;; "Have we disturbed the innards of an ml string, possibly by
+       ;; deleting \"s?"
+       (when (and c-old-beg-ml
+                  (eq? c-beg-pos 'string)
+                  (eqv? beg end))
+         (goto-char beg)
+         (c-ml-string-back-to-neutral (car (car c-old-beg-ml)))
+         (let* ((bound
+                 (if (cdr c-old-end-ml)
+                     (min (+ (- (car (cdr (cdr c-old-end-ml))) old-len)
+                             (%c-langvar 'c-ml-string-max-closer-len-no-leader))
+                          (point-max))
+                     (point-max)))
+                (new-END-end-ml-string
+                 (if (cdr c-old-end-ml)
+                     (- (car (cdr (cdr c-old-end-ml))) old-len)
+                     (point-max))))
+           (when (and
+                  (re-search-forward
+                   ((%c-lang-function
+                     (%c-langvar 'c-make-ml-string-closer-re-function))
+                    (buffer-substring-no-properties
+                     (car (car c-old-beg-ml))
+                     (car (cdr (car c-old-beg-ml)))))
+                   bound 'bound)
+                  (< (match-end 1) new-END-end-ml-string))
+             (set!c-new-END (max new-END-end-ml-string (c-new-END)))
+             (c-clear-syntax-table-properties-trim-caches
+              (car (car c-old-beg-ml)) (c-new-END))
+             (set!c-new-BEG (min (car (car c-old-beg-ml)) (c-new-BEG))))))
+
+       ;; "Have we terminated an existing raw string by inserting or
+       ;; removing text?"
+       (when (and (< beg end)
+                  (eq? c-old-END-literality 'string)
+                  c-old-beg-ml)
+         ;; "Have we just made or modified a closing delimiter?"
+         (goto-char end)
+         (c-ml-string-back-to-neutral (car (car c-old-beg-ml)))
+         (while
+             (and
+              (begin
+                (set! found
+                      (re-search-forward
+                       (%c-langvar 'c-ml-string-any-closer-re)
+                       (+ (c-point 'eol end)
+                          (- (%c-langvar 'c-ml-string-max-closer-len-no-leader)
+                             1))
+                       #t))
+                found)
+              (< (match-end 1) beg))
+           (goto-char (match-end 1)))
+         (when (and found (<= (match-beginning 0) end))
+           (let ((opener-re
+                  ((%c-lang-function
+                    (%c-langvar 'c-make-ml-string-opener-re-function))
+                   (match-string 1))))
+             (while
+                 (and
+                  (begin
+                    (set! found (re-search-backward opener-re #f #t))
+                    found)
+                  (begin
+                    (set! state (c-semi-pp-to-literal (point)))
+                    #t)
+                  (memv (nth 3 (car state)) (list #t (char->integer #\")))))
+             (when found
+               (set!c-new-BEG (min (point) (c-new-BEG)))
+               (set!c-new-END (point-max))
+               (c-clear-syn-tab-properties (point) (c-new-END))
+               (c-truncate-lit-pos/state-cache (point))))))
+
+       ;; "Are there any raw strings in a newly created macro?"
+       (goto-char (c-point 'bol beg))
+       (while (and (< (point) (c-point 'eol end))
+                   (re-search-forward (%c-langvar 'c-anchored-cpp-prefix)
+                                      (c-point 'eol end) 'bound))
+         (when (and (<= beg (match-end 1))
+                    (>= end (match-beginning 1)))
+           (goto-char (match-beginning 1))
+           (c-end-of-macro)
+           (c-depropertize-ml-strings-in-region
+            (match-beginning 1) (point))))))
+
     ;; `c-clear-syn-tab-properties' (`cc-defs.el:1444') removes the
     ;; `c-fl-syn-tab' mirrors with `c-clear-syn-tab' and the two
     ;; markers, which are cc-mode.scm's - above this library. The
@@ -14541,8 +14891,12 @@
                                (match-beginning
                                 (+ (%c-langvar 'c-cpp-or-ml-match-offset) 2))))))
               (c-depropertize-ml-string
+               ;; Emacs's `when' answers nil when its test fails, and
+               ;; this result is the closer half of the delims cons:
+               ;; Scheme's unspecified value would be a closer-shaped
+               ;; lie (`c-depropertize-ml-string' then does `(cdr nil)').
                (cons open-delim
-                     (when
+                     (when-e
                       (and
                        (re-search-forward
                         ((%c-lang-function
@@ -14573,7 +14927,7 @@
                                  (cons (match-end 1) (match-beginning 2)))))
                       (c-depropertize-ml-string
                        (cons open-delim
-                             (when
+                             (when-e
                               (re-search-forward
                                ((%c-lang-function
                                  (%c-langvar 'c-make-ml-string-closer-re-function))

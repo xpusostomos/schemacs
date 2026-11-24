@@ -15851,3 +15851,57 @@ pinned in `schemacs_editor_cc_engine_ml_end_delim`.
 Where this leaves the ml-string machinery: **`c-before-change-check-ml-strings`
 (`:7863`) and `c-after-change-unmark-ml-strings` (`:7953`) are the
 remaining two**, and everything they call is now in the tree.
+
+## The two ml-string change functions (2026-11-24)
+
+`c-before-change-check-ml-strings` (`cc-engine.el:7863`) and
+`c-after-change-unmark-ml-strings` (`:7953`) are in `cc-engine.scm`
+right after `c-ml-string-in-end-delim`, with the two opener-re builders
+that were the other half of that `cc-lang-defvar` pair
+(`c-ml-string-make-opener-re` `:7519`, `c-c++-make-ml-string-opener-re`
+`:7531`), registered in the language-function registry.
+
+`c-remove-string-fences` is `cc-mode.el:1437`'s - it removes the
+`syntax-table`/`c-fl-syn-tab` pair with `c-clear-syn-tab`, which lives
+above this library - so it arrives through
+`*c-remove-string-fences-function*`, as the string-fence pair does.
+cc-mode installs the seam as it loads.
+
+Three real bugs came out of the port, and two are the tree's recurring
+class:
+
+- **A `when` in value position, pre-existing**: `c-depropertize-ml-strings-in-region`
+  built the closer half of its delims cons with `(when (and ... search ...) (cons ...))`.
+  When the closer was not found inside the region, the "closer" was the
+  *unspecified* value, and `c-depropertize-ml-string` then did
+  `(cdr #<unspecified>)`. The earlier depropertize tests had only used
+  terminated strings, where the closer is found. Both sites are
+  `when-e` now.
+- **Emacs's `(car nil)`/`(cdr nil)`**: the arm that has no opener uses
+  `(%c-car c-old-beg-ml)`, and the arm whose delims have no closer uses
+  `(%c-caddr delims)` - `(cdr (cdr DELIMS))` is an error when the
+  closer is nil, exactly where Emacs's `caddr` answers nil.
+- **`match-data` answered `'()` where Emacs answers nil** - a shared
+  bug in `search.scm`. Emacs trims trailing nil registers and a
+  zero-length list *is* nil; here `'()` is true, so
+  `c-ml-string-in-end-delim`'s `(not (match-data))` never fired and
+  `(> (match-beginning 0) beg)` got `#f`. `match-data` now answers
+  `#f` when there is nothing to give (both the no-search branch and an
+  emptied register set); two rows in `search-tests.scm` pin it.
+
+Verified against Emacs 31.1 with a 34-row differential over five
+fixtures (a terminated raw string, an unterminated one, an ordinary
+multi-line string, a raw string whose delimiter is one character, and a
+macro with an escaped newline): before-change with the change's own
+region, the edit, after-change, then the grown region, the disrupted
+flag, the buffer text and the syntax-table properties. **All 34
+identical.** The probes are `/tmp/mlchg-em.el` and `/tmp/mlchg-ours.scm`
+(move them into `tools/` next time they are touched); twelve rows are
+pinned in `schemacs_editor_cc_engine_ml_change`.
+
+The remaining change machinery, in dependency order, is
+`c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`,
+`c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region` and
+`c-called-from-text-property-change-p`, and then `c-before-change` /
+`c-after-change` themselves, which call every function ported since the
+found-type helpers.

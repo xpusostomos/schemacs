@@ -34,7 +34,7 @@
  (only (schemacs textprop) get-text-property text-property-any)
  (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*
        c-skip-ws-chars-forward c-skip-ws-chars-backward c-clear-char-property)
- (only (schemacs cmds) beginning-of-line)
+ (only (schemacs cmds) beginning-of-line delete-char)
  (schemacs progmodes cc-langs)
  (schemacs progmodes cc-vars)
  (schemacs progmodes cc-styles)
@@ -2431,3 +2431,123 @@
        (list 28 29 #f #f)
        (list 30 31 #f #f)))
 (test-end "schemacs_editor_cc_engine_ml_end_delim")
+
+
+;;--------------------------------------------------------------
+;; `c-before-change-check-ml-strings' (`cc-engine.el:7863') and
+;; `c-after-change-unmark-ml-strings' (`:7953')
+;;--------------------------------------------------------------
+;; Each row is one change driven the way cc-mode's hooks drive it: the
+;; region is the change's own, the before-change function runs, the edit
+;; is made, the after-change function runs. The expectation is the whole
+;; answer - the grown region, the disrupted flag, the buffer and the
+;; `syntax-table' properties - measured on Emacs 31.1 first.
+(test-begin "schemacs_editor_cc_engine_ml_change")
+
+(define D (string #\"))
+(define NL (string #\newline))
+(define BS (string #\\))
+
+(define ml-f1 (string-append "auto s = R" D "delim(abc)delim" D ";" NL
+                             "int b;" NL))
+(define ml-f2 (string-append "auto s = R" D "delim(abc;" NL "int b;" NL))
+(define ml-f3 (string-append "int x;" NL "char *s = " D "abc" NL "def" D ";"
+                             NL "int y;" NL))
+(define ml-f4 (string-append "auto s = R" D "x(abc)x" D ";" NL "int b;" NL))
+(define ml-f5 (string-append "#define M " BS NL "R" D "y(ab" BS NL "cd)y" D NL
+                             "int b;" NL))
+
+(define (ml-change-case text markpos beg end-old new)
+  (cpp-buffer text)
+  (goto-char markpos)
+  (c-maybe-re-mark-ml-string)
+  (set!c-new-BEG beg) (set!c-new-END end-old)
+  (c-before-change-check-ml-strings beg end-old)
+  (goto-char beg)
+  (if new (insert new) (delete-char (- end-old beg)))
+  (c-after-change-unmark-ml-strings
+   beg (+ beg (if new (string-length new) 0)) (- end-old beg))
+  (list (c-new-BEG) (c-new-END) c-ml-string-end-delim-disrupted
+        (buffer-substring-no-properties (point-min) (point-max))
+        (props-in-buffer)))
+
+(test-equal "an edit inside a raw string's contents leaves the region"
+  (list 19 19 #f
+        (string-append "auto s = R" D "delim(aXbc)delim" D ";" NL
+                       "int b;" NL)
+        '())
+  (ml-change-case ml-f1 12 19 19 "X"))
+
+(test-equal "deleting the closing quote disrupts the terminator"
+  (list 10 28 #t
+        (string-append "auto s = R" D "delim(abc)delim;" NL "int b;" NL)
+        '())
+  (ml-change-case ml-f1 12 27 28 #f))
+
+(test-equal "inserting a quote before the closer disrupts it too"
+  (list 10 38 #t
+        (string-append "auto s = R" D "delim(abc)delim" D D ";" NL
+                       "int b;" NL)
+        '())
+  (ml-change-case ml-f1 12 27 27 D))
+
+(test-equal "typing into the opener depropertizes the whole string"
+  (list 10 28 #f
+        (string-append "auto s = R" D "delimq((abc)delim" D ";" NL
+                       "int b;" NL)
+        '())
+  (ml-change-case ml-f1 12 17 17 "q("))
+
+(test-equal "a raw string inside a new macro is depropertized"
+  (list 1 1 #f
+        (string-append "#define X auto s = R" D "delim(abc)delim" D ";" NL
+                       "int b;" NL)
+        '())
+  (ml-change-case ml-f1 12 1 1 "#define X "))
+
+(test-equal "an edit inside an unterminated raw string keeps its fences"
+  (list 19 19 #f
+        (string-append "auto s = R" D "delim(aXbc;" NL "int b;" NL)
+        '((11 (1)) (17 (15))))
+  (ml-change-case ml-f2 12 19 19 "X"))
+
+(test-equal "... until the edit completes it, and the fences go"
+  (list 10 30 #f
+        (string-append "auto s = R" D "delimq(abc;" NL "int b;" NL)
+        '())
+  (ml-change-case ml-f2 12 17 17 "q"))
+
+(test-equal "an edit inside an ordinary multi-line string is left alone"
+  (list 20 20 #f
+        (string-append "int x;" NL "char *s = " D "aXbc" NL "def" D ";" NL
+                       "int y;" NL)
+        '())
+  (ml-change-case ml-f3 20 20 20 "X"))
+
+(test-equal "typing a closer after a terminated raw string changes nothing"
+  (list 21 21 #f
+        (string-append "auto s = R" D "x(abc)x" D ";)" NL "int b;" NL)
+        '())
+  (ml-change-case ml-f4 12 21 21 ")"))
+
+(test-equal "typing a quote into a raw string's inside disrupts its closer"
+  (list 10 30 #t
+        (string-append "auto s = R" D "x(abc)x" D D ";" NL "int b;" NL)
+        '())
+  (ml-change-case ml-f4 12 19 19 D))
+
+(test-equal "deleting the escaped newline of a macro extends to the macro"
+  (list 1 26 #f
+        (string-append "#define M " BS NL "R" D "y(ab" NL "cd)y" D NL
+                       "int b;" NL)
+        '())
+  (ml-change-case ml-f5 15 19 20 #f))
+
+(test-equal "deleting into the closer disrupts it and keeps the region tight"
+  (list 13 26 #t
+        (string-append "#define M " BS NL "R" D "y(ab" BS NL "cdy" D NL
+                       "int b;" NL)
+        '())
+  (ml-change-case ml-f5 15 23 24 #f))
+
+(test-end "schemacs_editor_cc_engine_ml_change")

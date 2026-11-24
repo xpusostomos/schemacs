@@ -95,6 +95,7 @@
           c-ml-string-opener-at-or-around-point
           c-maybe-re-mark-ml-string
           *c-clear-syn-tab-properties-function*
+          *c-remove-string-fences-function*
           c-truncate-lit-pos/state-cache
           c-put-syntax-table-trim-caches c-clear-syntax-table-trim-caches
           c-clear-syntax-table-with-value-on-char-trim-caches
@@ -1254,5 +1255,9 @@
     (*c-restore-string-fences-function* c-restore-string-fences)
     (*c-clear-syn-tab-properties-function* %c-clear-syn-tab-properties-full)
     (*c-clear-string-fences-function* c-clear-string-fences)
+    ;; `c-before-change-check-ml-strings' /
+    ;; `c-after-change-unmark-ml-strings' are cc-engine's and reach this
+    ;; library's remover through the parameter.
+    (*c-remove-string-fences-function* c-remove-string-fences)
 
     ))

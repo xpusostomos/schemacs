@@ -17419,9 +17419,17 @@ it, as that library's header explains.
    explicit `#f` - left as `unless` the nil rows answered the
    unspecified value. `(match-data)` answers nil (not `'()`) when
    nothing has been searched.
-   Next: `c-before-change-check-ml-strings` (`:7863`) and
-   `c-after-change-unmark-ml-strings` (`:7953`) - everything they stand
-   on is now in the tree - then `c-depropertize-CPP`,
+   **The two ml-string change functions are in**
+   (`c-before-change-check-ml-strings` `:7863`,
+   `c-after-change-unmark-ml-strings` `:7953`, with the two opener-re
+   builders and a `*c-remove-string-fences-function*` seam that
+   cc-mode installs). A 34-row differential over five fixtures is
+   identical; group `schemacs_editor_cc_engine_ml_change` pins 12.
+   Three bugs: a pre-existing `when` in value position in
+   `c-depropertize-ml-strings-in-region`, two Emacs car/cdr-of-nil
+   arms (`%c-car`/`%c-caddr`), and **`match-data` answering `'()`
+   where Emacs answers nil** - fixed in `search.scm`.
+   Next: `c-depropertize-CPP`,
    `c-neutralize-syntax-in-CPP`, `c-change-expand-fl-region`,
    `c-called-from-text-property-change-p`, and
    `c-before-change`/`c-after-change` themselves.
