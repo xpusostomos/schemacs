@@ -17062,3 +17062,131 @@ plus `loadup-test.scm` 16 and `tools/pty-check.py imports scratch`
 2/2. `schemacs/loadup.scm` and `schemacs/imports.scm` carry
 `(schemacs core pcase)` (130 libraries, 5285 names); `tools/run-suites.py`
 runs the suite.
+
+## `elec-pair.el`, and the keymap lookup features under it (2026-11-24)
+
+`schemacs/elec-pair.scm` is `lisp/elec-pair.el` ported whole: the two
+pair alists, `electric-pair-syntax-info`, the balance walk,
+`electric-pair-post-self-insert-function`/`electric--pair-psif-1`, the
+open-newline hook, the filtered DEL binding, `electric-pair-mode` and
+`electric-pair-local-mode`. It is the caller that `pcase` (previous
+commit) was ported for.
+
+**Character representation.** Emacs characters are integers; this
+tree's buffer readers answer Scheme characters and
+`(last-command-event)` is an integer event. Every character crossing
+that boundary goes through a local `%char-code`, comparisons are
+`%char=`, and the pair alists hold *code points* - Emacs's own
+representation - so `eqv?` on a pair's two halves compares what Emacs's
+`eq` compares. A string pair is the string itself.
+
+**Three definitions are placed after Emacs's file order**, because a
+`define-custom` evaluates its default when declared and three of these
+defaults are procedures defined below them in Emacs's file:
+`*electric-pair-skip-self*` and `*electric-pair-inhibit-predicate*`
+(the two defcustoms) and `electric-pair-skip-whitespace-function` (a
+`defvar-local` whose default is `electric-pair--skip-whitespace`).
+Named in the library header.
+
+**`electric-pair--insert`'s `(let ((electric-pair-mode nil)) ...)`** is
+`call-with-buffer-local`: a global minor mode's value lives in the
+default store and has no Scheme dynamic binding. That binding is what
+keeps the inserted closer from being treated as a typed key by the
+post-self-insert hook.
+
+**`electric-pair--with-syntax` and
+`electric-pair--save-literal-point-excursion`** are `syntax-rules`
+macros over the body; Emacs's `unwind-protect` is `dynamic-wind`.
+`(catch 'done ... (throw 'done ...))` is Guile's own `catch`/`throw`
+(`(only (guile) catch throw)`), the same non-local exit.
+
+**The `:filter` on the DEL binding needed two shared primitives that
+Emacs has and this tree did not.** Both are ported here:
+
+* **`get_keyelt`'s `QCfilter` arm** (`keymap.c:700`). Emacs 32's
+  `access_keymap_1` calls `get_keyelt (val, true)` on *every* lookup
+  (`keymap.c:468`), so a menu item's `:filter` runs every time its key
+  is looked up, with the item's definition as the argument; a nil answer
+  makes the lookup fall through to the next map. `keymap.scm`'s
+  `%keymap-own-binding` now does the same, and `get-keyelt`'s AUTOLOAD
+  argument applies it too. A filter written as a **procedure** - a
+  Scheme `lambda` in the item evaluates to one - is called directly; a
+  filter written as a **form** goes through the
+  `*menu-item-eval-property-function*` seam, which `keyboard.scm`
+  installs (`menu_item_eval_property` is `keyboard.c`'s, above the
+  keymap library). Without the seam (a library that imports `keymap`
+  alone) a form filter answers the unfiltered definition.
+* **`Fbuffer_local_value`'s global fallback in
+  `minor-mode-keymaps`.** Emacs's active-map walk reads a minor mode's
+  variable through `Fbuffer_local_value`, which answers the *global*
+  value when the buffer has no local binding. The port read only the
+  buffer slot, so a `:global` minor mode's keymap was never active -
+  which is exactly `electric-pair-mode`, and why its DEL map was dead
+  before this. It now checks `local-variable-p` and falls back to
+  `default-value`.
+
+**`define-minor-mode` now auto-detects `MODE-map`**, as
+`easy-mmode.el:160` does when no `:keymap` is given. Emacs asks
+`boundp` at macro-expansion time; a Scheme library's `define` has not
+run then, so the generated form asks its own module
+(`module-defined?`/`module-ref`) when it runs. A mode whose map is
+defined later than the mode gets no map, which is Emacs's `boundp`
+answer too. **The question is asked of the defining module, not of the
+whole program**: a map that lives in another library is invisible here,
+where Emacs's one obarray would find it. Every mode in this tree
+defines its map beside itself, so nothing reaches that difference yet.
+
+**`prog-mode-syntax-table` is defined here after all.** GITE's
+`prog-mode.el` (Emacs 32 master) no longer defines it, while its
+`elec-pair.el:261` still names it; the running Emacs 31.1 still has the
+dumped value - a fresh `make-syntax-table`, character for character the
+standard table's (measured over ASCII). It is defined in `prog-mode.scm`
+with that note, because `electric-pair-text-syntax-table`'s default is
+it and elec-pair cannot load without it. This is a source-vs-binary
+disagreement where **the source is self-inconsistent**; the port
+follows the runtime's value.
+
+**Carried but inert, each named at its site:**
+
+* `*blink-matching-paren*` (`simple.el:9520`) is the option
+  `electric-pair--insert` binds around an insert. The blinking itself
+  (`blink-matching-open` and its timer) is not ported, so nothing reads
+  the variable.
+* `electric-layout-allow-duplicate-newlines` (`electric.el:453`) is
+  carried in `electric.scm`; `electric-pair--insert`'s binding of it is
+  **omitted**, because it is a plain variable (not a parameter) and
+  this tree cannot `let`-bind one, and `electric-layout-mode` - its
+  only other reader - is not ported.
+* `electric-pair-analyze-conversion` is carried whole; its caller
+  `analyze-text-conversion` (`simple.el`) is not ported and there are
+  no text-conversion events here.
+* `electric-pair-will-use-region` is installed on
+  `self-insert-uses-region-functions`, but `self-insert-command` here
+  does not delete an active region (the `delete-active-region` branch
+  of `internal_self_insert` is a pre-existing gap named in
+  `simple.scm`), so that hook has no reader yet.
+
+**A spelling copied as-is**: `electric-pair--syntax-ppss`'s HACK tests
+`(memq major-mode '(c-mode c++ mode))` - GITE's own odd spelling, with
+`c++` and `mode` as separate symbols rather than `c++-mode`. It is
+Emacs's text; the port does not "fix" it.
+
+**Verified.** `test/elec-pair-test.scm` (50) pins every behaviour
+against Emacs 31.1, driven the same way on both sides
+(`self-insert-command` with `last-command-event` bound): basic pairs,
+curly quotes, the two string-pair spellings, the balance-conservative
+predicates, overwrite mode, backslash escaping, whitespace skipping and
+`chomp`, the newline-between-pairs hook, region wrapping in both
+directions, the filtered DEL map (including a function-valued option),
+`electric-pair-delete-pair`, and the local mode's global-vs-local rules
+and hook install/removal. The full Emacs-measured differential
+(overwrite, backslash, newline, region, string pairs, curly quotes,
+filter lookups, local mode) is identical line for line; one scenario -
+a prefix argument larger than one character inserted - raises
+`args-out-of-range` in **both** implementations.
+
+`test/keymap-test.scm` (101) gained the `:filter` rows: a procedure
+filter used and declined, fall-through to the parent map, and a
+form filter going through the evaluator seam. `tools/run-suites.py`
+carries the new suite; `loadup.scm`, `imports.scm` (131 libraries,
+5327 names) and both front ends carry `(schemacs elec-pair)`.

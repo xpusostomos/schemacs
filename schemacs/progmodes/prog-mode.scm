@@ -38,7 +38,7 @@
     ;; The two commands, and what they call.
     (only (schemacs command)
           define-command current-prefix-arg uarg->integer)
-    (only (schemacs subr) nth kbd)
+    (only (schemacs subr) nth kbd make-syntax-table)
     (only (schemacs editfns)
           goto-char line-end-position point pos-eol save-excursion)
     (only (schemacs cmds) beginning-of-line end-of-line)
@@ -51,6 +51,7 @@
     (only (schemacs textmodes fill) fill-paragraph))
 
   (export prog-mode prog-mode-map prog-mode-hook
+          prog-mode-syntax-table
           *prog-indentation-context* prog-first-column
           prog-indent-sexp prog-fill-reindent-defun
           prog-fill-reindent-defun-default prog-fill-reindent-defun-function
@@ -72,6 +73,17 @@
 
     (define prog-mode-hook '())
     ;; ^ GNU Emacs's `prog-mode-hook', made by `define-derived-mode'.
+
+    (define prog-mode-syntax-table
+      ;; GNU Emacs's `prog-mode-syntax-table': "Syntax table for
+      ;; `prog-mode'." **GITE's `prog-mode.el' (Emacs 32 master) no
+      ;; longer defines it while `elec-pair.el' still names it**, and the
+      ;; running Emacs 31.1 still has the dumped value - a fresh
+      ;; `make-syntax-table', character for character the standard
+      ;; table's. This is that value, defined here so the library that
+      ;; reads it (`elec-pair.scm') loads.
+      ;;--------------------------------------------------------------
+      (make-syntax-table))
 
     (define-custom *prog-indentation-context* #f
       "When non-nil, provides context for indenting embedded code chunks."

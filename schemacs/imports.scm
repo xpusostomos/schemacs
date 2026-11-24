@@ -66,6 +66,7 @@
     (schemacs dispnew)
     (schemacs doc)
     (schemacs editfns)
+    (schemacs elec-pair)
     (schemacs electric)
     (schemacs env)
     (schemacs eval)
@@ -281,6 +282,7 @@
     *blink-cursor-delay*
     *blink-cursor-interval*
     *blink-cursor-mode*
+    *blink-matching-paren*
     *buffer-before-last-command-or-undo*
     *buffer-list*
     *buffer-list-update-hook*
@@ -498,6 +500,15 @@
     *echo-buffers*
     *electric-indent-actions*
     *electric-indent-functions*
+    *electric-pair-delete-adjacent-pairs*
+    *electric-pair-inhibit-predicate*
+    *electric-pair-open-newline-between-pairs*
+    *electric-pair-pairs*
+    *electric-pair-preserve-balance*
+    *electric-pair-skip-self*
+    *electric-pair-skip-whitespace*
+    *electric-pair-skip-whitespace-chars*
+    *electric-pair-text-pairs*
     *electric-quote-chars*
     *emacs-startup-hook*
     *enable-disabled-menus-and-buttons*
@@ -729,6 +740,7 @@
     *menu-bar-mode*
     *menu-bar-open-function*
     *menu-bar-update-hook*
+    *menu-item-eval-property-function*
     *menu-state*
     *message-clear-function*
     *message-function*
@@ -2644,6 +2656,7 @@
     editor-excluded-libraries
     editor-libraries
     electric--after-char-pos
+    electric--pair-psif-1
     electric-indent--activate-indent-actions
     electric-indent-can-reindent-p
     electric-indent-chars
@@ -2657,7 +2670,35 @@
     electric-indent-mode-value
     electric-indent-post-self-insert-function
     electric-indent-save-hook
+    electric-layout-allow-duplicate-newlines
     electric-newline-and-maybe-indent
+    electric-pair--balance-info
+    electric-pair--insert
+    electric-pair--inside-string-p
+    electric-pair--skip-whitespace
+    electric-pair--syntax-ppss
+    electric-pair--unbalanced-strings-p
+    electric-pair-analyze-conversion
+    electric-pair-conservative-inhibit
+    electric-pair-default-inhibit
+    electric-pair-default-skip-self
+    electric-pair-delete-pair
+    electric-pair-field-search-size
+    electric-pair-inhibit-if-helps-balance
+    electric-pair-local-mode
+    electric-pair-local-mode-hook
+    electric-pair-mode
+    electric-pair-mode-hook
+    electric-pair-mode-map
+    electric-pair-mode-value
+    electric-pair-open-newline-between-pairs-psif
+    electric-pair-post-self-insert-function
+    electric-pair-skip-if-helps-balance
+    electric-pair-skip-whitespace-function
+    electric-pair-string-bound-function
+    electric-pair-syntax-info
+    electric-pair-text-syntax-table
+    electric-pair-will-use-region
     elisp--preceding-sexp
     elisp-mode-syntax-propertize
     elt
@@ -3984,6 +4025,7 @@
     prog-mode
     prog-mode-hook
     prog-mode-map
+    prog-mode-syntax-table
     prog1
     prog2
     progn
@@ -4422,6 +4464,7 @@
     set!dired-directory!
     set!dired-subdir-alist!
     set!electric-indent-inhibit
+    set!electric-pair-skip-whitespace-function
     set!file-local-variables-alist
     set!font-lock-defaults!
     set!font-lock-fontify-region-function!

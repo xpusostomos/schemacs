@@ -82,6 +82,10 @@
    ;; The reverse lookup a menu's key hint is made of, and the
    ;; two pieces `where-is-internal' is built on.
    get-keyelt append-key accessible-keymaps
+   ;; The evaluator a `menu-item`'s `:filter` runs through - a seam,
+   ;; because `menu_item_eval_property` is `keyboard.c`'s and this
+   ;; library is below it. `keyboard.scm` installs it as it loads.
+   *menu-item-eval-property-function*
    ;; `map_keymap' and its DEFUN: menu construction is their first caller
    ;; (`keyboard.c''s `menu_bar_items' walks each active map with
    ;; `map_keymap_canonical'), and `define-key-after' (subr.el) reads the
@@ -345,6 +349,48 @@
                 (if under (cons event under) (loop (cdr events)))))
              (else (loop (cdr events)))))))))
 
+    (define *menu-item-eval-property-function* (make-parameter #f))
+    ;; ^ GNU Emacs's `menu_item_eval_property` (`keyboard.c:8843'),
+    ;; which `keymap.c` reaches because the two live in one C program.
+    ;; Here the evaluator is `keyboard.scm`'s, so it arrives through this
+    ;; parameter and `keyboard.scm` installs it as it loads. When it is
+    ;; unset - a library that imports `keymap` alone - a filter written
+    ;; as a *procedure* still works (the common case), and one written as
+    ;; a form is answered unevaluated.
+    ;;--------------------------------------------------------------
+
+    (define (%menu-item-filter rest)
+      ;; The `:filter` property in a menu item's property list, or #f.
+      ;; This is the C's walk at `keymap.c:700`: step one cons at a time
+      ;; through TEM = (CDDR OBJECT), so both `(:filter F :enable E)` and
+      ;; `(:enable E :filter F)` find it.
+      ;;--------------------------------------------------------------
+      (let loop ((tem rest))
+        (cond ((and (pair? tem) (pair? (cdr tem)))
+               (if (eq? (car tem) ':filter)
+                   (cadr tem)
+                   (loop (cdr tem))))
+              (else #f))))
+
+    (define (%menu-item-filter-answer def rest)
+      ;; Apply a menu item's `:filter` to DEF, exactly as
+      ;; `get_keyelt`'s `QCfilter` arm does: the filter is a function of
+      ;; one argument (the definition) and its answer is the definition
+      ;; to use. A *procedure* is this tree's lambda - the data a menu
+      ;; item is written with evaluates to one - so it is called
+      ;; directly; a form or symbol goes through the evaluator seam, as
+      ;; the C builds `(FILTER 'DEF)` and evaluates it.
+      ;;--------------------------------------------------------------
+      (let ((filter (%menu-item-filter rest)))
+        (cond
+         ((not filter) def)
+         ((procedure? filter) (filter def))
+         (else
+          (let ((evaluate (*menu-item-eval-property-function*)))
+            (if evaluate
+                (evaluate (list filter (list 'quote def)))
+                def))))))
+
     (define (get-keyelt object autoload)
       ;; GNU Emacs's `get_keyelt` (`keymap.c:681`): "Given OBJECT which
       ;; was found in a slot in a keymap, trace indirect definitions to
@@ -368,8 +414,11 @@
          ((not (pair? object)) object)
          ((eq? (car object) 'menu-item)
           (if (pair? (cdr object))
-              (let ((rest (cddr object)))
-                (if (pair? rest) (loop (car rest)) rest))
+              (let* ((rest (cddr object))
+                     (def (if (pair? rest) (car rest) rest)))
+                (loop (if autoload
+                          (%menu-item-filter-answer def rest)
+                          def)))
               object))
          ((string? (car object)) (loop (cdr object)))
          (else object))))
@@ -674,8 +723,13 @@
          ;; `[menu-bar file save-buffer]` both have to reach the
          ;; command itself, not the list describing it.
          ((and (pair? own) (eq? (car own) 'menu-item) (pair? (cdr own)))
+          ;; **`access_keymap_1` always asks `get_keyelt (val, true)`**
+          ;; (`keymap.c:468`), so a `:filter` is applied on every lookup
+          ;; - that is how `electric-pair-mode-map`'s DEL decides whether
+          ;; to delete a pair or fall through to the global binding.
           (let ((rest (cddr own)))
-            (if (pair? rest) (car rest) rest)))
+            (%menu-item-filter-answer
+             (if (pair? rest) (car rest) rest) rest)))
          (own own)
          (else
           (let ((ct (keymap-char-table keymap)))

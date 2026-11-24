@@ -49,6 +49,9 @@
     (only (schemacs textmodes paragraphs))
     ;; `fill.el`'s commands and the M-q binding it makes
     (only (schemacs textmodes fill))
+    ;; `elec-pair.el`: the two modes, so M-x finds them without an
+    ;; autoload (Emacs autoloads the file).
+    (only (schemacs elec-pair))
     ;; `electric.el`: the C-j binding and the post-self-insert hook its
     ;; global mode installs at load, as the dump has them in Emacs.
     (only (schemacs electric))

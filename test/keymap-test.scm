@@ -558,4 +558,46 @@
   '#(1 2 3 4 5)
   (vconcat '(1 2) '#(3 4) "\x05"))
 
+;; -------------------------------------------------------------------------------------------------
+;;
+;; **A `menu-item`'s `:filter`** (`get_keyelt`'s `QCfilter` arm,
+;; `keymap.c:700`). `access_keymap_1` always asks `get_keyelt (val, true)`,
+;; so the filter runs on every lookup - that is how `electric-pair-mode`'s
+;; DEL falls through to the global binding when point is not between a
+;; pair.
+;; -------------------------------------------------------------------------------------------------
+
+(test-assert "a menu-item's :filter is applied on lookup"
+  (let* ((map (make-sparse-keymap))
+         (command (lambda () 'ran))
+         (binding (list 'menu-item "" command
+                        ':filter (lambda (def) (if #t def #f)))))
+    (define-key map (kbd "DEL") binding)
+    (eq? (keymap-lookup map (kbd "DEL")) command)))
+
+(test-assert "a declined :filter falls through to the parent"
+  (let* ((parent (make-sparse-keymap))
+         (child (make-sparse-keymap))
+         (fallback (lambda () 'fallback)))
+    (define-key parent (kbd "DEL") fallback)
+    (set-keymap-parent child parent)
+    (define-key child (kbd "DEL")
+      (list 'menu-item "" (lambda () 'pair)
+            ':filter (lambda (def) #f)))
+    (eq? (keymap-lookup child (kbd "DEL")) fallback)))
+
+;; A filter written as a *form* rather than a procedure goes through the
+;; evaluator seam, exactly as `menu_item_eval_property` evaluates
+;; `(FILTER 'DEF)`.
+(test-assert "a form :filter is evaluated through the seam"
+  (let* ((map (make-sparse-keymap))
+         (command (lambda () 'ran))
+         (seen #f))
+    (define-key map (kbd "DEL")
+      (list 'menu-item "" command ':filter 'my-filter))
+    (parameterize ((*menu-item-eval-property-function*
+                    (lambda (form) (set! seen form) #t)))
+      (eq? (keymap-lookup map (kbd "DEL")) command))
+    (equal? seen (list 'my-filter (list 'quote command)))))
+
 (test-end "schemacs_keymap")

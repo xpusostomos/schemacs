@@ -55,8 +55,9 @@
     ;; and `syntax->datum' how a clause's keyword is read.
     ;; `quasisyntax' and `unsyntax' are what the templates below are
     ;; written with - `#`' and `#,' - and `(scheme base)' has neither.
-    (only (guile) datum->syntax delq format identifier? quasisyntax syntax
-          syntax->datum syntax-case unsyntax unsyntax-splicing)
+    (only (guile) datum->syntax delq format identifier? module-defined?
+          module-ref current-module quasisyntax syntax syntax->datum
+          syntax-case unsyntax unsyntax-splicing)
     (only (schemacs subr)
           add-hook add-minor-mode remove-hook run-hooks string-replace
           *after-change-major-mode-hook* *global-minor-modes*)
@@ -244,6 +245,29 @@
                         ;; it while the mode is on - `subr.el''s
                         ;; `(add-minor-mode mode lighter keymap ...)'.
                         (keymap (opt opts ':keymap))
+                        ;; **Emacs's auto-detected `MODE-map`**
+                        ;; (`easy-mmode.el:160`): "If there's no
+                        ;; `:keymap' argument, use `MODE-map` if it
+                        ;; exists." Emacs asks `boundp` at macro time;
+                        ;; a Scheme binding cannot be asked then (the
+                        ;; map's `define` is evaluated after the macro
+                        ;; expands), so the generated form asks its
+                        ;; module when it runs. The name is built with
+                        ;; the call site's context, as every generated
+                        ;; name is.
+                        (keymap-expr
+                         (if keymap
+                             keymap
+                             (let ((map-name
+                                    (datum->syntax
+                                     #'mode
+                                     (list 'quote
+                                           (string->symbol
+                                            (string-append name "-map"))))))
+                               #`(let ((module (current-module)))
+                                   (if (module-defined? module #,map-name)
+                                       (module-ref module #,map-name)
+                                       #f)))))
                         ;; `:variable' is the one clause with two
                         ;; values, so it is the one read as a list.
                         (variable (let ((e (assq ':variable opts)))
@@ -488,7 +512,7 @@
                        ;; - and a string literal quoted is itself, so
                        ;; every lighter written before this still works.
                        (add-minor-mode #,quoted-mode #,quoted-lighter
-                                       #,(or keymap #'#f) #f #,quoted-mode)
+                                       #,keymap-expr #f #,quoted-mode)
                        #,hook-id)))))))))
 
     (define-syntax define-globalized-minor-mode

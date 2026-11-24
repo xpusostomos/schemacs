@@ -293,6 +293,7 @@
    ;; Visual Line mode (`simple.el:8580-8785') and the commands its map
    ;; remaps to.
    visual-line-mode visual-line-mode-map *visual-line-fringe-indicators*
+   *blink-matching-paren*
    turn-on-visual-line-mode
    beginning-of-visual-line end-of-visual-line kill-visual-line
    next-logical-line previous-logical-line
@@ -4209,6 +4210,38 @@ With prefix argument ARG, kill that many visual lines from point."
       "Move cursor vertically up ARG lines, by logical lines."
       (interactive "^p")
       (line-move-with-visual (- (or arg 1)) #t #f))
+
+    ;; `simple.el:9520''s `blink-matching-paren' - the option
+    ;; `electric-pair--insert' binds to nil while it inserts a pair's
+    ;; closer. **The blinking itself is not ported** (`blink-matching-open'
+    ;; and its timer), so nothing here reads the variable yet; it is
+    ;; carried because elec-pair.el's `let' names it and because it is a
+    ;; real user option.
+    (define-custom *blink-matching-paren* #t
+      "Non-nil means show matching open-paren when close-paren is inserted.
+If this is non-nil, then when you type a closing delimiter, such as a
+closing parenthesis or brace, Emacs briefly indicates the location
+of the matching opening delimiter.
+
+The valid values are:
+
+  t                 Highlight the matching open-paren if it is visible
+                    in the window, otherwise show the text with matching
+                    open-paren in the echo area.  This is the default.
+  `jump'            If the matching open-paren is visible in the window,
+                    briefly move cursor to its position; otherwise show
+                    the text with matching open-paren in the echo area.
+  `jump-offscreen'  Briefly move cursor to the matching open-paren
+                    even if it is not visible in the window.
+  nil               Don't show the matching open-paren.
+
+Any other non-nil value is handled the same as t."
+      :type '(choice
+              (const :tag "Disable" nil)
+              (const :tag "Highlight open-paren if visible" t)
+              (const :tag "Move cursor to open-paren if visible" jump)
+              (const :tag "Move cursor even if it's off screen" jump-offscreen))
+      :group 'paren-blinking)
 
     (define-custom *visual-line-fringe-indicators* '(nil nil)
       "How fringe indicators are shown for wrapped lines in `visual-line-mode'.

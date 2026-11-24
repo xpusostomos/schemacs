@@ -73,6 +73,7 @@
   (export
    electric--after-char-pos
    *electric-indent-actions* *electric-quote-chars* electric-indent-chars
+   electric-layout-allow-duplicate-newlines
    *electric-indent-functions*
    electric-indent-inhibit set!electric-indent-inhibit
    electric-indent-functions-without-reindent
@@ -190,6 +191,16 @@ comments, strings, and text paragraphs, and these are selectively
 controlled with `electric-quote-comment', `electric-quote-string', and
 `electric-quote-paragraph'."
       :version "26.1" :type '(repeat character) :group 'electricity)
+
+    (define electric-layout-allow-duplicate-newlines #f)
+    ;; ^ GNU Emacs's `electric-layout-allow-duplicate-newlines'
+    ;; (`electric.el:453'), a plain `defvar'. Emacs's
+    ;; `electric-pair--insert' `let'-binds it to t so that adding a
+    ;; closer does not munch the newlines; **that binding is omitted
+    ;; here** because a plain variable has no dynamic binding this tree
+    ;; can make. **`electric-layout-mode' itself is not ported** (it is
+    ;; the third of electric.el's modes, after indent and pair), so the
+    ;; variable is carried for shape and has no reader.
 
     (define electric-indent-functions-without-reindent
       ;; GNU Emacs's list holds symbols, because Emacs resolves a

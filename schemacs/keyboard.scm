@@ -95,6 +95,7 @@
           *default-keymap*
           *special-event-map* define-key keymap-parent keymap-type?
           keymap-lookup lookup-key
+          *menu-item-eval-property-function*
           ;; Emacs's `key-description', which the undefined-key message is
           ;; built out of (`subr.el:1297') - and `single-key-description',
           ;; which the prefix-argument echo uses.
@@ -118,6 +119,10 @@
           ;; `keymap` text properties at a click, through `get_local_map`
           ;; (`editfns.scm`, above this library) - installed there.
           *get-local-map-function*
+          ;; `local-variable-p` is the test `current_active_maps` makes
+          ;; through `buffer_local_value` before it asks a minor mode
+          ;; whether it is on.
+          local-variable-p
           ;; `current_active_maps` switches to the clicked window's buffer
           ;; for the lookup; the parameter is this tree's current buffer.
           *current-buffer*
@@ -139,6 +144,10 @@
     ;; in `buffer.scm' now - `insdel.c`'s `prepare_to_modify_buffer_1' is
     ;; its main caller and `insdel.scm' is below `editfns.scm'.
     (only (schemacs buffer) barf-if-buffer-read-only)
+    ;; `default-value` is `data.c`'s: a minor mode's variable may have no
+    ;; buffer-local binding and its global value is what then decides
+    ;; whether its keymap is active (`current_active_maps`).
+    (only (schemacs data) default-value)
     ;; `uarg->integer' is `callint.c''s, in the command library the
     ;; commands' interactive specs come from.
     (only (schemacs command) uarg->integer current-prefix-arg
@@ -785,7 +794,16 @@
       ;;--------------------------------------------------------------
       (let loop ((rest (*minor-mode-map-alist*)) (acc '()))
         (cond ((null? rest) (reverse acc))
-              ((buffer-local-value (current-buffer) (caar rest) #f)
+              ((let* ((buffer (current-buffer))
+                      (variable (caar rest)))
+                 ;; `Fbuffer_local_value` answers the variable's *global*
+                 ;; value when the buffer has no local binding for it -
+                 ;; which is how a `:global` minor mode's map is active
+                 ;; (`electric-pair-mode`). Reading only the buffer slot
+                 ;; made every global mode's map dead.
+                 (if (local-variable-p variable buffer)
+                     (buffer-local-value buffer variable #f)
+                     (default-value variable #f)))
                (loop (cdr rest) (cons (cdar rest) acc)))
               (else (loop (cdr rest) acc)))))
 
@@ -4012,6 +4030,11 @@ With argument, insert ARG copies of the character."
     (*tool-bar-items-function* tool-bar-items)
 
     
+    ;; The `:filter` evaluator a menu-item binding runs through
+    ;; (`menu_item_eval_property`). Installed here, after
+    ;; `menu-item-eval-property` is defined, for the read-char reason
+    ;; below.
+    (*menu-item-eval-property-function* menu-item-eval-property)
     (*read-char-event-function* read-char-event)
     (*read-key-sequence-function* read-key-sequence)
     (*read-key-sequence-vector-function* read-key-sequence-vector)
