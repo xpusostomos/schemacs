@@ -69,13 +69,13 @@
  (only (schemacs xdisp)
        *truncate-partial-width-windows* get-window-cursor-type face->attribute
        line-display-rows render! window-truncates-lines? scroll-to-cursor!
-       window-start pos-visible-in-window-p)
+       window-start window-end pos-visible-in-window-p)
  ;; The dispatch asks the display what a raw event means, and this is the
  ;; display it asks: a terminal object with no curses behind it, which is
  ;; all the character events these tests feed ever need (only an extended
  ;; keycode would ask the terminal's terminfo, and none is used here).
  (only (schemacs dispnew) current-display key-event->key
-       lookup-face realize-face
+       lookup-face realize-face face-metrics
        ;; The generic the test below extends, so that its method attaches to
        ;; the display's own and not to a fresh generic of that name.
        read-input-event
@@ -5934,3 +5934,165 @@
     (test-equal "leaving point at the indentation's end" 13
                 (with-current-buffer ed (point)))))
 (test-end "schemacs_tty_editor_abbrev_and_tab")
+
+;;--------------------------------------------------------------------
+;; `pos-visible-in-window-p`'s PARTIALLY and POS t
+;;
+;; The measured groups below are Emacs 31.1's own answers, taken in an
+;; `emacs -nw` pty with a window of 16 text rows over the same 100-line
+;; buffer. `(new-frame ed 19 80)` is that geometry here: a 19-row frame
+;; with the menu-bar row above the window and the minibuffer below
+;; leaves the window 17 rows, its mode line one, and the text area 16.
+;; The glyph-matrix group reads the same rule through the matrix arm,
+;; at the 21 rows `render!` gives the window when it takes the test
+;; display's size; the last two groups need a row taller than a
+;; terminal's one cell and use a synthetic face height.
+;;--------------------------------------------------------------------
+
+(test-begin "schemacs_ncurses_editor_pos_visible")
+
+(define (with-pos-visible-frame thunk)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f)
+                 (*echo-area-buffer* #f) (*last-command* #f))
+    (let* ((ed (allocate-buffer))
+           (frame (new-frame ed 19 80)))
+      (parameterize ((*current-frame* frame))
+        (set-buffer ed)
+        (let loop ((i 0))
+          (when (< i 100)
+            (insert "line ")
+            (insert (if (< i 10) "0" ""))
+            (insert (number->string i))
+            (insert " abcdefghijklmnopqrstuvwxyz\n")
+            (loop (+ i 1))))
+        (goto-char 1)
+        (thunk ed frame (frame-selected-window frame))))))
+
+(test-equal "a fully visible position answers Emacs's two-element (X Y) list"
+  '((0 0) (9 2) (0 14) (34 15))
+  (with-pos-visible-frame
+   (lambda (ed frame w)
+     (map (lambda (p) (pos-visible-in-window-p p w #t))
+          (list 1 80 491 560)))))
+
+(test-equal "the row after the last one that fits is not visible"
+  '(#t #f #f #f)
+  (with-pos-visible-frame
+   (lambda (ed frame w)
+     (list (pos-visible-in-window-p 560 w)
+           (pos-visible-in-window-p 561 w)
+           (pos-visible-in-window-p 700 w)
+           (pos-visible-in-window-p (point-max) w)))))
+
+;; PARTIALLY does not conjure a position that is wholly below the
+;; window: Emacs answers nil for all three of these.
+(test-equal "PARTIALLY is nil, not a list, for positions out of view"
+  '(#f #f #f)
+  (with-pos-visible-frame
+   (lambda (ed frame w)
+     (list (pos-visible-in-window-p 561 w #t)
+           (pos-visible-in-window-p 700 w #t)
+           (pos-visible-in-window-p (point-max) w #t)))))
+
+(test-equal "POS t is the first position of the last visible row"
+  '((0 15) #t)
+  (with-pos-visible-frame
+   (lambda (ed frame w)
+     (list (pos-visible-in-window-p #t w #t)
+           (pos-visible-in-window-p #t w)))))
+
+(test-equal "POS t is point-max when the buffer ends before the window does"
+  '((0 5) #t (0 5))
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f)
+                 (*echo-area-buffer* #f) (*last-command* #f))
+    (let* ((ed (allocate-buffer))
+           (frame (new-frame ed 19 80)))
+      (parameterize ((*current-frame* frame))
+        (set-buffer ed)
+        (let loop ((i 0))
+          (when (< i 5)
+            (insert "line ")
+            (insert (if (< i 10) "0" ""))
+            (insert (number->string i))
+            (insert " abcdefghijklmnopqrstuvwxyz\n")
+            (loop (+ i 1))))
+        (goto-char 1)
+        (let ((w (frame-selected-window frame)))
+          (list (pos-visible-in-window-p #t w #t)
+                (pos-visible-in-window-p #t w)
+                (pos-visible-in-window-p (point-max) w #t)))))))
+
+(test-equal "a horizontally scrolled position is visible with a negative X"
+  '((-10 0) (22 0) (1 2))
+  (with-pos-visible-frame
+   (lambda (ed frame w)
+     (set-window-hscroll! w 10)
+     (map (lambda (p) (pos-visible-in-window-p p w #t))
+          (list 1 33 82)))))
+
+;; The redisplay resizes this frame to the test display's 24 rows (the
+;; 19 was only the initial size), so the text area is 21 rows here and
+;; the answers move with it. This is the glyph-matrix arm of the
+;; geometry - the rows carry their own y and height - and the fallback
+;; arm above was measured to agree.
+(test-equal "the drawn glyph matrix gives the same answers"
+  '(21 (0 16) (34 19) (0 20) #f)
+  (with-pos-visible-frame
+   (lambda (ed frame w)
+     (render! frame)
+     (list (window-body-height w)
+           (pos-visible-in-window-p 561 w #t)
+           (pos-visible-in-window-p 700 w #t)
+           (pos-visible-in-window-p #t w #t)
+           (pos-visible-in-window-p 736 w #t)))))
+
+;; **A row taller than the frame's character height** is what
+;; `text-scale-mode` produces, and a terminal's rows are all one cell
+;; tall, so no Emacs tty can be asked for this table. The display below
+;; answers every face a three-pixel row; the arithmetic being pinned is
+;; `pos_visible_p`'s (`xdisp.c:1693`): a row of height 3 whose top is 15
+;; in a 16-pixel text area is off by 2 at the bottom, shows 1 pixel, and
+;; is row 5. It is also the case where the renderer declines to lay the
+;; row out at all - `display-window!` has no clip - so this group is the
+;; regression test for the crash that used to follow (`list-ref` with
+;; index -1) as well as for the six-element answer.
+(define-class <tall-row-display> (<test-display>))
+
+(define-method (face-metrics (d <tall-row-display>) attrs)
+  (cons 1 2))
+
+(define (with-tall-row-frame thunk)
+  (parameterize ((*buffer-list* '()) (*current-buffer* #f)
+                 (*echo-area-buffer* #f) (*last-command* #f))
+    (let* ((display (make <tall-row-display> #:rows 19))
+           (ed (allocate-buffer)))
+      (parameterize ((current-display display))
+        (let ((frame (new-frame ed 19 80)))
+          (parameterize ((*current-frame* frame))
+            (set-buffer ed)
+            (let loop ((i 0))
+              (when (< i 20)
+                (insert "0123456789\n")
+                (loop (+ i 1))))
+            (goto-char 1)
+            (thunk ed frame (frame-selected-window frame))))))))
+
+(test-equal "a row cut at the text area's bottom answers the six-element list"
+  '((0 12) (0 15 0 2 1 5) #f (4 15 0 2 1 5))
+  (with-tall-row-frame
+   (lambda (ed frame w)
+     (list (pos-visible-in-window-p 45 w #t)
+           (pos-visible-in-window-p 56 w #t)
+           (pos-visible-in-window-p 56 w)
+           (pos-visible-in-window-p 60 w #t)))))
+
+(test-equal "POS t with a partially visible last row is nil unless PARTIALLY"
+  '(#f (0 15 0 2 1 5) 56)
+  (with-tall-row-frame
+   (lambda (ed frame w)
+     (render! frame)
+     (list (pos-visible-in-window-p #t w)
+           (pos-visible-in-window-p #t w #t)
+           (window-end w)))))
+
+(test-end "schemacs_ncurses_editor_pos_visible")

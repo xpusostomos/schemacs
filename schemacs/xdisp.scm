@@ -79,7 +79,7 @@
           ;; measured in - see `posn-at-x-y'.
           column-width line-height)
     ;; the markers, from marker.c's own library
-    (only (schemacs marker) marker-position set-marker)
+    (only (schemacs marker) markerp marker-position set-marker)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
     ;; `intervals.scm`'s - it must live below `search.scm`, which
     ;; calls it and cannot import `editfns.scm` (2026-10-13).
@@ -181,6 +181,9 @@
          sync-frame-size! window-body-height window-body-top window-wants-tab-line
          window-tab-line-height window-parameter window-last-tab-line
          set!window-last-tab-line
+         ;; `window_text_bottom_y` for `pos-visible-in-window-p`: the
+         ;; text area's bottom is the window's pixel height less this.
+         window-mode-line-height
          window-body-width window-buffer set!window-buffer window-height window-left
          ;; The text area's first column and the bar's share of the
          ;; window: `WINDOW_BOX_LEFT_EDGE_X` and the scroll bar macros.
@@ -254,6 +257,7 @@
           window-line-rows-at window-line-rows %window-line-rows
           window-line-slices-at window-line-slices %window-line-slices
           rows-above rows-row-of-column %row-of-position %row-beginning
+          line-texts-offsets
           vertical-motion line-next-start window-start)
     ;; `mode-line-eol-desc' reads the buffer's coding system: its eol
     ;; half is what the mnemonic is drawn from.
@@ -3620,42 +3624,263 @@ buffer size, the line number and the column number."
                         ;; window: the last row that fits ends it
                         (+ pos (cdr (list-ref slices (- fits 1)))))))))))
 
+    (define (%last-visible-row-position window start tab-y last-visible-y)
+      ;; GNU Emacs's POS t for `pos-visible-in-window-p`: "the first
+      ;; position displayed on the last visible screen line in WINDOW, or
+      ;; the end-of-buffer position, whichever comes first."
+      ;;
+      ;; The walk is this renderer's own, a row at a time from the
+      ;; window's start, accumulating the heights the rows are drawn at.
+      ;; The answer is the first position of the last row whose top is
+      ;; above the text area's bottom - or ZV, when the buffer ends
+      ;; before the window does, because then the end of the text is on
+      ;; that last row. Measured on Emacs 31.1 in a window with 16 text
+      ;; rows: a 100-line buffer answers the start of row 15, and a
+      ;; five-line buffer answers `point-max'.
+      ;;--------------------------------------------------------------
+      (let ((ed (window-buffer window)))
+        (let loop ((line-start start) (y tab-y) (last #f))
+          (if (not line-start)
+              (buffer-z ed)
+              (let* ((texts (line-display-texts ed line-start))
+                     (slices (%window-line-slices window texts)))
+                (if (null? slices)
+                    (buffer-z ed)
+                    (let inner ((rest slices) (row-y y) (row-start line-start)
+                                (last last))
+                      (cond
+                       ((null? rest)
+                        (let ((next (line-next-start ed line-start)))
+                          (if next
+                              (loop next row-y last)
+                              (buffer-z ed))))
+                       ((>= row-y last-visible-y)
+                        (or last (buffer-beg ed)))
+                       (else
+                        (let* ((slice (car rest))
+                               (metrics (row-metrics
+                                         ed (+ line-start (car slice))
+                                         (- (cdr slice) (car slice)))))
+                          (inner (cdr rest)
+                                 (+ row-y (cdr metrics))
+                                 (if (null? (cdr rest))
+                                     #f
+                                     (+ line-start (car (cadr rest))))
+                                 row-start)))))))))))
+
+    (define (%pos-visible-geometry window pos cw ch tab-y window-top-y)
+      ;; X, Y and the row's geometry for POS in WINDOW - the numbers
+      ;; `pos_visible_p` (`xdisp.c:1693`) computes and
+      ;; `pos-visible-in-window-p` returns, as
+      ;; `(X Y TOP-Y BOTTOM-Y ROW-ASCENT SCREEN-ROW)`.
+      ;;
+      ;; **The matrix answers when it can.** A drawn row carries the y it
+      ;; was laid out at and its own height (`w->current_matrix`), which
+      ;; is what Emacs reads; `window-pixel-y` lays the rows above out
+      ;; again to reach the same numbers when the matrix is not current.
+      ;;
+      ;; The row's own metrics are needed either way: a row is as tall
+      ;; as its tallest face (`compute_line_metrics`), which is what
+      ;; `row-metrics` answers, and `text-scale-mode` is what makes that
+      ;; differ from the frame's character height. X is the glyph's
+      ;; display column within its *row* (a continuation row starts at
+      ;; column zero) times the frame's character width; a hscrolled
+      ;; window subtracts its scroll from the display column, which is
+      ;; what `pos_visible_p` does at the end. The y of the glyph itself
+      ;; is the row's top plus the row's ascent less the glyph's own -
+      ;; zero when the row has one face.
+      ;;
+      ;; **Not carried**: line-number glyphs (`display-line-numbers` is
+      ;; not ported), display vectors, and bidi reordering, so a
+      ;; position inside a `display` property that is several glyphs
+      ;; long is measured at the text's own column rather than at the
+      ;; vector's last glyph. Named in DEPARTURES.md.
+      ;;--------------------------------------------------------------
+      (let* ((ed (window-buffer window))
+             (line-start (text-editor-get-start-of-line ed pos))
+             (column (- pos line-start))
+             (texts (line-display-texts ed line-start))
+             (slices (%window-line-slices window texts)))
+        (if (null? slices)
+            #f
+            (let* ((k (%row-of-position window line-start column))
+                   (slice (and (< k (length slices))
+                               (list-ref slices k))))
+              (if (not slice)
+                  #f
+                  (let* ((from (car slice))
+                         (to (cdr slice))
+                         (metrics (row-metrics ed (+ line-start from)
+                                               (- to from)))
+                         (base-row (rows-above-in-window window line-start))
+                         (screen-row (+ (or base-row
+                                            (rows-above window line-start))
+                                        k))
+                         (row (and base-row
+                                   (let* ((current (window-current-matrix window))
+                                          (rows (and current
+                                                     (glyph-matrix-rows current))))
+                                     (and rows
+                                          (< screen-row (vector-length rows))
+                                          (let ((r (vector-ref rows screen-row)))
+                                            (and r
+                                                 (glyph-row-enabled? r)
+                                                 r))))))
+                         (top-y (if row
+                                    (- (glyph-row-y row)
+                                       (row->pixel-y (window-top window)))
+                                    (+ tab-y
+                                       (window-pixel-y window screen-row))))
+                         (row-height (if row
+                                         (glyph-row-height row)
+                                         (cdr metrics)))
+                         (row-ascent (if row
+                                         (glyph-row-ascent row)
+                                         (car metrics)))
+                         (bottom-y (+ top-y row-height))
+                         (h (%window-hscroll window))
+                         (x (if (> h 0)
+                                (* (- (list-ref
+                                       (line-texts-offsets
+                                        texts 0 (vector-length texts))
+                                       column)
+                                      h)
+                                   cw)
+                                (let ((offsets (line-texts-offsets texts from to)))
+                                  (* (list-ref offsets
+                                               (max 0 (min (- column from)
+                                                           (- to from))))
+                                     cw))))
+                         (char-ascent
+                          (if (and (>= column from) (< column to)
+                                   (< pos (buffer-z ed)))
+                              (car (face-metrics
+                                    (frame-output (window-frame window))
+                                    (attrs-at-buffer-position ed pos)))
+                              row-ascent))
+                         (y (max (+ top-y (max 0 (- row-ascent char-ascent)))
+                                 window-top-y)))
+                    (list x y top-y bottom-y row-ascent screen-row)))))))
+
+    (define (%pos-visible-answer window pos cw ch tab-y window-top-y
+                                 last-visible-y partially)
+      ;; The answer `Fpos_visible_in_window_p` builds (`window.c:2046`):
+      ;; nil for a position out of view, `t` for a fully visible one
+      ;; without PARTIALLY, and otherwise the coordinates - two elements
+      ;; when the character is fully visible, six when its row is cut off
+      ;; at the top or bottom, which is the case
+      ;; `show-paren-context-when-offscreen` asks about.
+      ;;--------------------------------------------------------------
+      (let ((geometry (%pos-visible-geometry window pos cw ch tab-y
+                                             window-top-y)))
+        (and geometry
+             (let* ((x (list-ref geometry 0))
+                    (y (list-ref geometry 1))
+                    (top-y (list-ref geometry 2))
+                    (bottom-y (list-ref geometry 3))
+                    (screen-row (list-ref geometry 5))
+                    (rtop (max 0 (- window-top-y top-y)))
+                    (rbot (max 0 (- bottom-y last-visible-y)))
+                    (rowh (max 0 (- (min bottom-y last-visible-y)
+                                    (max top-y window-top-y))))
+                    (visible? (if (< top-y window-top-y)
+                                  (> bottom-y window-top-y)
+                                  (< top-y last-visible-y)))
+                    (fully? (and (= rtop 0) (= rbot 0))))
+               (cond ((not visible?) #f)
+                     ((not partially) (and fully? #t))
+                     (fully? (list x y))
+                     (else (list x y rtop rbot rowh screen-row)))))))
+
     (define (pos-visible-in-window-p position . args)
       ;; GNU Emacs's `pos-visible-in-window-p` (`window.c:1977`): "Return
       ;; non-nil if position POS is currently on the frame in WINDOW."
       ;;
-      ;; Emacs answers from the glyph matrix and can say whether the
-      ;; character is *fully* visible (a line cut off at the bottom is
-      ;; not, unless PARTIALLY); this tree's `window-end` already ends at
-      ;; the last *row* that fits, so a position inside a line that is
-      ;; cut off is past the answer and reads as not visible - the same
-      ;; answer for the caller the completion window's TAB uses
-      ;; (`completion--in-region-1` asks whether the list's last
-      ;; character is on the screen).
+      ;; POS defaults to WINDOW's point and WINDOW to the selected one.
+      ;; A position is visible when its *row* is - fully visible when
+      ;; the row lies wholly inside the text area (`it.last_visible_y`,
+      ;; the window's pixel height less its mode line), and with
+      ;; PARTIALLY non-nil a row cut off at the bottom answers its
+      ;; coordinates with the off-window heights as four more elements.
+      ;; PARTIALLY nil answers nil for a row that is only partly visible,
+      ;; as the C's `fully_p` test does (`window.c:2040`):
       ;;
-      ;; POSITION nil is WINDOW's point, as there; `t`, "the first
-      ;; position of the last visible line", needs the row walk and is
-      ;; not carried - nothing here asks for it. PARTIALLY, whose value
-      ;; is the coordinates list, is accepted and ignored for the same
-      ;; reason: this answers the boolean case.
-      ;;--------------------------------------------------------------
+      ;;     fully_p = !rtop && !rbot;
+      ;;     if (!NILP (partially) || fully_p) in_window = Qt;
+      ;;
+      ;; **POS t is the position the docstring describes**: the first
+      ;; position of the last visible screen line, or the end of the
+      ;; buffer when it comes first, and its answer is that position's
+      ;; visibility.
+      ;;
+      ;; **A position is visible although horizontally scrolled out**
+      ;; (`pos_visible_p`'s final `*x -= hscroll * column_width` only
+      ;; moves X; it does not test it) - POS 1 of a window scrolled ten
+      ;; columns right answers `(-10 0)` in Emacs 31.1, measured.
       ;;
       ;; **No frame is Emacs's no-redisplay answer**: a batch run has a
       ;; frame but has never laid glyphs out, so its answer is nil.
       ;; This tree's headless processes (the suites) have no current
-      ;; frame at all, and the old body called `(selected-window)' on
-      ;; `#f' - an error. `blink-matching-open' asks this from cc-mode's
+      ;; frame at all, and asking `(selected-window)' on `#f' was an
+      ;; error before. `blink-matching-open' asks this from cc-mode's
       ;; electric commands, which run in exactly such a process, so the
       ;; nil answer is what Emacs gives and what callers can rely on.
+      ;;
+      ;; **The one departure left is the renderer's, not this
+      ;; function's**: a row whose bottom would cross the text area's
+      ;; bottom is not laid out at all (`display-window!` says why), so
+      ;; the six-element answer can describe a sliver the screen does
+      ;; not show. Emacs lays the row out and clips it. The coordinates
+      ;; are the same ones Emacs computes for that layout.
       ;;--------------------------------------------------------------
       (let* ((window (if (and (pair? args) (car args))
                          (car args)
-                         (and (*current-frame*) (selected-window)))))
+                         (and (*current-frame*) (selected-window))))
+             (partially (and (pair? args) (pair? (cdr args)) (cadr args))))
         (and window
-             (let ((pos (if position position (window-point window)))
-                   (start (window-start window))
-                   (end (window-end window)))
-               (and (>= pos start) (<= pos end) #t)))))
+             (let* ((frame (window-frame window))
+                    (ed (window-buffer window))
+                    (cw (frame-char-width frame))
+                    (ch (frame-char-height frame))
+                    (tab-y (* (window-tab-line-height window) ch))
+                    (window-top-y tab-y)
+                    ;; `window_text_bottom_y`: the window's pixel height
+                    ;; less its mode line. Measured on a 16-row window:
+                    ;; rows 0..15 are inside, row 16 is not.
+                    (last-visible-y (* (- (window-height window)
+                                          (window-mode-line-height window))
+                                       ch))
+                    (start (window-start window))
+                    (beg (buffer-beg ed))
+                    (zv (buffer-z ed)))
+               ;; A frame with no display has never laid a glyph out -
+               ;; Emacs's `FRAME_INITIAL_P` answers nil before any of
+               ;; this (`xdisp.c:1703`), which is the batch frame's
+               ;; answer; a frame that a suite makes without a display
+               ;; has the same nothing behind it.
+               (and (frame-output frame)
+                    (>= start beg)
+                    (<= start zv)
+                    (let ((pos (cond ((eq? position #t)
+                                      (%last-visible-row-position
+                                       window start tab-y last-visible-y))
+                                     ((not position) (window-point window))
+                                     ((markerp position)
+                                      (marker-position position))
+                                     ((integer? position) position)
+                                     (else
+                                      (error "Wrong type argument: integer-or-marker-p")))))
+                      ;; `pos_visible_p` also resets a window start
+                      ;; outside [BEGV, ZV] to BEGV, but the C's caller
+                      ;; has already refused that window
+                      ;; (`window.c:2011`), so a position below the
+                      ;; start is simply not visible.
+                      (and (integer? pos)
+                           (>= pos start)
+                           (<= pos zv)
+                           (%pos-visible-answer window pos cw ch tab-y
+                                                window-top-y last-visible-y
+                                                partially))))))))
 
     (define (posn-at-point position window)
       ;; GNU Emacs's `posn-at-point` (`keyboard.c:13594`): "Return
@@ -4504,48 +4729,70 @@ buffer size, the line number and the column number."
                       ;; row.
                       (let* ((last-row (car next-row))
                              (rows-drawn (- (car next-row) row))
+                             (cut? (< rows-drawn (length slices)))
                              (next (line-next-start ed line-start))
-                             (end (cond ((< rows-drawn (length slices))
+                             (end (cond (cut?
                                          ;; this line was cut off by the
                                          ;; bottom: the last row that fits
-                                         ;; ends it
-                                         (+ line-start
-                                            (cdr (list-ref slices
-                                                           (- rows-drawn 1)))))
+                                         ;; ends it. **No row of the line
+                                         ;; may fit at all** - a row
+                                         ;; taller than the text area
+                                         ;; (`text-scale-mode`) whose top
+                                         ;; is inside it - and then the
+                                         ;; visible text ends where this
+                                         ;; line begins. Without this
+                                         ;; case `list-ref`'s index was
+                                         ;; -1: a crash, not a missing
+                                         ;; sliver.
+                                         (if (zero? rows-drawn)
+                                             line-start
+                                             (+ line-start
+                                                (cdr (list-ref
+                                                      slices (- rows-drawn 1))))))
                                         (next next)
                                         (else (text-editor-get-end-of-line
                                                ed line-start)))))
                         (set!%window-end-pos window (- (buffer-z ed) end))
                         (set!%window-end-vpos window (- last-row 1))
-                        (set!%window-end-valid? window #t))
-                      (let ((next (line-next-start ed line-start)))
-                        (if next
-                            (loop (car next-row) (cdr next-row) next)
-                            ;; **Past the buffer's end the rows below the
-                            ;; last line are built too**, which is
-                            ;; `try_window`'s loop - `while (it.current_y
-                            ;; < it.last_visible_y)` calls `display_line`
-                            ;; for as long as the window has room, and
-                            ;; `prepare_desired_row` enables each row it
-                            ;; starts. A built blank row compares equal to
-                            ;; the last one drawn and is skipped from then
-                            ;; on; a row left unbuilt is one the diff
-                            ;; cannot match, so it was cleared - as a
-                            ;; whole row of spaces, on a terminal - on
-                            ;; every redisplay.
-                            (let ((metrics (row-metrics ed line-start 0)))
-                              (let blank ((r (car next-row))
-                                          (yy (cdr next-row)))
-                                (if (and (< r vheight)
-                                         (<= (+ yy (cdr metrics)) y-limit))
-                                    (let ((slot (glyph-matrix-row-ref
-                                                 desired r)))
-                                      (when slot
-                                        (build-blank-row! slot ed x0 yy
-                                                          width metrics))
-                                      (blank (+ r 1)
-                                             (+ yy (cdr metrics))))
-                                    #t))))))))))))))
+                        (set!%window-end-valid? window #t)
+                        ;; **Nothing below a line that did not fit can
+                        ;; be on the screen**: Emacs's `try_window` loop
+                        ;; ends once `it.current_y` crosses
+                        ;; `it.last_visible_y`, and the row that crossed
+                        ;; it was built and clipped. Here the row was
+                        ;; not built, so the loop stops in the same place
+                        ;; with nothing left to draw.
+                        (if cut?
+                            #t
+                            (if next
+                                (loop (car next-row) (cdr next-row) next)
+                                ;; **Past the buffer's end the rows below
+                                ;; the last line are built too**, which is
+                                ;; `try_window`'s loop - `while
+                                ;; (it.current_y < it.last_visible_y)`
+                                ;; calls `display_line` for as long as the
+                                ;; window has room, and
+                                ;; `prepare_desired_row` enables each row
+                                ;; it starts. A built blank row compares
+                                ;; equal to the last one drawn and is
+                                ;; skipped from then on; a row left
+                                ;; unbuilt is one the diff cannot match,
+                                ;; so it was cleared - as a whole row of
+                                ;; spaces, on a terminal - on every
+                                ;; redisplay.
+                                (let ((metrics (row-metrics ed line-start 0)))
+                                  (let blank ((r (car next-row))
+                                              (yy (cdr next-row)))
+                                    (if (and (< r vheight)
+                                             (<= (+ yy (cdr metrics)) y-limit))
+                                        (let ((slot (glyph-matrix-row-ref
+                                                     desired r)))
+                                          (when slot
+                                            (build-blank-row! slot ed x0 yy
+                                                              width metrics))
+                                          (blank (+ r 1)
+                                                 (+ yy (cdr metrics))))
+                                        #t)))))))))))))))
 
     (define (update-window! window)
       ;; GNU Emacs's `update_window` (`dispnew.c:4400`): draw the rows the

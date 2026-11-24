@@ -1005,6 +1005,58 @@ def check_blink_paren():
     return problems
 
 
+def check_show_paren_context():
+    """An off-screen opener is shown in the echo area; a visible one is not.
+
+    `show-paren-function' asks `pos-visible-in-window-p' about the opener
+    and, when it is not fully visible, `minibuffer-message`s "Matches "
+    and the opener's line (`paren.el:553-577'). The option is off by
+    default, so the init turns it on. The tail of the condition - a
+    partially visible row whose off-window sliver is under a quarter of
+    the default font height - cannot arise on a terminal, where every
+    row is a whole cell; `test/apps/tty-editor-test.scm`'s
+    `pos_visible` group pins the geometry with a synthetic tall row.
+    """
+    config = tempfile.mkdtemp(prefix="pty-check-paren-context-")
+    os.makedirs(os.path.join(config, "schemacs"))
+    open(os.path.join(config, "schemacs", "init.scm"), "w").write(
+        NO_SPLASH_INIT
+        + "(import (schemacs paren))\n"
+        + "(*show-paren-context-when-offscreen* #t)\n")
+    M_GT = b"\x1b" + b">"
+    C_p = b"\x10"
+
+    def plain(text):
+        text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+        return re.sub(r"\x1b[()][A-Z0-9]", "", text)
+
+    problems = []
+    path = "/tmp/pty-check-paren-context-off.txt"
+    with open(path, "w") as port:
+        port.write("(\n" + "abc\n" * 40 + ")\n")
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 WAIT(b"abc"), M_GT, C_p, C_e, WAIT(b"Matches (")],
+                path, config=config)
+    if "gave up waiting" in out:
+        problems.append("the off-screen opener's context never appeared "
+                        "(screen %r)" % plain(screen_of(out))[-400:])
+    elif "Matches (" not in plain(screen_of(out)):
+        problems.append("the off-screen opener's context is not in the "
+                        "echo area (screen %r)"
+                        % plain(screen_of(out))[-400:])
+
+    path = "/tmp/pty-check-paren-context-on.txt"
+    with open(path, "w") as port:
+        port.write("(\nabc\n)\n")
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 WAIT(b"abc"), M_GT, C_p, C_e, ("sleep", 0.5)],
+                path, config=config)
+    if "Matches" in plain(screen_of(out)):
+        problems.append("a fully visible opener still showed the context "
+                        "(screen %r)" % plain(screen_of(out))[-400:])
+    return problems
+
+
 def check_continuation():
     """A line wider than the window CONTINUES on the row below.
 
@@ -6035,6 +6087,7 @@ CHECKS = {
     "region-highlight": check_region_highlight,
     "show-paren": check_show_paren,
     "blink-paren": check_blink_paren,
+    "show-paren-context": check_show_paren_context,
     "continuation": check_continuation,
     "mode-line-eol": check_mode_line_eol,
     "coding-roundtrip": check_coding_roundtrip,

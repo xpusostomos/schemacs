@@ -25,12 +25,6 @@
   ;;  * ... set to `overlay' - the overlay and its face are built, but
   ;;    this renderer does not draw an overlay's `display' string; the
   ;;    value is accepted and named in DEPARTURES.md.
-  ;;  * the partial-visibility arm of the context condition.
-  ;;    `pos-visible-in-window-p'`s PARTIALLY argument is accepted and
-  ;;    ignored in this tree (xdisp.scm says so), so the "a sliver of the
-  ;;    openparen's row is off-screen" refinement cannot be asked; the
-  ;;    context is shown whenever the openparen is not fully visible.
-  ;;    `default-font-height' is ported (simple.scm) ready for it.
   ;;  * `show-paren--context-child-frame-buffer', `-parameters' and
   ;;    `-redirect-focus' - all child-frame machinery.
   ;;  * `visible-bell'`s screen flash: the backends ring rather than
@@ -82,9 +76,9 @@
     (only (schemacs subr)
           add-hook remove-hook replace-regexp-in-string)
     (only (schemacs simple)
-          *blink-matching-paren* back-to-indentation)
+          *blink-matching-paren* back-to-indentation default-font-height)
     (only (schemacs keyboard) sit-for)
-    (only (schemacs fns) mapconcat)
+    (only (schemacs fns) mapconcat nth)
     (only (schemacs xdisp)
           pos-visible-in-window-p *message-log-max*)
     (only (schemacs cmds)
@@ -866,15 +860,24 @@ It is the default value of `show-paren-data-function'."
                                      (not (eqv? (show-paren--last-pos)
                                                 (point)))
                                      (< there-beg here-beg)
-                                     ;; The C also accepts a partially
-                                     ;; visible openparen when less than
-                                     ;; a quarter of the default font
-                                     ;; height is off-screen; this tree's
-                                     ;; `pos-visible-in-window-p' ignores
-                                     ;; PARTIALLY, so that refinement is
-                                     ;; not asked - DEPARTURES.md.
-                                     (not (pos-visible-in-window-p
-                                           openparen)))
+                                     ;; Either OPENPAREN position is
+                                     ;; fully visible...
+                                     (not (or (pos-visible-in-window-p
+                                               openparen)
+                                              (let ((dfh4 (* 0.25
+                                                             (default-font-height)))
+                                                    (part
+                                                     (pos-visible-in-window-p
+                                                      openparen #f #t)))
+                                                ;; ...or partially
+                                                ;; visible, and the
+                                                ;; invisible part is less
+                                                ;; than 1/4th of the
+                                                ;; default font height.
+                                                (and part
+                                                     (>= (length part) 4)
+                                                     (< (nth 2 part) dfh4)
+                                                     (< (nth 3 part) dfh4))))))
                             (let ((context (blink-paren-open-paren-line-string
                                             openparen
                                             (- there-end there-beg))))

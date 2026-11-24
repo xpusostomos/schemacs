@@ -17280,13 +17280,13 @@ port uses exists in 31.1 and was measured on it.
    from `show-paren--default`, so the nil answer is both Emacs's batch
    answer and what keeps those paths working headless.
 
-7. **`pos-visible-in-window-p`'s PARTIALLY is ignored here** (the
-   pre-existing xdisp departure). Show-paren's context condition asks
-   whether the openparen is partially visible with less than a quarter
-   of the default font height off-screen; with no PARTIALLY answer that
-   refinement cannot be asked, so the port uses "fully visible" alone
-   and shows the context whenever the openparen is not. `default-font-height`
-   (simple.el) is ported and tested, ready for the day PARTIALLY lands.
+7. **`pos-visible-in-window-p`'s PARTIALLY is ported** - the
+   pre-existing xdisp departure this pass closed. Show-paren's context
+   condition is Emacs's own now, including the "a sliver of the
+   openparen's row is off-screen" refinement, and `default-font-height`
+   finally has its caller. The port and what it does not carry are in
+   "`pos-visible-in-window-p`: PARTIALLY and POS t" at the end of this
+   file.
 
 8. **Child frames are not carried.** `show-paren-context-when-offscreen`
    with the value `'child-frame` builds a `*show-paren context*` buffer
@@ -17435,3 +17435,136 @@ is the battery's recurring one: a check that reads raw bytes must strip
 the attributes a new face can insert; a green check that has never been
 seen to fail is not evidence, and a red one can be the assertion rather
 than the editor.
+
+# `pos-visible-in-window-p`: PARTIALLY and POS t (2026-11-25)
+
+The xdisp primitive behind show-paren's context refinement, ported whole.
+`Fpos_visible_in_window_p` (`window.c:1977`) and `pos_visible_p`
+(`xdisp.c:1693`) were read for every rule below; every number in this
+section is Emacs 31.1's, measured in an `emacs -nw` pty at 80 columns
+and a window with 16 text rows.
+
+## What the C does, and what is here
+
+`pos_visible_p` walks the display from the window's start to the
+position and answers the top of the screen row containing it (`top_y`),
+the bottom of that row (`line_bottom_y`), the row's ascent and the
+screen row number. The window's text area's bottom is
+`window_text_bottom_y` - the window's pixel height less its mode line -
+and the tab-line/header-line height is the top of the coordinates:
+
+    rtop = max (0, window_top_y - top_y)
+    rbot = max (0, bottom_y - last_visible_y)
+    rowh = max (0, min(bottom_y, last_visible_y) - max(top_y, window_top_y))
+    visible   = top_y < window_top_y ? bottom_y > window_top_y
+                                     : top_y < last_visible_y
+    fully     = rtop == 0 && rbot == 0
+
+`Fpos_visible_in_window_p` then answers nil unless visible; `t` for a
+fully visible position when PARTIALLY is nil; and with PARTIALLY
+non-nil a list of 2 elements when fully visible or 6
+`(X Y RTOP RBOT ROWH VPOS)` when the row is cut off
+(`window.c:2040-2065`). X/Y are pixels relative to the window's top-left
+corner, X on the text area's left edge. A position that is only
+horizontally out of view is still visible: measured, POS 1 with an
+hscroll of 10 answers `(-10 0)`.
+
+The port is `%pos-visible-geometry`, `%pos-visible-answer` and
+`(%last-visible-row-position)` in `xdisp.scm`, under Emacs's names and
+in Emacs's order below `pos-visible-in-window-p`:
+
+- the row walk is this renderer's (`%window-line-slices` and
+  `row-metrics`), with the matrix answering the row's y and height
+  when it is current (`w->current_matrix`) and `window-pixel-y` walking
+  them out when it is not - measured equal at every visible position of
+  a 100-line buffer;
+- X is the glyph's display column *within its row* (a continuation row
+  starts at column zero) times `frame-char-width`, less `w->hscroll`
+  when the window is hscrolled;
+- Y is the row's top plus the row's ascent less the glyph's own face's
+  ascent - zero on a uniform-face row - as `pos_visible_p` computes it,
+  and never above `window_top_y`.
+
+**POS t is carried too**: the first position of the last visible screen
+row, or `point-max` when the buffer ends before the window does, and the
+visibility of that position is the answer. Measured: a 16-row window on
+a 100-line buffer answers `(0 15)` - the start of row 15; a five-line
+buffer answers `(0 5)` - the empty line after its final newline, which
+is `point-max`. The walk stops at the first row below the text area, so
+it costs the visible rows, not the buffer.
+
+## What is not carried
+
+- **`display-line-numbers`' glyphs** (`it.lnum_pixel_width` is not a
+  thing here), display vectors, and bidi reordering: a position inside
+  a `display` property that expands to several glyphs is measured at
+  the text's own column, where the C has a backtracking arm
+  (`:1961-2085`) that finds the display vector's last glyph. The
+  renderer does not carry display vectors either, so the two agree
+  about what is drawn.
+- **Image/fringe glyph y adjustments** (`it.what == IT_IMAGE`) - there
+  are no images or fringes.
+- **`vscroll`**: `window-vscroll` answers zero on both front ends
+  (`frame.scm`), so `it.current_y` starts at the tab-line height with
+  no scroll added.
+
+## The one renderer departure the numbers expose
+
+The six-element answer can describe a sliver the screen does not show.
+`display-window!` does not lay out a row whose bottom would cross the
+text area's bottom - Emacs lays it out and clips it at
+`it.last_visible_y` - so a tall row (a `text-scale-mode` row, or a row
+at the very bottom of a pixel-height Gtk frame) is reported partially
+visible by the geometry while this renderer draws nothing of it. The
+coordinates and the RTOP/RBOT/ROWH values are the ones Emacs computes
+for the same layout; the missing sliver is the existing rendering
+departure, not a departure in this function.
+
+## The crash the tall row found, and the row loop's stop
+
+`display-window!`'s cut branch computed the window's end as
+`(+ line-start (cdr (list-ref slices (- rows-drawn 1))))`. When the
+*first* row of a line was the one that did not fit, `rows-drawn` was
+zero, the index was -1, and the redisplay raised `list-ref: Value out
+of range`. On a terminal every row is one cell, so a row that does not
+fit has its top at the text area's bottom and the loop never enters the
+branch; a `text-scale-mode` row taller than the cell reaches it, which
+is how the synthetic tall row above found it.
+
+Two things changed there, both about what the renderer can actually
+have drawn:
+
+- with zero rows drawn, the visible text ends at `line-start` - nothing
+  of the line is on the screen - rather than at a slice that does not
+  exist;
+- the row loop **stops** at a cut line. It used to walk the remaining
+  lines at the same y, each cut, and each overwriting `window_end_pos`
+  with a later line's start. Emacs's `try_window` loop ends once
+  `it.current_y` crosses `it.last_visible_y`, so it never processes
+  those lines at all; ours now stops in the same place.
+
+Emacs builds the overflowing row and clips it, so its `window-end`
+includes the sliver; this renderer draws no sliver, and the end is the
+start of the line that did not fit. That is the rendering departure
+above, not a different rule for where the drawn text ends.
+
+## Tests
+
+`test/apps/tty-editor-test.scm`'s `schemacs_ncurses_editor_pos_visible`
+group pins Emacs's table with a 19-row test frame (16 text rows, so the
+same geometry as the measurement): positions across rows and columns
+(`(0 0)`, `(9 2)`, `(0 14)`, `(34 15)`), the newline at a row's end
+(x = the line's width), the first position of the next row (nil), a
+position far below the window (nil), `point-max` (nil), POS t `(0 15)`,
+the short-buffer POS t `(0 5)`, the hscrolled negative X `(-10 0)`, and
+the same answers again after `render!` has filled the matrix - the two
+arms of the geometry, both measured. The tall-row group cannot be
+Emacs-measured (a terminal row is one cell), so its three expectations
+are the C's arithmetic and its comment says so.
+
+`tools/pty-check.py` gained **`show-paren-context`**: with
+`show-paren-context-when-offscreen` turned on in the init, a closing
+paren whose opener is 40 lines up shows "Matches (" in the echo area,
+and the same point in a three-line file (opener on screen) shows
+nothing. Verified to fail with the option left off - the positive half
+then finds no message - and to pass three times in a row.
