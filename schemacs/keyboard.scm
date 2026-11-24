@@ -78,9 +78,10 @@
           *mouse-event-keys* current-display key-event->key
           read-input-event)
     (only (schemacs frame)
-          *current-frame* *pre-command-hook* blink-cursor-check
+          *current-frame* *pre-command-hook* *post-command-hook*
+          blink-cursor-check
           display-selections-p frame-keymap-state
-          frame-quit-cont run-pre-command-hook!
+          frame-quit-cont run-pre-command-hook! run-post-command-hook!
           ;; a click's window - `current_active_maps` switches to the
           ;; buffer of the window clicked on before it reads anything
           window-type? window-buffer
@@ -650,6 +651,16 @@
                       (run-command record))
                   (action))))
            (else (error "not a command" action)))))
+        ;; `post-command-hook', where Emacs runs it: after the command has
+        ;; run and its errors have been reported, before the region
+        ;; bookkeeping and the `last-command' promotion
+        ;; (`keyboard.c:1563'). The C's `safe_run_hooks_maybe_narrowed'
+        ;; protects the run; this guard reports a hook's error the way
+        ;; the command's own is reported and carries on, which is what
+        ;; `safe_run_hooks' does (it also removes the offending function;
+        ;; that part is named rather than copied).
+        (guard (ex (else (report-command-error! frame ex)))
+          (run-post-command-hook!))
         ;; Commands such as `kill-ring-save' set the buffer's deferred
         ;; `deactivate-mark' flag. Apply it after the command, as Emacs does,
         ;; so later motion does not extend the copied region. Not

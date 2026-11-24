@@ -280,6 +280,7 @@
    set-buffer
    set-buffer-local-value!
    kill-local-variable local-variable-p call-with-buffer-local
+   hook-value
    set-buffer-modified-p
    restore-buffer-modified-p
    set!buffer-default-directory
@@ -1915,6 +1916,44 @@
         (and buffer
              (pair? (assq variable (hashq-ref buffer-slots-table buffer '())))
              #t)))
+
+    (define (hook-value hook)
+      ;; The list of functions a hook will run - what `run_hooks' reads
+      ;; from a hook variable (`eval.c:2999', `find_symbol_value').
+      ;;
+      ;; **A hook is a parameter here and its buffer-local half is a
+      ;; buffer slot keyed by that parameter**, so the two have to be
+      ;; merged by hand: Emacs has one binding, and its buffer-local
+      ;; value *is* the value. `add-hook' with LOCAL writes the slot; the
+      ;; runners in `insdel.scm', `keyboard.scm' and `frame.scm' read it
+      ;; through here.
+      ;;
+      ;; **A `#t' in the local list is not a function** - it means "run
+      ;; the global value here", which is what `add-hook''s LOCAL arm
+      ;; seats (`subr.el:2330'). `run_hook_with_args' ignores a `t' that
+      ;; occurs in the global value itself, to avoid an endless loop, and
+      ;; so does this.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (current-buffer))
+             (local (and buffer
+                         (local-variable-p hook buffer)
+                         (buffer-local-value buffer hook))))
+        (if (not local)
+            (hook)
+            (let ((global (hook)))
+              (let loop ((rest (if (procedure? local) (list local) local))
+                         (acc '()))
+                (cond ((null? rest) (reverse acc))
+                      ((eq? (car rest) #t)
+                       (loop (cdr rest)
+                             (let g ((gs (if (procedure? global)
+                                             (list global)
+                                             global))
+                                     (a acc))
+                               (cond ((null? gs) a)
+                                     ((eq? (car gs) #t) (g (cdr gs) a))
+                                     (else (g (cdr gs) (cons (car gs) a)))))))
+                      (else (loop (cdr rest) (cons (car rest) acc)))))))))
 
     (define (call-with-buffer-local variable value thunk)
       ;; Run THUNK with VARIABLE's *buffer-local* value bound to VALUE,

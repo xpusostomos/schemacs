@@ -186,7 +186,12 @@
           ;; the end of each of the three marker functions below - the
           ;; tree's `itree_insert_gap'/`itree_delete_gap' under the C's
           ;; names.
-          adjust-overlays-for-insert  adjust-overlays-for-delete)
+          adjust-overlays-for-insert  adjust-overlays-for-delete
+          ;; A hook's buffer-local entries. `cc-mode` adds
+          ;; `c-before-change`/`c-after-change` with LOCAL, and the two
+          ;; runners below must see them - `hook-value` merges them with
+          ;; the parameter's global list.
+          hook-value)
     (only (schemacs marker)
           %for-each-marker %marker-charpos set!%marker-charpos
           marker-insertion-type)
@@ -289,7 +294,7 @@
       ;; and no overlays the args are read once, here.
       ;;--------------------------------------------------------------
       (for-each (lambda (f) (f start end))
-                (*before-change-functions*)))
+                (hook-value *before-change-functions*)))
 
     (define (signal-after-change charpos lendel lenins)
       ;; GNU Emacs's `signal_after_change` (`insdel.c:2381`): run
@@ -308,7 +313,7 @@
       ;;--------------------------------------------------------------
       (unless (*inhibit-modification-hooks*)
         (for-each (lambda (f) (f charpos (+ charpos lenins) lendel))
-                  (*after-change-functions*))))
+                  (hook-value *after-change-functions*))))
 
     ;;----------------------------------------------------------------
     ;; The caches

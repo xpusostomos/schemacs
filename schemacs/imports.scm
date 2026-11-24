@@ -772,6 +772,7 @@
     *point-before-last-command-or-undo*
     *point-marker-function*
     *popup-menu-function*
+    *post-command-hook*
     *post-self-insert-hook*
     *pre-command-hook*
     *pre-redisplay-functions*
@@ -2996,6 +2997,7 @@
     highlight-nonselected-windows
     history-entries
     history?
+    hook-value
     hscroll-line-slice
     icon-complete-spec
     icon-documentation
@@ -4009,6 +4011,7 @@
     run-hook-with-args-until-success
     run-hooks
     run-mode-hooks
+    run-post-command-hook!
     run-pre-command-hook!
     run-remote-files
     run-repl-client

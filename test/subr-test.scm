@@ -6,6 +6,7 @@
  (only (schemacs subr) kbd event-modifiers event-basic-type
        event-convert-list event-symbol-elements with-silent-modifications
        define-key-after keymap-canonicalize
+       add-hook remove-hook
        assoc-delete-all assq-delete-all)
  (only (schemacs keymap)
        keymap-index keymap-index->events
@@ -18,7 +19,8 @@
  ;; and the property write it exists for.
  (only (schemacs buffer)
        allocate-buffer buffer-modified-p set-buffer set-buffer-modified-p
-       set!buffer-read-only)
+       set!buffer-read-only current-buffer kill-all-local-variables
+       local-variable-p buffer-local-value hook-value)
  (only (schemacs editfns) insert)
  (only (schemacs textprop) get-text-property put-text-property))
 
@@ -368,5 +370,93 @@
   (assoc-delete-all 'wc '((name . "x") tab (wc . 1) (group . "g"))))
 (test-equal '((name . "x") tab)
   (assq-delete-all 'wc '((name . "x") tab (wc . 1))))
+
+;; ------------------------------------------------------------------
+;; add-hook's LOCAL arm, and the merged value a runner sees
+;;
+;; Every expected value is what `emacs -Q --batch' answers for the same
+;; sequence, measured first: a local add starts the buffer's value with
+;; `t' (the marker that says "run the global value here"), a positive
+;; DEPTH appends after it, and `run-hooks' runs the global list at the
+;; marker's position.
+
+(test-begin "schemacs_editor_subr_hooks")
+
+(define *test-hook* (make-parameter '()))
+(define hook-fn-1 (lambda () 'one))
+(define hook-fn-2 (lambda () 'two))
+(define hook-fn-3 (lambda () 'three))
+
+(define (with-test-hook thunk)
+  ;; A fresh *global* hook for every case: the parameter is module state
+  ;; and a test that adds globally would otherwise leak into the next.
+  (parameterize ((*test-hook* '()))
+    (let ((b (allocate-buffer)))
+      (set-buffer b)
+      (thunk b))))
+
+(test-equal "a global add is the parameter's list"
+             (list hook-fn-1)
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1)
+                (*test-hook*))))
+(test-equal "a local add makes the buffer's value start with t"
+             (list hook-fn-1 #t)
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1 #f #t)
+                (buffer-local-value b *test-hook*))))
+(test-equal "the global value is untouched by a local add" '()
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1 #f #t)
+                (*test-hook*))))
+(test-equal "a positive depth appends after the t marker"
+             (list hook-fn-1 #t hook-fn-2)
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1 #f #t)
+                (add-hook *test-hook* hook-fn-2 #t #t)
+                (buffer-local-value b *test-hook*))))
+(test-equal "hook-value splices the global list in at the marker"
+             (list hook-fn-1 hook-fn-3 hook-fn-2)
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1 #f #t)
+                (add-hook *test-hook* hook-fn-2 #t #t)
+                (*test-hook* (list hook-fn-3))
+                (hook-value *test-hook*))))
+(test-equal "removing a local function leaves the t marker"
+             (list #t hook-fn-2)
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1 #f #t)
+                (add-hook *test-hook* hook-fn-2 #t #t)
+                (remove-hook *test-hook* hook-fn-1 #t)
+                (buffer-local-value b *test-hook*))))
+(test-equal "kill-all-local-variables kills a local hook value"
+             #f
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1 #f #t)
+                (kill-all-local-variables)
+                (local-variable-p *test-hook*))))
+(test-equal "a local remove with no local value removes nothing globally"
+             (list hook-fn-1)
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1)
+                (remove-hook *test-hook* hook-fn-1 #t)
+                (*test-hook*))))
+(test-equal "a local add is not added twice"
+             (list hook-fn-1 #t)
+             (with-test-hook
+              (lambda (b)
+                (add-hook *test-hook* hook-fn-1 #f #t)
+                (add-hook *test-hook* hook-fn-1 #f #t)
+                (buffer-local-value b *test-hook*))))
+
+(test-end "schemacs_editor_subr_hooks")
 
 (test-end "schemacs_editor_subr")

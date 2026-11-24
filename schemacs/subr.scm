@@ -87,7 +87,14 @@
           ;; the template reads it from there.
           *inhibit-read-only* buffer-modified-p current-buffer
           restore-buffer-modified-p set!text-editor-undo-list
-          text-editor-undo-list)
+          text-editor-undo-list
+          ;; `add-hook`'s LOCAL arm writes a hook's buffer-local value,
+          ;; which is a buffer slot; and `hook-value` is its read side,
+          ;; used by the runners (`run_hooks` here takes the merged
+          ;; list). `subr.el` is where `add-hook` lives and it reaches
+          ;; the buffer here, one library up - the same edge
+          ;; `*run-hooks-function*` comes down.
+          buffer-local-value local-variable-p set-buffer-local-value!)
     )
 
   (export
@@ -884,39 +891,80 @@
       ;; `hook--depth-alist' that orders functions *among themselves* by
       ;; depth is not carried - nothing here sets a depth but 0.
       ;;
-      ;; LOCAL is not carried, and is named rather than taken: a hook's
-      ;; buffer-local half needs a hook to be a buffer-local *variable*,
-      ;; and a parameter cannot be. Every caller here wants the global
-      ;; hook, which is what `font-lock-mode` puts on
-      ;; `change-major-mode-hook'.
+      ;; LOCAL modifies the hook's buffer-local value instead, which is a
+      ;; buffer slot keyed by the hook parameter (`hook-value',
+      ;; `buffer.scm', merges it back). A hook with no local value yet is
+      ;; made local with the list `(t)' - the marker that says "run the
+      ;; global value here" (`subr.el:2330') - so an ordinary LOCAL
+      ;; addition is `(FUNCTION t)' or `(t FUNCTION)' by DEPTH.
+      ;;
+      ;; Emacs also treats a hook whose value is already buffer-local as
+      ;; LOCAL even when the argument is nil ("Detect the case where
+      ;; make-local-variable was used on a hook"); that is the same test
+      ;; here, `local-variable-p' on the parameter.
       ;;--------------------------------------------------------------
       (let* ((depth (if (pair? rest) (car rest) #f))
              (depth (if (number? depth) depth (if depth 90 0)))
-             (current (hook))
-             (current (cond ((not current) '())
-                            ((procedure? current) (list current))
-                            (else current))))
-        (if (member function current)
-            (hook current)
-            (hook (if (> depth 0)
-                      (append current (list function))
-                      (cons function current))))))
+             (local-arg (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+             (buffer (current-buffer))
+             (local (and buffer
+                         (or local-arg (local-variable-p hook buffer)))))
+        (if local
+            (let* ((bound (local-variable-p hook buffer))
+                   (current (and bound (buffer-local-value buffer hook)))
+                   (current (cond ((not current) (list #t))
+                                  ((procedure? current) (list current))
+                                  (else current))))
+              (unless (member function current)
+                (set-buffer-local-value!
+                 buffer hook
+                 (if (> depth 0)
+                     (append current (list function))
+                     (cons function current)))))
+            (let* ((current (hook))
+                   (current (cond ((not current) '())
+                                  ((procedure? current) (list current))
+                                  (else current))))
+              (if (member function current)
+                  (hook current)
+                  (hook (if (> depth 0)
+                            (append current (list function))
+                            (cons function current))))))))
 
     (define (remove-hook hook function . rest)
       ;; GNU Emacs's `remove-hook' (subr.el:2385): "Remove FUNCTION from
       ;; HOOK's functions. ... Do nothing if HOOK does not currently
-      ;; contain FUNCTION." HOOK and LOCAL as in `add-hook' above.
+      ;; contain FUNCTION." HOOK and LOCAL as in `add-hook' above; the
+      ;; `(t)' marker is left where it is, as `remove-hook' leaves it.
       ;;--------------------------------------------------------------
-      (let ((current (hook)))
-        (hook (cond ((not current) '())
-                    ((procedure? current)
-                     (if (equal? current function) '() current))
-                    (else (let loop ((rest current) (acc '()))
-                            (cond ((null? rest) (reverse acc))
-                                  ((equal? (car rest) function)
-                                   (append (reverse acc) (cdr rest)))
-                                  (else (loop (cdr rest)
-                                              (cons (car rest) acc))))))))))
+      (let* ((local-arg (and (pair? rest) (car rest)))
+             (buffer (current-buffer))
+             (local (and buffer
+                         (or local-arg (local-variable-p hook buffer)))))
+        (if local
+            (when (and buffer (local-variable-p hook buffer))
+              (let ((current (buffer-local-value buffer hook)))
+                (set-buffer-local-value!
+                 buffer hook
+                 (cond ((not current) '())
+                       ((procedure? current)
+                        (if (equal? current function) '() current))
+                       (else (let loop ((rest current) (acc '()))
+                               (cond ((null? rest) (reverse acc))
+                                     ((equal? (car rest) function)
+                                      (append (reverse acc) (cdr rest)))
+                                     (else (loop (cdr rest)
+                                                 (cons (car rest) acc))))))))))
+            (let ((current (hook)))
+              (hook (cond ((not current) '())
+                          ((procedure? current)
+                           (if (equal? current function) '() current))
+                          (else (let loop ((rest current) (acc '()))
+                                  (cond ((null? rest) (reverse acc))
+                                        ((equal? (car rest) function)
+                                         (append (reverse acc) (cdr rest)))
+                                        (else (loop (cdr rest)
+                                                    (cons (car rest) acc))))))))))))
 
     (define (run-hook-with-args hook . args)
       ;; GNU Emacs's `run-hook-with-args' (`eval.c:2908'): "Run HOOK with

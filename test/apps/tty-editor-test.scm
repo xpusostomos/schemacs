@@ -37,7 +37,9 @@
        window-height window-point window-right-border? window-top
        ;; the region's overlay lives in a window parameter
        window-parameter
+       *post-command-hook*
        window-width)
+ (only (schemacs subr) add-hook remove-hook)
  (only (schemacs keyboard)
        command-remapping dispatch-key-event dispatch-input-event timer-check!
        *unread-command-events*
@@ -5825,3 +5827,45 @@
     (*last-nonmenu-event*)))
 
 (test-end "schemacs_tty_editor_file_dialog")
+
+;;--------------------------------------------------------------------
+;; post-command-hook, and its buffer-local entry
+;;
+;; `cc-mode` is the hook's first local user (`cc-mode.el:764' - "Add a
+;; function to post-command-hook which looks for C
+;; declarations/definitions so they get fontified" is not it; the hook
+;; refreshes the mode line and the stale found-types). What is tested
+;; here is the command loop's half: a local entry runs after the
+;; command, and only in the buffer that owns it.
+
+(test-begin "schemacs_tty_editor_post_command_hook")
+(let* ((ed (allocate-buffer))
+       (frame (test-frame ed))
+       (log '()))
+  (parameterize ((*current-frame* frame) (*echo-area-buffer* #f)
+                 (*current-buffer* ed)
+                 (*this-command* #f) (*last-command* #f)
+                 (*post-command-hook* '()))
+    (set-window-buffer! (frame-selected-window frame) ed)
+    (with-current-buffer ed (insert "abc"))
+    (let ((fn (lambda () (set! log (cons 'ran log)))))
+      (add-hook *post-command-hook* fn #f #t)
+      (dispatch-key-event frame (char->integer #\d))
+      (test-equal "a buffer-local post-command-hook runs after the command"
+                  '(ran) log)
+      (test-equal "the command itself did run"
+                  "abcd"
+                  (with-current-buffer ed
+                    (buffer-substring-no-properties (point-min) (point-max))))
+      ;; The same local entry must not run in a buffer that never made
+      ;; one: `hook-value` would merge it from the wrong buffer's slot.
+      (let ((other (allocate-buffer)))
+        (parameterize ((*current-buffer* other))
+          (set-buffer other)
+          (set-window-buffer! (frame-selected-window frame) other)
+          (dispatch-key-event frame (char->integer #\e))
+          (test-equal "and does not run in another buffer" '(ran) log)))
+      (remove-hook *post-command-hook* fn #t)
+      (dispatch-key-event frame (char->integer #\f))
+      (test-equal "after remove-hook LOCAL it no longer runs" '(ran) log))))
+(test-end "schemacs_tty_editor_post_command_hook")

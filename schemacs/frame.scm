@@ -84,6 +84,9 @@
           ;; `window_outdated` (`window.c:231`) asks the buffer's two
           ;; modification ticks.
           buffer-modified-tick buffer-overlay-modified-tick
+          ;; A hook's buffer-local entries (`pre-command-hook' and
+          ;; `post-command-hook' below) are merged by this.
+          hook-value
           ;; `window_wants_tab_line` reads the *buffer's* `tab-line-format`
           ;; (`BVAR (XBUFFER (WINDOW_BUFFER (w)), tab_line_format)`), which
           ;; is one of the buffer-local slots this library's table holds.
@@ -168,7 +171,8 @@
    *blink-cursor-mode*
    *frame-cursor-type*
    *frame-focus*
-   *pre-command-hook*
+   *pre-command-hook* *post-command-hook*
+   run-post-command-hook!
    blink-cursor-check
    blink-cursor-idle-timer
    blink-cursor-timer
@@ -2549,8 +2553,34 @@
       ;; error might happen repeatedly and make Emacs nonfunctional";
       ;; this reports and carries on, which is what the command loop does
       ;; with a command's own errors.
+      ;;
+      ;; `hook-value` merges a buffer-local addition - `cc-mode` adds
+      ;; nothing to this hook, but the hook is one of Emacs's and a mode
+      ;; that adds to it locally must be run.
       ;;--------------------------------------------------------------
-      (for-each (lambda (function) (function)) (*pre-command-hook*)))
+      (for-each (lambda (function) (function))
+                (hook-value *pre-command-hook*)))
+
+    (define *post-command-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `post-command-hook', which `keyboard.c' declares and
+    ;; its command loop runs after each command (`keyboard.c:1563' -
+    ;; `safe_run_hooks_maybe_narrowed'). It sits beside `pre-command-hook'
+    ;; for the same reason: `keyboard.scm' imports this library, and the
+    ;; hook is with the rest of the frame's command-loop state.
+    ;;
+    ;; **Its first local user is `cc-mode`**, which adds `c-post-command'
+    ;; buffer-locally (`cc-mode.el:764') - so this one really does need
+    ;; the buffer-local merge `hook-value' does.
+
+    (define (run-post-command-hook!)
+      ;; Run `post-command-hook', after a command's own errors have been
+      ;; reported. Emacs's `safe_run_hooks_maybe_narrowed' protects this
+      ;; run; the command loop protects it with the same guard it
+      ;; protects a command with, and reports a hook's error the same
+      ;; way.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (function) (function))
+                (hook-value *post-command-hook*)))
 
     ;;----------------------------------------------------------------
     ;; blink-cursor-mode (frame.el)
