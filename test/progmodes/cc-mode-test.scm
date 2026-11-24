@@ -22,11 +22,11 @@
  (only (schemacs buffer) allocate-buffer set-buffer current-buffer buffer-local-value
        set-buffer-local-value! buffer-z)
  (only (schemacs editfns) insert goto-char point point-min point-max widen
-       save-restriction save-excursion)
+       save-restriction save-excursion buffer-substring)
  (only (schemacs search) match-beginning match-end)
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs marker) marker-position)
- (only (schemacs insdel) *before-change-functions*)
+ (only (schemacs insdel) *before-change-functions* *after-change-functions*)
  (only (schemacs textprop) get-text-property put-text-property
        remove-text-properties)
  (only (schemacs cmds) delete-char)
@@ -42,6 +42,7 @@
        c-new-BEG set!c-new-BEG c-new-END set!c-new-END
        %c-langvar %c-lang-function
        c-maybe-stale-found-type c-old-END-literality
+       c-ml-string-end-delim-disrupted c-macro-cache
        c-put-syntax-table-trim-caches c-clear-syn-tab-properties
        c-clear-syntax-table-with-value-on-char-trim-caches)
  (only (schemacs progmodes cc-mode)
@@ -64,7 +65,8 @@
        c-depropertize-CPP c-extend-region-for-CPP c-depropertize-new-text
        c-extend-font-lock-region-for-macros
        c-neutralize-CPP-line c-neutralize-syntax-in-CPP
-       c-before-change c-just-done-before-change c-open-string-opener
+       c-before-change c-after-change c-just-done-before-change
+       c-open-string-opener c-in-after-change-fontification
        c-fl-decl-start c-fl-decl-end
        c-doc-fl-decl-start c-doc-fl-decl-end c-change-expand-fl-region)
  (only (schemacs progmodes cc-engine) c-doc-line-join-re set!c-doc-line-join-re)
@@ -821,3 +823,64 @@
        (list '(30 40) '(29 46))))
 
 (test-end "schemacs_editor_cc_mode_fldecl")
+
+;;--------------------------------------------------------------
+;; `c-after-change' (`cc-mode.el:2364')
+;;--------------------------------------------------------------
+;; Driven through both real hooks, as the mode installs them. Every
+;; expectation is Emacs 31.1's answer for the same edit (the seven-edit
+;; differential is `/tmp/after-em.el' against `/tmp/after-ours.scm',
+;; identical).
+(test-begin "schemacs_editor_cc_mode_after_change")
+
+(define (after-report)
+  (list (c-new-BEG) (c-new-END) (c-just-done-before-change)
+        (c-in-after-change-fontification) (c-maybe-stale-found-type)
+        (c-open-string-opener)
+        (if c-ml-string-end-delim-disrupted #t #f)
+        (found-types) (c-macro-cache)
+        (buffer-substring (point-min) (point-max))
+        (before-props)))
+
+(define (after-edit beg text)
+  (goto-char beg)
+  (parameterize ((*before-change-functions* (list c-before-change))
+                 (*after-change-functions* (list c-after-change))
+                 (*c-buffer-is-cc-mode* 'c++-mode))
+    (if text (insert text) (delete-char 1))
+    (after-report)))
+
+(test-equal "typing inside an identifier: the region and the found types"
+  (list 14 15 #f #t #f #f #f '()
+        #f
+        (string-append "typedef int mzyint;\nmyint x;\n#define A (y\n"
+                       "char *s = R" (string #\") "d(hi)d" (string #\") ";\n// c\n")
+        '())
+  (begin (before-buffer) (after-edit 14 "z")))
+
+(test-equal "deleting in a macro records its cache and extends the region"
+  (list 29 42 #f #t #f #f #f '("myint")
+        '(29 . 40)
+        (string-append "typedef int myint;\nmyint x;\n#efine A (y\n"
+                       "char *s = R" (string #\") "d(hi)d" (string #\") ";\n// c\n")
+        '((38 (1))))
+  (begin (before-buffer) (after-edit 30 #f)))
+
+(test-equal "a quote at a raw string's end records the opener and disruption"
+  (list 52 69 #f #t #f 61 #t '("myint")
+        #f
+        (string-append "typedef int myint;\nmyint x;\n#define A (y\n"
+                       "char *s = R" (string #\") "d(hi)d" (string #\") (string #\")
+                       ";\n// c\n")
+        '((61 (1))))
+  (begin (before-buffer) (after-edit 60 (string #\"))))
+
+(test-equal "deleting the typedef prefix clears the found types"
+  (list 1 1 #f #t #f #f #f '()
+        #f
+        (string-append "ypedef int myint;\nmyint x;\n#define A (y\n"
+                       "char *s = R" (string #\") "d(hi)d" (string #\") ";\n// c\n")
+        '())
+  (begin (before-buffer) (after-edit 1 #f)))
+
+(test-end "schemacs_editor_cc_mode_after_change")

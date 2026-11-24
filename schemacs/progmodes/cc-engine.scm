@@ -4267,7 +4267,11 @@
       ;; deletion, check whether this deletion deleted or "damaged" its
       ;; opening delimiter. If so, return the current position of where
       ;; the construct ended, otherwise return nil."
-      (when c-sws-lit-limits
+      ;;
+      ;; `when-e', because the caller reads the answer as Elisp's nil:
+      ;; `c-invalidate-sws-region-after' puts it into `max', and the
+      ;; unspecified value fails there.
+      (when-e c-sws-lit-limits
         (if (and (< beg (+ (car c-sws-lit-limits) 2))
                  ;; "A lazy assumption that comment delimiters are 2
                  ;; chars long."
@@ -4295,7 +4299,8 @@
             (set! lit-type 'pound)
             (set! limits (cons (point)
                                (begin (c-end-of-macro) (point)))))
-          (when (memq lit-type '(c c++ pound))
+          ;; `when-e' for the caller's `max', as in `-after-del'.
+          (when-e (memq lit-type '(c c++ pound))
             (let ((next-in (c-next-single-property-change (car limits) 'c-in-sws
                                                           #f (cdr limits)))
                   (next-is (c-next-single-property-change (car limits) 'c-is-sws

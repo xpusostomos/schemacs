@@ -62,7 +62,7 @@
     (only (schemacs search) looking-at match-end match-beginning
           re-search-forward re-search-backward search-forward save-match-data)
     (only (schemacs syntax) skip-syntax-backward skip-chars-backward skip-chars-forward
-          parse-partial-sexp)
+          parse-partial-sexp syntax-ppss-flush-cache)
     (only (schemacs cmds) backward-char forward-char end-of-line beginning-of-line)
     (only (schemacs textprop) *in-property-change-p* get-text-property)
     (only (schemacs progmodes cc-defs)
@@ -81,7 +81,7 @@
           c-characterp
           c-mark-<-as-paren c-mark->-as-paren c-unmark-<-or->-as-paren
           c-save-buffer-state c-with-string-fences
-          set!c-syntax-table-hwm c-major-mode-is
+          c-syntax-table-hwm set!c-syntax-table-hwm c-major-mode-is
           c-go-up-list-backward c-go-list-forward c-go-list-backward
           *c-restore-string-fences-function*
           *c-clear-string-fences-function*)
@@ -113,7 +113,10 @@
           c-looking-at-c++-lambda-capture-list
           c-doc-line-join-re c-beginning-of-objc-method-header
           %c-car %c-cdr %c-cadr %c-cddr %c-caddr
-          c-invalidate-sws-region-before c-laomib-invalidate-cache
+          c-invalidate-sws-region-before c-invalidate-sws-region-after
+          c-invalidate-find-decl-cache c-after-change-check-<>-operators
+          c-trim-found-types
+          c-laomib-invalidate-cache
           c-invalidate-macro-cache c-whack-state-after
           c-no-bracelist-cache set!c-no-bracelist-cache
           c-register-lang-function! %c-lang-function
@@ -169,6 +172,9 @@
    ;; `cc-mode.el:2448'-`:2665': the font-lock region expanders
    c-doc-fl-decl-start c-doc-fl-decl-end
    c-fl-decl-start c-fl-decl-end c-change-expand-fl-region
+   ;; `cc-mode.el:2364': the after-change function and its flag
+   c-after-change
+   c-in-after-change-fontification set!c-in-after-change-fontification
    %c-clear-syn-tab-properties-full)
 
   (begin
@@ -1909,6 +1915,111 @@
                  (c-doc-fl-decl-end (c-new-END))
                  (c-point 'bonl (c-new-END)))))
           #f))
+
+    ;; ---------------------------------------------------------------
+    ;; `c-after-change' (`cc-mode.el:2364')
+    ;;--------------------------------------------------------------
+    ;; `c-in-after-change-fontification' is a `defvar'
+    ;; + `make-variable-buffer-local' in Emacs - a buffer-local flag, so
+    ;; the tree's accessor pair.
+    (define (c-in-after-change-fontification)
+      (buffer-local-value (current-buffer) 'c-in-after-change-fontification #f))
+    (define (set!c-in-after-change-fontification value)
+      (set-buffer-local-value! (current-buffer)
+                               'c-in-after-change-fontification value))
+
+    (define (c-after-change beg end old-len)
+      ;; "Function put on `after-change-functions' to adjust various
+      ;; caches etc. Prefer speed to finesse here, since there will be an
+      ;; order of magnitude more calls to this function than any of the
+      ;; functions that use the caches.
+      ;;
+      ;; Note that care must be taken so that this is called before any
+      ;; font-lock callbacks since we might get calls to functions using
+      ;; these caches from inside them, and we must thus be sure that this
+      ;; has already been executed.
+      ;;
+      ;; This calls the language variable
+      ;; c-before-font-lock-functions, if non-nil. This typically sets
+      ;; `syntax-table' properties."
+      ;;
+      ;; "We can sometimes get two consecutive calls to
+      ;; `after-change-functions' without an intervening call to
+      ;; `before-change-functions' when reverting the buffer (see bug
+      ;; #24094). Whatever the cause, assume that the entire buffer has
+      ;; changed."
+      ;;
+      ;; "Note: c-just-done-before-change is nil, t, or 'whole-buffer."
+      (unless (c-called-from-text-property-change-p)
+        (unless (eq? (c-just-done-before-change) #t)
+          (save-restriction
+            (widen)
+            (when (not (c-just-done-before-change))
+              (c-before-change (point-min) (point-max)))
+            (set! beg (point-min))
+            (set! end (point-max))
+            (set! old-len (- end beg))
+            (set!c-new-BEG (point-min))
+            (set!c-new-END (point-max)))))
+
+      ;; "`(c-new-BEG c-new-END)' will be the region to fontify. It may
+      ;; become larger than (beg end)."
+      (set!c-new-END (- (+ (c-new-END) (- end beg)) old-len))
+
+      (unless (c-called-from-text-property-change-p)
+        (set!c-just-done-before-change #f)
+        (c-save-buffer-state
+         ()
+         (parameterize ((*case-fold-search* #f))
+          (save-restriction
+            (save-match-data  ; "c-recognize-<>-arglists changes
+                              ; match-data"
+             (widen)
+             (c-with-string-fences
+              (when (> end (point-max))
+                ;; "Some emacsen might return positions past the end. ...
+                ;; Emacs 21.3 appears to work."
+                (set! end (point-max))
+                (when (> beg end)
+                  (set! beg end)))
+
+              ;; "C-y is capable of spuriously converting category
+              ;; properties c-</>-as-paren-syntax and c-cpp-delimiter
+              ;; into hard syntax-table properties. Remove these when it
+              ;; happens."
+              (c-save-buffer-state
+               ()
+               (c-clear-char-property-with-value beg end 'syntax-table
+                                                 c-<-as-paren-syntax)
+               (c-clear-char-property-with-value beg end 'syntax-table
+                                                 c->-as-paren-syntax)
+               (c-clear-char-property-with-value beg end 'syntax-table #f))
+
+              (c-update-new-id end)
+              (c-trim-found-types beg end old-len) ; "maybe we don't
+                                                   ; need all of these."
+              (c-after-change-de-typedef beg end old-len)
+              (c-invalidate-sws-region-after beg end old-len)
+              ;; "(c-invalidate-state-cache beg) ; moved to
+              ;; `c-before-change'."
+              (c-invalidate-find-decl-cache beg)
+
+              (when (%c-langvar 'c-recognize-<>-arglists)
+                (c-after-change-check-<>-operators beg end))
+
+              (set!c-in-after-change-fontification #t)
+              (save-excursion
+                (let ((fns (%c-langvar 'c-before-font-lock-functions)))
+                  (when (pair? fns)
+                    (for-each (lambda (fn)
+                                ((%c-lang-function fn) beg end old-len))
+                              fns)))))))
+          ;; "A workaround for syntax-ppss's failure to notice
+          ;; syntax-table text property changes."
+          ;; `c-syntax-table-hwm' is a plain variable (a `defvar' Emacs
+          ;; never `let'-binds), not a parameter: passing `(c-syntax-table-hwm)'
+          ;; would *apply* a number.
+          (syntax-ppss-flush-cache c-syntax-table-hwm)))))
 
     ;; ---------------------------------------------------------------
     ;; `c-with-string-fences'` seams (`cc-defs.el:1774')

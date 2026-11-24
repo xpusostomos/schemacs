@@ -16055,3 +16055,48 @@ Next in cc-mode.el: `c-after-change` (it maps over
 `c-before-font-lock-functions`, which now resolves completely), then
 `c-basic-common-init`/`c-common-init`/`c-font-lock-init` and the mode
 definitions.
+
+## `c-after-change` (2026-11-24)
+
+`c-after-change` (`cc-mode.el:2364`) is in `cc-mode.scm` with its
+`c-in-after-change-fontification` flag as a buffer-local accessor pair.
+It maps over `c-before-font-lock-functions`, which now resolves
+completely.
+
+**The bug the port found, and it was pre-existing**: the two
+`c-invalidate-sws-region-after-del`/`-ins` helpers answered the
+*unspecified* value when their guard failed. Their caller puts the
+answers into `max`, and `(max end #<unspecified> end end)` raised. They
+are `when-e` now. Nothing had called them from `after-change-functions`
+before, which is why the earlier sws differential (which called them
+directly) never saw it.
+
+**The transcription bug that took the hunt**: the flush was written
+`(syntax-ppss-flush-cache (c-syntax-table-hwm))` - the tree's
+parameter-call spelling applied to `c-syntax-table-hwm`, which is a
+*plain variable* (`cc-defs`'s `defvar`), so the code *applied* a number:
+"Wrong type to apply: 1". Emacs's line is `(syntax-ppss-flush-cache
+c-syntax-table-hwm)`. The rule at the top of this file - a parameter is
+read `(*name*)`, a plain variable by its name - is why; the mistake was
+transcribing from the tree's habit rather than from c-syntax-table-hwm's
+own definition.
+
+Found by extracting the function into a scratch probe and toggling its
+parts (the flush was the culprit), after bisecting inside the real
+editor was getting slow; the probe, the tree and the backtrace all
+agreed once the call was isolated. The probes are `/tmp/after-em.el` and
+`/tmp/after-ours.scm` (`/tmp/mkacx.py` regenerates the extracted copy).
+
+Verified against Emacs 31.1 with both real hooks installed, seven edits
+on the typedef/macro/raw-string fixture, recording the grown region, the
+two flags, the stale-type record, the opener, the literal, the found
+types, the macro cache, the text and the properties - **all seven
+identical** (after normalizing Emacs's `nil` against the tree's `#f` and
+`()`). Four rows are pinned in
+`schemacs_editor_cc_mode_after_change`.
+
+What is left of cc-mode.el: the mode definitions
+(`c-basic-common-init`, `c-common-init`, `c-font-lock-init`,
+`c-mode`/`c++-mode`), which is what puts these hooks on
+`before-change-functions`/`after-change-functions` and binds
+`c-buffer-is-cc-mode` for real, and then the `.c`/`.h` milestone.

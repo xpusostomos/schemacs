@@ -17452,7 +17452,15 @@ it, as that library's header explains.
    `*c-buffer-is-cc-mode*`, so a direct-call probe must parameterize
    it - without that `c-forward-declarator` answers #f everywhere and
    the port looks broken.
-   Next: `c-after-change`, then `c-basic-common-init`/`c-common-init`/
+   **`c-after-change` is in** (`cc-mode.el:2364`), with the
+   `c-in-after-change-fontification` accessor pair; seven-edit
+   two-hook differential identical; group
+   `schemacs_editor_cc_mode_after_change`, 4. Two bugs: the sws
+   `-after-del`/`-ins` helpers answered the unspecified value into
+   `max` (fixed with `when-e`), and the flush was written
+   `(syntax-ppss-flush-cache (c-syntax-table-hwm))` - c-syntax-table-hwm
+   is a *plain variable*, so that applied a number.
+   Next: `c-basic-common-init`/`c-common-init`/
    `c-font-lock-init` (whose `c-setup-doc-comment-style` is what sets
    `c-doc-line-join-re` for real sessions) and the mode definitions.
 3. Then `c-basic-common-init`/`c-common-init` and the mode definitions

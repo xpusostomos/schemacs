@@ -1219,6 +1219,7 @@
     c-add-syntax
     c-add-type
     c-add-type-1
+    c-after-change
     c-after-change-check-<>-operators
     c-after-change-de-typedef
     c-after-change-escape-NL-in-string
@@ -1494,6 +1495,7 @@
     c-hanging-colons-alist
     c-hanging-semi&comma-criteria
     c-hungry-delete-key
+    c-in-after-change-fontification
     c-in-gcc-asm-p
     c-in-id-arglist
     c-in-knr-argdecl
@@ -4111,6 +4113,7 @@
     set!c-hanging-colons-alist
     set!c-hanging-semi&comma-criteria
     set!c-hungry-delete-key
+    set!c-in-after-change-fontification
     set!c-indent-comment-alist
     set!c-indent-comments-syntactically-p
     set!c-indentation-style
