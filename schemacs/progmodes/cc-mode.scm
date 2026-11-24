@@ -47,17 +47,20 @@
   (import
     (scheme base)
     (only (guile) logand caddr while most-positive-fixnum)
-    (only (schemacs core syntax-macros) when-e while-e setq prog1)
+    (only (schemacs core syntax-macros) when-e unless-e while-e setq prog1)
     (only (schemacs buffer) current-buffer buffer-local-value
           set-buffer-local-value! *case-fold-search*)
     (only (schemacs marker) copy-marker set-marker marker-position)
     (only (schemacs data) /=)
+    (only (schemacs subr) regexp-unmatchable)
+    (only (schemacs indent) back-to-indentation)
+    (only (schemacs font-lock) font-lock-mode-on?)
     (only (schemacs editfns) point point-max point-min goto-char
           bobp eobp char-before char-after buffer-substring-no-properties
           save-excursion forward-line narrow-to-region save-restriction
           widen)
     (only (schemacs search) looking-at match-end match-beginning
-          re-search-forward search-forward save-match-data)
+          re-search-forward re-search-backward search-forward save-match-data)
     (only (schemacs syntax) skip-syntax-backward skip-chars-backward skip-chars-forward
           parse-partial-sexp)
     (only (schemacs cmds) backward-char forward-char end-of-line beginning-of-line)
@@ -78,7 +81,8 @@
           c-characterp
           c-mark-<-as-paren c-mark->-as-paren c-unmark-<-or->-as-paren
           c-save-buffer-state c-with-string-fences
-          set!c-syntax-table-hwm
+          set!c-syntax-table-hwm c-major-mode-is
+          c-go-up-list-backward c-go-list-forward c-go-list-backward
           *c-restore-string-fences-function*
           *c-clear-string-fences-function*)
     (only (schemacs progmodes cc-engine)
@@ -101,7 +105,14 @@
           c-depropertize-ml-strings-in-region
           c-clear->-pair-props c-clear-<-pair-props
           c-no-comment-end-of-macro
-          %c-car %c-cdr %c-cadr %c-caddr
+          c-cheap-inside-bracelist-p c-parse-state c-pull-open-brace
+          c-looking-at-or-maybe-in-bracelist c-syntactic-skip-backward
+          c-forward-keyword-clause c-forward-type c-forward-declarator
+          c-forward-over-token c-enclosing-c++-attribute
+          c-ml-string-opener-around-point
+          c-looking-at-c++-lambda-capture-list
+          c-doc-line-join-re c-beginning-of-objc-method-header
+          %c-car %c-cdr %c-cadr %c-cddr %c-caddr
           c-invalidate-sws-region-before c-laomib-invalidate-cache
           c-invalidate-macro-cache c-whack-state-after
           c-no-bracelist-cache set!c-no-bracelist-cache
@@ -155,6 +166,9 @@
    c-neutralize-CPP-line c-neutralize-syntax-in-CPP
    ;; `cc-mode.el:2224': the before-change function
    c-before-change
+   ;; `cc-mode.el:2448'-`:2665': the font-lock region expanders
+   c-doc-fl-decl-start c-doc-fl-decl-end
+   c-fl-decl-start c-fl-decl-end c-change-expand-fl-region
    %c-clear-syn-tab-properties-full)
 
   (begin
@@ -1639,6 +1653,264 @@
           (c-whack-state-after beg (c-no-bracelist-cache))))))
 
     ;; ---------------------------------------------------------------
+    ;; `c-doc-fl-decl-start'/`-end', `c-fl-decl-start'/`-end' and
+    ;; `c-change-expand-fl-region' (`cc-mode.el:2448'-`:2665')
+    ;;--------------------------------------------------------------
+    (define (c-doc-fl-decl-start pos)
+      ;; "If the line containing POS is in a doc comment continued line
+      ;; (as defined by `c-doc-line-join-re'), return the position of the
+      ;; first line of the sequence. Otherwise, return nil. Point has no
+      ;; significance at entry to and exit from this function."
+      (when-e (not (equal? (c-doc-line-join-re) regexp-unmatchable))
+        (goto-char pos)
+        (back-to-indentation)
+        (and (or (looking-at (%c-langvar 'c-comment-start-regexp))
+                 (memv (c-literal-type (c-literal-limits)) (list 'c 'c++)))
+             (begin
+               (end-of-line)
+               (let ((here (point)))
+                 (let loop ()
+                   (when (re-search-backward (c-doc-line-join-re)
+                                             (c-point 'bopl) #t)
+                     (loop)))
+                 (and (not (eqv? (point) here))
+                      (c-point 'bol)))))))
+
+    (define (c-doc-fl-decl-end pos)
+      ;; "If the line containing POS is continued by a doc comment
+      ;; continuation marker (as defined by `c-doc-line-join-re'), return
+      ;; the position of the BOL at the end of the sequence. Otherwise,
+      ;; return nil. Point has no significance at entry to and exit from
+      ;; this function."
+      (when-e (not (equal? (c-doc-line-join-re) regexp-unmatchable))
+        (goto-char pos)
+        (back-to-indentation)
+        (let ((here (point)))
+          (let loop ()
+            (when (re-search-forward (c-doc-line-join-re) (c-point 'eonl) #t)
+              (loop)))
+          (and (not (eqv? (point) here))
+               (c-point 'bonl)))))
+
+    (define (c-fl-decl-start pos)
+      ;; "If the beginning of the line containing POS is in the middle of
+      ;; a \"local\" declaration, return the beginning of that
+      ;; declaration. Otherwise return nil. Note that declarations, in
+      ;; this sense, can be nested. (A local declaration is one which does
+      ;; not start outside of struct braces (and similar) enclosing POS.
+      ;; Brace list braces here are not \"similar\".
+      ;;
+      ;; POS being in a literal does not count as being in a declaration
+      ;; (on pragmatic grounds).
+      ;;
+      ;; This function is called indirectly from font locking stuff -
+      ;; either from c-after-change (to prepare for after-change
+      ;; font-locking) or from font lock context (etc.) fontification."
+      (goto-char pos)
+      (or (and (c-major-mode-is 'objc-mode)
+               (c-beginning-of-objc-method-header)
+               (point))
+          (let ((lit-start (c-literal-start))
+                (old-pos #f)
+                (new-pos pos)
+                (capture-opener #f)
+                (bod-lim #f) (bo-decl #f)
+                (paren-state #f) (containing-brace #f))
+            (goto-char (c-point 'bol new-pos))
+            (unless-e lit-start
+              (set! bod-lim (c-determine-limit 500))
+
+              ;; "In C++ Mode, first check if we are within a (possibly
+              ;; nested) lambda form capture list."
+              (when (c-major-mode-is 'c++-mode)
+                (save-excursion
+                  (while (and (c-go-up-list-backward #f bod-lim)
+                              (c-looking-at-c++-lambda-capture-list))
+                    (set! capture-opener (point)))))
+
+              (let loop ()
+                (when
+                    (and
+                     (begin (set! old-pos (point)) old-pos)
+                     ;; "The following form tries to move to the end of
+                     ;; the previous declaration without moving outside of
+                     ;; an enclosing {."
+                     (let ((pseudo #f))
+                       (let inner ()
+                         (when (and
+                                ;; "N.B. `c-syntactic-skip-backward'
+                                ;; doesn't check (> (point) lim) and can
+                                ;; loop if that's not the case."
+                                (> (point) bod-lim)
+                                (begin
+                                  (c-syntactic-skip-backward "^;{}" bod-lim #t)
+                                  (and (eqv? (char-before) #\})
+                                       (save-excursion
+                                         (backward-char)
+                                         (begin
+                                           (set! pseudo
+                                                 (c-cheap-inside-bracelist-p
+                                                  (c-parse-state)))
+                                           pseudo)))))
+                           (goto-char pseudo)
+                           (inner)))
+                       (or pseudo (bobp) (> (point) bod-lim)))
+                     ;; "Move forward to the start of the next
+                     ;; declaration."
+                     (begin
+                       (c-forward-syntactic-ws)
+                       ;; "Have we got stuck in a comment at EOB?"
+                       (not (and (eobp) (c-literal-start))))
+                     (< (point) old-pos)
+                     (begin
+                       (set! bo-decl (point))
+                       (or (not (looking-at (%c-langvar 'c-protection-key)))
+                           (c-forward-keyword-clause 1)))
+                     (begin
+                       ;; "Are we looking at a keyword such as \"template\"
+                       ;; or \"typedef\" which can decorate a type, or the
+                       ;; type itself?"
+                       (when (or (looking-at (%c-langvar 'c-prefix-spec-kwds-re))
+                                 (c-forward-type #t))
+                         ;; "We've found another candidate position."
+                         (set! new-pos (min new-pos bo-decl))
+                         (goto-char bo-decl))
+                       #t)
+                     ;; "Try and go out a level to search again."
+                     (begin
+                       (c-backward-syntactic-ws bod-lim)
+                       (and (> (point) bod-lim)
+                            (or (memv (char-before) (list #\( #\[))
+                                (and (eqv? (char-before) #\<)
+                                     (equal? (c-get-char-property
+                                              (- (point) 1) 'syntax-table)
+                                             c-<-as-paren-syntax))
+                                (and (eqv? (char-before) #\{)
+                                     (save-excursion
+                                       (backward-char)
+                                       (set! paren-state (c-parse-state))
+                                       (let inner2 ()
+                                         (when (and
+                                                (begin
+                                                  (set! containing-brace
+                                                        (c-pull-open-brace
+                                                         paren-state))
+                                                  containing-brace)
+                                                (not (eqv? (char-after
+                                                            containing-brace)
+                                                           #\{)))
+                                           (inner2)))
+                                       (pair? (c-looking-at-or-maybe-in-bracelist
+                                               containing-brace
+                                               containing-brace)))))))
+                     (not (bobp)))
+                  (backward-char)       ; "back over (, [, <."
+                  (loop)))
+
+              (when (and capture-opener (< capture-opener new-pos))
+                (set! new-pos capture-opener))
+              (and (/= new-pos pos) new-pos)))))
+
+    (define (c-fl-decl-end pos)
+      ;; "If POS is inside a declarator, return the position of the end
+      ;; of the paren pair that terminates it, or of the end of the token
+      ;; that follows the declarator, otherwise return nil. If there is
+      ;; no such token, the end of the last token in the buffer is used.
+      ;; POS being in a literal is now (2022-07) handled correctly. POINT
+      ;; is not preserved."
+      (goto-char pos)
+      (let ((lit-start (c-literal-start))
+            (lim (c-determine-limit 1000))
+            (enclosing-attribute #f) (pos1 #f) (ml-delim #f))
+        (if lit-start
+            (goto-char lit-start))
+        (when (and lit-start (%c-langvar 'c-ml-string-opener-re)
+                   (begin
+                     (set! ml-delim (c-ml-string-opener-around-point))
+                     ml-delim))
+          (goto-char (car ml-delim)))
+        (c-backward-syntactic-ws lim)
+        (when (begin
+                (set! enclosing-attribute (c-enclosing-c++-attribute))
+                enclosing-attribute)
+          (goto-char (car enclosing-attribute))
+          ;; "Only happens in C or C++ Mode."
+          (c-backward-syntactic-ws lim))
+        (while (and (> (point) lim)
+                    (memv (char-before) (list #\[ #\()))
+          (backward-char)
+          (c-backward-syntactic-ws lim))
+        (when-e (begin (set! pos1 (c-on-identifier)) pos1)
+          (goto-char pos1)
+          (let* ((lim1 (save-excursion
+                         (and (c-beginning-of-macro)
+                              (begin (c-end-of-macro) (point)))))
+                 (lim+ (c-determine-+ve-limit 200))
+                 (decl-res (c-forward-declarator lim+)))
+            ;; The `(and (>= (point) pos) (point))' is the let*'s last
+            ;; form in Emacs - a sibling of this `if', not its third arm.
+            (begin
+             (if (or (%c-cadr (%c-cddr (%c-cddr decl-res))) ; "We scanned an
+                                                             ; arglist."
+                     (and (eqv? (char-after) #\() ; "Move over a non arglist
+                                                   ; (...)."
+                          (prog1 (c-go-list-forward)
+                            (c-forward-syntactic-ws))))
+                 (if (looking-at (%c-langvar 'c-symbol-char-key))
+                    ;; "Deal with baz (foo((bar)) type var), where `pos'
+                    ;; was inside foo, but foo((bar)) is not semantically
+                    ;; valid. The result must be after var)."
+                    (and
+                     (goto-char pos)
+                     (begin (set! pos1 (c-on-identifier)) pos1)
+                     (goto-char pos1)
+                     (begin
+                       (c-backward-syntactic-ws lim1)
+                       (eqv? (char-before) #\())
+                     (c-fl-decl-end (- (point) 1)))
+                    (begin
+                      (c-forward-over-token #f lim+) ; "The , or ) after
+                                                     ; the declarator."
+                      (point)))
+                (if (begin (c-forward-syntactic-ws)
+                           (not (eobp)))
+                    (begin
+                      (c-forward-over-token)
+                      ;; "Cope with having POS within a syntactically
+                      ;; invalid (...), by moving backward out of the
+                      ;; parens and trying again."
+                      (when (and (eqv? (char-before) #\))
+                                 (c-go-list-backward (point) lim1))
+                        (c-fl-decl-end (point))))
+                    (let ((lit-start (c-literal-start)))
+                      (when lit-start
+                        (goto-char lit-start))
+                      (c-backward-syntactic-ws))))
+             (and (>= (point) pos) (point)))))))
+
+    (define (c-change-expand-fl-region beg end old-len)
+      ;; "Expand the region (c-new-BEG c-new-END) to an after-change
+      ;; font-lock region. This will usually be the smallest sequence of
+      ;; whole lines containing `c-new-BEG' and `c-new-END', but if
+      ;; `c-new-BEG' is in a \"local\" declaration (see
+      ;; `c-fl-decl-start') the beginning of this is used as the lower
+      ;; bound.
+      ;;
+      ;; This is called from an after-change-function, but the
+      ;; parameters BEG END and OLD-LEN are not used."
+      (if (font-lock-mode-on?)
+          (begin
+            (set!c-new-BEG
+             (or (c-fl-decl-start (c-new-BEG))
+                 (c-doc-fl-decl-start (c-new-BEG))
+                 (c-point 'bol (c-new-BEG))))
+            (set!c-new-END
+             (or (c-fl-decl-end (c-new-END))
+                 (c-doc-fl-decl-end (c-new-END))
+                 (c-point 'bonl (c-new-END)))))
+          #f))
+
+    ;; ---------------------------------------------------------------
     ;; `c-with-string-fences'` seams (`cc-defs.el:1774')
     ;; ---------------------------------------------------------------
     ;; `cc-defs' is below this library and cannot reach these two, so it
@@ -1682,5 +1954,7 @@
                                c-extend-font-lock-region-for-macros)
     (c-register-lang-function! 'c-neutralize-syntax-in-CPP
                                c-neutralize-syntax-in-CPP)
+    (c-register-lang-function! 'c-change-expand-fl-region
+                               c-change-expand-fl-region)
 
     ))

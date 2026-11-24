@@ -17444,13 +17444,17 @@ it, as that library's header explains.
    `(cdr cache)` nil test, which needs `%c-true` (the cdr is normally a
    *number*). Eight-row real-hook differential identical; group
    `schemacs_editor_cc_mode_before_change`, 6.
-   Next: the `c-fl-decl-start`/`-end` pair and the
-   `c-doc-fl-decl-start`/`-end` pair with
-   `c-change-expand-fl-region` (and
-   `c-beginning-of-objc-method-header`, which has no mode here), then
-   `c-after-change`.
-2. Then `c-after-change` maps over `c-before-font-lock-functions`, so
-   the fl-decl pair above must come first.
+   **The fl-decl pair and `c-change-expand-fl-region` are in**
+   (`cc-mode.el:2448`-`:2665`; group
+   `schemacs_editor_cc_mode_fldecl`, 13). A 370-row whole-position
+   differential is identical. The objc helper is a signalling stub (no
+   objc-mode here). **Harness note**: `c-major-mode-is` reads
+   `*c-buffer-is-cc-mode*`, so a direct-call probe must parameterize
+   it - without that `c-forward-declarator` answers #f everywhere and
+   the port looks broken.
+   Next: `c-after-change`, then `c-basic-common-init`/`c-common-init`/
+   `c-font-lock-init` (whose `c-setup-doc-comment-style` is what sets
+   `c-doc-line-join-re` for real sessions) and the mode definitions.
 3. Then `c-basic-common-init`/`c-common-init` and the mode definitions
    (with `c-font-lock-init`/`c-font-lock-fontify-region`, and the
    language function registry filled for every symbol the change

@@ -345,7 +345,7 @@
    *c-maybe-labelp* *c-commas-bound-stmts* c-punctuation-in
    c-crosses-statement-barrier-p c-beginning-of-statement-1
    ;; `cc-engine.el:12171' and `:13917'
-   c-in-method-def-p c-looking-at-inexpr-block
+   c-in-method-def-p c-beginning-of-objc-method-header c-looking-at-inexpr-block
    ;; token movement (`cc-engine.el:4947')
    c-jump-syntax-balanced c-jump-syntax-unbalanced
    c-end-of-token c-end-of-current-token c-forward-over-token
@@ -5984,6 +5984,15 @@
         (beginning-of-line)
         (let ((re (%c-langvar 'c-opt-method-key)))
           (and re (looking-at re) (point)))))
+
+    (define (c-beginning-of-objc-method-header)
+      ;; `cc-engine.el:12146': the Objective-C method-header scanner.
+      ;; Not ported - there is no `objc-mode' in this tree, so the one
+      ;; caller, `c-fl-decl-start''s objc arm, never reaches it (the arm
+      ;; is guarded by `(c-major-mode-is 'objc-mode)'). The definition is
+      ;; here so that arm is not an unbound variable, and it says what it
+      ;; is if it is ever reached.
+      (error "c-beginning-of-objc-method-header: objc-mode is not ported"))
 
     ;;------------------------------------------------------------------
     ;; `c-looking-at-special-brace-list' (`cc-engine.el:13584'-`:13645')

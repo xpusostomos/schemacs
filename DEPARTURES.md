@@ -16004,3 +16004,54 @@ identical. The probes are `/tmp/before-em.el` and
 `c-change-expand-fl-region` is not ported yet; the get-state list alone
 is replayed on both sides. That pair is the next tranche and is what
 `c-after-change` maps over.
+
+## The font-lock region expanders (2026-11-24)
+
+`c-doc-fl-decl-start`/`-end`, `c-fl-decl-start`/`-end` and
+`c-change-expand-fl-region` (`cc-mode.el:2448'-`:2665') are in
+`cc-mode.scm`.
+
+**The objc arm is a named stub**: `c-fl-decl-start` guards its
+Objective-C branch with `(c-major-mode-is 'objc-mode)`, and there is no
+`objc-mode` here, so `c-beginning-of-objc-method-header`
+(`cc-engine.el:12146`) is defined in cc-engine as a function that
+signals what it is. Nothing can reach it in this tree.
+
+**The verification is a whole-position differential**: `c-fl-decl-start`
+and `-end` called at every position of a C and a C++ fixture (364 rows),
+the doc pair at every position of a doc-comment fixture, and
+`c-change-expand-fl-region` on four regions - 370 rows, **all identical
+to Emacs 31.1**. The probes are `/tmp/fldecl-em.el` and
+`/tmp/fldecl-ours.scm`; thirteen rows are pinned in
+`schemacs_editor_cc_mode_fldecl`.
+
+**The lesson of the pass is the harness, not the port.** The first
+ours-side run had `c-forward-declarator` answering `#f` at *every*
+position - which reads as a broken port. It was not: the calls were made
+without `(parameterize ((*c-buffer-is-cc-mode* 'c++-mode)) ...)`, and
+`c-major-mode-is` reads that parameter. In a live editor
+`c-basic-common-init` sets it; a harness that calls cc-engine functions
+directly must bind it, as `tools/cc-decl-diff/`'s harness has done since
+the declaration tranche. Nothing in the port changed to fix it.
+
+Two translation points, both the tree's recurring class:
+`c-fl-decl-end`'s outer `when`, `c-fl-decl-start`'s `unless` and the
+doc pair's `when` are *values* when they do not run, so they are
+`when-e`/`unless-e` (as `unless` the nil rows answered
+`#<unspecified>`), and `(cadr (cddr (cddr decl-res)))` is
+`%c-cadr`/`%c-cddr`, which also reads Emacs's `(car nil)` as nil.
+`c-change-expand-fl-region`'s `font-lock-mode` variable is this tree's
+`(font-lock-mode-on?)`.
+
+**A dependency for the mode pass**: Emacs's `c-doc-line-join-re` and
+its siblings are set by `c-setup-doc-comment-style`, which runs only
+when font locking is on, so in a plain `--batch` buffer they are
+`regexp-unmatchable`. The differential sets the variable explicitly on
+both sides for that reason; `c-font-lock-init`/`c-common-init` must call
+the setup for a real editing session to get the doc-comment fontifying
+it expects.
+
+Next in cc-mode.el: `c-after-change` (it maps over
+`c-before-font-lock-functions`, which now resolves completely), then
+`c-basic-common-init`/`c-common-init`/`c-font-lock-init` and the mode
+definitions.

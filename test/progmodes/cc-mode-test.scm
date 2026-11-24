@@ -64,7 +64,11 @@
        c-depropertize-CPP c-extend-region-for-CPP c-depropertize-new-text
        c-extend-font-lock-region-for-macros
        c-neutralize-CPP-line c-neutralize-syntax-in-CPP
-       c-before-change c-just-done-before-change c-open-string-opener))
+       c-before-change c-just-done-before-change c-open-string-opener
+       c-fl-decl-start c-fl-decl-end
+       c-doc-fl-decl-start c-doc-fl-decl-end c-change-expand-fl-region)
+ (only (schemacs progmodes cc-engine) c-doc-line-join-re set!c-doc-line-join-re)
+ (only (schemacs font-lock) set!font-lock-mode!))
 
 (test-begin "schemacs_editor_cc_mode")
 
@@ -724,3 +728,96 @@
          (before-edit 20 "z")))
 
 (test-end "schemacs_editor_cc_mode_before_change")
+
+;;--------------------------------------------------------------
+;; The font-lock region expanders (`cc-mode.el:2448'-`:2665')
+;;--------------------------------------------------------------
+;; Every expectation is Emacs 31.1's answer for the same fixture (the
+;; whole-position differential is `/tmp/fldecl-em.el' against
+;; `/tmp/fldecl-ours.scm': 370 rows, identical). The calls bind
+;; `*c-buffer-is-cc-mode*' as `c-basic-common-init' will, because
+;; `c-major-mode-is' reads it.
+(test-begin "schemacs_editor_cc_mode_fldecl")
+
+(define fl-fxc
+  (string-append "int f (void)\n{\n  int a = 1;\n  {\n    char *p;\n  }\n"
+                 "  x = (a +\n       b);\n}\n"))
+(define fl-fxcpp
+  (string-append "void f ()\n{\n  auto l = [x] (int y) { return x + y; };\n"
+                 "  std::vector<int> v;\n}\n"))
+
+(define (fl-buffer text mode)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert text)
+    (set-buffer-local-value! b 'major-mode mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (if (eq? mode 'c-mode)
+        (begin
+          (c-init-language-vars c-mode)
+          (set-syntax-table ((c-lang-const c-make-mode-syntax-table c))))
+        (begin
+          (c-init-language-vars c++-mode)
+          (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))))
+    (c-clear-found-types)
+    (let loop ((p 1))
+      (when (<= p (1- (point-max)))
+        (remove-text-properties p (+ p 1)
+          (list 'syntax-table #f 'c-fl-syn-tab #f 'category #f 'c-type #f
+                'c-is-sws #f 'c-in-sws #f))
+        (loop (+ p 1))))
+    b))
+
+(define (fl-row fun pos mode)
+  (parameterize ((*c-buffer-is-cc-mode* mode))
+    (goto-char pos)
+    (let ((ans (fun pos)))
+      (list ans (point)))))
+
+(fl-buffer fl-fxc 'c-mode)
+(test-equal "c-fl-decl-start on the open brace line answers the header"
+  (list 1 1) (fl-row c-fl-decl-start 14 'c-mode))
+(test-equal "... and inside a continued statement the declaration's start"
+  (list 52 49) (fl-row c-fl-decl-start 65 'c-mode))
+(test-equal "c-fl-decl-end after a function header answers the arglist end"
+  (list 15 15) (fl-row c-fl-decl-end 7 'c-mode))
+(test-equal "... and nil where there is no declarator"
+  (list #f 45) (fl-row c-fl-decl-end 46 'c-mode))
+
+(fl-buffer fl-fxcpp 'c++-mode)
+(test-equal "c-fl-decl-start in a C++ function header answers its start"
+  (list 1 1) (fl-row c-fl-decl-start 11 'c++-mode))
+(test-equal "c-fl-decl-end on the C++ header's identifier answers the arglist"
+  (list 12 12) (fl-row c-fl-decl-end 7 'c++-mode))
+(test-equal "... and after a declarator's id, the following token"
+  (list 23 23) (fl-row c-fl-decl-end 21 'c++-mode))
+
+;; The doc-comment pair. Emacs's mode init leaves `c-doc-line-join-re' at
+;; `regexp-unmatchable' until font locking sets it, so the tests set it,
+;; as the differential did on both sides.
+(fl-buffer (string-append "int f ()\n{\n  /** first line\n   * continued\n"
+                          "   */\n  g ();\n}\n")
+           'c-mode)
+(set!c-doc-line-join-re "^[ \t]*\\(\\*\\|//+\\)")
+(test-equal "c-doc-fl-decl-start on a continuation line answers the doc start"
+  (list 29 29) (fl-row c-doc-fl-decl-start 30 'c-mode))
+(test-equal "c-doc-fl-decl-end there answers the line after the doc"
+  (list 50 48) (fl-row c-doc-fl-decl-end 30 'c-mode))
+
+(fl-buffer fl-fxc 'c-mode)
+(set!font-lock-mode! #t)
+(for-each
+ (lambda (case)
+   (let ((pair (car case)))
+     (set!c-new-BEG (car pair)) (set!c-new-END (cadr pair))
+     (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+       (c-change-expand-fl-region 1 2 3))
+     (test-equal (list 'change-expand pair)
+       (cadr case)
+       (list (c-new-BEG) (c-new-END)))))
+ (list (list '(10 12) '(1 14))
+       (list '(6 8) '(1 15))
+       (list '(20 24) '(16 25))
+       (list '(30 40) '(29 46))))
+
+(test-end "schemacs_editor_cc_mode_fldecl")

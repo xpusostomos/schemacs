@@ -1280,6 +1280,7 @@
     c-beginning-of-defun-1
     c-beginning-of-inheritance-list
     c-beginning-of-macro
+    c-beginning-of-objc-method-header
     c-beginning-of-statement-1
     c-beginning-of-syntax
     c-benign-error
@@ -1300,6 +1301,7 @@
     c-calc-offset
     c-calculate-state
     c-called-from-text-property-change-p
+    c-change-expand-fl-region
     c-characterp
     c-cheap-inside-bracelist-p
     c-check-qualified-type
@@ -1357,6 +1359,8 @@
     c-doc-bright-comment-start-re
     c-doc-comment-style
     c-doc-face-name
+    c-doc-fl-decl-end
+    c-doc-fl-decl-start
     c-doc-line-join-end-ch
     c-doc-line-join-re
     c-doc-markup-face-name
@@ -1385,6 +1389,8 @@
     c-find-decl-spots
     c-find-decl-syntactic-pos
     c-find-invalid-doc-markup
+    c-fl-decl-end
+    c-fl-decl-start
     c-fn-region-is-active-p
     c-font-lock-<>-arglists
     c-font-lock-c++-lambda-captures
