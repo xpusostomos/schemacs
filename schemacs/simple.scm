@@ -273,6 +273,7 @@
    ;; so the command is named `insert-newline' here; see below.
    insert-newline
    newline-and-indent
+   *self-insert-uses-region-functions*
    ;; The three options `newline' reads. `*paragraphs.el*`'s two are
    ;; here because this file's `newline' is their lowest reader;
    ;; `paragraphs.scm` and `fill.scm` import and re-export them.
@@ -1053,6 +1054,15 @@ A non-nil INTERACTIVE argument means to run the `post-self-insert-hook'."
     ;; `keyboard-quit', `read-only-mode' and
     ;; `exchange-point-and-mark' are simple.el's; they were
     ;; misfiled under the Windows and isearch banners.
+    (define *self-insert-uses-region-functions* (make-parameter '()))
+    ;; ^ GNU Emacs's `self-insert-uses-region-functions'
+    ;; (`simple.el:602'): "Special hook to tell if `self-insert-command'
+    ;; will use the region. ... If any function on this hook returns a
+    ;; non-nil value, `delete-selection-mode' will act on that value".
+    ;; A hook is a parameter here; `delete-selection-mode' is not
+    ;; ported, so the hook has no reader yet and is carried for
+    ;; `electric-pair-mode' to register with, as Emacs's is.
+
     (define-command (newline-and-indent . rest)
       "Insert a newline, then indent according to major mode.
 Indentation is done using the value of `indent-line-function'.

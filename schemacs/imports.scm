@@ -497,6 +497,7 @@
     *echo-buffers*
     *electric-indent-actions*
     *electric-indent-functions*
+    *electric-quote-chars*
     *emacs-startup-hook*
     *enable-disabled-menus-and-buttons*
     *enable-kinsoku*
@@ -867,6 +868,7 @@
     *selected-window-override*
     *selection-coding-system*
     *selection-converter-alist*
+    *self-insert-uses-region-functions*
     *sentence-end*
     *sentence-end-base*
     *sentence-end-double-space*

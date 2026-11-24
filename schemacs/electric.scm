@@ -72,7 +72,7 @@
 
   (export
    electric--after-char-pos
-   *electric-indent-actions* electric-indent-chars
+   *electric-indent-actions* *electric-quote-chars* electric-indent-chars
    *electric-indent-functions*
    electric-indent-inhibit set!electric-indent-inhibit
    electric-indent-functions-without-reindent
@@ -172,6 +172,24 @@ significant."
                           (*electric-indent-inhibit*)))
     (define (set!electric-indent-inhibit value)
       (set-buffer-local-value! (current-buffer) *electric-indent-inhibit* value))
+
+    ;; `electric-quote-chars' is `electric.el:641''s defcustom - the
+    ;; curved quote pairs `electric-pair-pairs' and
+    ;; `electric-pair-text-pairs' are built from, which is why it is
+    ;; here even though `electric-quote-mode' itself is not carried.
+    ;; The widget-based `:type' is simplified: the values are characters.
+    (define-custom *electric-quote-chars* (list #\‘ #\’ #\“ #\”)
+      "Curved quote characters for `electric-quote-mode'.
+This list's members correspond to left single quote, right single
+quote, left double quote, and right double quote, respectively.
+
+When `electric-quote-mode' is enabled, as you type it replaces \\=` with
+the first element of this list, \\=' with the second element, \\=`\\=`
+with the third, and \\='\\=' with the fourth.  This occurs only in
+comments, strings, and text paragraphs, and these are selectively
+controlled with `electric-quote-comment', `electric-quote-string', and
+`electric-quote-paragraph'."
+      :version "26.1" :type '(repeat character) :group 'electricity)
 
     (define electric-indent-functions-without-reindent
       ;; GNU Emacs's list holds symbols, because Emacs resolves a
