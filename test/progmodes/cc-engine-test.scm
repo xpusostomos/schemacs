@@ -2405,3 +2405,29 @@
      18 (point)))
  '(19 21 25 27 28))
 (test-end "schemacs_editor_cc_engine_ml_neutral")
+
+
+;;--------------------------------------------------------------
+;; `c-ml-string-in-end-delim' (`cc-engine.el:7670')
+;;--------------------------------------------------------------
+(test-begin "schemacs_editor_cc_engine_ml_end_delim")
+(cpp-buffer (string-append "auto s = R" (string #\") "delim(abc)delim"
+                           (string #\") ";"
+                           (string #\newline) "int b;" (string #\newline)))
+(goto-char 12)
+(c-maybe-re-mark-ml-string)
+(for-each
+ (lambda (case)
+   (test-equal (string-append "in-end-delim from "
+                              (number->string (car case)) " to "
+                              (number->string (cadr case)))
+     (list-ref case 3)
+     (c-ml-string-in-end-delim (car case) (cadr case) (list-ref case 2))))
+ (list (list 12 13 #f #f)
+       (list 12 13 '(10 18 . 11) #f)
+       (list 20 21 #f #f)
+       (list 25 25 '(10 18 . 11) '(21 . 28))
+       (list 26 27 #f #f)
+       (list 28 29 #f #f)
+       (list 30 31 #f #f)))
+(test-end "schemacs_editor_cc_engine_ml_end_delim")

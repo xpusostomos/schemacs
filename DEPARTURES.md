@@ -15817,3 +15817,37 @@ both property kinds and unsets both markers. Rows pinned in
 functions that use it: `c-before-change-check-ml-strings` (`:7863`) and
 `c-after-change-unmark-ml-strings` (`:7953`). Everything they stand on
 is now in the tree.
+
+## `c-ml-string-in-end-delim` (2026-11-24)
+
+`c-ml-string-in-end-delim` (`cc-engine.el:7670`) is in `cc-engine.scm`
+right after `c-ml-string-back-to-neutral`, in Emacs's order. It finds a
+raw string's closing delimiter in (or touching) a region, given
+sometimes the opener the region sits in.
+
+Two translation notes, both the tree's recurring class:
+
+- **The final `unless` is a value**, so it is an `if` with an explicit
+  `#f`. Left as `unless`, the nil cases answered the *unspecified*
+  value, which is true - the differential printed `#<unspecified>`
+  where Emacs prints nil on six of its seven rows.
+- **`(match-data)` is nil when no match data is set**, and
+  `set-match-data` here treats nil as "clear the registers", as the C
+  does. `saved-match-data` is bound `#f` and testable with `(not
+  (match-data))` because `(match-data)` answers nil - not `'()` - when
+  nothing has been searched.
+- The inner loop's re-search is the **first conjunct of the `and`**;
+  stored in a variable first, a failed search re-reads stale match data
+  and the loop spins (the `c-position-wrt-ml-delims` lesson, again).
+
+Verified against Emacs 31.1 on `auto s = R"delim(abc)delim";\nint b;\n`
+with the mode's properties wiped and `c-maybe-re-mark-ml-string` run at
+12: seven `(beg end open-delim)` cases, all identical, including
+`(25 25 (10 18 . 11))` answering `(21 . 28)` and `(12 13 (10 18 . 11))`
+answering nil. The probes are `/tmp/ined-em.el` and `/tmp/ined-ours.scm`
+(move them into `tools/` next time they are touched); the rows are
+pinned in `schemacs_editor_cc_engine_ml_end_delim`.
+
+Where this leaves the ml-string machinery: **`c-before-change-check-ml-strings`
+(`:7863`) and `c-after-change-unmark-ml-strings` (`:7953`) are the
+remaining two**, and everything they call is now in the tree.

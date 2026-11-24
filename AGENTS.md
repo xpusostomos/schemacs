@@ -17412,8 +17412,14 @@ it, as that library's header explains.
    `c-clear-syn-tab-properties` with its seam - the cc-mode body is
    `%c-clear-syn-tab-properties-full`, because two exports of one name
    are two bindings and `loadup-tests` refuses that).
-   Next: `c-ml-string-in-end-delim` (`cc-engine.el:7670`), then
-   `c-before-change-check-ml-strings` (`:7863`) and
+   **`c-ml-string-in-end-delim` is in** (`cc-engine.el:7670`, right
+   after `c-ml-string-back-to-neutral`; group
+   `schemacs_editor_cc_engine_ml_end_delim`, 7 rows, every Emacs
+   31.1's). Its final `unless` is a value, so it is an `if` with an
+   explicit `#f` - left as `unless` the nil rows answered the
+   unspecified value. `(match-data)` answers nil (not `'()`) when
+   nothing has been searched.
+   Next: `c-before-change-check-ml-strings` (`:7863`) and
    `c-after-change-unmark-ml-strings` (`:7953`) - everything they stand
    on is now in the tree - then `c-depropertize-CPP`,
    `c-neutralize-syntax-in-CPP`, `c-change-expand-fl-region`,

@@ -1644,6 +1644,7 @@
     c-ml-string-back-to-neutral
     c-ml-string-delims-around-point
     c-ml-string-end-delim-disrupted
+    c-ml-string-in-end-delim
     c-ml-string-make-closer-re
     c-ml-string-opener-around-point
     c-ml-string-opener-at-or-around-point

@@ -170,7 +170,7 @@
     (only (schemacs search) re-search-forward re-search-backward
           search-forward looking-at string-match regexp-quote
           match-beginning match-end match-string match-string-no-properties
-          save-match-data)
+          save-match-data match-data set-match-data)
     (only (schemacs textprop) get-text-property put-text-property
           remove-text-properties text-property-any)
     (only (schemacs syntax) skip-chars-backward skip-chars-forward
@@ -249,6 +249,7 @@
    c-old-END-literality c-old-beg-ml c-old-1-beg-ml c-old-end-ml
    c-beg-pos c-end-pos c-ml-string-end-delim-disrupted
    c-ml-string-back-to-neutral
+   c-ml-string-in-end-delim
    *c-clear-syn-tab-properties-function* c-clear-syn-tab-properties
    c-neutralize-pos c-neutralized-prop
    c-depropertize-ml-string c-depropertize-ml-strings-in-region
@@ -14385,6 +14386,72 @@
             (re-search-backward (%c-langvar 'c-ml-string-back-closer-re)
                                 (max opener-end (c-point 'eopl))
                                 'bound))))
+
+    (define (c-ml-string-in-end-delim beg end open-delim)
+      ;; "If the region (BEG END) intersects or touches a possible
+      ;; multiline string terminator, return a cons of the position of
+      ;; the start and end of the first such terminator. ... OPEN-DELIM
+      ;; is the three element dotted list of the start, end, and double
+      ;; quote position of the multiline string opener that BEG is in,
+      ;; or nil if it isn't in one."
+      (save-excursion
+        (goto-char beg)
+        (when open-delim
+          ;; "If BEG is in an opener, move back to a position we know to
+          ;; be \"safe\"."
+          (if (<= beg (car (cdr open-delim)))
+              (goto-char (car (cdr open-delim)))
+              (c-ml-string-back-to-neutral (car open-delim))))
+
+        (let ((saved-match-data #f))
+          ;; The `or's value is not used; Emacs relies on the `and's
+          ;; truthiness, so each arm ends in `#t'.
+          (or
+           ;; "If we might be in the middle of \"context\" bytes at the
+           ;; start of a closer, move to after the closer."
+           (and (%c-langvar 'c-ml-string-back-closer-re)
+                (looking-at (%c-langvar 'c-ml-string-any-closer-re))
+                (eq? (c-in-literal) 'string)
+                (begin (set! saved-match-data (match-data)) #t)
+                (begin (goto-char (match-end 0)) #t))
+           ;; "Otherwise, move forward over closers while we haven't yet
+           ;; reached END, until we're after BEG."
+           (begin
+             (let loop ()
+               (when (let ((found #f))
+                       (let inner () ; "Go over a single real closer."
+                         (when (and
+                                (re-search-forward
+                                 (%c-langvar 'c-ml-string-any-closer-re)
+                                 (min (+ end
+                                         (%c-langvar 'c-ml-string-max-closer-len-no-leader))
+                                      (point-max))
+                                 #t)
+                                (save-excursion
+                                  (goto-char (match-end 1))
+                                  (if (c-in-literal) ; "a pseudo closer."
+                                      #t
+                                      (begin
+                                        (set! saved-match-data (match-data))
+                                        (set! found #t)
+                                        #f))))
+                           (inner)))
+                       (and found (<= (point) beg)))
+                 (loop)))
+             #t))
+          (set-match-data saved-match-data))
+
+        ;; "Test whether we've found the sought closing delimiter."
+        ;; The `unless` is a value here (Emacs answers nil), so it is an
+        ;; `if` with an explicit `#f`: a `when`'s or `unless`'s
+        ;; unspecified value is true in Scheme.
+        (if (or (not (match-data))
+                (and (not (eobp)) (<= (point) beg))
+                (> (match-beginning 0) beg)
+                (begin (goto-char (match-beginning 2))
+                       (not (c-literal-start))))
+            #f
+            (cons (match-beginning 1) (match-end 1)))))
 
     ;; `c-clear-syn-tab-properties' (`cc-defs.el:1444') removes the
     ;; `c-fl-syn-tab' mirrors with `c-clear-syn-tab' and the two
