@@ -2386,3 +2386,22 @@
   (list 1 12) (list (c-new-BEG) (c-new-END)))
 
 (test-end "schemacs_editor_cc_engine_ml_depropertize")
+
+
+;;--------------------------------------------------------------
+;; `c-ml-string-back-to-neutral' (`cc-engine.el:7654')
+;;--------------------------------------------------------------
+(test-begin "schemacs_editor_cc_engine_ml_neutral")
+(cpp-buffer (string-append "auto s = R" (string #\") "delim(abc)delim"
+                           (string #\") ";"
+                           (string #\newline) "int b;" (string #\newline)))
+(goto-char 12)
+(c-maybe-re-mark-ml-string)
+(for-each
+ (lambda (p)
+   (goto-char p)
+   (c-ml-string-back-to-neutral 10)
+   (test-equal (string-append "back to neutral from " (number->string p))
+     18 (point)))
+ '(19 21 25 27 28))
+(test-end "schemacs_editor_cc_engine_ml_neutral")

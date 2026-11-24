@@ -15778,3 +15778,42 @@ the eight state variables they share (`c-old-beg-ml`, `c-old-end-ml`,
 `c-ml-string-in-end-delim`), and `c-clear-syn-tab-properties`
 (`cc-defs.el:1444`), which needs `c-clear-syn-tab` and the two markers
 from cc-mode - a seam, since those live above cc-engine.
+
+## The ml-string state, the neutral position and the syn-tab seam (2026-11-24)
+
+The state the two remaining ml-string change functions share is in
+(`c-old-beg-ml`, `c-old-1-beg-ml`, `c-old-end-ml`, `c-beg-pos`,
+`c-end-pos`, `c-ml-string-end-delim-disrupted`, and
+`c-old-END-literality` - all plain `defvar`s in Emacs, so plain
+variables here), with `c-ml-string-back-to-neutral`
+(`cc-engine.el:7654`) and `c-clear-syn-tab-properties`
+(`cc-defs.el:1444`).
+
+**The seam, and the clash it first caused.** `c-clear-syn-tab-properties`
+removes the `c-fl-syn-tab` mirrors with `c-clear-syn-tab` and the two
+markers, which are `cc-mode.scm`'s - above cc-engine. The body lives
+there, named `%c-clear-syn-tab-properties-full`, and cc-engine's
+`c-clear-syn-tab-properties` reaches it through
+`*c-clear-syn-tab-properties-function*`; with the seam unset (cc-mode
+not loaded, or no fences in the buffer) it does Emacs's other half -
+`c-clear-char-properties` over `syntax-table`.
+**The first version exported the same name from both libraries**, and
+`loadup-tests`' clash census caught it: two libraries exporting
+`c-clear-syn-tab-properties` are two *different bindings*, which the
+generated `imports.scm` would silently resolve by picking the first.
+The public name belongs to exactly one library; the other's
+implementation takes a `%` prefix.
+
+Verified against Emacs 31.1 on `R"delim(abc)delim"`: `c-ml-string-back-to-neutral`
+from positions 19/21/25/27/28 lands at 18 in both, and
+`c-clear-syn-tab-properties` over a buffer with fences at 18/22 removes
+both property kinds and unsets both markers. Rows pinned in
+`schemacs_editor_cc_mode_clear_syn_tab` (3) and
+`schemacs_editor_cc_engine_ml_neutral` (5).
+
+## What is left of the ml-string machinery, exactly
+
+`c-ml-string-in-end-delim` (`cc-engine.el:7670`) and the two change
+functions that use it: `c-before-change-check-ml-strings` (`:7863`) and
+`c-after-change-unmark-ml-strings` (`:7953`). Everything they stand on
+is now in the tree.

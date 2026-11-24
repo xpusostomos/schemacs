@@ -17407,11 +17407,15 @@ it, as that library's header explains.
    `c-before-after-change-check-c++-modules`, plus the two global
    neutralize variables; group
    `schemacs_editor_cc_engine_ml_depropertize`, 4).
-   Next: `c-before-change-check-ml-strings` and
-   `c-after-change-unmark-ml-strings` with their eight shared state
-   variables and `c-ml-string-in-end-delim`, plus
-   `c-clear-syn-tab-properties` (needs a seam to cc-mode's
-   `c-clear-syn-tab` and the markers), then `c-depropertize-CPP`,
+   **The ml-string state and helpers are in too** (the seven global
+   state variables, `c-ml-string-back-to-neutral`,
+   `c-clear-syn-tab-properties` with its seam - the cc-mode body is
+   `%c-clear-syn-tab-properties-full`, because two exports of one name
+   are two bindings and `loadup-tests` refuses that).
+   Next: `c-ml-string-in-end-delim` (`cc-engine.el:7670`), then
+   `c-before-change-check-ml-strings` (`:7863`) and
+   `c-after-change-unmark-ml-strings` (`:7953`) - everything they stand
+   on is now in the tree - then `c-depropertize-CPP`,
    `c-neutralize-syntax-in-CPP`, `c-change-expand-fl-region`,
    `c-called-from-text-property-change-p`, and
    `c-before-change`/`c-after-change` themselves.

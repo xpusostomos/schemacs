@@ -94,6 +94,7 @@
           c-end-of-macro c-in-literal
           c-ml-string-opener-at-or-around-point
           c-maybe-re-mark-ml-string
+          *c-clear-syn-tab-properties-function*
           c-truncate-lit-pos/state-cache
           c-put-syntax-table-trim-caches c-clear-syntax-table-trim-caches
           c-clear-syntax-table-with-value-on-char-trim-caches
@@ -129,7 +130,8 @@
    c-quoted-number-straddling-point
    c-parse-quotes-before-change c-parse-quotes-after-change
    c-bc-changed-stringiness set!c-bc-changed-stringiness
-   c-open-string-opener set!c-open-string-opener)
+   c-open-string-opener set!c-open-string-opener
+   %c-clear-syn-tab-properties-full)
 
   (begin
 
@@ -340,6 +342,30 @@
                       pos 'c-fl-syn-tab #f
                       (+ (marker-position (c-min-syn-tab-mkr)) 1))))))))
       (c-truncate-lit-pos/state-cache pos))
+
+    (define (%c-clear-syn-tab-properties-full from to)
+      ;; "Remove all occurrences of the `syntax-table' and `c-fl-syn-tab'
+      ;; text properties between FROM and TO." (`cc-defs.el:1444'; the
+      ;; body lives here because the fence state does, but the *name*
+      ;; belongs to cc-engine, which exports the wrapper that reaches
+      ;; this through `*c-clear-syn-tab-properties-function*'. Two
+      ;; exports of one name would be two bindings, which loadup-tests
+      ;; refuses.)
+      (let ((min-mkr (c-min-syn-tab-mkr)) (max-mkr (c-max-syn-tab-mkr)))
+        (when (and min-mkr max-mkr
+                   (< from (marker-position max-mkr))
+                   (> to (marker-position min-mkr)))
+          (let ((pos from))
+            (let loop ()
+              (when (and (< pos to)
+                         (begin
+                           (set! pos (c-min-property-position pos to 'c-fl-syn-tab))
+                           pos)
+                         (< pos to))
+                (c-clear-syn-tab pos)
+                (set! pos (+ pos 1))
+                (loop))))))
+      (c-clear-char-properties from to 'syntax-table))
 
     ;; ---------------------------------------------------------------
     ;; `c-clear-string-fences' and `c-restore-string-fences'
@@ -1226,6 +1252,7 @@
     ;; reads them through parameters; install them as this library loads,
     ;; as `keyboard.scm' installs its seam.
     (*c-restore-string-fences-function* c-restore-string-fences)
+    (*c-clear-syn-tab-properties-function* %c-clear-syn-tab-properties-full)
     (*c-clear-string-fences-function* c-clear-string-fences)
 
     ))

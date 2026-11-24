@@ -166,6 +166,7 @@
     %c-car
     %c-cddr
     %c-cdr
+    %c-clear-syn-tab-properties-full
     %c-false
     %c-langvar
     %c-true
@@ -292,6 +293,7 @@
     *c-buffer-is-cc-mode*
     *c-cleanup-list*
     *c-clear-string-fences-function*
+    *c-clear-syn-tab-properties-function*
     *c-commas-bound-stmts*
     *c-comment-only-line-offset*
     *c-comment-prefix-regexp*
@@ -1266,6 +1268,7 @@
     c-before-change-de-typedef
     c-before-change-fix-comment-escapes
     c-before-change-include-<>
+    c-beg-pos
     c-beginning-of-current-token
     c-beginning-of-decl-1
     c-beginning-of-defun-1
@@ -1307,6 +1310,7 @@
     c-clear-found-types
     c-clear-string-fences
     c-clear-syn-tab
+    c-clear-syn-tab-properties
     c-clear-syntax-table-properties-trim-caches
     c-clear-syntax-table-trim-caches
     c-clear-syntax-table-with-value-on-char-trim-caches
@@ -1358,6 +1362,7 @@
     c-end-of-literal
     c-end-of-macro
     c-end-of-token
+    c-end-pos
     c-evaluate-offset
     c-face-name-p
     c-fallback-style
@@ -1636,7 +1641,9 @@
     c-maybe-stale-found-type
     c-min-property-position
     c-min-syn-tab-mkr
+    c-ml-string-back-to-neutral
     c-ml-string-delims-around-point
+    c-ml-string-end-delim-disrupted
     c-ml-string-make-closer-re
     c-ml-string-opener-around-point
     c-ml-string-opener-at-or-around-point
@@ -1663,6 +1670,10 @@
     c-noise-macro-name-re
     c-noise-macro-with-parens-name-re
     c-offsets-alist
+    c-old-1-beg-ml
+    c-old-END-literality
+    c-old-beg-ml
+    c-old-end-ml
     c-on-identifier
     c-open-string-opener
     c-override-default-keywords

@@ -34,7 +34,7 @@
  (only (schemacs progmodes cc-engine) c-found-types c-add-type-1 c-clear-found-types
        c-new-id-start c-new-id-end c-new-id-is-type
        c-new-BEG set!c-new-BEG c-new-END set!c-new-END
-       c-put-syntax-table-trim-caches
+       c-put-syntax-table-trim-caches c-clear-syn-tab-properties
        c-clear-syntax-table-with-value-on-char-trim-caches)
  (only (schemacs progmodes cc-mode)
        c-unfind-enclosing-token c-unfind-coalesced-tokens c-update-new-id
@@ -455,3 +455,23 @@
   (list (c-new-BEG) (c-new-END)))
 
 (test-end "schemacs_editor_cc_mode_quotes")
+
+
+;;--------------------------------------------------------------
+;; `c-clear-syn-tab-properties' (`cc-defs.el:1444') and its seam
+;;--------------------------------------------------------------
+;; Emacs's macro lives in cc-mode here because the fence state does;
+;; cc-engine reaches it through *c-clear-syn-tab-properties-function*.
+(test-begin "schemacs_editor_cc_mode_clear_syn_tab")
+
+(fresh "int a;\nchar *s = \"xy\";\nint b;\n")
+(c-put-syn-tab 18 '(15))
+(c-put-syn-tab 22 '(15))
+(test-equal "the fences are in place first"
+  (list (list 18 '(15) '(15)) (list 22 '(15) '(15))) (fences))
+(c-clear-syn-tab-properties 1 (point-max))
+(test-equal "clearing the syn-tab properties removes both kinds"
+  '() (fences))
+(test-equal "... and unsets the markers" '(#f #f) (mrk))
+
+(test-end "schemacs_editor_cc_mode_clear_syn_tab")

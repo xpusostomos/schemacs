@@ -246,6 +246,10 @@
    c-clear-syntax-table-properties-trim-caches
    c-depropertize-ml-string-delims c-ml-string-opener-intersects-region
    c-ml-string-delims-around-point c-position-wrt-ml-delims
+   c-old-END-literality c-old-beg-ml c-old-1-beg-ml c-old-end-ml
+   c-beg-pos c-end-pos c-ml-string-end-delim-disrupted
+   c-ml-string-back-to-neutral
+   *c-clear-syn-tab-properties-function* c-clear-syn-tab-properties
    c-neutralize-pos c-neutralized-prop
    c-depropertize-ml-string c-depropertize-ml-strings-in-region
    c-before-after-change-check-c++-modules
@@ -14352,6 +14356,51 @@
        ((eqv? (point) (car (cdr (cdr ml-string-delims))))
         'after-close)
        (else 'close-delim)))
+
+    ;; ---------------------------------------------------------------
+    ;; The ml-string change state (`cc-engine.el:7135', `:7538'-`:7547')
+    ;; and the two helpers the change functions use (`:7654', `:7670')
+    ;;--------------------------------------------------------------
+    ;; All plain `defvar's in Emacs - global, not buffer-local.
+    (define c-old-END-literality #f)
+    (define c-old-beg-ml #f)
+    (define c-old-1-beg-ml #f) ; only non-nil when `c-old-beg-ml' is nil.
+    (define c-old-end-ml #f)
+    (define c-beg-pos #f)
+    (define c-end-pos #f)
+    ;; "Whether a buffer change has disrupted or will disrupt the
+    ;; terminator of a multi-line string."
+    (define c-ml-string-end-delim-disrupted #f)
+
+    (define (c-ml-string-back-to-neutral opening-point)
+      ;; "Given OPENING-POINT, the position of the start of a multiline
+      ;; string opening delimiter, move point back to a neutral position
+      ;; within the ml string."
+      (let ((opener-end (save-excursion
+                          (goto-char opening-point)
+                          (looking-at (%c-langvar 'c-ml-string-opener-re))
+                          (match-end 1))))
+        (if (not (%c-langvar 'c-ml-string-back-closer-re))
+            (goto-char (max (c-point 'boll) opener-end))
+            (re-search-backward (%c-langvar 'c-ml-string-back-closer-re)
+                                (max opener-end (c-point 'eopl))
+                                'bound))))
+
+    ;; `c-clear-syn-tab-properties' (`cc-defs.el:1444') removes the
+    ;; `c-fl-syn-tab' mirrors with `c-clear-syn-tab' and the two
+    ;; markers, which are cc-mode.scm's - above this library. The
+    ;; whole body is there and arrives through this seam; without it
+    ;; (before cc-mode loads, or in a buffer with no fences) only the
+    ;; `syntax-table' half can be done, which is Emacs's own no-op
+    ;; order.
+    (define *c-clear-syn-tab-properties-function* (make-parameter #f))
+    (define (c-clear-syn-tab-properties from to)
+      ;; "Remove all occurrences of the `syntax-table' and `c-fl-syn-tab'
+      ;; text properties between FROM and TO."
+      (let ((f (*c-clear-syn-tab-properties-function*)))
+        (if f
+            (f from to)
+            (c-clear-char-properties from to 'syntax-table))))
 
     ;; ---------------------------------------------------------------
     ;; `c-depropertize-ml-string' and its region walker
