@@ -57,6 +57,7 @@ SUITES = [
     'test/core/lisp-mode-test.scm',
     'test/core/lisp-test.scm',
     'test/core/map-ynp-test.scm',
+    'test/core/pcase-test.scm',
     'test/core/seq-test.scm',
     'test/core/syntax-macros-test.scm',
     'test/core/timer-test.scm',

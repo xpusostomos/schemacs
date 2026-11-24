@@ -16984,3 +16984,81 @@ The primitives `elec-pair.el` needs under its own logic; they are
   and its `t` end, and `atomic-change-group`'s four measured cases
   (success keeps `"abcX"`, an error restores `"abc"`, both again with
   undo disabled and the disabled flag preserved). `fns-test.scm` 42.
+
+## `pcase.el` - the pattern language and the binding macros (2026-11-24)
+
+`schemacs/core/pcase.scm` is `lisp/emacs-lisp/pcase.el`: `pcase`,
+`pcase-exhaustive`, `pcase-let`, `pcase-let*`, `pcase-let*-strict`,
+`pcase-dolist`, `pcase-lambda`, `pcase-setq`, `pcase-defmacro` and
+`pcase--macroexpand`. The primitives elec-pair.el was blocked on are
+in: elec-pair uses `pcase` in five places and this is the language it
+speaks.
+
+**The engine is a sequential walker, not pcase.el's decision-tree
+compiler** - the named departure. pcase.el compiles every clause into
+one tree, reordering tests through `pcase--split-*` and sharing them
+via the `pcase--subtype-bitsets` mutual-exclusion analysis. That is an
+optimisation: it changes the expansion's shape and size, never which
+clause matches or what it binds. This library emits one match per
+clause, tried in order. The observable semantics are Emacs's,
+including the body's value and the `nil`/`#f` answer when no clause
+matches. `pcase--macroexpand` is exported for the same reason
+pcase.el exports it - user expanders are expanded through it.
+
+The pattern language is Emacs's: `_` and `t` wildcards; a symbol
+binds, and a repeated symbol compares with `eql` (`eqv?` here);
+numbers, strings, characters and keywords match themselves; `quote`
+matches with `equal`; `(pred F)`, `(pred (not F))`, `(guard E)`,
+`(app F PAT)`, `(let PAT E)`, `(and ...)`, `(or ...)` and `(not PAT)`
+are carried.
+
+**The backquote pattern is written with Scheme's own quasiquote.**
+pcase.el's reader syntax is the Lisp backquote; Scheme's reader has
+its own, so `` `(,a ,b) `` is the pattern `(a b)` and `unquote` is
+Emacs's `,`. `,@` is unsupported, as it is in Emacs. A dotted
+backquote's tail pattern sees the cdr, as Emacs's does: `` `(1 . ,x) ``
+against `(1 2)` binds `x` to `(2)`, and so does the `or` example in
+the tests - both answers measured on Emacs 31.1.
+
+**A keyword is a symbol in Scheme and does not self-evaluate.** In a
+pattern position `:k` is Emacs's keyword literal, but as `pcase`'s
+*expression* it must be written `':k`, where Emacs lets `:k` stand.
+The tests spell that and say why.
+
+**`pcase-defmacro`'s hygiene.** Emacs's expander takes pattern *data*
+and returns pattern *data*, and this one does too. The generated
+`define` uses the caller's own identifier for the macro name and the
+caller's own formals list, so the binding is visible in the calling
+library. A pattern argument converted to data keeps its *name* but not
+its lexical identity, so a local variable named inside an expander's
+pattern argument is a plain symbol; a `pred`/`guard`/`app` expression
+written directly in a pattern is kept as syntax and has no such
+limitation. That is the price of a data-in/data-out expander and is
+named in the library header.
+
+**`pcase-let*` is lenient by measurement, and that is new in GITE.**
+`pcase-let*-strict` exists in GITE's `pcase.el` (Emacs 32 master) and
+**not in the installed Emacs 31.1** (`(fboundp 'pcase-let*-strict)` is
+nil). Its expectations were therefore measured by loading GITE's
+`pcase.el` into the 31.1 runtime, which is this project's rule when
+the source tree and the installed binary disagree. Measured: a
+pattern that *tests* (a literal, `pred`, `guard`) has its test
+ignored by the non-strict form, a missing element binds nil, and a
+non-list value binds nil for the elements; the strict form signals.
+The strict form's message is this tree's condition shape (a `~s`
+template plus irritants) where Emacs formats it - the standing
+`error` representation, not a departure of this library.
+`pcase-exhaustive`'s "No clause matching `~s'" is the template with
+the value in the irritants for the same reason.
+
+**`pcase-setq` answers the last assigned value**, which is why the
+simple-symbol case is `(begin (set! pat val) pat)` - `set!` answers
+the unspecified value here - and the destructuring case keeps the
+result in the state's result variable.
+
+Verified by `test/core/pcase-test.scm` (56) - every expectation
+measured on Emacs (31.1, or GITE's pcase.el for the strict form) -
+plus `loadup-test.scm` 16 and `tools/pty-check.py imports scratch`
+2/2. `schemacs/loadup.scm` and `schemacs/imports.scm` carry
+`(schemacs core pcase)` (130 libraries, 5285 names); `tools/run-suites.py`
+runs the suite.

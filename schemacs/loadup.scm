@@ -264,6 +264,7 @@
         (schemacs xdisp)
         (schemacs xfaces)
         (schemacs core map-ynp)
+        (schemacs core pcase)
         (schemacs core regexp-opt)
         (schemacs core syntax-macros)))
 

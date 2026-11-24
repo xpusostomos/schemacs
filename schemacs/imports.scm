@@ -49,6 +49,7 @@
     (schemacs core lisp)
     (schemacs core lisp-mode)
     (schemacs core map-ynp)
+    (schemacs core pcase)
     (schemacs core regexp-opt)
     (schemacs core rmc)
     (schemacs core seq)
@@ -3903,6 +3904,16 @@
     parse-single-submenu
     parse-solitary-modifier
     parse-tool-bar-item
+    pcase
+    pcase--macroexpand
+    pcase-defmacro
+    pcase-dolist
+    pcase-exhaustive
+    pcase-lambda
+    pcase-let
+    pcase-let*
+    pcase-let*-strict
+    pcase-setq
     pending-uarg
     percent99
     perform-replace
