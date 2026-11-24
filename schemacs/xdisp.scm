@@ -3639,13 +3639,23 @@ buffer size, the line number and the column number."
       ;; is the coordinates list, is accepted and ignored for the same
       ;; reason: this answers the boolean case.
       ;;--------------------------------------------------------------
+      ;;
+      ;; **No frame is Emacs's no-redisplay answer**: a batch run has a
+      ;; frame but has never laid glyphs out, so its answer is nil.
+      ;; This tree's headless processes (the suites) have no current
+      ;; frame at all, and the old body called `(selected-window)' on
+      ;; `#f' - an error. `blink-matching-open' asks this from cc-mode's
+      ;; electric commands, which run in exactly such a process, so the
+      ;; nil answer is what Emacs gives and what callers can rely on.
+      ;;--------------------------------------------------------------
       (let* ((window (if (and (pair? args) (car args))
                          (car args)
-                         (selected-window)))
-             (pos (if position position (window-point window)))
-             (start (window-start window))
-             (end (window-end window)))
-        (and (>= pos start) (<= pos end) #t)))
+                         (and (*current-frame*) (selected-window)))))
+        (and window
+             (let ((pos (if position position (window-point window)))
+                   (start (window-start window))
+                   (end (window-end window)))
+               (and (>= pos start) (<= pos end) #t)))))
 
     (define (posn-at-point position window)
       ;; GNU Emacs's `posn-at-point` (`keyboard.c:13594`): "Return

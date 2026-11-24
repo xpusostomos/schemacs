@@ -930,6 +930,81 @@ def check_region_highlight():
     return problems
 
 
+def check_show_paren():
+    """`show-paren-mode' highlights the matching paren after the idle delay.
+
+    It is on by default (`paren.el''s `:init-value t'), the highlight is
+    an overlay with the `show-paren-match' face (`paren.el:541'), and it
+    appears from the *idle timer* - no keypress follows it. A theme gives
+    the face a background no other face has, so the exact 24-bit SGR in
+    the stream is the proof that the overlay was drawn, and a terminal
+    claiming truecolor is what lets it be exact.
+
+    At point 2 of "x(abc)" (after the `x', before the `(') both parens
+    are highlighted; before the `C-f' there is no paren next to point and
+    no such colour.
+    """
+    themes = tempfile.mkdtemp(prefix="pty-check-paren-themes-")
+    open(os.path.join(themes, "show-paren-probe-theme.scm"), "w").write(
+        '(define-theme show-paren-probe "A colour no other face has.")\n'
+        '(custom-theme-set-faces\n'
+        " 'show-paren-probe\n"
+        '  \'(show-paren-match ((#t (:background "#123456")))))\n'
+        "(provide-theme 'show-paren-probe)\n")
+    config = tempfile.mkdtemp(prefix="pty-check-paren-")
+    os.makedirs(os.path.join(config, "schemacs"))
+    open(os.path.join(config, "schemacs", "init.scm"), "w").write(
+        NO_SPLASH_INIT
+        + "(import (schemacs theme))\n"
+        + '(*custom-theme-load-path* (cons "%s" (*custom-theme-load-path*)))\n'
+          % themes
+        + "(load-theme 'show-paren-probe #t)\n")
+    path = "/tmp/pty-check-show-paren.txt"
+    open(path, "w").write("x(abc)\n")
+    problems = []
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 WAIT(b"x(abc)"), C_f, ("sleep", 0.4)],
+                path, config=config, term="xterm-256color",
+                colorterm="truecolor")
+    if "\x1b[48;2;18;52;86m" not in out:
+        problems.append("show-paren did not draw the matching paren in the "
+                        "theme's colour after the idle delay (screen %r)"
+                        % out[-400:])
+    return problems
+
+
+def check_blink_paren():
+    """Typing a close paren shows its off-screen opener in the echo area.
+
+    `blink-paren-post-self-insert-function' is on `post-self-insert-hook'
+    (`simple.el:9777') and calls `blink-matching-open', which - when the
+    opener is not visible - says "Matches " and the opener's line
+    (`simple.el:9689'). The file has its `(' on the first line and the
+    editor is sent to the end before the `)' is typed, so the opener is
+    off screen. `show-paren-mode' being on does not suppress this: the
+    echo-area branch is outside its guard in Emacs too.
+    """
+    path = "/tmp/pty-check-blink-paren.txt"
+    with open(path, "w") as port:
+        port.write("(\n" + "abc\n" * 40)
+    M_x = b"\x1b" + b"x"
+    M_GT = b"\x1b" + b">"
+
+    def plain(text):
+        text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+        return re.sub(r"\x1b[()][A-Z0-9]", "", text)
+
+    problems = []
+    out = drive([C_x + C_f, C_a, C_k, path.encode(), RET,
+                 WAIT(b"abc"), M_GT, b")", ("sleep", 0.3)],
+                path)
+    screen = plain(screen_of(out))
+    if "Matches (" not in screen:
+        problems.append("typing a close paren did not show the off-screen "
+                        "opener (screen %r)" % screen[-400:])
+    return problems
+
+
 def check_continuation():
     """A line wider than the window CONTINUES on the row below.
 
@@ -4153,7 +4228,18 @@ def check_eval_expression():
     out = drive([C_x + C_f, path.encode(), RET,
                  M_COLON, b"(+ 1 2)", RET,
                  M_COLON, b"\x1b", b"p"], path)
-    if "(+ 1 2)" not in out.split("Eval: ")[-1]:
+    # **Strip the attributes before looking for the expression.** The
+    # prompt's parenthesized text is what `show-paren-mode' highlights
+    # once the editor goes idle (the mode is on by default now), so
+    # between `(` and the rest of the recalled expression the stream
+    # carries a `show-paren-match' SGR run - and the literal `(+ 1 2)'
+    # is no longer contiguous. The screen shows it plainly; the raw
+    # stream does not. (This check failed for exactly that reason until
+    # 2026-11-25, with the feature working.)
+    def plain(text):
+        text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+        return re.sub(r"\x1b[()][A-Z0-9]", "", text)
+    if "(+ 1 2)" not in plain(out.split("Eval: ")[-1]):
         problems.append("M-p in the expression prompt did not recall the "
                         "previous expression (screen %r)" % screen_of(out)[:300])
     return problems
@@ -5947,6 +6033,8 @@ CHECKS = {
     "quit-after-prefix": check_quit_after_prefix,
     "isearch-quit": check_isearch_quit,
     "region-highlight": check_region_highlight,
+    "show-paren": check_show_paren,
+    "blink-paren": check_blink_paren,
     "continuation": check_continuation,
     "mode-line-eol": check_mode_line_eol,
     "coding-roundtrip": check_coding_roundtrip,

@@ -74,7 +74,9 @@
        c-fill-paragraph c-do-auto-fill c-indent-new-comment-line
        c-context-line-break c-context-open-line)
  (only (schemacs newcomment) comment-start comment-end *comment-multi-line*)
- (only (schemacs command) *last-command-event*))
+ (only (schemacs command) *last-command-event*)
+ (only (schemacs elec-pair) electric-pair-mode)
+ (only (schemacs paren) *blink-paren-function*))
 
 (test-begin "schemacs_editor_cc_cmds")
 
@@ -827,3 +829,100 @@
             (run-ptc "int a" "*" 42))
 
 (test-end "schemacs_editor_cc_cmds_text_conversion")
+
+;; ------------------------------------------------------------------
+;; The `electric-pair-mode' blocks and the blink courtesy
+;;
+;; `cc-cmds.el` emulates `electric-pair-mode` around the insert
+;; (`:911`, `:1288`, `:1373`, `:1420`) and calls
+;; `blink-paren-function` itself after the insert. Every answer here is
+;; Emacs 31.1's, measured with `emacs -Q --batch` on the same fixture in
+;; a real `c-mode` buffer, with the mode enabled or disabled explicitly
+;; per row. The blink call is exercised only for effect - it messages
+;; and does not edit, so the buffer text is the assertion - and is what
+;; the tree's `pos-visible-in-window-p` no-frame answer keeps from
+;; erroring in a headless suite.
+
+(test-begin "schemacs_editor_cc_cmds_electric_pair")
+
+(define (pair-run text pos command key on auto)
+  (fresh text)
+  ;; The same fresh state `run-electric' sets: an earlier test may have
+  ;; turned the electric flag or syntactic indentation off, and the
+  ;; macro-start parameter is a `set', not a `parameterize', so a
+  ;; previous macro test can leave a position in it.
+  (set!c-electric-flag #t)
+  (set!c-syntactic-indentation #t)
+  (set!c-auto-newline (if auto #t #f))
+  (set!c-hungry-delete-key #f)
+  (electric-pair-mode (if on 1 -1))
+  (goto-char pos)
+  (parameterize ((*c-macro-start* #f)
+                 (*last-command-event* (char->integer key)))
+    (command #f))
+  (list (contents) (point)))
+
+(test-equal "an empty buffer gets a brace pair" '("{}" 2)
+            (pair-run "" 1 c-electric-brace #\{ #t #f))
+(test-equal "without the mode, only the brace" '("{" 2)
+            (pair-run "" 1 c-electric-brace #\{ #f #f))
+(test-equal "a defun's brace is paired" '("int f()\n{}" 10)
+            (pair-run "int f()\n" 9 c-electric-brace #\{ #t #f))
+(test-equal "without the mode, only the brace after a defun"
+            '("int f()\n{" 10)
+            (pair-run "int f()\n" 9 c-electric-brace #\{ #f #f))
+(test-equal "auto-newline opens the paired brace" '("int f()\n{\n  \n}" 13)
+            (pair-run "int f()\n" 9 c-electric-brace #\{ #t #t))
+(test-equal "auto-newline without the pair" '("int f()\n{\n  " 13)
+            (pair-run "int f()\n" 9 c-electric-brace #\{ #f #t))
+(test-equal "a paren after a word is paired" '("foo()" 5)
+            (pair-run "foo" 4 c-electric-paren #\( #t #f))
+(test-equal "without the mode, only the paren" '("foo(" 5)
+            (pair-run "foo" 4 c-electric-paren #\( #f #f))
+;; The else branch: the insert is inside a comment or a string, so the
+;; mode's own call is the only pairing (cc-cmds.el:1420).
+(test-equal "a paren inside a comment is paired" '("/* ()" 5)
+            (pair-run "/* " 4 c-electric-paren #\( #t #f))
+(test-equal "a paren inside a comment, mode off" '("/* (" 5)
+            (pair-run "/* " 4 c-electric-paren #\( #f #f))
+(test-equal "a paren inside a string is paired" '("\"ab()" 5)
+            (pair-run "\"ab" 4 c-electric-paren #\( #t #f))
+;; Skipping the auto-inserted closer.
+(test-equal "a close paren skips its pair" '("()" 3)
+            (pair-run "()" 2 c-electric-paren #\) #t #f))
+(test-equal "without the mode, the close paren is inserted" '("())" 3)
+            (pair-run "()" 2 c-electric-paren #\) #f #f))
+(test-equal "a close brace skips its pair" '("{}" 3)
+            (pair-run "{}" 2 c-electric-paren #\} #t #f))
+
+;; The blink courtesy: after a `}` the brace command calls the
+;; `blink-paren-function` it saved before the insert
+;; (cc-cmds.el:938-945); after a `)` the paren command does the same
+;; (`:1416-1418`). Neither is Emacs's post-self-insert hook - the
+;; command suppresses that - it is the explicit call.
+(let ((called #f))
+  (fresh "void f()\n{\n")
+  (set!c-electric-flag #t)
+  (set!c-syntactic-indentation #t)
+  (set!c-auto-newline #f)
+  (goto-char (point-max))
+  (parameterize ((*blink-paren-function* (lambda () (set! called #t)))
+                 (*c-macro-start* #f)
+                 (*last-command-event* (char->integer #\})))
+    (c-electric-brace #f))
+  (test-assert "c-electric-brace blinks the paren after a close brace" called))
+(let ((called #f))
+  (fresh "foo(")
+  (set!c-electric-flag #t)
+  (set!c-syntactic-indentation #t)
+  (set!c-auto-newline #f)
+  (goto-char (point-max))
+  (parameterize ((*blink-paren-function* (lambda () (set! called #t)))
+                 (*c-macro-start* #f)
+                 (*last-command-event* (char->integer #\))))
+    (c-electric-paren #f))
+  (test-assert "c-electric-paren blinks the paren after a close paren" called))
+
+(electric-pair-mode -1)
+
+(test-end "schemacs_editor_cc_cmds_electric_pair")

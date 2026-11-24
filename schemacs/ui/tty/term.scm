@@ -1536,6 +1536,16 @@
       ;;--------------------------------------------------------------
       1)
 
+    (define-method (display-ring-bell (d <tty-display>))
+      ;; GNU Emacs's `tty_ring_bell` (`term.c:154`): write the
+      ;; terminal's bell capability - BEL when the terminfo has no
+      ;; visible-bell string, which is every terminal this tree has
+      ;; seen. `visible-bell`'s flash is named in DEPARTURES.md.
+      ;;--------------------------------------------------------------
+      (%tty-write-byte 7)
+      (flush-output-port (current-output-port))
+      #f)
+
     (define-method (line-height (d <tty-display>))
       ;; `FRAME_LINE_HEIGHT' for a non-window frame.
       ;;--------------------------------------------------------------

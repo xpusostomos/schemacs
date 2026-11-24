@@ -58,7 +58,7 @@
          ;; terminal branch pads to `(window-width)` - which here is
          ;; `window-body-width`, the frame's *function*; the record's
          ;; `window-width` slot accessor is not it.
-         display-graphic-p window-body-width
+         display-graphic-p window-body-width frame-char-height
          set-message!
          frame-keymap-state
          selected-window set!frame-keymap-state
@@ -294,6 +294,7 @@
    ;; remaps to.
    visual-line-mode visual-line-mode-map *visual-line-fringe-indicators*
    *blink-matching-paren*
+   default-font-height
    turn-on-visual-line-mode
    beginning-of-visual-line end-of-visual-line kill-visual-line
    next-logical-line previous-logical-line
@@ -4213,10 +4214,11 @@ With prefix argument ARG, kill that many visual lines from point."
 
     ;; `simple.el:9520''s `blink-matching-paren' - the option
     ;; `electric-pair--insert' binds to nil while it inserts a pair's
-    ;; closer. **The blinking itself is not ported** (`blink-matching-open'
-    ;; and its timer), so nothing here reads the variable yet; it is
-    ;; carried because elec-pair.el's `let' names it and because it is a
-    ;; real user option.
+    ;; closer. It stays here because `simple.el' declares it and because
+    ;; elec-pair sits below `paren.scm'; **the block that reads it is
+    ;; `paren.scm'** (`blink-matching-open' and its
+    ;; `post-self-insert-hook' entry), where the Show Paren section of
+    ;; that library's header says why it is not beside this definition.
     (define-custom *blink-matching-paren* #t
       "Non-nil means show matching open-paren when close-paren is inserted.
 If this is non-nil, then when you type a closing delimiter, such as a
@@ -4242,6 +4244,24 @@ Any other non-nil value is handled the same as t."
               (const :tag "Move cursor to open-paren if visible" jump)
               (const :tag "Move cursor even if it's off screen" jump-offscreen))
       :group 'paren-blinking)
+
+    (defface 'blink-matching-paren-offscreen
+          '((#t :inherit show-paren-match))
+          "Face for showing in the echo area matched open paren that is off-screen.
+This face is used only when `blink-matching-paren-highlight-offscreen'
+is non-nil.")
+
+    (define (default-font-height)
+      ;; GNU Emacs's `default-font-height' (`simple.el:7871'): "Return
+      ;; the height in pixels of the current buffer's default face font."
+      ;;
+      ;; Emacs asks `font-info` when the frame's font was changed with
+      ;; `set-frame-font`; this tree's displays have one font metric,
+      ;; `(frame-char-height)` (`frame.c:4345`), and no `face-font`/
+      ;; `font-info` pair to ask. The remapped-font branch is named in
+      ;; DEPARTURES.md.
+      ;;--------------------------------------------------------------
+      (frame-char-height))
 
     (define-custom *visual-line-fringe-indicators* '(nil nil)
       "How fringe indicators are shown for wrapped lines in `visual-line-mode'.

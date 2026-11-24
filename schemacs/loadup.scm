@@ -184,6 +184,7 @@
         (schemacs editfns)
         (schemacs elec-pair)
         (schemacs electric)
+        (schemacs paren)
         (schemacs progmodes elisp-mode)
         (schemacs newcomment)
         (schemacs novice)

@@ -330,7 +330,7 @@ answering `#f`. Only a deadline or a real end of input answers `#f` now.
    `(width, height)`. A Scheme pair carries no names, and the rest of this
    tree reads a display size as `(height . width)` (`display-rows-cols`).
    Cosmetic, but worth knowing when comparing against `sysdep.c`.
-6. **A pty that was never given a size answers 0 x 0**, which `get_tty_size`
+7. **A pty that was never given a size answers 0 x 0**, which `get_tty_size`
    treats as "no valid information" and `screen-size` answers with the
    startup capabilities - so 24x80 until the first resize. That is why a
    harness must set the pty size *and* send SIGWINCH; the C's `> 5 / > 2`
@@ -2635,23 +2635,23 @@ fixed.
    `scan-lists`, `scan-sexps` are not ported.** They are the half that
    `forward-sexp` and `comment-dwim` stand on; the syntactic pass does
    not call them. *Port with the sexp commands.*
-6. **`syntax-propertize-rules` (the macro) is not carried**, and
+7. **`syntax-propertize-rules` (the macro) is not carried**, and
    `syntax-propertize` calls the mode's function over the extended
    region without the `syntax-multiline` walk. *Port with the first mode
    that needs it (lisp-mode's `#;` and `#|` will).*
-7. **The delimiter-face branch is skipped**: `font-lock-comment-start-skip`
+8. **The delimiter-face branch is skipped**: `font-lock-comment-start-skip`
    and `-end-skip` are false and `comment-start-skip` is not ported
    (newcomment.el), so a comment gets one face from its first character
    and `font-lock-comment-delimiter-face` is unused. *Port with
    newcomment.el.*
-8. **`syntax-ppss`'s near-position heuristic uses a fixed 2000-character
+9. **`syntax-ppss`'s near-position heuristic uses a fixed 2000-character
    span** where the C reads its statistics ratio; the stats vector is
    kept but not consulted. Performance only, and the cache is the same.
    *Keep unless a profile says otherwise.*
-9. **`font-lock-syntactic-keywords`** (the pre-syntax-propertize
+10. **`font-lock-syntactic-keywords`** (the pre-syntax-propertize
    mechanism) is still not carried; the syntactic pass runs
    `syntax-propertize` and `syntax-table` properties only.
-10. **`font-lock-defaults`' SYNTAX-ALIST** (fourth element) is not read.
+11. **`font-lock-defaults`' SYNTAX-ALIST** (fourth element) is not read.
     No mode in this tree sets it; *port with the first that does.*
 
 # The modes, and the regexp engine's syntax classes (2026-11-15)
@@ -8362,17 +8362,17 @@ provider, so a theme change repaints both.
    and Emacs's merge appends keymap *lists*, which a keymap record
    cannot do. `secondary-tool-bar-map` is a variable so a user setting
    it sees no error.
-6. **The Gtk buttons are rebuilt when the item vector changes**, where
+7. **The Gtk buttons are rebuilt when the item vector changes**, where
    the C keeps a widget per item and replaces only the stale ones. The
    comparison that decides *when* is the C's (`tbinfo->last_tool_bar`),
    so the work happens at the same moments; per-item reuse is a
    micro-optimisation the rebuild makes unnecessary.
-7. **`tool-bar-position` `left` and `right` fall back to the top.**
+8. **`tool-bar-position` `left` and `right` fall back to the top.**
    Emacs packs them into an inner horizontal box (`x->hbox_widget`)
    that this front end's window does not have.
-8. **The button press's modifier mask is not applied** to the key the
+9. **The button press's modifier mask is not applied** to the key the
    click stands for; Emacs stores it and folds it into the event.
-9. **`image-mask-p` answers nil**, and the spec then gets `:mask
+10. **`image-mask-p` answers nil**, and the spec then gets `:mask
    heuristic` - Emacs's own answer for an image whose mask it has not
    computed. Nothing loads a bitmap here; the toolkit's pixbuf keeps
    the alpha. `:data` images, `:scale` and `:rotation` are not carried;
@@ -8380,16 +8380,16 @@ provider, so a theme change repaints both.
    variable symbols); `find-image` returns the spec
    `(image :type ... :file ...)`, not an image struct, because there is
    no `image.c` here.
-10. **`display-color-p` ignores its DISPLAY argument** and answers from
+11. **`display-color-p` ignores its DISPLAY argument** and answers from
     the current display's `*display-color-cells*`; every caller here
     asks about that one.
-11. **`menu-find-file-existing`'s MUSTMATCH is always t.** The C asks
+12. **`menu-find-file-existing`'s MUSTMATCH is always t.** The C asks
     `x-uses-old-gtk-dialog`, which is nil unless a pre-3.10 Gtk dialog
     is in use; there is no such dialog here. `menu-find-file-existing`
     and `dired-from-menubar` *are* ported, so the File menu's two
     entries and the tool bar's two buttons now name the commands the C
     names - the earlier `find-file`/`dired` stand-ins are gone.
-12. **`tool-bar-style`'s system half is not read.** Emacs asks
+13. **`tool-bar-style`'s system half is not read.** Emacs asks
     GSettings/GConf; with no setting there the answer is `tool-bar-style`
     or `image`, which is what this tree answers. The default style
     therefore shows images only, as an unconfigured Gtk Emacs does.
@@ -9034,18 +9034,18 @@ The C source each rule was taken from, and every place this tree differs.
    `define-command` passes the interactive expression's list to a
    procedure of fixed arity - so a 3-required-parameter `occur` was an
    arity error at M-x. `occur-next-error`'s optional RESET is the same.
-6. **`occur-mode` is defined after its commands.** Emacs's `occur-mode`
+7. **`occur-mode` is defined after its commands.** Emacs's `occur-mode`
    body names `occur-revert-function` and `occur-next-error`, which are
    defined later in the file; `derive-mode` is a Scheme procedure whose
    body looks the names up when it runs, so the definition order is
    moved to where the references resolve, as every `define-key` in this
    tree is.
-7. **`occur-mode-hook` is a plain list**, not a `define-custom`
+8. **`occur-mode-hook` is a plain list**, not a `define-custom`
    parameter: `define-derived-mode` hands the hook to `run-mode-hooks`
    as a value, and a parameter there would be applied. Its default is
    set to `(turn-on-font-lock)` after the definition, which is also what
    marks it mutable against the compiler's constant folding.
-8. **The map's missing keys.** `n`/`p` (`next-error-no-select`/
+9. **The map's missing keys.** `n`/`p` (`next-error-no-select`/
    `previous-error-no-select`), `l` (`recenter-current-error`),
    `C-c C-f` (`next-error-follow-minor-mode`), `c` (`clone-buffer`) and
    `e` (`occur-edit-mode`) are not bound because those commands are not
@@ -10263,13 +10263,13 @@ the library its Emacs file names:
    first few hovers. One ref per display is never dropped, as Emacs never
    drops its own.
 
-6. **`gtk_widget_trigger_tooltip_query` is called after the text is
+7. **`gtk_widget_trigger_tooltip_query` is called after the text is
    set**, which Emacs does not do. Gtk runs its own hover timer and
    queries while the pointer moves; Emacs decides at its 0.7s delay,
    after the pointer has usually stopped, so without the trigger the
    tooltip would wait for the next pixel of movement.
 
-7. **`x-show-tip`/`x-hide-tip` are `tooltip.scm`'s, not a window-system
+8. **`x-show-tip`/`x-hide-tip` are `tooltip.scm`'s, not a window-system
    file's.** The display half is a pair of `dispnew` generics; the
    Lisp-visible functions take Emacs's six arguments but pass only the
    frame, string and timeout down, because the Gtk build's system path
@@ -10278,12 +10278,12 @@ the library its Emacs file names:
    the C's `tip_last_frame`. The Lisp-level checks (a string, the empty
    string becoming a space, the default timeout) are the C's.
 
-8. **`mouse-fixup-help-message` uses `(mouse-position)`**, whose answers
+9. **`mouse-fixup-help-message` uses `(mouse-position)`**, whose answers
    are cells, rather than `mouse-pixel-position`, whose answers are
    pixels: this tree's `posn-at-x-y` counts cells. The position the two
    name is the same.
 
-9. **The substitution and its inhibit test split across a seam.**
+10. **The substitution and its inhibit test split across a seam.**
    `help_echo_substitute_command_keys` runs `substitute-command-keys`
    unless the string's first character has
    `help-echo-inhibit-substitution`. Reading a string's text property is
@@ -10291,13 +10291,13 @@ the library its Emacs file names:
    holds the seam (`*help-echo-substitute-function*`, default identity)
    and `help.scm` installs the function that does both.
 
-10. **`current-message` answers nil once the echo area is cleared.**
+11. **`current-message` answers nil once the echo area is cleared.**
     `Fcurrent_message` returns nil when there is no message; the frame's
     message slot holds the empty string after `(message "")`, so the
     seam translates an empty message to nil. `tooltip-show-help-non-mode`
     depends on the distinction (`(stringp tooltip-previous-message)`).
 
-11. **`lisp-time-arguments` converts a non-integer time to exact
+12. **`lisp-time-arguments` converts a non-integer time to exact
     seconds+picoseconds.** `(float-time)` is what `tooltip-hide-time`
     stores and `time-since` subtracts; `(cons time 0)` left the fraction
     in the seconds field and the exact `floor-quotient`/`ash` arithmetic
@@ -10388,33 +10388,33 @@ something differently.
 5. **`mode-line-minor-mode-help` is in `help-fns.scm`.** It is
    `bindings.el`'s, but it calls `describe-minor-mode-from-indicator`,
    which is above `xdisp.scm` - the map binds the symbol.
-6. **`minor-mode-menu-from-indicator`'s generated menu is a record
+7. **`minor-mode-menu-from-indicator`'s generated menu is a record
    keymap.** Emacs builds `(keymap TITLE (turn-off menu-item ...)
    (help menu-item ...))`; `x-popup-menu` here takes a record, so the
    same two items are defined into a sparse map (back to front, because
    `define-key` prepends).
-7. **`:minor-mode-function` is read, and nothing sets it here.**
+8. **`:minor-mode-function` is read, and nothing sets it here.**
    `add-minor-mode` records it only when TOGGLE-FUN differs from
    TOGGLE; no mode here passes one, so `(get minor-mode
    ':minor-mode-function)` is nil and `mm-fun` is the mode symbol -
    which is Emacs's answer for every mode in this tree.
-8. **`fboundp mm-fun` is the command table.** The generated menu is
+9. **`fboundp mm-fun` is the command table.** The generated menu is
    skipped when the name does not name a command, which is Emacs's
    bug#20201 guard.
-9. **The "Help" item is present only when a help library is loaded** -
+10. **The "Help" item is present only when a help library is loaded** -
    the seam `*describe-function-function*`, installed by
    `help-fns.scm`. Emacs preloads help, so this is invisible in a real
    editor and shows in a test process that does not.
-10. **`mode-line-compact`'s disambiguation arm is not carried.** The
+11. **`mode-line-compact`'s disambiguation arm is not carried.** The
     option is not ported; measured, Emacs without it compares the whole
     lighter string `lookup-minor-mode-from-indicator` is given, which is
     what this does.
-11. **The `:button` expressions name this tree's readers.**
+12. **The `:button` expressions name this tree's readers.**
     `buffer-overwrite-mode`, `font-lock-mode-on?`,
     `buffer-auto-fill-function` stand where Emacs writes the variable's
     own symbol - the variable and the command share a name in Emacs and
     cannot here.
-12. **`*minor-mode-alist*`'s default is `bindings.el`'s whole list
+13. **`*minor-mode-alist*`'s default is `bindings.el`'s whole list
     again** - `(abbrev-mode " Abbrev")`, `(overwrite-mode
     overwrite-mode)`, `(auto-fill-function " Fill")`,
     `(defining-kbd-macro mode-line-defining-kbd-macro)`. The last two
@@ -10878,7 +10878,7 @@ the right window).
    `alpha alpha alpha ` inverse, the padding after it not. The tests
    that need an extension therefore ask an **8-colour** display, whose
    region spec carries `:extend t`.
-6. **`w->last_mark` is recorded, not read.** `mark_window_display_accurate_1`
+7. **`w->last_mark` is recorded, not read.** `mark_window_display_accurate_1`
    (`xdisp.c:18359`) stores the mark while it is active; this tree
    stores it with the C's condition (`mark-active` and the buffer's mark
    set, no transient-mark-mode question) and nothing reads it yet -
@@ -11225,7 +11225,7 @@ Departures, all named in the source:
    Lisp `match-data` trims trailing unset pairs (`(string-match
    "\\(a\\)?" "b")` gives `(0 0)`, not `(0 0 nil nil)`), and that
    belongs to the `match-data` port in `search.sld`, not here.
-6. **No unibyte patterns.** Scheme strings hold code points; the C's
+7. **No unibyte patterns.** Scheme strings hold code points; the C's
    `!multibyte` arms and every `CHAR_BYTE8_P` branch are marked in the
    compiler where they would be.
 
@@ -13752,10 +13752,10 @@ the find-decl cache, the brace-stack cache, `c-find-decl-prefix-search`,
 5. **`condition-case ... (error range)` in `c-collect-line-comments` is
    `guard`,** with a quit re-raised because Emacs's `error` handler does not
    catch one.
-6. **`c-literal-faces` is a plain variable**, not an accessor pair: Emacs
+7. **`c-literal-faces` is a plain variable**, not an accessor pair: Emacs
    `defvar`s it and nothing `let`-binds it; cc-fonts `setq`s it, hence the
    self-assignment that keeps the compiler from folding its reads.
-7. **`match-string-no-properties` is in `search.scm`**, not subr: the tree's
+8. **`match-string-no-properties` is in `search.scm`**, not subr: the tree's
    `match-string` is there for the same import-graph reason.
 
 ## Bugs this tranche found
@@ -13845,11 +13845,11 @@ the helpers and matcher constructors the keyword data is built with.
 5. **`c-annotation-face`'s spec is `((#t :inherit ...))`** where Emacs
    writes `((default :inherit ...))`; `#t` is this tree's spelling of the
    display spec that always matches.
-6. **`c-make-inverse-face` is not ported yet.** It needs `copy-face`,
+7. **`c-make-inverse-face` is not ported yet.** It needs `copy-face`,
    `invert-face` and `face-inverse-video-p` (`xfaces.c`), which the face
    layer does not have; its only caller is the hard-space matcher in
    `c-basic-matchers-before`, which comes with the keyword-data tranche.
-7. **cc-fonts imports `font-lock` for its side effect.** The face-name
+8. **cc-fonts imports `font-lock` for its side effect.** The face-name
    constants are computed when cc-fonts loads and test for `font-lock-*`
    faces that `font-lock.scm` defines. Emacs has font-lock preloaded; the
    import is this tree's way of placing the load in the same order.
@@ -16564,14 +16564,14 @@ passes.)
 
 ## Not carried, each with what it waits for
 
-- The `electric-pair-mode` blocks in five of the commands:
-  `electric-pair-mode` (`simple.el`) and
-  `electric-pair-post-self-insert-function` are not ported.
-- The `blink-paren-function` courtesy at the end of
-  `c-electric-brace'/`c-electric-lt-gt'/`c-electric-paren':
-  `blink-matching-open` (`simple.el`) is not ported. The variable reads
-  nil in Emacs unless that feature is loaded, so the branch does not run
-  there either.
+- **The `electric-pair-mode` blocks and the
+  `blink-paren-function` courtesy are carried as of 2026-11-25**, when
+  `elec-pair.scm` and `paren.scm` supplied the primitives they wait on.
+  The earlier note said neither mode existed here; that stopped being
+  true in this session (see the show-paren section near the end). The
+  blocks are at `cc-cmds.el:911`/`:1288`/`:1373`/`:1420` and the
+  courtesies at `:938-945`/`:1416-1418`, with Emacs-measured rows in
+  `test/progmodes/cc-cmds-test.scm`.
 - `c-electric-delete` and `c-hungry-delete` (`:469', `:486'): XEmacs's
   `delete-forward-p` variants; not bound on GNU Emacs.
 - `c-align-cpp-indent-to-body`, `c-electric-pragma`, the abbreviation
@@ -16795,7 +16795,7 @@ rows pin both answers.
    default is the empty string); and the invisible-text skip (the
    renderer does not honour `invisible`, so treating the text as
    visible is the consistent answer).
-6. **`imenu--make-index-alist`'s index shape is Emacs's**: the rescan
+7. **`imenu--make-index-alist`'s index shape is Emacs's**: the rescan
    item is consed on the front when `imenu-auto-rescan` is nil, and
    `imenu--cleanup` detaches the markers, both measured and pinned.
 
@@ -17190,3 +17190,248 @@ filter used and declined, fall-through to the parent map, and a
 form filter going through the evaluator seam. `tools/run-suites.py`
 carries the new suite; `loadup.scm`, `imports.scm` (131 libraries,
 5327 names) and both front ends carry `(schemacs elec-pair)`.
+
+# show-paren and the paren blink (2026-11-25)
+
+Chris's standing rule is the reason this section exists: `elec-pair.scm`
+carried `blink-matching-paren` as an option nothing read, and when asked
+whether that was acceptable the answer was "follow the rule" - a missing
+primitive is ported, not worked around. So `lisp/paren.el` is ported
+whole (`schemacs/paren.scm`) and with it the paren blink block of
+`lisp/simple.el` (`blink-matching-open` and friends), which is the code
+`blink-matching-paren` is for.
+
+## Where each piece lives, and why
+
+**The blink block is in `paren.scm`, not `simple.scm`**. It is
+`simple.el`'s in Emacs, but it needs `forward-sexp` (`lisp.el`),
+`font-lock-ensure` (`font-lock.el`), `minibuffer-message`
+(`minibuffer.el`), `pos-visible-in-window-p` (`xdisp.c`) and the
+show-paren variables - every one of them above `simple.scm` in this
+tree's import graph. `paren.scm` is above all of them and imports
+`simple.scm`, so the block is here, with the placement named in its
+header. `*blink-matching-paren*` itself stays in `simple.scm` where
+`simple.el` declares it - `elec-pair--insert` binds it below this library.
+
+## Source versus binary: Emacs 32's paren.el
+
+GITE's `lisp/` is Emacs 32.0.50 master; the installed binary is 31.1.
+The source has `show-paren--snap` and the `syntax-propertize beg`
+before the narrowing (the bug#81035 fix), and 31.1's preloaded `paren.el`
+has neither (`(fboundp 'show-paren--snap)` is nil there). **The port
+follows the source**, as the cc-fonts pass established; the expectations
+for `show-paren--snap` were measured by loading GITE's `paren.el` into
+the 31.1 runtime (`test/paren-test.scm` says so). Everything else the
+port uses exists in 31.1 and was measured on it.
+
+## The departures, each named
+
+1. **The three overlays are made on first use**, not at load.
+   `show-paren--overlay`, `show-paren--overlay-1` and
+   `blink-matching--overlay` are Emacs `defvar`s whose initial value is
+   `(make-overlay (point) (point) nil t)`; a library here can be loaded
+   before any buffer exists, so the initial value is `#f` and the
+   helpers `%show-paren--ensure-overlays` / `%blink-matching--ensure-overlay`
+   make them. The names and faces are Emacs's, and
+   `show-paren--delete-overlays` guards the `#f` case.
+
+2. **The three function-valued variables hold procedures, not
+   symbols.** Emacs `defvar`s the *symbol* `'show-paren--default` and
+   `funcall`s it through the obarray; there is no function obarray here,
+   so the procedure itself is the value.
+   `blink-matching-check-function` is a plain variable (Emacs never
+   `let`-binds it). **`blink-paren-function` is a parameter**,
+   `*blink-paren-function*`: `cc-cmds.el` (and lua-mode.el) `let`-bind
+   it around an insert, and this tree's convention makes a dynamically
+   bound variable a parameter whose name carries the stars.
+   **`show-paren-data-function` is a buffer-local slot behind an
+   accessor pair**, because Emacs's `defvar` is `setq-local`-ed by
+   treesit/html-ts-mode/yaml-ts-mode: a buffer's own value wins over the
+   global default, which is `show-paren--default`.
+
+3. **`show-paren-mode-value` stands in for reading the variable.** The
+   global mode's state is in `default-value` (`define-minor-mode`'s
+   `:global`), and `show-paren-local-mode` writes a buffer-local slot;
+   Emacs reads the symbol, which a buffer-local binding shadows. This
+   function is that read, and `blink-matching-open`'s `(not
+   show-paren-mode)` uses it rather than the global default alone - the
+   difference is visible in a buffer where the local mode was turned
+   off.
+
+4. **`show-paren-delay`'s `:set` is written with this tree's writer.**
+   Emacs's lambda calls `(set sym val)`; here the parameter is set by
+   calling it, and the *mode* is reached by name after the declaration
+   (the mode command is defined later in the file, and `:set` does not
+   run at load because `:initialize` is `custom-initialize-default`,
+   which leaves an already-bound parameter alone). The observable rule -
+   changing the delay while the mode is active re-arms the timer - is
+   Emacs's.
+
+5. **The two modes are enabled at load**, as `electric.scm` does for
+   `electric-indent-mode`: Emacs is dumped with `show-paren-mode` on
+   (`:init-value t` plus `custom-initialize-after-file-load`), and this
+   tree has no dump. `paren.scm` ends with `(show-paren-mode 1)`.
+
+6. **`pos-visible-in-window-p` answers nil with no current frame.**
+   Emacs in batch has a frame that never laid glyphs out and answers
+   nil; this tree's headless processes have no frame at all, and the
+   old body called `(selected-window)` on `#f` - an error.
+   `blink-matching-open` asks this from cc-mode's electric commands and
+   from `show-paren--default`, so the nil answer is both Emacs's batch
+   answer and what keeps those paths working headless.
+
+7. **`pos-visible-in-window-p`'s PARTIALLY is ignored here** (the
+   pre-existing xdisp departure). Show-paren's context condition asks
+   whether the openparen is partially visible with less than a quarter
+   of the default font height off-screen; with no PARTIALLY answer that
+   refinement cannot be asked, so the port uses "fully visible" alone
+   and shows the context whenever the openparen is not. `default-font-height`
+   (simple.el) is ported and tested, ready for the day PARTIALLY lands.
+
+8. **Child frames are not carried.** `show-paren-context-when-offscreen`
+   with the value `'child-frame` builds a `*show-paren context*` buffer
+   and a child frame in Emacs (`parent-frame`, `redirect-frame-focus`,
+   `set-frame-size`/`-position`, `make-frame-visible`). None of that
+   exists in this tree; `show-paren--show-context-in-child-frame` signals
+   `"Child frames are not supported in this editor"`, and
+   `show-paren--context-child-frame-buffer`, `-parameters` and
+   `-redirect-focus` are not carried. The variable and the delete hook
+   are carried for shape.
+
+9. **An overlay's `display` string is not drawn by this renderer**, so
+   `show-paren-context-when-offscreen` set to `'overlay` builds exactly
+   Emacs's overlay (the `display` text, `priority`, the `:inherit
+   default` + `:box` face) but nothing appears on screen. The value is
+   accepted and the overlay is there for a future renderer. (The
+   echo-area and child-frame branches are the working ones here; the
+   echo-area one is what the default `t` uses.)
+
+10. **The blink hook's `priority` is an `add-hook` depth.** Emacs does
+   `(put 'blink-paren-post-self-insert-function 'priority 100)` and an
+   `add-hook ... 'append`; this tree's `add-hook` has DEPTH but no
+   priority property, so the port appends with depth 100, which puts it
+   after the other post-self-insert entries - the observable rule.
+
+11. **`show-paren--delete-context-overlay` removes
+    `show-paren--delete-overlays` from the local `post-command-hook`**,
+    not itself. That reads like an Emacs bug, but it is what 31.1's and
+    32's source do, and it is copied literally - do not "fix" it here.
+
+12. **`visible-bell` flashes nothing**: the terminal and Gtk
+    `display-ring-bell` methods ring (BEL / `gdk_display_beep`), so
+    `ding`'s visible-bell branch is the same as its audible one. The
+    variable and the choice are carried; the flash is the gap.
+
+13. **`buffer-match-p`'s `not` was wrong and is fixed here.** Its cdr is
+    a *list* of conditions and Emacs negates the OR over them - the port
+    passed the list to the single-condition test, so every `(not ...)`
+    condition answered true. `show-paren-predicate`'s default,
+    `(not (derived-mode . special-mode))`, therefore held in the
+    special-mode buffers it exists to exclude - which is how it was
+    found; `test/core/derived-test.scm` now pins
+    eight measured rows, including nested `and`/`or`.
+
+**A conversion the new test caught.** `show-paren-data-function`
+began as a plain variable holding the procedure, with call sites like
+`(show-paren-data-function)`. Making it a buffer-local accessor pair -
+which its `setq-local` users require - changed what a call answers: the
+accessor returns the *value*, a procedure, so `show-paren-function` had
+to apply it (`((show-paren-data-function))`, Emacs's `funcall`). The
+first version left a `set!` of the accessor's binding to
+`show-paren--default`, which made every call site work *by mutation* and
+hid both mistakes at once - the editor behaved and the accessor did not
+exist as a function. The four buffer-local rows in `test/paren-test.scm`
+are what found it; none of the earlier tests read the variable through
+the accessor. The rule is the one this tree keeps relearning: when a
+value changes representation, every reader has to be told, and a
+`set!` that papers over it is a departure wearing a fix's clothes.
+
+## The primitives this pass added
+
+Each is in the file its Emacs source lives in, and each is called by the
+new code (except where noted):
+
+- `ppss-comment-depth` (`syntax.el`), in `syntax.scm` - what
+  `show-paren--default` asks to decide whether to ignore comments.
+- `ding`, `beep`, `ring-bell-function`, `visible-bell`,
+  `noninteractive`, `executing-kbd-macro` and the `display-ring-bell`
+  generic (`dispnew.c`, `emacs.c`, `macros.c`, `terminal.c`) in
+  `dispnew.scm`, with a BEL method for the tty and `gdk_display_beep`
+  for Gtk. `ding` is what `show-paren-ring-bell-on-mismatch` calls.
+- `blink-matching-paren-offscreen` (`simple.el`'s defface) in
+  `simple.scm`, beside `blink-matching-paren`.
+- `default-font-height` (`simple.el`) in `simple.scm`; its remapped-font
+  `font-info` branch is not carried - there is one font metric per
+  display - and it answers `(frame-char-height)`, which is 1 on a
+  terminal and the font's height on Gtk.
+- `show-paren-match-expression` and `show-paren-mismatch` were already
+  in `faces.scm`; `show-paren-match` was too. No face was missing.
+
+`string-lines` and `string-search` were added for the child-frame
+branch's `(length (string-lines text))` and then that branch was not
+carried; **they are removed again** rather than left as two unmeasured
+primitives - nothing in the tree calls either.
+
+## Tests
+
+- `test/paren-test.scm` (new, 80 tests in four groups): the
+  `show-paren--default` table at every position of "foo (bar) baz", the
+  inside-paren and periphery options, `categorize-paren`/`unescaped-p`,
+  `show-paren--snap` in a string and a comment, the overlays (face,
+  priority, spans) for a forward match, a backward match, the
+  expression style, `highlight-openparen` nil, a mismatch, and
+  `show-paren-not-in-comments-or-strings` both ways, the enabled
+  predicate in fundamental and special-mode buffers, the local/global
+  mode rules, the blink mismatch table, the line strings (including the
+  highlight face), the hook's install and its Emacs-measured call table
+  (quote/backslash parity, `noninteractive`, `last-command-event`), the
+  two messages, and `default-font-height`.
+- `test/core/derived-test.scm` gained `derived_buffer_match` (8).
+- `tools/pty-check.py` gained **`show-paren`** (a theme gives
+  `show-paren-match` a background no other face has; at point 2 of
+  "x(abc)" the exact 24-bit SGR must appear after the idle delay) and
+  **`blink-paren`** (a file whose `(` is off-screen; typing `)` must
+  put "Matches (" in the echo area). Each was run with its feature
+  turned off and seen to fail - `(show-paren-mode -1)` and
+  `(*blink-matching-paren* #f)` - then seen to pass.
+- `test/progmodes/cc-cmds-test.scm` grew `cc_cmds_electric_pair` (14):
+  the four `electric-pair-mode` blocks in the electric commands
+  (`cc-cmds.el:911`, `:1288`, `:1373`, `:1420`) - brace pairing, the
+  auto-newline case, parens in code/comment/string, the closer skip,
+  and the no-mode controls - plus the two explicit
+  `blink-paren-function` courtesies (`:938-945`, `:1416-1418`). Every
+  expectation is Emacs 31.1's, measured with `emacs -Q --batch` on the
+  same fixture in a real `c-mode` buffer. `cc-cmds.scm` now imports
+  `paren.scm` and `elec-pair.scm` for them; that is why `cc-cmds-test`
+  imports `*blink-paren-function*` too. The cc-electric differential
+  (`tools/cc-electric-diff/`) is still **60 scenarios, 0 different** -
+  electric-pair is off in its replay, and the blink courtesy edits
+  nothing.
+- Wiring: `loadup.scm`'s library list, both front ends (`(only
+  (schemacs paren))` so the library loads and arms the timer), and
+  `imports.scm` regenerated (132 libraries; 5385-odd names - the
+  generated file is the authority).
+
+**The batteries, on the settled tree.** The full suite battery: 104
+suites, of which all pass except the two documented pre-existing
+failures - `cl-indent-test` (7) and `lisp-mode-test` (1), both measured
+red on a clean `HEAD` worktree in the previous session. `paren-test`
+84, `derived-test` 35, `cc-cmds-test` 122.
+
+The pty battery: **101/102**, the outstanding failure being
+`font-lock-scheme`, which was already red on `HEAD` (its row now also
+carries `show-paren-match`'s background attribute, because a paren near
+point is exactly what that mode draws; the underlying font-lock failure
+is unchanged). The new `show-paren` and `blink-paren` checks pass, and
+`eval-expression` - which had passed before - failed when the battery
+ran, for a reason worth recording: **its assertion searched the raw
+terminal stream for the contiguous text `(+ 1 2)`, and show-paren now
+highlights those parens in the expression prompt, putting an SGR run
+between `(` and the rest.** The prompt was correct and the recalled
+expression was there; only the assertion was wrong. The check strips
+attributes before searching now (the same fix `occur`'s check needed for
+its faced prefix), and it passes 3/3 alone on the same tree. The lesson
+is the battery's recurring one: a check that reads raw bytes must strip
+the attributes a new face can insert; a green check that has never been
+seen to fail is not evidence, and a red one can be the assertion rather
+than the editor.

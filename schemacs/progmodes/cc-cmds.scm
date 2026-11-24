@@ -196,13 +196,22 @@
           delete-char self-insert-command *post-self-insert-hook*)
     (only (schemacs command)
           define-command define-alias current-prefix-arg prefix-numeric-value)
+    ;; `paren.el`'s blink option and the function a closing paren calls
+    ;; (`simple.el`'s block, placed in `paren.scm` - see its header) and
+    ;; `elec-pair.el`'s pairing, which the electric commands emulate
+    ;; around the self-insert (`cc-cmds.el:911`, `:1288`, `:1373`,
+    ;; `:1420`).
+    (only (schemacs paren) *blink-paren-function*)
+    (only (schemacs elec-pair)
+          electric-pair-mode-value electric-pair-post-self-insert-function)
+    (only (schemacs dispnew) executing-kbd-macro)
     (only (schemacs editfns)
           bobp bolp eobp eolp char-before char-after point point-min
           point-max point-marker goto-char
           forward-line insert insert-char insert-and-inherit
           delete-region save-excursion message format
           line-beginning-position widen region-beginning region-end
-          buffer-substring-no-properties
+          buffer-substring-no-properties buffer-size
           ;; `narrow-to-region' and `save-restriction' are `editfns.c`'s
           ;; here (`buffer.scm` is below them).
           narrow-to-region save-restriction)
@@ -727,17 +736,16 @@ This action does nothing when the mode only has one comment style."
     ;; `post-self-insert-hook' is a `parameterize' of
     ;; `*post-self-insert-hook*' (`cmds.c:524').
     ;;
+    ;; **The `electric-pair-mode' and blink blocks are carried**, now
+    ;; that their primitives are: `elec-pair.scm` provides the mode and
+    ;; `electric-pair-post-self-insert-function`, and `paren.scm`
+    ;; provides `*blink-paren-function*` (a parameter, because these
+    ;; commands `let`-bind it) and `blink-matching-open`. Emacs's
+    ;; `(boundp 'electric-pair-mode)` guard is the mode's value here,
+    ;; the library being imported.
+    ;;
     ;; **Not carried, each with what it waits for**:
     ;;
-    ;;   * the `electric-pair-mode' blocks: `electric-pair-mode' is a
-    ;;     `simple.el' minor mode and `electric-pair-post-self-insert-
-    ;;     function' with it; neither is ported.
-    ;;   * the `blink-paren-function' courtesy at the end of
-    ;;     `c-electric-brace', `c-electric-lt-gt' and `c-electric-paren':
-    ;;     `blink-paren-function' and `blink-matching-open'
-    ;;     (`simple.el') are not ported. The variable reads as nil in
-    ;;     Emacs unless that feature is loaded, so the branches do not
-    ;;     run there either.
     ;;   * `c-electric-delete' and `c-hungry-delete' (`:469', `:486'):
     ;;     they are for XEmacs's `delete-forward-p' and are not bound on
     ;;     GNU Emacs.
@@ -1198,32 +1206,66 @@ reindented unless `c-syntactic-indentation' is nil.
 settings of `c-cleanup-list' are done."
       (interactive "*P")
       (parameterize ((*case-fold-search* #f))
-        (let ((safepos #f) (literal #f)
-              ;; We want to inhibit blinking the paren since this would
-              ;; be most disruptive. We'll blink it ourselves later on.
-              ;; (No `blink-paren-function' here - see the header.)
-              (at-eol (looking-at "[ \t]*\\\\?$"))
-              (active-region (use-region-p)))
-          (c-with-string-fences
-           (c-save-buffer-state ()
-             (set! safepos (c-safe-position (point) (c-parse-state)))
-             (set! literal (c-in-literal safepos)))
+        (let* ((old-blink-paren (*blink-paren-function*))
+               (safepos #f) (literal #f)
+               (at-eol (looking-at "[ \t]*\\\\?$"))
+               (active-region (use-region-p))
+               (got-pair-} #f)
+               (electric-pair-deletion #f))
+          ;; We want to inhibit blinking the paren since this would be
+          ;; most disruptive. We'll blink it ourselves later on.
+          (parameterize ((*blink-paren-function* #f))
+            (c-with-string-fences
+             (c-save-buffer-state ()
+               (set! safepos (c-safe-position (point) (c-parse-state)))
+               (set! literal (c-in-literal safepos)))
 
-           ;; Insert the brace. Note that expand-abbrev might reindent
-           ;; the line here if there's a preceding "else" or something.
-           (parameterize ((*post-self-insert-hook* '()))
-             ;; the only way to get defined functionality from
-             ;; `self-insert-command'.
-             (self-insert-command (prefix-numeric-value arg)
-                                  (c-last-command-char)))
+             ;; Insert the brace. Note that expand-abbrev might reindent
+             ;; the line here if there's a preceding "else" or something.
+             (parameterize ((*post-self-insert-hook* '()))
+               ;; the only way to get defined functionality from
+               ;; `self-insert-command'.
+               (self-insert-command (prefix-numeric-value arg)
+                                    (c-last-command-char))))
 
-           (c-with-string-fences
-            ;; Perform any required CC Mode electric actions.
-            (cond
-             ((or literal arg (not (c-electric-flag)) active-region) #f)
-             ((not at-eol)
-              (c-indent-line))
-             (else (c-do-brace-electrics #f #f)))))))
+            ;; Emulate `electric-pair-mode', outside of
+            ;; `c-with-string-fences'.
+            (when (electric-pair-mode-value)
+              (let ((size (buffer-size)))
+                (parameterize ((*post-self-insert-hook* '()))
+                  (electric-pair-post-self-insert-function))
+                (set! got-pair-}
+                      (and at-eol
+                           (%c-last-command-char=? #\{)
+                           (let ((c (char-after)))
+                             (and c (char=? c #\})))))
+                (set! electric-pair-deletion (< (buffer-size) size))))
+
+            (c-with-string-fences
+             ;; Perform any required CC Mode electric actions.
+             (cond
+              ((or literal arg (not (c-electric-flag)) active-region) #f)
+              ((not at-eol)
+               (c-indent-line))
+              (electric-pair-deletion
+               (c-indent-line)
+               (c-do-brace-electrics 'ignore #f))
+              (else
+               (c-do-brace-electrics #f #f)
+               (when got-pair-}
+                 (save-excursion
+                   (forward-char)
+                   (c-do-brace-electrics 'assume 'ignore))
+                 (c-indent-line))))
+
+             ;; blink the paren
+             (and (%c-last-command-char=? #\})
+                  (not executing-kbd-macro)
+                  old-blink-paren
+                  (save-excursion
+                    (c-save-buffer-state ()
+                      (c-backward-syntactic-ws safepos))
+                    (old-blink-paren)))))))
       (c--call-post-self-insert-hook-more-safely))
 
     (define-command (c-electric-slash arg)
@@ -1590,9 +1632,20 @@ numeric argument is supplied, or the point is inside a literal."
                (goto-char final-pos)
 
                (when found-delim
-                 (indent-according-to-mode))))))
-        ;; (The `blink-paren-function' courtesy is not carried - see the
-        ;; header.)
+                 (indent-according-to-mode)))))
+        ;; On the off chance that < and > are configured as pairs in
+        ;; `electric-pair-mode'.
+        (when (and (electric-pair-mode-value)
+                   (or template-delim include-delim))
+          (parameterize ((*post-self-insert-hook* '()))
+            (electric-pair-post-self-insert-function)))
+
+        (when found-delim
+          (when (and (%c-last-command-char=? #\>)
+                     (not executing-kbd-macro)
+                     (*blink-paren-function*))
+            ((*blink-paren-function*))))
+        )
         )
       (c--call-post-self-insert-hook-more-safely))
 
@@ -1620,8 +1673,11 @@ newline cleanups are done if appropriate; see the variable `c-cleanup-list'."
                                  (c-last-command-char)))
 
           (if (and (not arg) (not literal))
-              (begin
-                (c-with-string-fences
+              ;; We want to inhibit blinking the paren since this will be
+              ;; most disruptive. We'll blink it ourselves afterwards.
+              (let ((old-blink-paren (*blink-paren-function*)))
+                (parameterize ((*blink-paren-function* #f))
+                  (c-with-string-fences
                  (if (and (c-syntactic-indentation) (c-electric-flag))
                      (indent-according-to-mode))
 
@@ -1661,8 +1717,11 @@ newline cleanups are done if appropriate; see the variable `c-cleanup-list'."
                              #f #t)
                             (not (c-save-buffer-state () (c-in-literal))))
                      (delete-region (match-beginning 0) (match-end 0))
-                     (insert-and-inherit "} catch (")))
-
+                     (insert-and-inherit "} catch ("))))
+                  ;; Apply `electric-pair-mode' stuff.
+                  (when (electric-pair-mode-value)
+                    (parameterize ((*post-self-insert-hook* '()))
+                      (electric-pair-post-self-insert-function)))
                  (c-with-string-fences
                   ;; Check for clean-ups at function calls. These two
                   ;; DON'T need `c-electric-flag' or
@@ -1699,8 +1758,16 @@ newline cleanups are done if appropriate; see the variable `c-cleanup-list'."
                                  (skip-chars-backward " \t")
                                  (set! beg (point))
                                  (c-on-identifier)))))
-                      (delete-region beg end)))))))
-              #f)))
+                      (delete-region beg end)))))
+                  (and (%c-last-command-char=? #\))
+                       (not executing-kbd-macro)
+                       old-blink-paren
+                       (old-blink-paren))))
+              ;; Apply `electric-pair-mode' stuff inside a string or
+              ;; comment.
+              (when (electric-pair-mode-value)
+                (parameterize ((*post-self-insert-hook* '()))
+                  (electric-pair-post-self-insert-function))))))
       (c--call-post-self-insert-hook-more-safely))
 
     (define (c-electric-continued-statement)

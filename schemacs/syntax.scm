@@ -144,7 +144,7 @@
    ;; syntax.el
    with-syntax-table syntax-ppss syntax-ppss-depth syntax-ppss-context
    syntax-ppss-toplevel-pos syntax-ppss-flush-cache syntax-propertize
-   ppss-comment-or-string-start
+   ppss-comment-or-string-start ppss-comment-depth
    syntax-propertize-wholelines syntax-propertize-multiline
    ;; the variables
    *parse-sexp-lookup-properties* *parse-sexp-ignore-comments*
@@ -2881,6 +2881,16 @@ by `find-word-boundary-function-table'.  It is also not interactive."
       ;; in, or nil."
       ;;--------------------------------------------------------------
       (list-ref ppss 8))
+
+    (define (ppss-comment-depth ppss)
+      ;; GNU Emacs's `ppss-comment-depth' (`syntax.el'), the accessor
+      ;; `cl-defstruct (ppss (:type list))' generates for its
+      ;; `comment-depth' slot: "nil if outside a comment, t if inside a
+      ;; non-nestable comment, else an integer (the current comment
+      ;; nesting)." The slot is list element 4, which is what this
+      ;; tree's `parse-partial-sexp' already stores there.
+      ;;--------------------------------------------------------------
+      (list-ref ppss 4))
 
     (define (syntax-ppss-depth ppss)
       ;; `syntax-ppss-depth' (`syntax.el:487').

@@ -215,3 +215,47 @@
             '(body hook after)
             (reverse *after-hook-log*))
 (test-end "derived_after_hook")
+
+;; ------------------------------------------------------------------
+;; buffer-match-p's `not': the cdr is a *list* of conditions and the
+;; negation is over the OR of them (`subr.el:8020`). The port passed the
+;; list to the single-condition test, which asked `case' about a cons and
+;; answered nil - so every `(not ...)' was true. `show-paren-predicate`'s
+;; default is `(not (derived-mode . special-mode))`, and it held in the
+;; special-mode buffers it exists to exclude - which is how this was
+;; found.
+;;
+;; Every answer below is `emacs -Q --batch''s.
+
+(test-begin "derived_buffer_match")
+
+(let ((special (get-buffer-create "*bm-special*"))
+      (fundamental (get-buffer-create "*bm-fundamental*")))
+  (set-buffer-local-value! special 'major-mode 'special-mode)
+  (set-buffer-local-value! fundamental 'major-mode 'fundamental-mode)
+  (test-equal "not derived-mode: special" #f
+              (buffer-match-p '(not (derived-mode . special-mode)) special))
+  (test-equal "not derived-mode: fundamental" #t
+              (buffer-match-p '(not (derived-mode . special-mode))
+                              fundamental))
+  (test-equal "not major-mode: special" #f
+              (buffer-match-p '(not (major-mode . special-mode)) special))
+  (test-equal "not major-mode: fundamental" #t
+              (buffer-match-p '(not (major-mode . special-mode))
+                              fundamental))
+  (test-equal "and with not: special" #t
+              (buffer-match-p '(and (derived-mode . special-mode)
+                                    (not (derived-mode . text-mode)))
+                              special))
+  (test-equal "and with not: fundamental" #f
+              (buffer-match-p '(and (derived-mode . special-mode)
+                                    (not (derived-mode . text-mode)))
+                              fundamental))
+  (test-equal "not of or: special" #t
+              (buffer-match-p '(not (or (major-mode . fundamental-mode)))
+                              special))
+  (test-equal "not of or: fundamental" #f
+              (buffer-match-p '(not (or (major-mode . fundamental-mode)))
+                              fundamental)))
+
+(test-end "derived_buffer_match")

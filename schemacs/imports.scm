@@ -113,6 +113,7 @@
     (schemacs newcomment)
     (schemacs novice)
     (schemacs pages)
+    (schemacs paren)
     (schemacs progmodes cc-align)
     (schemacs progmodes cc-cmds)
     (schemacs progmodes cc-defs)
@@ -282,7 +283,13 @@
     *blink-cursor-delay*
     *blink-cursor-interval*
     *blink-cursor-mode*
+    *blink-matching-delay*
     *blink-matching-paren*
+    *blink-matching-paren-distance*
+    *blink-matching-paren-dont-ignore-comments*
+    *blink-matching-paren-highlight-offscreen*
+    *blink-matching-paren-on-screen*
+    *blink-paren-function*
     *buffer-before-last-command-or-undo*
     *buffer-list*
     *buffer-list-update-hook*
@@ -895,6 +902,16 @@
     *set-message-function*
     *show-help-echo-function*
     *show-help-function*
+    *show-paren-context-when-offscreen*
+    *show-paren-delay*
+    *show-paren-highlight-openparen*
+    *show-paren-not-in-comments-or-strings*
+    *show-paren-predicate*
+    *show-paren-priority*
+    *show-paren-ring-bell-on-mismatch*
+    *show-paren-style*
+    *show-paren-when-point-in-periphery*
+    *show-paren-when-point-inside-paren*
     *show-trailing-whitespace*
     *signal-wake-function*
     *special-event-map*
@@ -1165,6 +1182,7 @@
     balance-intervals
     balance-possible-root-interval
     barf-if-buffer-read-only
+    beep
     beginning-of-buffer
     beginning-of-defun
     beginning-of-defun--in-emptyish-line-p
@@ -1184,6 +1202,12 @@
     blink-cursor-mode
     blink-cursor-suspend
     blink-cursor-timer
+    blink-matching--overlay
+    blink-matching-check-function
+    blink-matching-check-mismatch
+    blink-matching-open
+    blink-paren-open-paren-line-string
+    blink-paren-post-self-insert-function
     bobp
     bol
     bolp
@@ -2391,6 +2415,7 @@
     default-boundp
     default-buffer-file-coding-system
     default-directory
+    default-font-height
     default-frame-scroll-bars
     default-indent-new-line
     default-to-grave-quoting-style
@@ -2478,6 +2503,7 @@
     diff-context?
     digest-single-submenu
     digit-argument
+    ding
     dir-local-variables-alist
     directory-abbrev-apply
     directory-abbrev-make-regexp
@@ -2596,6 +2622,7 @@
     display-popup-menus-p
     display-raise-frame
     display-redeem-scroll-bars
+    display-ring-bell
     display-selections-p
     display-selections-supported?
     display-set-mouse-pixel-position
@@ -2751,6 +2778,7 @@
     exec-path
     executable-find
     execute-extended-command
+    executing-kbd-macro
     exit-minibuffer
     exit-recursive-edit
     exit-splash-screen
@@ -3855,6 +3883,7 @@
     next-single-char-property-change
     next-single-property-change
     ngettext
+    noninteractive
     normal-auto-fill-function
     normal-mode
     normal-splash-screen
@@ -3992,6 +4021,7 @@
     posn-string
     posn-window
     posn-x-y
+    ppss-comment-depth
     ppss-comment-or-string-start
     preceding-char
     prefix-argument-description
@@ -4205,6 +4235,7 @@
     revert-buffer--default
     revert-buffer-with-coding-system
     right-char
+    ring-bell-function
     risky-local-variable-p
     rmc--add-key-description
     rmc--show-help
@@ -4527,6 +4558,7 @@
     set!paragraph-ignore-fill-prefix
     set!paragraph-separate
     set!paragraph-start
+    set!show-paren-data-function
     set!string-intervals
     set!test-display-color-cells
     set!test-display-column-width
@@ -4702,6 +4734,29 @@
     shell-quote-argument
     show-command
     show-help-echo
+    show-paren--categorize-paren
+    show-paren--context-child-frame
+    show-paren--default
+    show-paren--delete-context-child-frame
+    show-paren--delete-context-overlay
+    show-paren--delete-overlays
+    show-paren--enabled-p
+    show-paren--idle-timer
+    show-paren--last-pos
+    show-paren--locate-near-paren
+    show-paren--overlay
+    show-paren--overlay-1
+    show-paren--show-context-in-child-frame
+    show-paren--show-context-in-overlay
+    show-paren--snap
+    show-paren--unescaped-p
+    show-paren-data-function
+    show-paren-function
+    show-paren-local-mode
+    show-paren-local-mode-hook
+    show-paren-mode
+    show-paren-mode-hook
+    show-paren-mode-value
     show-prefix-echo!
     show-text-editor
     shrink-mini-window
@@ -5231,6 +5286,7 @@
     vconcat
     verify-visited-file-modtime
     vertical-motion
+    visible-bell
     visited-file-modtime
     visual-line-mode
     visual-line-mode-map

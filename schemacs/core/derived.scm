@@ -247,7 +247,16 @@
                (provided-mode-derived-p
                 (buffer-local-value buffer 'major-mode 'fundamental-mode)
                 (cdr condition)))
-              ((not) (not (match-1 (cdr condition))))
+              ;; Emacs's `(`(not . ,cond) (not (funcall match cond)))':
+              ;; the cdr is a *list* of conditions and `match' is the
+              ;; OR over a list. Passing the list to `match-1' - which
+              ;; is what this did until 2026-11-25 - asked `case' about
+              ;; a cons and answered #f, so every `(not ...)' condition
+              ;; was *true*. `show-paren-predicate`'s default,
+              ;; `(not (derived-mode . special-mode))`, therefore held in
+              ;; the special-mode buffers it exists to exclude - how this
+              ;; was found.
+              ((not) (not (match (cdr condition))))
               ((or) (match (cdr condition)))
               ((and)
                (let loop ((cs (cdr condition)))

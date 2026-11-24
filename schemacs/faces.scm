@@ -1306,6 +1306,15 @@ Note: Other faces cannot inherit from the cursor face.")
           '((((class color) (background light)) :background "turquoise") (((class color) (background dark)) :background "steelblue3") (((background dark) (min-colors 4)) :background "grey50") (((background light) (min-colors 4)) :background "gray") (#t :inherit underline))
           "Face used for a matching paren.")
 
+    (defface 'show-paren-match-expression
+          '((#t :inherit show-paren-match))
+          "Face used for a matching paren when highlighting the whole expression.
+This face is used by `show-paren-mode'.")
+
+    (defface 'show-paren-mismatch
+          '((((class color)) (:foreground "white" :background "purple")) (#t (:inverse-video #t)))
+          "Face used for a mismatching paren.")
+
     (defface 'isearch
           '((((class color) (min-colors 88) (background light)) (:background "magenta3" :foreground "lightskyblue1")) (((class color) (min-colors 88) (background dark)) (:background "palevioletred2" :foreground "brown4")) (((class color) (min-colors 16)) (:background "magenta4" :foreground "cyan1")) (((class color) (min-colors 8)) (:background "magenta4" :foreground "cyan1")) (#t (:inverse-video #t)))
           "Face for highlighting Isearch matches.")

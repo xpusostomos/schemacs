@@ -75,6 +75,7 @@
     ;; bindings.
     (only (schemacs ui gtk pgtk-names)
           init-check! <GtkWindow> <GtkDrawingArea>
+          display:beep display:get-default
           widget:show-all widget:hide widget:destroy widget:queue-draw
           ;; a *child* widget has to select the events it wants -
           ;; see the button handlers below
@@ -217,6 +218,7 @@
           draw-box! draw-window-cursor! erase-window-cursor! flush-display!
           key-event->key
           display-mouse-position get-selection line-height read-input-event
+          display-ring-bell
           ;; **The pointer queries.** `display-mouse-position` is imported
           ;; right here; these two were *not*, and the `define-method`s
           ;; below therefore made fresh generics in this module while the
@@ -2608,6 +2610,14 @@
         was-open?))
 
     (define-method (column-width (d <pgtk-display>)) 1)
+    (define-method (display-ring-bell (d <pgtk-display>))
+      ;; GNU Emacs's `pgtk_ring_bell` (`pgtkterm.c:3933`): the toolkit's
+      ;; own bell. `visible_bell`'s flash (`pgtk_flash`) is named in
+      ;; DEPARTURES.md.
+      ;;--------------------------------------------------------------
+      (display:beep (display:get-default))
+      #f)
+
     (define-method (line-height (d <pgtk-display>)) 1)
     (define-method (face-metrics (d <pgtk-display>) face-attrs)
       ;; The ascent and descent of the line this display draws, in pixels.

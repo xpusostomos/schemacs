@@ -81,6 +81,10 @@
    *mouse-event-keys*
    display-color-cells
    display-font-families
+   ;; `dispnew.c`'s `ding`/`beep`, the terminal's `ring_bell_hook`, and
+   ;; the three variables the C's `ring_bell` reads.
+   ding beep ring-bell-function visible-bell noninteractive
+   executing-kbd-macro display-ring-bell
    ;; the selections, which `select' reads and writes through
    get-selection
    set-selection!
@@ -220,6 +224,78 @@
     ;; rows and columns are derived from the pixel size through them, as
     ;; Emacs derives `FRAME_COLS' from `FRAME_PIXEL_WIDTH'.
     ;;------------------------------------------------------------------
+
+    (define-generic display-ring-bell)
+    ;; Ring the terminal's bell, the display half of `ring_bell`
+    ;; (`terminal.c:56'). The C calls the terminal's
+    ;; `ring_bell_hook'; a display object is this tree's terminal. The
+    ;; default does nothing, which is what a display with no bell -
+    ;; a test display - gets.
+    ;;--------------------------------------------------------------
+
+    (define ring-bell-function #f)
+    ;; ^ GNU Emacs's `ring-bell-function' (`terminal.c:695'): "Function
+    ;; called to ring the bell, or nil if the normal bell should be
+    ;; used." A plain defvar; a user sets it, nothing `let`-binds it.
+    (define visible-bell #f)
+    ;; ^ GNU Emacs's `visible-bell' (`dispnew.c:7496'): "Non-nil means
+    ;; try to flash the frame to represent a bell." The backends here
+    ;; ring rather than flash; the flash itself is named in
+    ;; DEPARTURES.md.
+    (define noninteractive #f)
+    ;; ^ GNU Emacs's `noninteractive' (`emacs.c'), read by `ding`:
+    ;; "Non-nil means Emacs is running without interactive terminal."
+    ;; This tree is an editor, so the value is #f; a batch caller sets
+    ;; it. It lives here because `ding` is the function that reads it
+    ;; in this library.
+    (define executing-kbd-macro #f)
+    ;; ^ GNU Emacs's `executing-kbd-macro` (`macros.c'), read by
+    ;; `bitch_at_user`. Keyboard macros are not ported; the variable is
+    ;; the part of the C contract `ding` needs, and a future macro loop
+    ;; binds it.
+
+    (define (ring-bell)
+      ;; GNU Emacs's `ring_bell` (`terminal.c:56'): call
+      ;; `ring-bell-function` when it is set, else the terminal's bell.
+      ;; The C clears the variable before calling it ("so that if we
+      ;; get an error, it stays nil and we don't call it over and over"),
+      ;; and it does not specbind it.
+      ;;--------------------------------------------------------------
+      (cond
+       (ring-bell-function
+        (let ((function ring-bell-function))
+          (set! ring-bell-function #f)
+          (function)))
+       (else
+        (let ((display (current-display)))
+          (if display (display-ring-bell display) #f)))))
+
+    (define (bitch-at-user)
+      ;; GNU Emacs's `bitch_at_user` (`dispnew.c:6873'): the bell for a
+      ;; command with no argument; in a keyboard macro it terminates the
+      ;; macro with a user-error instead.
+      ;;--------------------------------------------------------------
+      (cond
+       (noninteractive
+        (write-char #\x07 (current-output-port)))
+       (executing-kbd-macro
+        (error "Keyboard macro terminated by a command ringing the bell"))
+       (else (ring-bell))))
+
+    (define (ding . rest)
+      ;; GNU Emacs's `ding` (`dispnew.c:6854'): "Beep, or flash the
+      ;; screen.  Also, unless an argument is given, terminate any
+      ;; keyboard macro currently executing."
+      ;;--------------------------------------------------------------
+      (if (and (pair? rest) (car rest))
+          (if noninteractive
+              (write-char #\x07 (current-output-port))
+              (ring-bell))
+          (bitch-at-user))
+      #f)
+
+    (define beep ding)
+    ;; ^ `(defalias 'beep #'ding)' (`keyboard.c').
 
     (define-generic face-metrics)
     ;; The ascent and descent of a face on this display, in pixels, as

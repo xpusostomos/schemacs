@@ -29,9 +29,11 @@
   ;;    `electric.scm' and `electric-pair--insert' would bind it, but a
   ;;    plain variable cannot be `let'-bound here and nothing else reads
   ;;    it. Named at the binding site.
-  ;;  * the real `blink-matching-paren' machinery (`blink-matching-open'
-  ;;    and its timer). The option is carried in `simple.scm' and bound
-  ;;    around the insert, as Emacs binds it; nothing blinks.
+  ;;  * the `blink-matching-paren' machinery is **in `paren.scm'**
+  ;;    (`blink-matching-open' and the `post-self-insert-hook' entry) as
+  ;;    of 2026-11-25; this library binds the option around the insert
+  ;;    exactly as Emacs does, so the pair's closer does not blink and
+  ;;    the next typed paren does.
   ;;  * `analyze-text-conversion' (`simple.el'), the caller of
   ;;    `electric-pair-analyze-conversion'. The function is carried whole;
   ;;    there are no text-conversion events here for it to be called from.
