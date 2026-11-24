@@ -1252,6 +1252,7 @@
     c-backslash-region
     c-backward-<>-arglist
     c-backward-comments
+    c-backward-into-nomenclature
     c-backward-over-enum-header
     c-backward-over-lambda-expression
     c-backward-sexp
@@ -1260,6 +1261,7 @@
     c-backward-syntactic-ws
     c-backward-to-block-anchor
     c-backward-to-decl-anchor
+    #{c-backward-to-nth-BOF-\x7b;}#
     c-backward-token-1
     c-backward-token-2
     c-backward-typed-enum-colon
@@ -1278,6 +1280,7 @@
     c-beg-pos
     c-beginning-of-current-token
     c-beginning-of-decl-1
+    c-beginning-of-defun
     c-beginning-of-defun-1
     c-beginning-of-inheritance-list
     c-beginning-of-macro
@@ -1333,15 +1336,21 @@
     c-compose-keywords-list
     c-concat-separated
     c-constant-face-name
+    c-cpp-define-name
     c-cpp-matchers
     c-crosses-statement-barrier-p
     c-current-comment-prefix
     c-debug-parse-state
     c-debug-put-decl-spot-faces
     c-debug-sws-msg
+    c-declaration-limits
+    c-declaration-limits-1
     c-default-value-sentence-end
     c-define-lang-constant
     c-define-lang-constant-here
+    c-defun-name
+    c-defun-name-1
+    c-defun-name-and-limits
     c-delete-backslashes-forward
     c-delete-overlay
     c-delq-from-dotted-list
@@ -1356,6 +1365,7 @@
     c-determine-limit-no-macro
     c-digit
     c-directly-in-class-called-p
+    c-display-defun-name
     c-do-declarators
     c-doc-bright-comment-start-re
     c-doc-comment-style
@@ -1374,6 +1384,7 @@
     c-enclosing-c++-attribute
     c-end-of-current-token
     c-end-of-decl-1
+    c-end-of-defun
     c-end-of-literal
     c-end-of-macro
     c-end-of-token
@@ -1461,6 +1472,7 @@
     c-forward-sws
     c-forward-syntactic-ws
     c-forward-to-cpp-define-body
+    #{c-forward-to-nth-EOF-;-or-\x7d;}#
     c-forward-token-1
     c-forward-token-2
     c-forward-type
@@ -1496,6 +1508,7 @@
     c-hanging-semi&comma-criteria
     c-hungry-delete-key
     c-in-after-change-fontification
+    c-in-function-trailer-p
     c-in-gcc-asm-p
     c-in-id-arglist
     c-in-knr-argdecl
@@ -1505,6 +1518,7 @@
     c-indent-command
     c-indent-comment-alist
     c-indent-comments-syntactically-p
+    c-indent-defun
     c-indent-exp
     c-indent-line
     c-indent-line-or-region
@@ -1622,6 +1636,7 @@
     c-looking-at-decl-block
     c-looking-at-inexpr-block
     c-looking-at-inexpr-block-backward
+    c-looking-at-non-alphnumspace
     c-looking-at-or-maybe-in-bracelist
     c-looking-at-special-brace-list
     c-looking-at-statement-block
@@ -1653,6 +1668,7 @@
     c-make-syntactic-matcher
     c-mark-<-as-paren
     c-mark->-as-paren
+    c-mark-function
     c-matchers-1
     c-matchers-2
     c-matchers-3
@@ -1678,6 +1694,7 @@
     c-most-enclosing-decl-block
     c-multiline-string-check-final-quote
     c-multiline-string-start-is-being-detached
+    c-narrow-to-most-enclosing-decl-block
     c-negation-char-face-name
     c-neutralize-CPP-line
     c-neutralize-pos
@@ -1771,6 +1788,7 @@
     c-safe-position
     c-safe-scan-lists
     c-save-buffer-state
+    c-scope-operator
     c-search-backward-char-property
     c-search-backward-char-property-with-value-on-char
     c-search-decl-header-end
@@ -1894,6 +1912,8 @@
     c-vsemi-status-unknown-p
     c-whack-state-after
     c-whack-state-before
+    c-where-wrt-brace-construct
+    c-widen-to-enclosing-decl-scope
     c-will-be-escaped
     c-will-be-unescaped
     c-with-string-fences

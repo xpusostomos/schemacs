@@ -25,7 +25,7 @@
  (only (schemacs buffer) allocate-buffer set-buffer current-buffer
        buffer-local-value set-buffer-local-value!)
  (only (schemacs editfns) insert goto-char point point-min point-max
-       forward-line buffer-substring line-beginning-position)
+       forward-line buffer-substring line-beginning-position save-excursion)
  (only (schemacs cmds) end-of-line)
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*)
@@ -33,10 +33,12 @@
  (only (schemacs progmodes cc-vars)
        c-syntactic-indentation set!c-syntactic-indentation
        c-block-comment-flag
-       *c-tab-always-indent*)
+       *c-tab-always-indent*
+       c-make-noise-macro-regexps c-make-macro-with-semi-re)
  (only (schemacs progmodes cc-styles) c-set-style c-set-offset)
  (only (schemacs progmodes cc-engine)
-       c-parsing-error c-electric-flag c-auto-newline c-hungry-delete-key)
+       c-parsing-error c-electric-flag c-auto-newline c-hungry-delete-key
+       c-clear-found-types)
  ;; The line-up registry `c-run-special-indent-hook' resolves the
  ;; style's `c-gnu-impose-minimum' through is filled when this loads.
  (schemacs progmodes cc-align)
@@ -45,7 +47,11 @@
        c-backslash-region c-update-modeline
        c-toggle-auto-newline c-toggle-hungry-state c-toggle-electric-state
        c-toggle-syntactic-indentation c-toggle-comment-style
-       c-syntactic-information-on-region *c-fix-backslashes*)
+       c-syntactic-information-on-region *c-fix-backslashes*
+       c-where-wrt-brace-construct c-in-function-trailer-p
+       c-defun-name c-cpp-define-name c-declaration-limits
+       c-defun-name-and-limits c-beginning-of-defun c-end-of-defun
+       c-indent-defun)
  (only (schemacs newcomment) comment-start comment-end))
 
 (test-begin "schemacs_editor_cc_cmds")
@@ -61,7 +67,14 @@
     (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
       (c-init-language-vars c-mode)
       (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
-      (c-set-style "gnu"))
+      (c-set-style "gnu")
+      ;; `c-basic-common-init' clears the found-type table, and the
+      ;; declaration machinery reads it. The mode's `:after-hook'
+      ;; builds the noise-macro and vsemi regexps; without them
+      ;; `c-forward-sws' looks up a #f one.
+      (c-clear-found-types)
+      (c-make-noise-macro-regexps)
+      (c-make-macro-with-semi-re))
     ;; `c-basic-common-init' (`cc-mode.el`) sets these; cc-mode.el is
     ;; not ported, so the replay does what the mode will. The block
     ;; comment flag is the mode's default comment style.
@@ -212,3 +225,122 @@
               (contents)))
 
 (test-end "schemacs_editor_cc_cmds")
+
+
+;;--------------------------------------------------------------
+;; The defun movements (`cc-cmds.el:1569'-`:2426')
+;;--------------------------------------------------------------
+;; Every row was measured from `tools/cc-cmds-diff/emacs-defuns.el'
+;; on the same text in a real `c-mode' buffer; the whole-position
+;; differential over that fixture and `fixture-knr.c' is identical.
+;; Each probe builds a fresh buffer, as the harness does, because the
+;; caches are per buffer.
+(test-begin "schemacs_editor_cc_cmds_defuns")
+
+(define defun-text
+  (string-append
+   "struct S { int a; } gvar;\n"
+   "static int f(void) { return 1; }\n"
+   "int g(int a)\n"
+   "{\n"
+   "  if (a > 0)\n"
+   "    {\n"
+   "      return a;\n"
+   "    }\n"
+   "  return 0;\n"
+   "}\n"))
+
+(define (defun-row pos)
+  (fresh defun-text)
+  (goto-char pos)
+  (list (c-where-wrt-brace-construct)
+        (c-in-function-trailer-p)
+        (c-defun-name)
+        (c-cpp-define-name)
+        (c-declaration-limits #f)
+        (c-declaration-limits #t)
+        (c-defun-name-and-limits #f)))
+
+(define (defun-move pos thunk)
+  (fresh defun-text)
+  (save-excursion
+    (goto-char pos)
+    (let ((ret (thunk)))
+      (cons (point) ret))))
+
+(define (row pos)
+  (list (defun-row pos)
+        (defun-move pos (lambda () (c-beginning-of-defun)))
+        (defun-move pos (lambda () (c-end-of-defun)))))
+
+(test-equal "at the struct's header, position 1"
+  (list (list 'at-header #f "gvar" #f '(1 . 27) '(1 . 27)
+              (cons "gvar" (cons 1 27)))
+        (cons 1 #f) (cons 27 #t))
+  (row 1))
+
+(test-equal "inside the struct's brace block, position 11"
+  (list (list 'in-block #f "gvar" #f '(1 . 27) #f
+              (cons "gvar" (cons 1 27)))
+        (cons 1 #t) (cons 27 #t))
+  (row 11))
+
+(test-equal "in the struct's trailer, position 20"
+  (list (list 'in-trailer 1 "gvar" #f '(1 . 27) '(1 . 27)
+              (cons "gvar" (cons 1 27)))
+        (cons 1 #t) (cons 27 #t))
+  (row 20))
+
+(test-equal "just after the struct, position 26"
+  (list (list 'at-function-end #f #f #f #f '(27 . 60) #f)
+        (cons 1 #t) (cons 60 #t))
+  (row 26))
+
+(test-equal "at the one-line function's header, position 27"
+  (list (list 'at-header #f "f" #f '(27 . 60) '(27 . 60)
+              (cons "f" (cons 27 60)))
+        (cons 1 #t) (cons 60 #t))
+  (row 27))
+
+(test-equal "at the end of the one-line function, position 59"
+  (list (list 'at-function-end #f #f #f #f '(60 . 130) #f)
+        (cons 27 #t) (cons 130 #t))
+  (row 59))
+
+(test-equal "at g's header, position 60"
+  (list (list 'at-header #f "g" #f '(60 . 130) '(60 . 130)
+              (cons "g" (cons 60 130)))
+        (cons 27 #t) (cons 130 #t))
+  (row 60))
+
+(test-equal "in g's header, position 61"
+  (list (list 'in-header #f "g" #f '(60 . 130) '(60 . 130)
+              (cons "g" (cons 60 130)))
+        (cons 60 #t) (cons 130 #t))
+  (row 61))
+
+(test-equal "at the end of g, position 129"
+  (list (list 'at-function-end #f #f #f #f #f #f)
+        (cons 60 #t) (cons 130 #f))
+  (row 129))
+
+;; `c-indent-defun': Emacs 31.1's answer for this text (measured through
+;; `tools/cc-cmds-diff/emacs-defuns.el' on `fixture-indent.c'), and the
+;; whole-position differential over that fixture is identical.
+(test-equal "c-indent-defun reindents the declaration"
+  (list "int g(int a)\n{\n  if (a > 0)\n    {\n      return a;\n    }\n  return 0;\n}\n"
+        1)
+  (let ((b (fresh (string-append
+                   "int g(int a)\n"
+                   "{\n"
+                   "if (a > 0)\n"
+                   "{\n"
+                   "return a;\n"
+                   "}\n"
+                   "  return 0;\n"
+                   "}\n"))))
+    (goto-char 1)
+    (c-indent-defun)
+    (list (contents) (point))))
+
+(test-end "schemacs_editor_cc_cmds_defuns")

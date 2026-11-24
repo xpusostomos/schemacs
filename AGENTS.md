@@ -17460,9 +17460,29 @@ it, as that library's header explains.
    `max` (fixed with `when-e`), and the flush was written
    `(syntax-ppss-flush-cache (c-syntax-table-hwm))` - c-syntax-table-hwm
    is a *plain variable*, so that applied a number.
-   Next: `c-basic-common-init`/`c-common-init`/
-   `c-font-lock-init` (whose `c-setup-doc-comment-style` is what sets
-   `c-doc-line-join-re` for real sessions) and the mode definitions.
+   **The defun movements are in** (`cc-cmds.el:1569'-`:2426'`, plus
+   `c-indent-defun`), placed in Emacs's file order inside
+   `cc-cmds.scm`. The gate is
+   `tools/cc-cmds-diff/emacs-defuns.el` / `ours-defuns.scm`: ten
+   probes at every position, identical on ten fixtures in both
+   languages, `c-indent-defun`'s resulting text included. Two things
+   the harness must do (README): import
+   `(schemacs progmodes cc-align)` (the gnu style's
+   `c-gnu-impose-minimum` moves labels off column 0), and run the
+   editing probe in its own fresh buffer. A replay of the mode must
+   call `c-make-noise-macro-regexps` and `c-make-macro-with-semi-re`
+   (the mode's `:after-hook`) or `c-forward-sws` looks up a #f regexp.
+   Next is the rest of cc-cmds, which `c-basic-common-init` waits on:
+   the statement and sentence motions (`cc-cmds.el:2429'-`:3260'`),
+   `c-comment-indent` (`:3294`) and `c-outline-level` (`:3348`), the
+   conditionals (`:3357'-`:3534`), then the filling half
+   (`:4057'-`:5152`: `c-indent-new-comment-line`,
+   `c-context-line-break`/`-open-line`, `c-fill-paragraph`,
+   `c-do-auto-fill`, `c-mask-paragraph`, `c-guess-fill-prefix`), and
+   the electric keys (`:409'-`:1568`). After that
+   `c-basic-common-init`/`c-common-init`/`c-font-lock-init` (whose
+   `c-setup-doc-comment-style` is what sets `c-doc-line-join-re` for
+   real sessions) and the mode definitions.
 3. Then `c-basic-common-init`/`c-common-init` and the mode definitions
    (with `c-font-lock-init`/`c-font-lock-fontify-region`, and the
    language function registry filled for every symbol the change

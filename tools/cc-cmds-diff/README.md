@@ -42,3 +42,32 @@ So the gate for the rest of cc-cmds' indentation verification is the
 `cc-mode.el` change-function tranche. Until it lands, `cc-cmds-tests.scm`
 tests one edit per fresh buffer, which is the case the caches cannot
 get wrong.
+
+## The defun-movement differential (2026-11-24)
+
+A second pair of harnesses covers `cc-cmds.el:1569'-`:2426' and
+`c-indent-defun':
+
+    emacs -Q --batch -l tools/cc-cmds-diff/emacs-defuns.el FILE OUT [cpp]
+    guile --no-auto-compile -L . -L "$SITE" \
+        -s tools/cc-cmds-diff/ours-defuns.scm FILE OUT [cpp]
+
+At **every position** of FILE it records
+`c-where-wrt-brace-construct', `c-in-function-trailer-p',
+`c-defun-name', `c-cpp-define-name', `c-declaration-limits' (NEAR nil
+and t), `c-defun-name-and-limits', `c-beginning-of-defun' and
+`c-end-of-defun' (final point and return), and `c-indent-defun'
+(the whole resulting text, newlines written as `|'). It is identical
+on `fixture-defuns.c', `fixture-defuns.cpp', `fixture-indent.c',
+`fixture.c', `fixture-knr.c', `fixture-label.c', `fixture-brace.c',
+`fixture-brace.cpp', `fixture.cpp' and
+`../cc-cgbs-diff/fixture-cgbs.c' - every position, both languages.
+
+Two things the schemacs side must do that are not obvious:
+
+* **import `(schemacs progmodes cc-align)`** - the gnu style's
+  `c-gnu-impose-minimum' lives there, and without it labels stay in
+  column 0 where Emacs moves them to 1;
+* **`c-indent-defun` runs in a fresh buffer per position**, because it
+  edits and the change hooks that invalidate cc's caches arrive with
+  `cc-mode.el'; the read-only probes share one buffer, as they can.

@@ -16100,3 +16100,113 @@ What is left of cc-mode.el: the mode definitions
 `c-mode`/`c++-mode`), which is what puts these hooks on
 `before-change-functions`/`after-change-functions` and binds
 `c-buffer-is-cc-mode` for real, and then the `.c`/`.h` milestone.
+
+# cc-mode: the defun movements, and the four host spellings they needed
+# (2026-11-24)
+
+`cc-cmds.el:1569'-`:2426' is in `schemacs/progmodes/cc-cmds.scm`:
+`c-backward-into-nomenclature` (a stub - see below), `c-scope-operator`,
+`c-in-function-trailer-p`, `c-where-wrt-brace-construct`,
+`c-backward-to-nth-BOF-{`, `c-narrow-to-most-enclosing-decl-block`,
+`c-widen-to-enclosing-decl-scope`, `c-beginning-of-defun`,
+`c-forward-to-nth-EOF-;-or-}`, `c-end-of-defun`, `c-defun-name-1`,
+`c-defun-name`, `c-declaration-limits-1`, `c-declaration-limits`,
+`c-defun-name-and-limits`, `c-display-defun-name`, `c-mark-function`,
+`c-cpp-define-name` and `c-indent-defun`. The block sits in Emacs's
+file order - before `c-indent-command` (`:3535') - not at the end of
+the port, and `c-indent-defun` sits between `c-indent-exp` and
+`c-indent-region`, where the C has it.
+
+## The gate: `tools/cc-cmds-diff/emacs-defuns.el` / `ours-defuns.scm`
+
+Ten probes at **every position** of a file, each position in a fresh
+buffer: `c-where-wrt-brace-construct`, `c-in-function-trailer-p`,
+`c-defun-name`, `c-cpp-define-name`, `c-declaration-limits` (NEAR nil
+and t), `c-defun-name-and-limits`, `c-beginning-of-defun` and
+`c-end-of-defun` (final point and return value), and `c-indent-defun`
+(the whole resulting text, newlines written as `|`). Result:
+**identical on all ten fixtures** - `fixture-defuns.c`,
+`fixture-defuns.cpp`, `fixture-indent.c`, `fixture.c`,
+`fixture-knr.c`, `fixture-label.c`, `fixture-brace.c`,
+`fixture-brace.cpp`, `fixture.cpp` and
+`../cc-cgbs-diff/fixture-cgbs.c` - every position, both languages.
+Two harness requirements are in `tools/cc-cmds-diff/README.md`: the
+schemacs side imports `(schemacs progmodes cc-align)` (the gnu
+style's `c-gnu-impose-minimum` is what moves a label off column 0),
+and the `c-indent-defun` probe gets a fresh buffer of its own because
+it edits. That is 2,000-odd calls a fixture; the C++
+fixture alone is 455 positions.
+
+`c-indent-defun' matters here because it is `c-indent-region` (the
+`cc-cmds-diff` whole-buffer differential's subject) confined to one
+declaration: on `fixture-indent.c` it produces Emacs's gnu indentation
+from deliberately wrong input at every position, and on the already-
+gnu fixtures it is a no-op on both sides. The whole-buffer
+differential's 24 red pairs stay red for the reason its README gives -
+`c-indent-line' edits the buffer and the change functions that
+invalidate cc's caches are not installed until `cc-mode.el` lands -
+but no red pair is a defun-movement difference.
+
+## The four host spellings, each documented in the library
+
+1. **`c-while-widening-to-decl-block` is a local `letrec-syntax`.**
+   Emacs's macro (`cc-cmds.el:1841') expands into code that reads and
+   *sets* the caller's `paren-state', `lim' and `where'. A
+   `syntax-rules` template's identifiers resolve where the macro is
+   defined, so a library-level macro cannot reach them; each of the
+   three functions that uses it (`c-beginning-of-defun',
+   `c-end-of-defun', `c-defun-name-and-limits') binds the macro in a
+   `letrec-syntax` inside its body, the `c-bos-*' automaton's shape.
+   Two clauses stand in for Emacs's optional NO-WHERE (which only
+   decides whether `where' is set).
+2. **`c-forward-to-nth-EOF-;-or-}` keeps its Emacs name, spelled
+   `#{c-forward-to-nth-EOF-;-or-\x7d;}#`.** Guile's reader rejects
+   `\;` in an identifier (`invalid character in escape sequence:
+   \;`), and the `#{...}#` form is the tree's escape for a symbol a
+   reader would otherwise split; `\x7d;` is the closing brace.
+3. **`(eq (char-before) ?X)` / `(eq (char-after) ?X)` are
+   `%c-char-before=?' / `%c-char-after=?'.** Emacs's `char-before'
+   and `char-after' answer nil at the accessible buffer's edges, and
+   nil is false; here they answer #f there and `char=?' raises
+   (`(1 "character" #f)`). The first run at position 1 of the C
+   fixture failed with exactly that, which is why the helpers exist.
+   A position argument of #f means point in both (`(char-before lim)'
+   with LIM nil is Emacs's).
+4. **The dynamic bindings are `parameterize`.** Emacs's
+   `(c-save-buffer-state (beginning-of-defun-function
+   end-of-defun-function (paren-state ...) ... case-fold-search)
+   ...)' binds two special variables and one Lisp special; here the
+   two `*beginning-of-defun-function*'/`*end-of-defun-function*'
+   parameters and `*case-fold-search*' are `parameterize'd around the
+   macro, and the plain locals stay in the macro's `let*'. Binding a
+   parameter's name with `let*' would shadow the parameter object,
+   not bind its value - the tree's oldest trap.
+
+Also spelled the tree's way: `this-command' and `last-command' are
+`*this-command*' and `*last-command*' (values are the bound
+procedures, so `(eq? (*this-command*) c-beginning-of-defun)' is
+Emacs's `(eq this-command 'c-beginning-of-defun)'); `catch'/`throw'
+are `call-with-current-continuation' with an exit procedure (the
+`c-beginning-of-decl-1' shape); `(when ... (setq x ...))' whose value
+is tested is `(when-e (setq x ...) ...)' - `setq' here answers the
+new value, which is what the C reads.
+
+## Not carried
+
+`c-backward-into-nomenclature' (`cc-cmds.el:1569') forwards to
+`subword.el''s `subword-backward' or `cc-subword.el''s
+`c-backward-subword', neither of which is ported; it is an obsolete
+alias in Emacs 31 too, and the command is a stub that names the gap
+(the `c-beginning-of-objc-method-header' shape). `c-indent-defun' was
+listed as pending in the last handoff and is not: it only wanted
+`c-declaration-limits', which is in this tranche.
+
+## The harness's mode replay now includes the mode's `:after-hook'
+
+`c-indent-region' (and so `c-indent-defun') reads
+`c-noise-macro-name-re', which `c-make-noise-macro-regexps' builds;
+in a real buffer `c-mode''s `:after-hook' calls it (and
+`c-make-macro-with-semi-re') after `c-common-init'. A replay without
+it fails with `(string=? #f "<the keywords regexp>")' from
+`c-forward-sws' at the first indent. `test/progmodes/cc-cmds-test.scm''s
+`fresh' and the differential harness call both, as the mode will.

@@ -94,7 +94,7 @@
     ;; The `c-search-*-char-property-with-value-on-char' helpers move one
     ;; character at a time and set the match data on it, as the C's
     ;; `search-forward-regexp' does.
-    (only (schemacs search) re-search-forward re-search-backward)
+    (only (schemacs search) re-search-forward re-search-backward looking-at)
     ;; `c-region-is-active-p' (`cc-defs.el:497') is `region-active-p'
     ;; on any Emacs that has it, which is this one (`simple.el`'s).
     (only (schemacs simple) region-active-p)
@@ -124,7 +124,7 @@
    c-with-string-fences *c-string-fences-set-flag*
    *c-restore-string-fences-function* *c-clear-string-fences-function*
    c-syntax-table-hwm set!c-syntax-table-hwm
-   c-intersect-lists c-lookup-lists
+   c-intersect-lists c-lookup-lists c-looking-at-non-alphnumspace
    c-langelem-sym c-langelem-pos c-langelem-col c-langelem-2nd-pos
    c-put-char-property c-get-char-property c-clear-char-property
    c-put-char-properties c-clear-char-properties c-min-property-position
@@ -1539,6 +1539,17 @@
   ;; before POS, or before the point if POS is left out."
   (let ((dest (apply c-down-list-backward args)))
     (if dest (begin (goto-char dest) #t) #f)))
+
+;; `c-looking-at-non-alphnumspace' (`cc-defs.el:2023')
+;;----------------------------------------------------------------------
+;; "Are we looking at a character which isn't alphanumeric or space?"
+;; Emacs's macro picks its arm from `c-emacs-features'; `gen-comment-
+;; delim' is in this tree's value (measured), so the arm taken is the
+;; plain `looking-at' - the `(14)' generic-comment-delimiter test
+;; belongs to the other one.
+(define (c-looking-at-non-alphnumspace)
+  (looking-at
+   "\\([;#]\\|\\'\\|\\s(\\|\\s)\\|\\s\"\\|\\s\\\\|\\s$\\|\\s<\\|\\s>\\)"))
 
 ;;----------------------------------------------------------------------
 ;; The syntactic-element accessors (`cc-defs.el:2018'-`:2090')
