@@ -183,7 +183,12 @@
           ;; library re-exports it so every caller and `M-x` still find it
           ;; here.
           back-to-indentation
-          indent-according-to-mode *delete-horizontal-space-function*
+          indent-according-to-mode indent-for-tab-command
+          *delete-horizontal-space-function*
+          ;; `indent-for-tab-command` asks `simple.el`'s `use-region-p` and
+          ;; the command loop's `this-command`/`last-command`, which live
+          ;; in this library because `indent.scm` is below it.
+          *this-command-function* *last-command-function*
           ;; `newline`'s post-processing indents the new line to the
           ;; margin (`indent.el:70`) and measures the margin it deletes
           ;; from a blank line.
@@ -3077,7 +3082,13 @@ If N is omitted or nil, move point 1 character to the left."
       read-only-mode)
     (define-key *default-keymap* (kbd "C-x C-x")
       exchange-point-and-mark)
-    (define-key *default-keymap* (kbd "C-i") self-insert-tab)
+    ;; `bindings.el` binds TAB to `indent-for-tab-command`; the command
+    ;; indents the line, or inserts a tab where `indent-relative` would
+    ;; not move, which is why `self-insert-tab` is no longer what the key
+    ;; reaches.
+    (*this-command-function* (lambda () (*this-command*)))
+    (*last-command-function* (lambda () (*last-command*)))
+    (define-key *default-keymap* (kbd "C-i") indent-for-tab-command)
     (define-key *default-keymap* (kbd "C-v") scroll-up-command)
     (define-key *default-keymap* (kbd "M-v") scroll-down-command)
     (define-key *default-keymap* (kbd "M-<") beginning-of-buffer)

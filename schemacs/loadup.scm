@@ -142,7 +142,8 @@
       ;; Every `(schemacs editor ...)' there is, less the pair above:
       ;; sorted, so a diff of this file shows the one library that moved.
       ;;--------------------------------------------------------------
-      '((schemacs buff-menu)
+      '((schemacs abbrev)
+        (schemacs buff-menu)
         (schemacs buffer)
         (schemacs buffer-text)
         (schemacs callproc)

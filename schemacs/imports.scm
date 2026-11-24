@@ -25,6 +25,7 @@
 
 (define-library (schemacs imports)
   (import
+    (schemacs abbrev)
     (schemacs arrays)
     (schemacs buff-menu)
     (schemacs buffer)
@@ -237,6 +238,7 @@
     *Buffer-menu-mode-width*
     *Buffer-menu-name-width*
     *Buffer-menu-size-width*
+    *abbrev-all-caps*
     *abbreviated-home-dir*
     *activate-mark-hook*
     *activate-menubar-hook*
@@ -265,6 +267,7 @@
     *backward-delete-char-untabify-method*
     *barf-if-buffer-read-only-function*
     *before-change-functions*
+    *before-hack-local-variables-hook*
     *before-init-hook*
     *before-make-frame-hook*
     *beginning-of-defun-function*
@@ -403,6 +406,7 @@
     *comment-style*
     *comment-use-global-state*
     *comment-use-syntax-ppss*
+    *completion-at-point-function*
     *completion-auto-help*
     *completion-auto-wrap*
     *completion-ignore-case*
@@ -489,6 +493,7 @@
     *emacs-startup-hook*
     *enable-disabled-menus-and-buttons*
     *enable-kinsoku*
+    *enable-local-eval*
     *enable-local-variables*
     *enable-multibyte-characters*
     *end-of-defun-function*
@@ -567,6 +572,7 @@
     *gui--last-selected-text-primary*
     *gui-last-cut-in-clipboard*
     *gui-last-cut-in-primary*
+    *hack-local-variables-hook*
     *help--help-screen-function*
     *help-echo-substitute-function*
     *help-for-help-use-variable-pitch*
@@ -578,6 +584,7 @@
     *history-length*
     *icon-preference*
     *idl-font-lock-extra-types*
+    *ignored-local-variable-values*
     *image-load-path*
     *in-property-change-p*
     *indent-tabs-mode*
@@ -636,6 +643,7 @@
     *last-coding-system-used*
     *last-command*
     *last-command-event*
+    *last-command-function*
     *last-nonmenu-event*
     *last-read-event*
     *last-thing-searched*
@@ -815,6 +823,8 @@
     *require-final-newline*
     *resize-mini-windows*
     *run-hooks-function*
+    *safe-local-eval-forms*
+    *safe-local-variable-values*
     *save-silently*
     *save-some-buffers--switch-window-callback*
     *save-some-buffers-default-predicate*
@@ -861,6 +871,7 @@
     *syntax-propertize-chunk-size*
     *syntax-propertize-extend-region-functions*
     *system-time-locale*
+    *tab-always-indent*
     *tab-bar-auto-width*
     *tab-bar-auto-width-max*
     *tab-bar-close-button-show*
@@ -891,6 +902,7 @@
     *tab-bar-tab-pre-close-functions*
     *tab-bar-tab-prevent-close-functions*
     *tab-bar-tabs-function*
+    *tab-first-completion*
     *tab-line-auto-hscroll*
     *tab-line-close-button-show*
     *tab-line-close-modified-button-show*
@@ -923,6 +935,7 @@
     *text-property-replace*
     *text-quoting-style*
     *this-command*
+    *this-command-function*
     *this-command-keys*
     *three-step-help*
     *timer-idle-list*
@@ -1015,7 +1028,26 @@
     MENU-FOR-CLICK
     MENU-KBD-NAVIGATION
     MENU-KEYMAPS
+    abbrev--default-expand
+    abbrev--symbol
+    abbrev-expand-function
+    abbrev-expansion
+    abbrev-get
+    abbrev-insert
+    abbrev-minor-mode-table-alist
+    abbrev-mode
+    abbrev-mode-variable
+    abbrev-put
+    abbrev-start-location
+    abbrev-start-location-buffer
+    abbrev-symbol
+    abbrev-table-get
+    abbrev-table-name-list
+    abbrev-table-named
+    abbrev-table-p
+    abbrev-table-put
     abbreviate-file-name
+    abbrevs-changed
     abort-recursive-edit
     access-keymap
     accessible-keymaps
@@ -2067,6 +2099,7 @@
     cl-intersection
     cl-member
     cl-set-difference
+    clear-abbrev-table
     clear-end-of-line!
     clear-frame!
     clear-frame-area!
@@ -2204,6 +2237,7 @@
     cond-e
     confirm-nonexistent-file-or-buffer
     constrain-to-field
+    copy-abbrev-table
     copy-alist
     copy-category-table
     copy-char-table
@@ -2301,6 +2335,8 @@
     default-to-grave-quoting-style
     default-value
     defface
+    define-abbrev
+    define-abbrev-table
     define-alias
     define-category
     define-charset
@@ -2381,6 +2417,7 @@
     diff-context?
     digest-single-submenu
     digit-argument
+    dir-local-variables-alist
     directory-abbrev-apply
     directory-abbrev-make-regexp
     directory-entries
@@ -2612,6 +2649,7 @@
     exit-minibuffer
     exit-recursive-edit
     exit-splash-screen
+    expand-abbrev
     expand-file-name
     expand-line-display
     expand-line-glyphs
@@ -2664,6 +2702,7 @@
     file-directory-p
     file-executable-p
     file-exists-p
+    file-local-variables-alist
     file-modes
     file-modes-string
     file-name-absolute-p
@@ -2875,6 +2914,7 @@
     function-key-offset
     function-key-translate
     fundamental-mode
+    fundamental-mode-abbrev-table
     generate-new-buffer
     generate-new-buffer-name
     get
@@ -2893,6 +2933,7 @@
     get-text-property
     get-unused-category
     get-window-cursor-type
+    global-abbrev-table
     global-buffers-menu-map
     global-font-lock-mode
     global-tab-line-mode
@@ -2959,6 +3000,14 @@
     gui-select-text
     gui-selection-value
     gui-set-selection
+    hack-local-variable-regexp
+    hack-local-variables
+    hack-local-variables--find-variables
+    hack-local-variables-apply
+    hack-local-variables-confirm
+    hack-local-variables-filter
+    hack-local-variables-prop-line
+    hack-one-local-variable
     handle-delete-frame
     handle-interrupt
     help--analyze-key
@@ -3027,6 +3076,7 @@
     indent-according-to-mode
     indent-code-rigidly
     indent-for-comment
+    indent-for-tab-command
     indent-line-function
     indent-line-ignored-functions
     indent-line-to
@@ -3256,6 +3306,9 @@
     kill-word
     know-region-cache
     last
+    last-abbrev
+    last-abbrev-location
+    last-abbrev-text
     lazy-highlight-cleanup
     left-char
     line-beginning-position
@@ -3343,6 +3396,7 @@
     list-without
     load-init
     load-theme
+    local-abbrev-table
     local-variable-p
     locate-file
     locate-file-internal
@@ -3372,6 +3426,7 @@
     ls-lisp-version-lessp
     major-mode
     major-mode-remap
+    make-abbrev-table
     make-bool-vector
     make-buffer-string
     make-category-set
@@ -3902,6 +3957,7 @@
     read-buffer
     read-buffer-file-coding-system
     read-buffer-to-switch
+    read-char-choice
     read-char-event
     read-char-from-minibuffer
     read-coding-system
@@ -3997,6 +4053,7 @@
     revert-buffer--default
     revert-buffer-with-coding-system
     right-char
+    risky-local-variable-p
     rmc--add-key-description
     rmc--show-help
     row-equal?
@@ -4018,6 +4075,7 @@
     run-window-change-functions
     run-with-idle-timer
     run-with-timer
+    safe-local-variable-p
     sanitize-char-width
     save-buffer
     save-buffers-kill-emacs
@@ -4134,6 +4192,7 @@
     set!%window-start
     set!%window-start-at-line-beg
     set!%window-suspend-auto-hscroll?
+    set!abbrev-mode-variable!
     set!adaptive-fill-first-line-regexp
     set!adaptive-fill-mode
     set!adaptive-fill-regexp
@@ -4247,10 +4306,12 @@
     set!cd-path
     set!comment-end
     set!comment-start
+    set!dir-local-variables-alist
     set!dired-actual-switches!
     set!dired-buffers!
     set!dired-directory!
     set!dired-subdir-alist!
+    set!file-local-variables-alist
     set!font-lock-defaults!
     set!font-lock-keywords!
     set!font-lock-mode!
@@ -4291,6 +4352,7 @@
     set!itree-node-parent
     set!itree-node-red
     set!itree-node-right
+    set!local-abbrev-table
     set!major-mode
     set!mark-active
     set!mark-ring
@@ -4566,6 +4628,7 @@
     sword
     sync-frame-size!
     syntax-after
+    syntax-class
     syntax-class-to-char
     syntax-ppss
     syntax-ppss-context
@@ -4961,6 +5024,7 @@
     undo-insertion-entry?
     undo-modified-entry?
     undo-redo
+    unexpand-abbrev
     unfill-paragraph
     unibyte-to-char
     unify-charset

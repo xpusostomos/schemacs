@@ -352,7 +352,7 @@ read-number-history
    next-line-or-history-element
    previous-history-element
    previous-line-or-history-element
-   read-char-from-minibuffer
+   read-char-from-minibuffer read-char-choice
    read-from-minibuffer exit-minibuffer
    read-string
    read-command read-variable read-minibuffer eval-minibuffer
@@ -1286,7 +1286,7 @@ previous element of the minibuffer history in the minibuffer."
                                        (string-length typed)
                                        #f))))
 
-    (define (read-char-from-minibuffer prompt)
+    (define (read-char-from-minibuffer prompt . rest)
       ;; GNU Emacs's `read-char-from-minibuffer': ask a question whose
       ;; answer is a single key, and return it - `y' or `n' alone
       ;; answers, with no RET. Emacs reads the key itself (`read-key');
@@ -1304,8 +1304,13 @@ previous element of the minibuffer history in the minibuffer."
       ;; plus `*echo-area-prompt*` - drawn by the renderer; the echo area
       ;; is a window now and draws the frame's own echo buffer, so a
       ;; message is what puts text there.
+      ;;
+      ;; `(read-char-from-minibuffer PROMPT &optional CHARS HISTORY)`:
+      ;; with CHARS, a character not in it is ignored and the prompt
+      ;; stays up - which is `read-char-choice`'s whole filter.
       ;;--------------------------------------------------------------
-      (let ((frame (*current-frame*)))
+      (let ((frame (*current-frame*))
+            (chars (and (pair? rest) (car rest))))
         (parameterize ((*cursor-in-echo-area* #t))
           (set!frame-message frame prompt)
           ;; `read-key` propertizes the prompt with the
@@ -1335,9 +1340,22 @@ previous element of the minibuffer history in the minibuffer."
                ;; an arrow key, a frame resize and the control keys
                ;; (RET included, as it was before) ask again.
                ((and (integer? key) (< key char-alt) (>= key 32))
-                (integer->char key))
+                (let ((ch (integer->char key)))
+                  (if (or (not chars) (memv ch chars))
+                      ch
+                      (loop))))
                ;; an arrow key, a frame resize: asks again
                (else (loop))))))))
+
+    (define (read-char-choice prompt chars)
+      ;; GNU Emacs's `read-char-choice' (`subr.el:3760'): "Read and return
+      ;; one of the characters in CHARS, prompting with PROMPT." It lives
+      ;; here rather than in `subr.scm` because its reader is this
+      ;; library's (`subr.scm` is below the minibuffer here).
+      ;;--------------------------------------------------------------
+      (unless (pair? chars)
+        (error "Called `read-char-choice' without valid char choices"))
+      (read-char-from-minibuffer prompt chars))
 
     (define *extended-command-history* (make<history> '()))
     ;; ^ GNU Emacs's `extended-command-history': the names `M-x' has

@@ -28,16 +28,21 @@
           make-char-table set-char-table-range)
     (only (schemacs buffer)
           buffer-overwrite-mode current-buffer set-point buffer-pt buffer-beg
-          buffer-z buffer-auto-fill-function)
+          buffer-z buffer-auto-fill-function buffer-read-only?)
     (only (schemacs editfns)
           char-after char-before delete-region goto-char insert
           insert-and-inherit
-          line-beginning-position line-end-position point point-max)
+          line-beginning-position line-end-position point point-min point-max)
     ;; `replace_range`, which the overwrite branch is: the C replaces the
     ;; characters being covered in **one** change, where a delete and an
     ;; insert would be two. `del-range` is what `delete-char` below is
     ;; built on - the C's `del_range` - so it comes from the same library.
     (only (schemacs insdel) replace-range del-range)
+    ;; `internal_self_insert`'s abbreviation branch (`cmds.c:412'): the
+    ;; syntax of the character being typed and of the one before it, and
+    ;; the expansion itself.
+    (only (schemacs syntax) char-syntax)
+    (only (schemacs abbrev) abbrev-mode-variable expand-abbrev)
     (only (schemacs indentc) current-column move-to-column)
     (only (schemacs command)
           define-command uarg->integer current-prefix-arg
@@ -151,8 +156,19 @@
                               (set! spaces-to-insert (- actual-clm target-clm)))))
                       ;; the measurement is over: put point back
                       (goto-char pos))))))))
-          ;; `expand-abbrev' and its `no-self-insert' property go here in
-          ;; the C; `abbrev-mode' is not ported.
+          ;; "Before insertion, `expand-abbrev' is executed if the
+          ;; inserted character does not have word syntax and the
+          ;; preceding character has" (`cmds.c:412'). The C then reads a
+          ;; `no-self-insert' property off the abbreviation's hook symbol
+          ;; to let it suppress the typed character; an abbreviation's
+          ;; hook is a procedure here (abbrev.scm's named departure), so
+          ;; that arm is not carried.
+          (when (and (abbrev-mode-variable)
+                     (not (char=? (char-syntax c) #\w))
+                     (not (buffer-read-only? ed))
+                     (> (point) (point-min))
+                     (char=? (char-syntax (char-before)) #\w))
+            (expand-abbrev))
           (if (> chars-to-delete 0)
               ;; The C's `replace_range (PT, to, string, true, true,
               ;; false)' followed by `Fforward_char (n)': the region is

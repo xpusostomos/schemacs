@@ -110,7 +110,7 @@
    ;; `syntax-after` is `subr.el:6563`'s, not `syntax.c`'s - placed here
    ;; because it reads the `syntax-table` text property through
    ;; `get-char-property`, which is this library's neighbour.
-   syntax-after
+   syntax-after syntax-class
    string-to-syntax modify-syntax-entry
    parse-partial-sexp
    ;; syntax.c's class codes
@@ -432,6 +432,14 @@
                 st
                 (char-table-ref (or st (syntax-table))
                                 (%char-code (fetch-char (current-buffer) pos)))))))
+
+    (define (syntax-class syntax)
+      ;; GNU Emacs's `syntax-class' (`subr.el:6576'): "Return the code
+      ;; for the syntax class described by SYNTAX. ... If SYNTAX is nil,
+      ;; return nil." `subr.el`'s function beside `syntax-after`, where
+      ;; it reads that descriptor's cons.
+      ;;--------------------------------------------------------------
+      (and syntax (logand (car syntax) #xffff)))
 
     ;; ---------------------------------------------------------------
     ;; `string-to-syntax' (`syntax.c:1156') and `modify-syntax-entry'

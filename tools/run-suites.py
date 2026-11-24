@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
     'test/apps/tty-editor-test.scm',
+    'test/abbrev-test.scm',
     'test/buffer-test.scm',
     'test/buffer-text-test.scm',
     'test/casefiddle-test.scm',

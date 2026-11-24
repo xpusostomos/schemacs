@@ -15,9 +15,8 @@
   ;; `current-indentation` and `indent-to` are `indent.c`'s and are in
   ;; `indentc.sld` with the rest of the column arithmetic.
   ;;
-  ;; Not ported: `indent-for-tab-command` and the tab-stop *editing*
-  ;; commands (`edit-tab-stops` and its map), the whole of the
-  ;; interactive `indent-rigidly` map (`indent-rigidly-left' and its
+  ;; Not ported: the tab-stop *editing* commands (`edit-tab-stops` and
+  ;; its map), the whole of the interactive `indent-rigidly` map (`indent-rigidly-left' and its
   ;; siblings, a transient-map feature this display does not have), the
   ;; left-margin family (`current-left-margin`, `move-to-left-margin`,
   ;; `indent-to-left-margin` - they need `left-margin` and
@@ -30,7 +29,10 @@
           current-buffer buffer-local-value set-buffer-local-value!
           ;; `left-margin`, the buffer-local the two margin functions
           ;; below are about (`indent.el:70')
-          buffer-left-margin)
+          buffer-left-margin
+          ;; `insert-tab` reads `tab-width` (buffer-local in Emacs), and
+          ;; `indent-for-tab-command` asks whether the indentation changed.
+          buffer-tab-width buffer-chars-modified-tick)
     ;; `current-left-margin` reads the `left-margin` text property at the
     ;; start of the line (`indent.el:63`)
     (only (schemacs textprop) get-text-property)
@@ -40,10 +42,13 @@
     (only (schemacs character) *tab-width*)
     (only (schemacs cmds) beginning-of-line backward-char)
     (only (schemacs command)
-          current-prefix-arg define-command prefix-numeric-value uarg->integer)
+          current-prefix-arg define-command prefix-numeric-value uarg->integer
+          ;; `simple.scm` installs this for the interactive `r` code; TAB's
+          ;; region branch asks the same question.
+          *use-region-p-function*)
     (only (schemacs editfns)
           bobp bolp delete-region eobp eolp forward-line goto-char
-          insert insert-char
+          insert insert-char preceding-char
           point point-marker
           region-beginning region-end line-end-position save-excursion
           ;; `indent-according-to-mode` widens first, so that indenting a
@@ -60,7 +65,13 @@
     (only (schemacs subr) kbd)
     (only (schemacs syntax)
           backward-prefix-chars skip-chars-forward skip-chars-backward
-          skip-syntax-forward syntax-propertize)
+          skip-syntax-forward syntax-propertize
+          char-syntax syntax-after syntax-class syntax-ppss scan-sexps)
+    ;; `insert-tab` expands an abbreviation before it inserts, as
+    ;; `indent.el:215` has it.
+    (only (schemacs abbrev) abbrev-mode-variable expand-abbrev)
+    ;; `nth`, for `syntax-ppss`'s vector.
+    (only (schemacs fns) nth)
     )
 
   (export
@@ -72,7 +83,10 @@
    indent-to-left-margin *fill-prefix*
    indent-relative indent-relative-first-indent-point indent-relative-maybe
    indent-next-tab-stop tab-to-tab-stop tab-stop-list
-   insert-tab
+   insert-tab indent-for-tab-command
+   *tab-always-indent* *tab-first-completion*
+   *this-command-function* *last-command-function*
+   *completion-at-point-function*
    *delete-horizontal-space-function*
    )
 
@@ -140,27 +154,195 @@ non-nil."
               ;; The normal case.
               (fn)))))
 
+    ;;----------------------------------------------------------------
+    ;; indent-for-tab-command and tab insertion
+    ;;
+    ;; **The seams.** `use-region-p`, `this-command` and `last-command`
+    ;; are `simple.el`'s and `simple.scm` is above this library (it
+    ;; imports `indent` for `indent-region`), so the three readings
+    ;; arrive through parameters that `simple.scm` installs. The same is
+    ;; so for Emacs's completion arm: `completion-at-point` is
+    ;; `minibuffer.el`'s and is not ported, so the seam says so by name
+    ;; rather than leaving an unbound variable behind a TAB.
+    ;;----------------------------------------------------------------
+
+    ;; `*use-region-p-function*` is `command.scm`'s, imported above.
+    (define *this-command-function*
+      (make-parameter (lambda () #f)))
+    (define *last-command-function*
+      (make-parameter (lambda () #f)))
+    (define *completion-at-point-function*
+      (make-parameter
+       (lambda ()
+         (error "completion-at-point is not ported"))))
+
+    (define-custom *tab-always-indent* #t
+      "Controls the operation of the TAB key.
+If t, hitting TAB always just indents the current line.
+If nil, hitting TAB indents the current line if point is at the left margin
+or in the line's indentation, otherwise it inserts a \"real\" TAB character.
+If `complete', TAB first tries to indent the current line, and if the line
+was already indented, then try to complete the thing at point."
+      :type '(choice (const :tag "Always" t)
+                     (const :tag "Never" nil)
+                     (const :tag "Complete" complete))
+      :group 'indent)
+    (define-custom *tab-first-completion* #f
+      "Governs the behavior of TAB completion on the first press of the key.
+When nil, complete.  When `eol', only complete if point is at the
+end of a line.  When `word', complete unless the next character
+has word syntax (according to `syntax-after').  When
+`word-or-paren', complete unless the next character is part of a
+word or a parenthesis.  When `word-or-paren-or-punct', complete
+unless the next character is part of a word, parenthesis, or
+punctuation."
+      :type '(choice (const :tag "Complete" nil)
+                     (const eol) (const word)
+                     (const word-or-paren)
+                     (const word-or-paren-or-punct))
+      :group 'indent)
+
+    (define (indent--funcall-widened func)
+      ;; GNU Emacs's `indent--funcall-widened' (`indent.el:190').
+      ;;--------------------------------------------------------------
+      (save-restriction
+        (widen)
+        (func)))
+
+    (define (indent--default-inside-comment)
+      ;; GNU Emacs's `indent--default-inside-comment' (`indent.el:122'):
+      ;; "Indent current line of an inside comment to the indentation of
+      ;; the previous line's comment." Answers `t' when it indented, nil
+      ;; otherwise.
+      ;;
+      ;; `comment-start-skip` is `newcomment.el`'s buffer-local, read here
+      ;; through its slot: `newcomment.scm` imports this library, so the
+      ;; accessor would be a cycle.
+      ;;--------------------------------------------------------------
+      (if (or (> (current-column) (current-indentation))
+              (eq? (*this-command-function*) (*last-command-function*)))
+          #f
+          (let ((ppss (syntax-ppss)))
+            (if (nth 4 ppss)
+                (begin
+                  (indent-line-to
+                   (save-excursion
+                     (forward-line -1)
+                     (skip-chars-forward " \t")
+                     (when (< (- (point) 1) (nth 8 ppss) (line-end-position))
+                       (goto-char (nth 8 ppss))
+                       (let ((skip (buffer-local-value
+                                    (current-buffer) 'comment-start-skip #f)))
+                         (when (and skip (looking-at skip))
+                           (goto-char (match-end 0)))))
+                     (current-column)))
+                  #t)
+                #f))))
+
     (define-command (insert-tab . rest)
       ;; GNU Emacs's `insert-tab' (`indent.el:215'), which cc-mode's
-      ;; `c-insert-tab-function' names as its default. It sits here
-      ;; rather than beside `indent-rigidly` because
-      ;; `indent--default-inside-comment`, `indent-for-tab-command` and
-      ;; `indent--funcall-widened` - the three functions Emacs has
-      ;; between `indent-according-to-mode` and it - are not ported.
-      ;;
-      ;; **One departure**: `(and abbrev-mode ... (expand-abbrev))` is
-      ;; dropped, because `abbrev.el` is not ported and `abbrev-mode` is
-      ;; unbound here; Emacs's branch is a no-op in a tree with no
-      ;; abbrevs.
+      ;; `c-insert-tab-function' names as its default. It sits before
+      ;; `indent-for-tab-command` here where Emacs has it after, because
+      ;; the command calls it.
       "Insert a tab character.
 If `indent-tabs-mode' is nil, insert spaces instead of a tab, up to the
 next tab stop."
       (interactive "P")
       (let ((count (prefix-numeric-value (if (pair? rest) (car rest) #f))))
+        (if (and (abbrev-mode-variable)
+                 (eqv? (char-syntax (preceding-char)) #\w))
+            (expand-abbrev))
         (if (*indent-tabs-mode*)
             (insert-char #\tab count)
-            (indent-to (* *tab-width*
-                          (+ count (/ (current-column) (*tab-width*))))))))
+            (let ((tab-width (buffer-tab-width (current-buffer))))
+              (indent-to (* tab-width
+                            (+ count (/ (current-column) tab-width))))))))
+
+    (define-command (indent-for-tab-command . rest)
+      "Indent the current line or region, or insert a tab, as appropriate.
+This function either inserts a tab, or indents the current line,
+or performs symbol completion, depending on `tab-always-indent'.
+The function called to actually indent the line or insert a tab
+is given by the variable `indent-line-function'.
+
+If a prefix argument is given (ARG), after this function indents
+the current line or inserts a tab, it also rigidly indents the entire
+balanced expression which starts at the beginning of the current
+line, to reflect the current line's indentation.
+
+In most major modes, if point was in the current line's indentation, it
+is moved to the first non-whitespace character after indenting;
+otherwise it stays at the same position relative to the text.
+
+If `transient-mark-mode' is turned on and the region is active,
+this function instead calls `indent-region'.  In this case, any
+prefix argument is ignored."
+      (interactive "P")
+      (let ((arg (if (pair? rest) (car rest) #f)))
+        (cond
+         ;; "The region is active, indent it."
+         ((let ((f (*use-region-p-function*))) (and f (f)))
+          (indent-region (region-beginning) (region-end)))
+         ((or (eq? (indent-line-function) indent-to-left-margin)
+              (and (not (*tab-always-indent*))
+                   (or (> (current-column) (current-indentation))
+                       (eq? (*this-command-function*) (*last-command-function*)))))
+          (insert-tab arg))
+         (else
+          (let ((old-tick (buffer-chars-modified-tick))
+                (old-point (point))
+                (old-indent (current-indentation)))
+            ;; "Indent the line."
+            (or (not (eq? (indent--funcall-widened (indent-line-function))
+                          'noindent))
+                (indent--default-inside-comment)
+                (if (or (<= (current-column) (current-indentation))
+                        (not (eq? (*tab-always-indent*) 'complete)))
+                    (begin
+                      (indent--funcall-widened (indent-line-function))
+                      #t)
+                    #f))
+            (cond
+             ;; "If the text was already indented right, try completion."
+             ((and (eq? (*tab-always-indent*) 'complete)
+                   (= old-point (point))
+                   (= old-tick (buffer-chars-modified-tick))
+                   (or (eq? (*last-command-function*) (*this-command-function*))
+                       (let ((syn (syntax-class (syntax-after (point)))))
+                         (cond ((not (*tab-first-completion*)) #t)
+                               ((eq? (*tab-first-completion*) 'eol) (eolp))
+                               ((eq? (*tab-first-completion*) 'word)
+                                (not (= 2 syn)))
+                               ((eq? (*tab-first-completion*) 'word-or-paren)
+                                (not (memv syn '(2 4 5))))
+                               ((eq? (*tab-first-completion*)
+                                    'word-or-paren-or-punct)
+                                (not (memv syn '(2 4 5 1))))
+                               (else #f)))))
+              (*completion-at-point-function*))
+             ;; "If a prefix argument was given, rigidly indent the
+             ;; following sexp to match the change in the current line's
+             ;; indentation."
+             (arg
+              (let ((end-marker
+                     (save-excursion
+                       (forward-line 0)
+                       ;; Emacs's `(forward-sexp)` here goes through
+                       ;; `forward-sexp-function`; its default action is
+                       ;; `scan-sexps`, which is `syntax.c`'s and below
+                       ;; this library. A Lisp mode's macro-aware mover
+                       ;; (`lisp.el`'s) is above it, so the prefix arm
+                       ;; gets the default mover.
+                       (goto-char (or (scan-sexps (point) 1) (point-max)))
+                       (backward-prefix-chars)
+                       (point-marker)))
+                    (indentation-change (- (current-indentation) old-indent)))
+                (save-excursion
+                  (forward-line 1)
+                  (when (and (not (= indentation-change 0))
+                             (< (point) (marker-position end-marker)))
+                    (indent-rigidly (point) (marker-position end-marker)
+                                    indentation-change)))))))))))
 
     (define-command (indent-rigidly start end arg)
       "Indent all lines starting in the region forward by ARG columns.
@@ -528,14 +710,18 @@ See also `indent-relative-first-indent-point'."
            (else
             ;; "We passed the end of tab-stop-list: guess a continuation."
             (let* ((rev (reverse (tab-stop-list)))
-                   ;; `(last TAB-STOP-LIST 2)': the last two elements.
-                   (last2 (if (pair? (cdr rev))
+                   ;; `(last TAB-STOP-LIST 2)': the last two elements. An
+                   ;; empty list is the *default* - "A value of nil means
+                   ;; a tab stop every `tab-width' columns" - so it is
+                   ;; not an error and `last2` is empty.
+                   (last2 (if (and (pair? rev) (pair? (cdr rev)))
                               (list (cadr rev) (car rev))
                               rev))
-                   (step (if (pair? (cdr last2))
+                   (step (if (and (pair? last2) (pair? (cdr last2)))
                              (- (cadr last2) (car last2))
-                             (*tab-width*)))
-                   (last (if (pair? (cdr last2))
+                             ;; "Extend the default tab stop list."
+                             (buffer-tab-width (current-buffer))))
+                   (last (if (and (pair? last2) (pair? (cdr last2)))
                              (cadr last2)
                              (if (pair? last2) (car last2) 0))))
               ;; "Repeat the last tab's length."

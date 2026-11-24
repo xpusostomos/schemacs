@@ -18,6 +18,8 @@
   (import
  (only (schemacs undo) text-editor-undo-disable! text-editor-undo-enable!)
     (scheme base)
+    (only (scheme read) read)
+    (only (guile) sort port-column)
     (scheme char)
     ;; Reading and writing the file itself, and the `display' that writes
     ;; the buffer back line by line. Neither is in `(scheme base)', and a
@@ -46,6 +48,7 @@
     (only (schemacs frame)
           *current-frame* delete-frame
           frame-editor frame-list frame-quit-cont
+          window-body-height selected-window
           ;; `next-read-file-uses-dialog-p` asks the selected frame's
           ;; display whether it is a window system, which is the C's
           ;; `window_system_available (SELECTED_FRAME ())`.
@@ -60,7 +63,7 @@
     ;; `use-dialog-box` and `use-file-dialog` are `fns.c`'s switches;
     ;; `use-dialog-box-override` is `subr.el`'s. `mapconcat` and
     ;; `identity` are `fns.c`'s too, and `save-some-buffers` reads both.
-    (only (schemacs fns) *use-dialog-box* use-file-dialog
+    (only (schemacs fns) *use-dialog-box* use-file-dialog line-number-at-pos
           mapconcat identity)
     ;; `funcall` is `eval.c`'s; `save-some-buffers` calls it over
     ;; `save-some-buffers-functions`.
@@ -94,7 +97,8 @@
     ;; buffer in the selected window, which is a window operation.
     ;; `find-file-other-window' shows one in the OTHER window.
     (only (schemacs window)
-          pop-to-buffer-same-window display-buffer save-window-excursion
+          pop-to-buffer pop-to-buffer-same-window display-buffer
+          save-window-excursion quit-window
           ;; `set-buffer-major-mode`'s one caller in this tree, installed
           ;; at the bottom of this file.
           *set-buffer-major-mode-function*
@@ -109,7 +113,11 @@
     ;; is below `editfns.scm`.
     (only (schemacs editfns)
           goto-char insert message point point-min point-max save-excursion
-          line-end-position buffer-substring)
+          line-end-position buffer-substring
+          ;; `hack-local-variables` reads and writes the block and the
+          ;; -*- line.
+          buffer-substring-no-properties delete-region forward-line
+          line-beginning-position insert-buffer-substring eobp bolp eolp)
     (only (schemacs buffer) barf-if-buffer-read-only
           ;; `FETCH_CHAR` (`buffer.h`) - the raw read of a named
           ;; buffer. It has no Lisp name, and it was the engine's
@@ -121,7 +129,8 @@
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs subr)', which is below this library.
     (only (schemacs subr)
-          kbd run-hook-with-args-until-success run-hook-with-args-until-failure
+          kbd user-error assq-delete-all
+          run-hook-with-args-until-success run-hook-with-args-until-failure
           run-hooks string-suffix-p assoc-default *delay-mode-hooks*
           *change-major-mode-after-body-hook* *after-change-major-mode-hook*
           ;; `with-temp-file` below is built on the temp-buffer macro.
@@ -146,12 +155,16 @@
     (only (schemacs syntax) skip-chars-forward skip-chars-backward)
     ;; `forward-char' is `cmds.c''s MOVE_POINT command, which `set-auto-mode-1'
     ;; steps back three characters with.
-    (only (schemacs cmds) forward-char)
+    (only (schemacs cmds) forward-char beginning-of-line end-of-line)
     ;; `downcase' is casefiddle.c''s string case function
     (only (schemacs casefiddle) downcase)
     (only (schemacs buffer)
           *case-fold-search*
           current-buffer default-directory erase-buffer
+          ;; file-local variables are buffer slots; the *Local Variables*
+          ;; prompt's buffer and its cursor are the buffer library's.
+          buffer-local-value set-buffer-local-value! local-variable-p
+          get-buffer-create set!buffer-cursor-type
           ;; the buffer's text, which the save path reads code points out
           ;; of - `buffer-text-to-code-points' below is the walk
           text-editor-text)
@@ -199,8 +212,8 @@
     ;; `abbreviate-file-name`'s regexp and its `match-beginning 1' need.
     (only (schemacs search)
           match-beginning match-end match-string regexp-quote string-match
-          string-match-p search-forward re-search-forward looking-at
-          save-match-data)
+          string-match-p search-forward search-backward re-search-forward
+          looking-at looking-back save-match-data)
     ;; `get' and `put' are `fns.c`'s - symbol properties, which is where
     ;; `abbreviate-file-name`'s cache records the home directory it was
     ;; built for. They live in `intervals.sld` for now (see the note
@@ -249,6 +262,7 @@
           *special-event-map*)
     ;; Every command here prompts.
     (only (schemacs minibuffer)
+          read-char-choice
           *insert-default-directory*
           read-buffer
           *minibuffer-completing-file-name*
@@ -354,6 +368,18 @@
    ensure-final-newline-on-visit
    ;; Choosing the major mode (files.el:3040-3910)
    set-auto-mode set-auto-mode-0 set-auto-mode-1
+   ;; File-local variables (files.el:3870-4500)
+   hack-local-variables hack-local-variables--find-variables
+   hack-local-variables-prop-line hack-local-variables-apply
+   hack-local-variables-filter hack-one-local-variable
+   hack-local-variables-confirm
+   file-local-variables-alist set!file-local-variables-alist
+   dir-local-variables-alist set!dir-local-variables-alist
+   *before-hack-local-variables-hook* *hack-local-variables-hook*
+   *enable-local-eval* *safe-local-variable-values*
+   *ignored-local-variable-values* *safe-local-eval-forms*
+   safe-local-variable-p risky-local-variable-p
+   hack-local-variable-regexp
    set-auto-mode--apply-alist set-auto-mode--from-matching-alist-entry
    normal-mode set-buffer-major-mode
    *auto-mode-alist* *magic-mode-alist* *magic-fallback-mode-alist*
@@ -4207,6 +4233,603 @@ The path separator is colon in GNU and GNU-like systems."
                                    (error "Problem with magic-fallback-mode-alist element: %s" re))))))))
              (set-auto-mode-0 mode keep-mode-if-same))))))
 
+
+    ;;----------------------------------------------------------------
+    ;; File-local variables - `hack-local-variables' and its machinery
+    ;;
+    ;; The parser and the safety filter are Emacs's, step for step. Two
+    ;; named departures: a value is read with Scheme's reader and its
+    ;; `nil'/`t' symbols are turned into this tree's `#f'/`#t'
+    ;; (`%elisp-datum'); and `eval:' forms are not applied at all,
+    ;; because evaluating Emacs Lisp is not something this tree can do -
+    ;; the filter still classifies them, and applying one says so.
+    ;; Directory-local variables (`.dir-locals.el') are not ported; the
+    ;; variable is here and stays empty.
+    ;;----------------------------------------------------------------
+
+    (define-custom *enable-local-eval* #t
+      "Control processing of the \"eval\" variable in local variable lists.
+If t, process `eval' local variables without asking.
+If nil, ignore `eval' local variables.
+If anything else, ask the user before processing each."
+      :type 'boolean
+      :group 'find-file)
+
+    (define-custom *safe-local-variable-values* '()
+      "List of variable-value pairs that are considered safe.
+Each element is a cons cell (VAR . VAL), where VAR is a variable
+symbol and VAL is a value that is considered safe."
+      :type 'alist
+      :group 'find-file)
+
+    (define-custom *ignored-local-variable-values* '()
+      "List of variable-value pairs that should always be ignored."
+      :type 'alist
+      :group 'find-file)
+
+    (define-custom *safe-local-eval-forms* '()
+      "Expressions that are considered safe in an `eval:' local variable.
+This tree cannot evaluate Emacs Lisp, so the list is carried for the
+filter's shape and its members are never run."
+      :type '(repeat sexp)
+      :group 'find-file)
+
+    (define ignored-local-variables
+      '(ignored-local-variables safe-local-variable-values
+        file-local-variables-alist dir-local-variables-alist))
+    ;; ^ `files.el:3886`. The names are the symbols a *file* writes, which
+    ;; is what the filter compares against; this tree's own parameters
+    ;; carry the asterisks the convention gives them.
+
+    (define (file-local-variables-alist . buffer)
+      ;; GNU Emacs's buffer-local `file-local-variables-alist'
+      ;; (`files.el:4002`): "Alist of file-local variable settings in the
+      ;; current buffer." Empty is `'()` here, and every emptiness test
+      ;; below is a `pair?` test - `'()` is true in Scheme.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (or (and (pair? buffer) (car buffer)) (current-buffer))
+                          'file-local-variables-alist '()))
+
+    (define (set!file-local-variables-alist value . buffer)
+      (set-buffer-local-value!
+       (or (and (pair? buffer) (car buffer)) (current-buffer))
+       'file-local-variables-alist value))
+
+    (define (dir-local-variables-alist . buffer)
+      ;; `files.el:4012`. No `.dir-locals.el` machinery is ported; the
+      ;; slot exists so the mode hooks that ask for it get an answer.
+      ;;--------------------------------------------------------------
+      (buffer-local-value (or (and (pair? buffer) (car buffer)) (current-buffer))
+                          'dir-local-variables-alist '()))
+    (define (set!dir-local-variables-alist value . buffer)
+      (set-buffer-local-value!
+       (or (and (pair? buffer) (car buffer)) (current-buffer))
+       'dir-local-variables-alist value))
+
+    (define *before-hack-local-variables-hook* (make-parameter '()))
+    (define *hack-local-variables-hook* (make-parameter '()))
+    ;; ^ `files.el:3892` and `:4018`, normal hooks.
+
+    (define permanently-enabled-local-variables
+      '(lexical-binding read-symbol-shorthands))
+    ;; ^ `files.el:4028`.
+
+    (define hack-local-variable-regexp
+      ;; `files.el:4155`: "[ \t]*\\([^][;\"'?()\\ \t\n]+\\)[ \t]*:[ \t]*"
+      ;; written as a Scheme string: the `\\` in the class is one literal
+      ;; backslash, which is `\\\\` here.
+      "[ \t]*\\([^][;\"'?()\\\\ \t\n]+\\)[ \t]*:[ \t]*")
+
+    (define (%elisp-datum datum)
+      ;; Read a file-local value the way Emacs's reader does: `nil' and
+      ;; `t' are this tree's `#f' and `#t', and every other symbol is the
+      ;; symbol it names. A Scheme reader cannot read Elisp's `?c' and
+      ;; `#<...>' forms; they are named departures of the value reader.
+      ;;--------------------------------------------------------------
+      (cond ((eq? datum 'nil) #f)
+            ((eq? datum 't) #t)
+            ((pair? datum)
+             (cons (%elisp-datum (car datum)) (%elisp-datum (cdr datum))))
+            ((vector? datum)
+             (list->vector (map %elisp-datum (vector->list datum))))
+            (else datum)))
+
+    (define (%read-local-variable-value string)
+      ;; Emacs's `(read (current-buffer))' over the value text; the
+      ;; second answer is how many characters it consumed, which is what
+      ;; advancing point past the value needs (`read` moves the buffer's
+      ;; point in Emacs). The port's column is that count - the text is
+      ;; one line.
+      ;;--------------------------------------------------------------
+      (let* ((port (open-input-string string))
+             (datum (read port)))
+        (values (%elisp-datum datum) (port-column port))))
+
+    (define (hack-local-variables-prop-line . rest)
+      ;; GNU Emacs's `hack-local-variables-prop-line' (`files.el:4159`):
+      ;; "Return local variables specified in the -*- line." HANDLE-MODE
+      ;; t asks only for the major mode.
+      ;;--------------------------------------------------------------
+      (let ((handle-mode (and (pair? rest) (car rest))))
+        (save-excursion
+          (goto-char (point-min))
+          (let ((end (set-auto-mode-1)))
+            (cond
+             ((not end) #f)
+             ((looking-at "[ \t]*\\([^ \t\n\r:;]+\\)\\([ \t]*-\\*-\\)")
+              ;; "Simple form: \"-*- MODENAME -*-\"."
+              (if (eq? handle-mode #t)
+                  (string->symbol (string-append (match-string 1) "-mode"))
+                  #f))
+             (else
+              ;; "Hairy form: '-*-' [ <variable> ':' <value> ';' ]* '-*-'."
+              (let ((result '()))
+                (let loop ()
+                  (cond
+                   ((or (and (eq? handle-mode #t) (pair? result))
+                        (>= (point) end))
+                    (if (pair? result) result #f))
+                   ((not (looking-at hack-local-variable-regexp))
+                    (message "Malformed mode-line: %S in buffer %S"
+                             (buffer-substring-no-properties (point) end)
+                             (buffer-name))
+                    #f)
+                   (else
+                    (goto-char (match-end 0))
+                    (let* ((key (string->symbol (match-string 1)))
+                           (value-start (point)))
+                      (let-values (((val n)
+                                    (%read-local-variable-value
+                                     (buffer-substring-no-properties
+                                      (point) end))))
+                      (goto-char (+ value-start n))
+                      (let ((keyname (downcase (symbol->string key))))
+                      (cond
+                       ((eq? handle-mode #t)
+                        (when (equal? keyname "mode")
+                          (set! result
+                                (list (string->symbol
+                                       (string-append
+                                        (downcase (symbol->string val))
+                                        "-mode"))))))
+                       ((equal? keyname "coding") #f)
+                       (else
+                        (when (or (not handle-mode)
+                                  (not (equal? keyname "mode")))
+                          ;; Emacs's `indirect-variable` follows a
+                          ;; variable alias; there are no aliases here.
+                          (set! result
+                                (cons (cons (cond ((eq? key 'eval) 'eval)
+                                                  ((equal? keyname "mode") 'mode)
+                                                  (else key))
+                                            val)
+                                      result))))))
+                      (skip-chars-forward " \t;")
+                      (loop)))))))))))))
+
+    (define (hack-local-variables--find-variables . rest)
+      ;; GNU Emacs's `hack-local-variables--find-variables'
+      ;; (`files.el:4260`): "Return all local variables in the current
+      ;; buffer", from the `Local Variables:` block in the last page.
+      ;;--------------------------------------------------------------
+      (let ((handle-mode (and (pair? rest) (car rest))))
+        (let ((result '()))
+          (save-excursion
+            (goto-char (point-max))
+            (search-backward (string #\newline (integer->char 12))
+                             (max (- (point-max) 3000) (point-min))
+                             'move)
+            (when (parameterize ((*case-fold-search* #t))
+                    (search-forward "Local Variables:" #f #t))
+              (skip-chars-forward " \t")
+              ;; "suffix is what comes after \"local variables:\" in its
+              ;; line. prefix is what comes before it."
+              (let ((suffix (string-append
+                             (regexp-quote
+                              (buffer-substring-no-properties
+                               (point) (line-end-position)))
+                             "$"))
+                    (prefix (string-append
+                             "^"
+                             (regexp-quote
+                              (buffer-substring-no-properties
+                               (line-beginning-position) (match-beginning 0))))))
+                (forward-line 1)
+                (let ((startpos (point))
+                      (thisbuf (current-buffer))
+                      (endpos #f))
+                  (save-excursion
+                    (unless (parameterize ((*case-fold-search* #t))
+                              (re-search-forward
+                               (string-append prefix "[ \t]*End:[ \t]*" suffix)
+                               #f #t))
+                      ;; "This used to be an error, but really all it
+                      ;; means is that this may simply not be a
+                      ;; local-variables section, so just ignore it."
+                      (message "Local variables list is not properly terminated"))
+                    (beginning-of-line)
+                    (set! endpos (point)))
+                  (with-temp-buffer
+                    (insert-buffer-substring thisbuf startpos endpos)
+                    (goto-char (point-min))
+                    ;; `selective-display`'s CR substitution is not
+                    ;; carried: a visited file's CRLFs are decoded before
+                    ;; the text is here.
+                    (let strip ()
+                      (unless (eobp)
+                        ;; "Discard the prefix."
+                        (if (looking-at prefix)
+                            (delete-region (point) (match-end 0))
+                            (user-error "Local variables entry is missing the prefix"))
+                        (end-of-line)
+                        ;; "Discard the suffix."
+                        (if (looking-back suffix (line-beginning-position))
+                            (delete-region (match-beginning 0) (point))
+                            (user-error "Local variables entry is missing the suffix"))
+                        (forward-line 1)
+                        (strip)))
+                    (goto-char (point-min))
+                    (let parse ()
+                      (unless (eobp)
+                        ;; "Find the variable name."
+                        (unless (looking-at hack-local-variable-regexp)
+                          (user-error "Malformed local variable line: %S"
+                                      (buffer-substring-no-properties
+                                       (point) (line-end-position))))
+                        (goto-char (match-end 1))
+                        (let* ((str (match-string 1))
+                               (var (string->symbol str))
+                               (var (if (equal? (downcase (symbol->string var))
+                                                "mode")
+                                        'mode
+                                        var)))
+                          ;; "Read the variable value."
+                          (skip-chars-forward "^:")
+                          (forward-char 1)
+                          (let-values (((val n)
+                                        (%read-local-variable-value
+                                         (buffer-substring-no-properties
+                                          (point) (line-end-position)))))
+                            (goto-char (+ (point) n))
+                            (cond
+                             ((eq? handle-mode #t)
+                              (when (eq? var 'mode)
+                                (let* ((val2 (downcase (symbol->string val)))
+                                       (mode (string->symbol
+                                              (string-append val2 "-mode"))))
+                                  (when (command-record-named
+                                         (major-mode-remap mode))
+                                    (set! result mode)))))
+                             ((eq? var 'coding) #f)
+                             ((eq? var 'lexical-binding)
+                              (unless hack-local-variables--warned-lexical
+                                (set! hack-local-variables--warned-lexical #t)
+                                (message "%s: `lexical-binding' at end of file unreliable"
+                                         (file-name-nondirectory-part
+                                          (or (buffer-file-name thisbuf) "")))))
+                             ((eq? var 'read-symbol-shorthands)
+                              ;; "Sort automatically by shorthand length in
+                              ;; descending order."
+                              (set! val (sort val
+                                              (lambda (sh1 sh2)
+                                                (> (string-length (car sh1))
+                                                   (string-length (car sh2))))))
+                              (set! result
+                                    (cons (cons 'read-symbol-shorthands val)
+                                          result)))
+                             ((and (eq? var 'mode) handle-mode) #f)
+                             (else
+                              (guard (ex (else #f))
+                                (set! result
+                                      (cons (cons (if (eq? var 'eval)
+                                                      'eval
+                                                      var)
+                                                  val)
+                                            result))))))
+                          (forward-line 1)
+                          (parse)))))))))
+          result)))
+
+    (define hack-local-variables--warned-lexical #f)
+    ;; ^ `files.el:4262`, a `defvar` warning once per session.
+
+    (define (safe-local-variable-p sym val)
+      ;; GNU Emacs's `safe-local-variable-p' (`files.el:4402`): "Return
+      ;; non-nil if SYM is safe as a file-local variable with value VAL."
+      ;;--------------------------------------------------------------
+      (or (member (cons sym val) (*safe-local-variable-values*))
+          (let ((sv (get sym 'safe-local-variable)))
+            (and sv
+                 (if (procedure? sv) (sv val) #f)))))
+
+    (define (risky-local-variable-p sym . ignored)
+      ;; GNU Emacs's `risky-local-variable-p' (`files.el:3870`): "Non-nil
+      ;; if SYM could be dangerous as a file-local variable."
+      ;;--------------------------------------------------------------
+      (or (get sym 'risky-local-variable)
+          (string-match
+           (string-append
+            "-hooks?$\\|-functions?$\\|-forms?$\\|-program$\\|"
+            "-commands?$\\|-predicates?$\\|font-lock-keywords$\\|"
+            "font-lock-keywords-[0-9]+$\\|font-lock-syntactic-keywords$\\|"
+            "-frame-alist$\\|-mode-alist$\\|"
+            "-map$\\|-map-alist$\\|-bindat-spec$")
+           (symbol->string sym))))
+
+    (define (%list-ref-safe list n)
+      ;; Emacs's `(nth N LIST)': nil when it runs out, which is what the
+      ;; eval-safep `put` walk needs from a malformed form.
+      ;;--------------------------------------------------------------
+      (cond ((not (pair? list)) #f)
+            ((<= n 0) (car list))
+            (else (%list-ref-safe (cdr list) (- n 1)))))
+
+    (define (hack-one-local-variable-quotep exp)
+      ;; `files.el:3872`.
+      (and (pair? exp) (eq? (car exp) 'quote) (pair? (cdr exp))))
+
+    (define (hack-one-local-variable-eval-safep exp)
+      ;; GNU Emacs's `hack-one-local-variable-eval-safep'
+      ;; (`files.el:3878`): "Return non-nil if it is safe to eval EXP when
+      ;; it is found in a file." The `put` forms and the safe-function
+      ;; property are carried; `macroexp-const-p` is not (every Scheme
+      ;; datum is constant here), and the `(mode)' forms are recognised by
+      ;; their argument lists.
+      ;;--------------------------------------------------------------
+      (or (not (pair? exp))
+          (and (eq? (car exp) 'put)
+               (hack-one-local-variable-quotep (%list-ref-safe exp 1))
+               (hack-one-local-variable-quotep (%list-ref-safe exp 2))
+               (let* ((prop (%list-ref-safe (%list-ref-safe exp 2) 1))
+                      (val (%list-ref-safe exp 3)))
+                 (cond ((memq prop '(lisp-indent-hook
+                                     lisp-indent-function
+                                     scheme-indent-function))
+                        (or (number? val)
+                            (and (hack-one-local-variable-quotep val)
+                                 (eq? (%list-ref-safe val 1) 'defun))))
+                       (else #f))))
+          (member exp (*safe-local-eval-forms*))
+          (and (symbol? (car exp))
+               (or (and (or (null? (cdr exp))
+                            (member (cdr exp) '((1) (0) (-1))))
+                        (string-match "-mode\\'" (symbol->string (car exp))))
+                   (let ((prop (get (car exp) 'safe-local-eval-function)))
+                     (cond ((eq? prop #t) #t)
+                           ((procedure? prop) (prop exp))
+                           ((pair? prop)
+                            (let loop ((rest prop))
+                              (cond ((null? rest) #f)
+                                    ((and (procedure? (car rest))
+                                          ((car rest) exp))
+                                     #t)
+                                    (else (loop (cdr rest))))))
+                           (else #f)))))))
+
+    (define (hack-local-variables-confirm all-vars unsafe-vars risky-vars dir-name)
+      ;; GNU Emacs's `hack-local-variables-confirm' (`files.el:4040`):
+      ;; "Get confirmation before setting up local variable values." The
+      ;; *Local Variables* buffer and the choice loop are the C's; the
+      ;; `!`/`i` answers update the lists in memory, where Emacs's
+      ;; `customize-push-and-save` also writes them to the init file
+      ;; (that machinery is not ported).
+      ;;--------------------------------------------------------------
+      (let* ((name (cond (dir-name dir-name)
+                         ((buffer-file-name)
+                          (file-name-nondirectory-part (buffer-file-name)))
+                         (else (string-append "buffer " (buffer-name)))))
+             (offer-save (and (eq? (*enable-local-variables*) #t)
+                              (pair? unsafe-vars)))
+             (buf (get-buffer-create "*Local Variables*")))
+        (with-current-buffer buf
+          (erase-buffer)
+          (cond
+           ((pair? unsafe-vars)
+            (insert "The local variables list in " name
+                    "\nor .dir-locals.el contains values that may not be safe (*)"
+                    (if (pair? risky-vars)
+                        ", and variables that are risky (**)."
+                        ".")))
+           ((pair? risky-vars)
+            (insert "The local variables list in " name
+                    "\ncontains variables that are risky (**)."))
+           (else
+            (insert "A local variables list is specified in " name ".")))
+          (insert "\n\nDo you want to apply it?  You can type
+y  -- to apply the local variables list.
+n  -- to ignore the local variables list.")
+          (if offer-save
+              (insert "
+!  -- to apply the local variables list, and permanently mark these
+      values (*) as safe (in the future, they will be set automatically.)
+i  -- to ignore the local variables list, and permanently mark these
+      values (*) as ignored
+
+")
+              (insert "\n\n"))
+          (for-each
+           (lambda (elt)
+             (cond ((member elt unsafe-vars) (insert "  * "))
+                   ((member elt risky-vars) (insert " ** "))
+                   (else (insert "    ")))
+             (insert (symbol->string (car elt)))
+             (insert " : ")
+             ;; Emacs's `princ` of the value; `~s` is the nearest this
+             ;; tree has.
+             (insert (format #f "~s" (cdr elt)))
+             (insert "\n"))
+           all-vars)
+          (set!buffer-cursor-type buf #f)
+          (set-buffer-modified-p #f)
+          (goto-char (point-min)))
+        (save-window-excursion
+          (pop-to-buffer buf '(display-buffer--maybe-at-bottom))
+          (let* ((exit-chars (append (list #\y #\n #\space)
+                                     (if offer-save (list #\! #\i) '())))
+                 (prompt (let ((n (line-number-at-pos (point-max)))
+                               (h (window-body-height (selected-window))))
+                           (if (< n h)
+                               (format #f "Please type ~a: "
+                                       (if offer-save "y, n, !, i" "y or n"))
+                               (format #f "Please type ~a, or C-v/M-v to scroll: "
+                                       (if offer-save "y, n, !, i" "y or n")))))
+                 (char (read-char-choice prompt exit-chars)))
+            (when (and offer-save
+                       (or (eqv? char #\!) (eqv? char #\i))
+                       (pair? unsafe-vars))
+              (if (eqv? char #\!)
+                  (*safe-local-variable-values*
+                   (append unsafe-vars (*safe-local-variable-values*)))
+                  (*ignored-local-variable-values*
+                   (append unsafe-vars (*ignored-local-variable-values*)))))
+            (let ((answer (memv char (list #\! #\space #\y))))
+              (quit-window)
+              answer)))))
+
+    (define (hack-local-variables-filter variables dir-name)
+      ;; GNU Emacs's `hack-local-variables-filter' (`files.el:4330`):
+      ;; "Filter local variable settings, querying the user if
+      ;; necessary." The results are added to `file-local-variables-alist'
+      ;; without applying them.
+      ;;--------------------------------------------------------------
+      (let ((all-vars '()) (risky-vars '()) (unsafe-vars '()))
+        (for-each
+         (lambda (elt)
+           (let ((var (car elt)) (val (cdr elt)))
+             (cond
+              ;; "Ignore any variable in `ignored-local-variables'."
+              ((memq var ignored-local-variables) #f)
+              ;; "Ignore variables with the specified values."
+              ((member elt (*ignored-local-variable-values*)) #f)
+              ;; "Obey `enable-local-eval'."
+              ((eq? var 'eval)
+               (when (*enable-local-eval*)
+                 (let ((safe (or (hack-one-local-variable-eval-safep val)
+                                 (safe-local-variable-p var val))))
+                   (when (or safe (not (eq? (*enable-local-variables*) ':safe)))
+                     (set! all-vars (cons elt all-vars))
+                     (or (eq? (*enable-local-eval*) #t)
+                         safe
+                         (set! unsafe-vars (cons elt unsafe-vars)))))))
+              ;; "Ignore duplicates (except `mode') in the present list."
+              ((and (assq var all-vars) (not (eq? var 'mode))) #f)
+              ;; "Accept known-safe variables."
+              ((or (memq var '(mode unibyte coding))
+                   (safe-local-variable-p var val))
+               (set! all-vars (cons elt all-vars)))
+              ;; "The variable is either risky or unsafe."
+              ((not (eq? (*enable-local-variables*) ':safe))
+               (set! all-vars (cons elt all-vars))
+               (if (risky-local-variable-p var val)
+                   (set! risky-vars (cons elt risky-vars))
+                   (set! unsafe-vars (cons elt unsafe-vars)))))))
+         variables)
+        (when (and (pair? all-vars)
+                   ;; "Query, unless all vars are safe or user wants no
+                   ;; querying."
+                   (or (and (eq? (*enable-local-variables*) #t)
+                            (null? unsafe-vars) (null? risky-vars))
+                       (memq (*enable-local-variables*) '(:all :safe))
+                       (hack-local-variables-confirm
+                        all-vars unsafe-vars risky-vars dir-name)))
+          (for-each
+           (lambda (elt)
+             (unless (memq (car elt) '(eval mode))
+               ;; No dir-locals here, so only the file's own alist is
+               ;; cleaned.
+               (set!file-local-variables-alist
+                (assq-delete-all (car elt) (file-local-variables-alist)))))
+           all-vars)
+          (for-each
+           (lambda (elt)
+             (set!file-local-variables-alist
+              (cons elt (file-local-variables-alist))))
+           all-vars)
+          #f)))
+
+    (define (hack-one-local-variable var val)
+      ;; GNU Emacs's `hack-one-local-variable' (`files.el:4247`): "Set
+      ;; local variable VAR with value VAL. If VAR is `mode', call
+      ;; `VAL-mode' as a function unless it's already the major mode."
+      ;;--------------------------------------------------------------
+      (cond
+       ((eq? var 'mode)
+        (set-auto-mode-0 (string->symbol
+                          (string-append (downcase (symbol->string val))
+                                         "-mode"))
+                         #t))
+       ((eq? var 'eval)
+        ;; Emacs evaluates the form; there is no Emacs Lisp evaluator in
+        ;; this tree (see `eval-expression`'s departure), so the setting
+        ;; is reported rather than silently dropped.
+        (message "Local variable `eval' not applied: Emacs Lisp evaluation is not ported"))
+       (else
+        ;; "Make sure the string has no text properties" has nothing to
+        ;; do here - a string read by the value reader carries none - and
+        ;; `custom-variable-p`'s `setopt--set-local` is the same slot
+        ;; write this tree's variable readers use.
+        (set-buffer-local-value! (current-buffer) var val)))
+      #f)
+
+    (define (hack-local-variables-apply)
+      ;; GNU Emacs's `hack-local-variables-apply' (`files.el:4420`):
+      ;; "Apply the elements of `file-local-variables-alist'."
+      ;;--------------------------------------------------------------
+      (when (pair? (file-local-variables-alist))
+        ;; "Any 'evals must run in the Right sequence."
+        (set!file-local-variables-alist
+         (reverse (file-local-variables-alist)))
+        (run-hooks (*before-hack-local-variables-hook*))
+        (for-each (lambda (elt)
+                    (hack-one-local-variable (car elt) (cdr elt)))
+                  (file-local-variables-alist)))
+      (run-hooks (*hack-local-variables-hook*))
+      #f)
+
+    (define (hack-local-variables . rest)
+      ;; GNU Emacs's `hack-local-variables' (`files.el:4254`): "Parse and
+      ;; put into effect this buffer's local variables spec." HANDLE-MODE
+      ;; t asks only for the major mode; INHIBIT-LOCALS ignores the file's
+      ;; settings. `hack-dir-local-variables` and connection-local
+      ;; variables are not ported.
+      ;;--------------------------------------------------------------
+      (let* ((handle-mode (and (pair? rest) (car rest)))
+             (inhibit-locals (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+             (enable (and (not inhibit-locals)
+                          (*local-enable-local-variables*)
+                          (*enable-local-variables*))))
+        (if (eq? handle-mode #t)
+            ;; "We're looking just for the major mode setting."
+            (and enable
+                 (not (inhibit-local-variables-p))
+                 (or (hack-local-variables-prop-line #t)
+                     (hack-local-variables--find-variables #t)))
+            (begin
+              ;; "Normal handling of local variables."
+              (set!file-local-variables-alist '())
+              ;; Emacs's `append` treats nil as the empty list; a Scheme
+              ;; `append` treats it as an improper tail, so the -*- line's
+              ;; nil is spelled `'()` here.
+              (let ((result (append (hack-local-variables--find-variables handle-mode)
+                                    (or (hack-local-variables-prop-line handle-mode)
+                                        '()))))
+                (if (and enable (not (inhibit-local-variables-p)))
+                    (begin
+                      ;; "Set the variables."
+                      (hack-local-variables-filter result #f)
+                      (hack-local-variables-apply))
+                    (begin
+                      ;; "Handle `lexical-binding' and other special local
+                      ;; variables."
+                      (for-each
+                       (lambda (variable)
+                         (let ((elem (assq variable result)))
+                           (when elem
+                             (set!file-local-variables-alist
+                              (cons elem (file-local-variables-alist))))))
+                       permanently-enabled-local-variables)
+                      (hack-local-variables-apply))))))))
+
     (define (normal-mode . rest)
       ;; GNU Emacs's `normal-mode' (files.el:3040): "Choose the major mode
       ;; for this buffer automatically. Also sets up any specified local
@@ -4214,8 +4837,8 @@ The path separator is colon in GNU and GNU-like systems."
       ;;
       ;; "`delay-mode-hooks' being non-nil will have prevented the major
       ;; mode's call to `run-mode-hooks' from calling
-      ;; `hack-local-variables'" - which is not ported; the step that
-      ;; would call it is named here.
+      ;; `hack-local-variables'" - so the two calls below are Emacs's
+      ;; `normal-mode` itself, after `set-auto-mode`.
       ;;--------------------------------------------------------------
       (let ((find-file (if (pair? rest) (car rest) #f)))
         (kill-all-local-variables)
@@ -4225,7 +4848,8 @@ The path separator is colon in GNU and GNU-like systems."
         (let ((enable-local-variables (or (not find-file)
                                           (*enable-local-variables*))))
           (parameterize ((*enable-local-variables* enable-local-variables))
-            (set-auto-mode)))
+            (set-auto-mode)
+            (hack-local-variables)))
         ;; "Turn font lock off and on, to make sure it takes account of
         ;; whatever file local variables are relevant to it" - the mode
         ;; has just been set, and `font-lock-mode' is re-turned-on by the

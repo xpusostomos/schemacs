@@ -40,6 +40,9 @@
        *post-command-hook*
        window-width)
  (only (schemacs subr) add-hook remove-hook)
+ (only (schemacs abbrev)
+       make-abbrev-table define-abbrev set!local-abbrev-table
+       set!abbrev-mode-variable! abbrev-mode-variable)
  (only (schemacs keyboard)
        command-remapping dispatch-key-event dispatch-input-event timer-check!
        *unread-command-events*
@@ -474,7 +477,10 @@
   (run-keys "X" (list C-u C-u #\a)))
 
 ;; The prefix reaches every count-taking command, not just self-insert.
-(test-equal '("\t\t\t\tX" . 5) (run-keys "X" (list C-u #\tab)))
+;; TAB is `indent-for-tab-command` now, which takes the prefix for its
+;; rigid-sexp arm and not as a repeat count: Emacs 31.1 answers
+;; "\tX" with point 2 for `C-u TAB` on "X".
+(test-equal '("\tX" . 2) (run-keys "X" (list C-u #\tab)))
 (test-equal '("\n\n\n\nX" . 5) (run-keys "X" (list C-u #\return)))
 (test-equal '("o" . 1) (run-keys "hello" (list C-u C-d)))
 (test-equal '("a\nb\nc\nd\ne" . 9) (run-keys "a\nb\nc\nd\ne" (list C-u C-n)))
@@ -5869,3 +5875,62 @@
       (dispatch-key-event frame (char->integer #\f))
       (test-equal "after remove-hook LOCAL it no longer runs" '(ran) log))))
 (test-end "schemacs_tty_editor_post_command_hook")
+
+
+;;--------------------------------------------------------------------
+;; Abbreviations through the real self-insert path, and TAB
+;;
+;; `internal_self_insert` expands an abbreviation when the character
+;; being typed is not a word constituent and the one before it is
+;; (`cmds.c:412'). The TAB binding is Emacs's `indent-for-tab-command`
+;; now, which inserts a tab where `indent-relative` would not move and
+;; reindents where it would - both measured on Emacs 31.1 first.
+
+(test-begin "schemacs_tty_editor_abbrev_and_tab")
+(let* ((tbl (make-abbrev-table))
+       (ed (allocate-buffer))
+       (frame (test-frame ed)))
+  (define-abbrev tbl "tt" "testing")
+  (parameterize ((*current-frame* frame) (*echo-area-buffer* #f)
+                 (*current-buffer* ed)
+                 (*this-command* #f) (*last-command* #f))
+    (set-window-buffer! (frame-selected-window frame) ed)
+    (set!local-abbrev-table tbl)
+    (set!abbrev-mode-variable! #t)
+    (dispatch-key-event frame (char->integer #\t))
+    (dispatch-key-event frame (char->integer #\t))
+    (dispatch-key-event frame (char->integer #\space))
+    (test-equal "a typed abbreviation expands on the following space"
+                "testing "
+                (with-current-buffer ed
+                  (buffer-substring-no-properties (point-min) (point-max))))))
+
+(let* ((ed (allocate-buffer))
+       (frame (test-frame ed)))
+  (parameterize ((*current-frame* frame) (*echo-area-buffer* #f)
+                 (*current-buffer* ed)
+                 (*this-command* #f) (*last-command* #f))
+    (set-window-buffer! (frame-selected-window frame) ed)
+    (dispatch-key-event frame 9)
+    (test-equal "TAB on an empty line inserts a tab (Emacs 31.1)"
+                "\t"
+                (with-current-buffer ed
+                  (buffer-substring-no-properties (point-min) (point-max))))
+    (test-equal "and point is after it" 2
+                (with-current-buffer ed (point)))))
+
+(let* ((ed (allocate-buffer))
+       (frame (test-frame ed)))
+  (parameterize ((*current-frame* frame) (*echo-area-buffer* #f)
+                 (*current-buffer* ed)
+                 (*this-command* #f) (*last-command* #f))
+    (set-window-buffer! (frame-selected-window frame) ed)
+    (with-current-buffer ed (insert "    abc\n") (goto-char 9))
+    (dispatch-key-event frame 9)
+    (test-equal "TAB on an indented blank line reindents it (Emacs 31.1)"
+                "    abc\n    "
+                (with-current-buffer ed
+                  (buffer-substring-no-properties (point-min) (point-max))))
+    (test-equal "leaving point at the indentation's end" 13
+                (with-current-buffer ed (point)))))
+(test-end "schemacs_tty_editor_abbrev_and_tab")

@@ -20,7 +20,9 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  
  (only (schemacs buffer) buffer-local-value default-directory current-buffer allocate-buffer
-       get-buffer-create set-buffer set-buffer-local-value!)
+       get-buffer-create set-buffer set-buffer-local-value! major-mode)
+ (only (schemacs editfns) insert)
+ (only (schemacs intervals) put)
  (only (schemacs window) window-normalize-buffer-to-switch-to)
  (only (schemacs frame) *current-frame* new-frame)
  (only (schemacs fileio)
@@ -31,7 +33,12 @@
        *abbreviated-home-dir* *directory-abbrev-alist*
        abbreviate-file-name cd cd-absolute cd-path set!cd-path
        directory-abbrev-apply file-name-completion-table
-       parse-colon-path locate-file set-buffer-major-mode))
+       parse-colon-path locate-file set-buffer-major-mode
+       ;; file-local variables
+       hack-local-variables file-local-variables-alist
+       set!file-local-variables-alist
+       *before-hack-local-variables-hook* *enable-local-variables*
+       *safe-local-variable-values*))
 
 (setvbuf (current-output-port) 'none)
 
@@ -268,3 +275,89 @@
     (buffer-local-value scratch 'major-mode 'fundamental-mode)))
 
 (test-end "schemacs_editor_files_major_mode")
+
+
+;;--------------------------------------------------------------------
+;; File-local variables: the -*- line and the Local Variables block.
+;;
+;; Every expectation is what `emacs -Q --batch' answers with
+;; `enable-local-variables' bound to `:all' (so the safety prompt, which
+;; this test cannot answer, is out of the way). `nil' in a value is this
+;; tree's #f, which is why `indent-tabs-mode: nil' reads back as false.
+
+(test-begin "schemacs_editor_files_local_variables")
+
+(define (local-variables-buffer text)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert text)
+    b))
+
+(parameterize ((*enable-local-variables* ':all))
+  (let ((b (local-variables-buffer "-*- foo-bar: 42; str: \"x\" -*-\nbody")))
+    (hack-local-variables)
+    (test-equal "the -*- line sets a number" 42
+                (buffer-local-value b 'foo-bar #f))
+    (test-equal "and a string" "x" (buffer-local-value b 'str #f))
+    (test-equal "and records them in file-local-variables-alist" 42
+                (cdr (assq 'foo-bar (file-local-variables-alist))))
+    (test-equal "the coding: tag is not a variable" #f
+                (assq 'coding (file-local-variables-alist))))
+
+  (let ((b (local-variables-buffer
+            "body\nLocal Variables:\nfoo-bar: 42\nstr: \"x\"\nEnd:\n")))
+    (hack-local-variables)
+    (test-equal "the Local Variables block sets a number" 42
+                (buffer-local-value b 'foo-bar #f))
+    (test-equal "and a string" "x" (buffer-local-value b 'str #f)))
+
+  (let ((b (local-variables-buffer
+            "body\nLocal Variables:\nmode: text\nEnd:\n")))
+    (hack-local-variables)
+    (test-equal "mode: runs the mode" 'text-mode (major-mode b)))
+
+  (let ((b (local-variables-buffer
+            "body\nLocal Variables:\nindent-tabs-mode: nil\nEnd:\n")))
+    (hack-local-variables)
+    (test-equal "nil is this tree's false" #f
+                (buffer-local-value b 'indent-tabs-mode 'absent))))
+
+;; The before-hook runs after the alist is filled and before the
+;; variables are applied, which is where cc-mode's c-before-hack-hook
+;; reads and rewrites the file's style (cc-mode.el:863).
+(let ((b (local-variables-buffer
+          "body\nLocal Variables:\nfoo-bar: 42\nEnd:\n"))
+      (log '()))
+  (parameterize ((*enable-local-variables* ':all)
+                 (*before-hack-local-variables-hook*
+                  (list (lambda ()
+                          (set! log (cons 'ran log))
+                          (set!file-local-variables-alist
+                           (cons (cons 'added 7) (file-local-variables-alist)))))))
+    (hack-local-variables)
+    (test-equal "before-hack-local-variables-hook ran" '(ran) log)
+    (test-equal "its addition is applied too" 7
+                (buffer-local-value b 'added #f))
+    (test-equal "and the file's own variable as well" 42
+                (buffer-local-value b 'foo-bar #f))))
+
+;; A variable marked safe with `put' is applied without the prompt.
+(put 'safe-marked-test-variable 'safe-local-variable integer?)
+(let ((b (local-variables-buffer
+          "body\nLocal Variables:\nsafe-marked-test-variable: 9\nEnd:\n")))
+  (parameterize ((*enable-local-variables* #t))
+    (hack-local-variables)
+    (test-equal "a safe-local-variable property applies without asking" 9
+                (buffer-local-value b 'safe-marked-test-variable #f))))
+
+;; A value in `safe-local-variable-values' likewise.
+(let ((b (local-variables-buffer
+          "body\nLocal Variables:\nplist-test-variable: \"v\"\nEnd:\n")))
+  (parameterize ((*enable-local-variables* #t)
+                 (*safe-local-variable-values*
+                  (list (cons 'plist-test-variable "v"))))
+    (hack-local-variables)
+    (test-equal "safe-local-variable-values applies without asking" "v"
+                (buffer-local-value b 'plist-test-variable #f))))
+
+(test-end "schemacs_editor_files_local_variables")
