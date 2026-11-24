@@ -17429,18 +17429,23 @@ it, as that library's header explains.
    `c-depropertize-ml-strings-in-region`, two Emacs car/cdr-of-nil
    arms (`%c-car`/`%c-caddr`), and **`match-data` answering `'()`
    where Emacs answers nil** - fixed in `search.scm`.
-   Next: `c-depropertize-CPP`,
-   `c-neutralize-syntax-in-CPP`, `c-change-expand-fl-region`,
-   `c-called-from-text-property-change-p`, and
-   `c-before-change`/`c-after-change` themselves.
-2. Then `c-depropertize-CPP`, `c-neutralize-syntax-in-CPP`, the
-   comment-escape pair, `c-parse-quotes-after-change`,
-   `c-extend-font-lock-region-for-macros`, `c-change-expand-fl-region`,
-   and `c-called-from-text-property-change-p` (Guile has no
-   `backtrace-frame`; bind a flag in textprop.scm's property-change
-   path instead - decision recorded in DEPARTURES.md).
-3. Then `c-before-change`/`c-after-change` themselves, then
-   `c-basic-common-init`/`c-common-init` and the mode definitions.
+   **The property-change test and the CPP propertizers are in**
+   (`cc-mode.el:997`-`:1260`; group `schemacs_editor_cc_mode_cpp`, 13).
+   `c-called-from-text-property-change-p` is a parameter
+   (`*in-property-change-p*`, bound in `textprop.scm`'s
+   `modify-text-properties`) where Emacs walks its stack; the
+   after-change side of Emacs's signal is a named gap.
+   Next: `c-before-change`/`c-after-change` themselves (every function
+   their language lists name is now ported except the `c-fl-decl-*`
+   pair behind `c-change-expand-fl-region`), then
+   `c-change-expand-fl-region`.
+2. `c-change-expand-fl-region` needs the `c-fl-decl-start`/`-end`
+   pair and the `c-doc-fl-decl-start`/`-end` pair (and
+   `c-beginning-of-objc-method-header`, which has no mode here).
+3. Then `c-basic-common-init`/`c-common-init` and the mode definitions
+   (with `c-font-lock-init`/`c-font-lock-fontify-region`, and the
+   language function registry filled for every symbol the change
+   lists name).
    That is the gate for `tools/cc-cmds-diff/`: currently 75/99, every
    red pair a stale cc cache. Run it with:
    `emacs -Q --batch -l tools/cc-cmds-diff/emacs-cmds.el STYLE FILE OUT [cpp]`

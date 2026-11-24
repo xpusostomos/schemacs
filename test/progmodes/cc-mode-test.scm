@@ -25,9 +25,11 @@
  (only (schemacs search) match-beginning match-end)
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs marker) marker-position)
- (only (schemacs textprop) get-text-property)
+ (only (schemacs insdel) *before-change-functions*)
+ (only (schemacs textprop) get-text-property put-text-property)
  (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*
-       c-clear-char-property c-mark-<-as-paren c-mark->-as-paren
+       c-clear-char-property c-get-char-property
+       c-mark-<-as-paren c-mark->-as-paren
        c-clear-char-property-with-value-on-char)
  (schemacs progmodes cc-langs)
  (only (schemacs progmodes cc-styles) c-set-style)
@@ -50,7 +52,12 @@
        c-before-change-fix-comment-escapes c-after-change-fix-comment-escapes
        c-quoted-number-head-before-point c-quoted-number-tail-after-point
        c-quoted-number-straddling-point
-       c-parse-quotes-before-change c-parse-quotes-after-change))
+       c-parse-quotes-before-change c-parse-quotes-after-change
+       c-called-from-text-property-change-p
+       c-locate-first-punctuation-prop
+       c-depropertize-CPP c-extend-region-for-CPP c-depropertize-new-text
+       c-extend-font-lock-region-for-macros
+       c-neutralize-CPP-line c-neutralize-syntax-in-CPP))
 
 (test-begin "schemacs_editor_cc_mode")
 
@@ -475,3 +482,142 @@
 (test-equal "... and unsets the markers" '(#f #f) (mrk))
 
 (test-end "schemacs_editor_cc_mode_clear_syn_tab")
+
+;;--------------------------------------------------------------
+;; `c-called-from-text-property-change-p' and the CPP propertizers
+;; (`cc-mode.el:997'-`:1260')
+;;--------------------------------------------------------------
+;; Emacs answers the first by walking its own stack (`(backtrace-frame
+;; 3)'); this tree binds `*in-property-change-p*' in `textprop.scm''s
+;; `modify-text-properties', so the contract measured here is the same:
+;; a property write's change hooks see t, an insertion's do not. (An
+;; insertion here raises the hook twice - once for the text change and
+;; once for the property graft, which is a property write - so the
+;; test looks at the first call.)
+(test-begin "schemacs_editor_cc_mode_cpp")
+
+(let ((b (fresh "abc")))
+  (let ((got #f))
+    (parameterize ((*before-change-functions*
+                    (list (lambda (beg end)
+                            (set! got (c-called-from-text-property-change-p))))))
+      (put-text-property 1 2 'face 'bold)
+      (test-equal "a property write's hook sees the property-change flag"
+        #t got))))
+
+(let ((b (fresh "abc")))
+  (let ((calls '()))
+    (parameterize ((*before-change-functions*
+                    (list (lambda (beg end)
+                            (set! calls (cons (c-called-from-text-property-change-p)
+                                              calls))))))
+      (insert "x")
+      (test-equal "an insertion's first hook call does not see it"
+        #f (car (reverse calls))))))
+
+(define cpp-fx (string-append "#define A (x\nint y;\n#define B R" (string #\")
+                              "d(hi)d" (string #\") "\nint z;\n"))
+
+(define (fresh-cpp text)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert text)
+    (set-buffer-local-value! b 'major-mode 'c++-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (parameterize ((*c-buffer-is-cc-mode* 'c++-mode))
+      (c-init-language-vars c++-mode)
+      (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++))))
+    (let loop ((p 1))
+      (when (<= p (1- (point-max)))
+        (c-clear-char-property p 'syntax-table)
+        (c-clear-char-property p 'c-fl-syn-tab)
+        (loop (+ p 1))))
+    b))
+
+(define (cpp-props)
+  (let loop ((p 1) (acc '()))
+    (if (> p (1- (point-max)))
+        (reverse acc)
+        (let ((v (c-get-char-property p 'syntax-table)))
+          (loop (+ p 1) (if v (cons (list p v) acc) acc))))))
+
+(define (mark p) (c-put-syntax-table-trim-caches p '(1)))
+
+;; A: a change inside the first macro depropertizes that whole macro
+(fresh-cpp cpp-fx)
+(for-each mark '(8 10 21 30 32 34 42))
+(set!c-new-BEG 1) (set!c-new-END 48)
+(c-depropertize-CPP 12 13)
+(test-equal "c-depropertize-CPP clears the changed macro's punctuation"
+  (list (list 1 48) (list (list 42 '(1))))
+  (list (list (c-new-BEG) (c-new-END)) (cpp-props)))
+
+;; A2: a raw string inside a macro is depropertized too
+(fresh-cpp cpp-fx)
+(for-each mark '(32 34 38 42))
+(set!c-new-BEG 1) (set!c-new-END 48)
+(c-depropertize-CPP 40 41)
+(test-equal "... including a raw string inside the macro"
+  (list (list 42 '(1))) (cpp-props))
+
+;; B: the region grows to the macro's bounds
+(fresh-cpp cpp-fx)
+(set!c-new-BEG 5) (set!c-new-END 15)
+(c-extend-region-for-CPP 5 15)
+(test-equal "c-extend-region-for-CPP grows the region to the macro start"
+  (list 1 15) (list (c-new-BEG) (c-new-END)))
+
+(fresh-cpp cpp-fx)
+(set!c-new-BEG 23) (set!c-new-END 26)
+(c-extend-region-for-CPP 23 26)
+(test-equal "... and at the other end to the macro's terminating newline"
+  (list 21 41) (list (c-new-BEG) (c-new-END)))
+
+;; C: the font-lock region is restricted to the macro
+(fresh-cpp cpp-fx)
+(set!c-new-BEG 1) (set!c-new-END 30)
+(c-extend-font-lock-region-for-macros 1 30 0)
+(test-equal "c-extend-font-lock-region-for-macros extends to the macro end"
+  (list 1 40) (list (c-new-BEG) (c-new-END)))
+
+(fresh-cpp cpp-fx)
+(set!c-new-BEG 1) (set!c-new-END 10)
+(c-extend-font-lock-region-for-macros 1 10 0)
+(test-equal "... without shrinking, and bounded by the macro"
+  (list 1 13) (list (c-new-BEG) (c-new-END)))
+
+;; D: an unmatched ( on a macro line gets punctuation syntax
+(fresh-cpp cpp-fx)
+(c-neutralize-CPP-line 1 13)
+(test-equal "c-neutralize-CPP-line marks the unmatched paren"
+  (list (list 11 '(1))) (cpp-props))
+
+;; E: ... and the region walk does it for every macro line
+(fresh-cpp cpp-fx)
+(set!c-new-BEG 1) (set!c-new-END 48)
+(c-neutralize-syntax-in-CPP 1 48 0)
+(test-equal "c-neutralize-syntax-in-CPP marks it through the region"
+  (list (list 11 '(1))) (cpp-props))
+
+;; F: new text loses the properties that would interfere
+(fresh-cpp cpp-fx)
+(for-each mark '(8 10 21 30 32 34 42))
+(c-depropertize-new-text 21 40 19)
+(test-equal "c-depropertize-new-text clears the new region only"
+  (list (list 8 '(1)) (list 10 '(1)) (list 42 '(1))) (cpp-props))
+
+;; G: the first punctuation property in a region, point unchanged
+(fresh-cpp cpp-fx)
+(for-each mark '(8 30))
+(goto-char 48)
+(test-equal "c-locate-first-punctuation-prop answers the first and keeps point"
+  (list 8 48)
+  (list (c-locate-first-punctuation-prop 1) (point)))
+
+(fresh-cpp cpp-fx)
+(goto-char 20)
+(test-equal "... and nil when there is none"
+  (list #f 20)
+  (list (c-locate-first-punctuation-prop 1) (point)))
+
+(test-end "schemacs_editor_cc_mode_cpp")

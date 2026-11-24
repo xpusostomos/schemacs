@@ -15905,3 +15905,52 @@ The remaining change machinery, in dependency order, is
 `c-called-from-text-property-change-p`, and then `c-before-change` /
 `c-after-change` themselves, which call every function ported since the
 found-type helpers.
+
+## The property-change test and the CPP propertizers (2026-11-24)
+
+`c-called-from-text-property-change-p` (`cc-mode.el:997`),
+`c-locate-first-punctuation-prop` (`:1008`), `c-depropertize-CPP`
+(`:1019`), `c-extend-region-for-CPP` (`:1060`),
+`c-depropertize-new-text` (`:1080`),
+`c-extend-font-lock-region-for-macros` (`:1108`),
+`c-neutralize-CPP-line` (`:1135`) and `c-neutralize-syntax-in-CPP`
+(`:1159`) are in `cc-mode.scm`.
+
+**The one representation departure** is the first function. Emacs asks
+`(memq (cadr (backtrace-frame 3)) '(put-text-property
+remove-text-properties remove-list-of-text-properties))`; Guile has no
+`backtrace-frame`, so `textprop.scm` gained
+`*in-property-change-p*`, bound to `#t` around the
+`prepare_to_modify_buffer_1` call in `modify-text-properties` - the one
+place a property write reaches the change hooks. The contract is the
+same and is tested: a property write's before-change hook sees `t`, an
+insertion's does not.
+
+**The after-change side of it is not carried, and is a real gap**:
+Emacs's property writes signal `after-change-functions` too
+(`textprop.c:1458`), and this tree's do not, so a ported after-change
+function is never called from a property write here. Adding that
+signal changes every mode's after-change path and has not been done;
+when it is, the same parameter must be bound around the signal.
+
+A second departure the test found: **an insertion here raises
+`before-change-functions` twice** - once for the text change and once
+for the text-property graft, which goes through
+`modify-text-properties`. Emacs raises it once. The second call is
+exactly the case `c-called-from-text-property-change-p` exists to
+skip, so a ported `c-before-change` is unaffected; it is named here
+because it is visible to any hook that counts its calls.
+
+Verified against Emacs 31.1 on `#define A (x\nint y;\n#define B
+R"d(hi)d"\nint z;\n`, every expectation measured there first: the
+eleven rows in `schemacs_editor_cc_mode_cpp` cover the macro
+depropertization (including a raw string inside a macro), the region
+growth at both ends, the font-lock region's restriction, the
+punctuation of an unmatched paren through both the line and the region
+walk, the new-text clearing, and the punctuation locator's answer and
+point. The probes are `/tmp/cpp-em.el` and `/tmp/cpp-ours.scm`;
+`/tmp/ccp2-ours.scm` is the double-signal measurement.
+
+Next, in cc-mode.el's order: `c-before-change` and `c-after-change`
+themselves - every function their language lists name is now ported,
+except the `c-fl-decl-*` pair behind `c-change-expand-fl-region`.

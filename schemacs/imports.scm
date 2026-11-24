@@ -575,6 +575,7 @@
     *icon-preference*
     *idl-font-lock-extra-types*
     *image-load-path*
+    *in-property-change-p*
     *indent-tabs-mode*
     *inhibit-auto-fill*
     *inhibit-field-text-motion*
@@ -1296,6 +1297,7 @@
     c-cache-to-parse-ps-state
     c-calc-offset
     c-calculate-state
+    c-called-from-text-property-change-p
     c-characterp
     c-cheap-inside-bracelist-p
     c-check-qualified-type
@@ -1338,9 +1340,11 @@
     c-delete-backslashes-forward
     c-delete-overlay
     c-delq-from-dotted-list
+    c-depropertize-CPP
     c-depropertize-ml-string
     c-depropertize-ml-string-delims
     c-depropertize-ml-strings-in-region
+    c-depropertize-new-text
     c-determine-+ve-limit
     c-determine-limit
     c-determine-limit-get-base
@@ -1368,6 +1372,8 @@
     c-end-of-token
     c-end-pos
     c-evaluate-offset
+    c-extend-font-lock-region-for-macros
+    c-extend-region-for-CPP
     c-face-name-p
     c-fallback-style
     c-filter-ops
@@ -1598,6 +1604,7 @@
     c-literal-limits
     c-literal-start
     c-literal-type
+    c-locate-first-punctuation-prop
     c-looking-at-c++-attribute
     c-looking-at-c++-lambda-capture-list
     c-looking-at-c++-lambda-expression
@@ -1662,7 +1669,9 @@
     c-multiline-string-check-final-quote
     c-multiline-string-start-is-being-detached
     c-negation-char-face-name
+    c-neutralize-CPP-line
     c-neutralize-pos
+    c-neutralize-syntax-in-CPP
     c-neutralized-prop
     c-new-BEG
     c-new-END

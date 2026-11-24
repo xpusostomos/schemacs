@@ -85,6 +85,7 @@
    add-text-properties
    add-text-properties-from-list
    modify-text-properties
+   *in-property-change-p*
    text-property-list
    get-char-property
    remove-text-properties
@@ -380,6 +381,24 @@
                                         (list old val)))))
                   (loop (cddr tail) #t))))))))))
 
+    ;; "Is the primitive which invoked `before-change-functions' or
+    ;; `after-change-functions' one which merely changes text
+    ;; properties?" - `cc-mode.el:997''s
+    ;; `c-called-from-text-property-change-p' asks it, and Emacs answers
+    ;; by walking its own stack (`(backtrace-frame 3)'), which Guile has
+    ;; no counterpart for. This parameter is the tree's answer: it is
+    ;; bound around the one call below that raises the change hooks from
+    ;; a property write.
+    ;;
+    ;; **The after-change side is not carried**: this tree's property
+    ;; writes raise `before-change-functions' through
+    ;; `prepare_to_modify_buffer_1' but do not signal
+    ;; `after-change-functions' the way `textprop.c:1458' does, so a
+    ;; ported after-change function is never called from a property
+    ;; write here. Adding that signal is a change to every mode's
+    ;; after-change path and has not been made; DEPARTURES.md names it.
+    (define *in-property-change-p* (make-parameter #f))
+
     (define (modify-text-properties object start end)
       ;; GNU Emacs's `modify_text_properties` (`textprop.c:76'): "Prepare to
       ;; modify the text properties of BUFFER from START to END." Every
@@ -423,7 +442,8 @@
       ;; than Emacs does and changes nothing else.
       ;;--------------------------------------------------------------
       (with-current-buffer object
-        (prepare-to-modify-buffer-1 start end)
+        (parameterize ((*in-property-change-p* #t))
+          (prepare-to-modify-buffer-1 start end))
         (record-first-change)
         (%text-editor-incr-modiff! (current-buffer) 0)))
 

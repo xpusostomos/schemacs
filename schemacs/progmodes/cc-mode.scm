@@ -47,18 +47,20 @@
   (import
     (scheme base)
     (only (guile) logand caddr while)
-    (only (schemacs core syntax-macros) when-e while-e setq)
+    (only (schemacs core syntax-macros) when-e while-e setq prog1)
     (only (schemacs buffer) current-buffer buffer-local-value
           set-buffer-local-value! *case-fold-search*)
     (only (schemacs marker) copy-marker set-marker marker-position)
     (only (schemacs editfns) point point-max point-min goto-char
           bobp eobp char-before char-after buffer-substring-no-properties
-          save-excursion forward-line narrow-to-region save-restriction)
+          save-excursion forward-line narrow-to-region save-restriction
+          widen)
     (only (schemacs search) looking-at match-end match-beginning
           re-search-forward search-forward save-match-data)
     (only (schemacs syntax) skip-syntax-backward skip-chars-backward skip-chars-forward
           parse-partial-sexp)
     (only (schemacs cmds) backward-char forward-char end-of-line beginning-of-line)
+    (only (schemacs textprop) *in-property-change-p*)
     (only (schemacs progmodes cc-defs)
           c-search-forward-non-nil-char-property
           c-search-forward-char-property c-search-backward-char-property
@@ -94,10 +96,14 @@
           c-end-of-macro c-in-literal
           c-ml-string-opener-at-or-around-point
           c-maybe-re-mark-ml-string
+          c-depropertize-ml-strings-in-region
+          c-clear->-pair-props c-clear-<-pair-props
+          c-no-comment-end-of-macro
           *c-clear-syn-tab-properties-function*
           *c-remove-string-fences-function*
           c-truncate-lit-pos/state-cache
           c-put-syntax-table-trim-caches c-clear-syntax-table-trim-caches
+          c-clear-syntax-table-with-value-trim-caches
           c-clear-syntax-table-with-value-on-char-trim-caches
           c-put-syntax-table-properties-on-char-trim-caches
           c-put-string-fence-trim-caches
@@ -132,6 +138,13 @@
    c-parse-quotes-before-change c-parse-quotes-after-change
    c-bc-changed-stringiness set!c-bc-changed-stringiness
    c-open-string-opener set!c-open-string-opener
+   ;; `cc-mode.el:997'-`:1260': the property-change test and the CPP
+   ;; propertizers
+   c-called-from-text-property-change-p
+   c-locate-first-punctuation-prop
+   c-depropertize-CPP c-extend-region-for-CPP c-depropertize-new-text
+   c-extend-font-lock-region-for-macros
+   c-neutralize-CPP-line c-neutralize-syntax-in-CPP
    %c-clear-syn-tab-properties-full)
 
   (begin
@@ -1245,6 +1258,238 @@
                          (not (eobp))))
               (forward-char)
               (loop)))))))
+
+    ;; ---------------------------------------------------------------
+    ;; The property-change test and the CPP propertizers
+    ;; (`cc-mode.el:997'-`:1260')
+    ;;--------------------------------------------------------------
+    (define (c-called-from-text-property-change-p)
+      ;; "Is the primitive which invoked `before-change-functions' or
+      ;; `after-change-functions' one which merely changes text
+      ;; properties? This function must be called directly from a member
+      ;; of one of the above hooks."
+      ;;
+      ;; Emacs asks `(cadr (backtrace-frame 3))'. Guile has no
+      ;; `backtrace-frame', so `textprop.scm''s `modify-text-properties'
+      ;; binds `*in-property-change-p*' around the
+      ;; `prepare_to_modify_buffer_1' that raises the change hooks - the
+      ;; one place the property primitives reach them.
+      (*in-property-change-p*))
+
+    (define (c-locate-first-punctuation-prop beg)
+      ;; "Scan the region (BEG (point)) for `syntax-table' punctuation
+      ;; text properties, returning the position of the first found, or
+      ;; nil. Point is unchanged."
+      (let ((end (point)))
+        (goto-char beg)
+        (prog1
+            (if (c-search-forward-char-property 'syntax-table '(1) end)
+                (match-beginning 0)
+                #f)
+          (goto-char end))))
+
+    (define (c-depropertize-CPP beg end)
+      ;; "Remove the punctuation syntax-table text property from the CPP
+      ;; parts of (c-new-BEG c-new-END), and remove all syntax-table
+      ;; properties from any raw strings within these CPP parts.
+      ;;
+      ;; This function is in the C/C++/ObjC values of
+      ;; `c-get-state-before-change-functions' and is called exclusively
+      ;; as a before change function."
+      (c-save-buffer-state
+       ((m-beg #f) (ss-found #f))
+       (goto-char (c-new-BEG))
+       (while (and (< (point) beg)
+                   (re-search-forward (%c-langvar 'c-anchored-cpp-prefix)
+                                      beg 'bound))
+         (goto-char (match-beginning 1))
+         (set! m-beg (point))
+         (c-end-of-macro)
+         (when (%c-langvar 'c-ml-string-opener-re)
+           (save-excursion
+             (c-depropertize-ml-strings-in-region m-beg (point))))
+         (c-clear-syntax-table-with-value-trim-caches m-beg (point) '(1)))
+
+       (while (and (< (point) end)
+                   (begin
+                     (set! ss-found
+                           (re-search-forward (%c-langvar 'c-anchored-cpp-prefix)
+                                              end 'bound))
+                     ss-found))
+         (goto-char (match-beginning 1))
+         (set! m-beg (point))
+         (c-end-of-macro)
+         (c-truncate-lit-pos/state-cache
+          (or (c-locate-first-punctuation-prop m-beg) (point-max))))
+
+       (when (and ss-found (> (point) end))
+         (when (%c-langvar 'c-ml-string-opener-re)
+           (save-excursion
+             (c-depropertize-ml-strings-in-region m-beg (point))))
+         (c-clear-syntax-table-with-value-trim-caches m-beg (point) '(1)))
+
+       (while (and (< (point) (c-new-END))
+                   (re-search-forward (%c-langvar 'c-anchored-cpp-prefix)
+                                      (c-new-END) 'bound))
+         (goto-char (match-beginning 1))
+         (set! m-beg (point))
+         (c-end-of-macro)
+         (c-truncate-lit-pos/state-cache
+          (or (c-locate-first-punctuation-prop m-beg) (point-max)))
+         (when (%c-langvar 'c-ml-string-opener-re)
+           (save-excursion
+             (c-depropertize-ml-strings-in-region m-beg (point))))
+         (c-clear-syntax-table-with-value-trim-caches m-beg (point) '(1)))))
+
+    (define (c-extend-region-for-CPP beg end)
+      ;; "Adjust `c-new-BEG', `c-new-END' respectively to the beginning
+      ;; and end of any preprocessor construct they may be in.
+      ;;
+      ;; Point is undefined both before and after this function call; the
+      ;; buffer has already been widened, and match-data saved. The
+      ;; return value is meaningless.
+      ;;
+      ;; This function is in the C/C++/ObjC values of
+      ;; `c-get-state-before-change-functions' and is called exclusively
+      ;; as a before change function."
+      (goto-char (c-new-BEG))
+      (c-beginning-of-macro)
+      (when (< (point) (c-new-BEG))
+        (set!c-new-BEG (max (point) (c-determine-limit 500 (c-new-BEG)))))
+
+      (goto-char (c-new-END))
+      (when (c-beginning-of-macro)
+        (c-end-of-macro)
+        (or (eobp) (forward-char)))     ; "Over the terminating NL which may be
+                                        ; marked with a c-cpp-delimiter
+                                        ; category property"
+      (when (> (point) (c-new-END))
+        (set!c-new-END
+         (min (point) (c-determine-+ve-limit 500 (c-new-END))))))
+
+    (define (c-depropertize-new-text beg end old-len)
+      ;; "Remove from the new text in (BEG END) any and all text
+      ;; properties which might interfere with CC Mode's proper working.
+      ;;
+      ;; This function is called exclusively as an after-change function.
+      ;; It appears in the value (for all languages) of
+      ;; `c-before-font-lock-functions'. ..."
+      (c-save-buffer-state
+       ()
+       (when (> end beg)
+         (c-clear-char-properties beg end 'syntax-table)
+         (c-clear-char-properties beg end 'c-fl-syn-tab)
+         (c-clear-char-properties beg end 'category)
+         (c-clear-char-properties beg end 'c-is-sws)
+         (c-clear-char-properties beg end 'c-in-sws)
+         (c-clear-char-properties beg end 'c-type)
+         (c-clear-char-properties beg end 'c-awk-NL-prop))))
+
+    (define (c-extend-font-lock-region-for-macros begg endd old-len)
+      ;; "Extend the region (c-new-BEG c-new-END) to cover all (possibly
+      ;; changed) preprocessor macros; The return value has no
+      ;; significance.
+      ;;
+      ;; Point is undefined on both entry and exit to this function. The
+      ;; buffer will have been widened on entry.
+      ;;
+      ;; c-new-BEG has already been extended in `c-extend-region-for-CPP'
+      ;; so we don't need to repeat the exercise here.
+      ;;
+      ;; This function is in the C/C++/ObjC value of
+      ;; `c-before-font-lock-functions'."
+      (goto-char endd)
+      (when (c-beginning-of-macro)
+        (c-end-of-macro)
+        ;; "Determine the region, (c-new-BEG c-new-END), which will get
+        ;; font locked. This restricts the region should there be long
+        ;; macros."
+        (set!c-new-END
+         (min (max (c-new-END) (point))
+              (c-determine-+ve-limit 500 (c-new-END))))))
+
+    (define (c-neutralize-CPP-line beg end)
+      ;; "BEG and END bound a region, typically a preprocessor line. Put
+      ;; a \"punctuation\" syntax-table property on syntactically
+      ;; obtrusive characters, ones which would interact syntactically
+      ;; with stuff outside this region.
+      ;;
+      ;; These are unmatched parens/brackets/braces. An unclosed comment
+      ;; is regarded as valid, NOT obtrusive. Unbalanced strings are
+      ;; handled elsewhere."
+      (save-excursion
+        (let ((s #f))
+          (while
+              (begin
+                (set! s (parse-partial-sexp beg end -1))
+                (cond
+                 ((< (list-ref s 0) 0)  ; "found an unmated ),},],>"
+                  (if (eqv? (char-before) #\>)
+                      (c-clear->-pair-props (- (point) 1))
+                      (c-put-syntax-table-trim-caches (- (point) 1) '(1)))
+                  #t)
+                 ;; "Unbalanced strings are now handled by
+                 ;; `c-before-change-check-unbalanced-strings', etc."
+                 ((> (list-ref s 0) 0)  ; "In a (,{,[,<"
+                  (if (eqv? (char-after (list-ref s 1)) #\<)
+                      (c-clear-<-pair-props (list-ref s 1))
+                      (c-put-syntax-table-trim-caches (list-ref s 1) '(1)))
+                  #t)
+                 (else #f)))))))
+
+    (define (c-neutralize-syntax-in-CPP begg endd old-len)
+      ;; "\"Neutralize\" every preprocessor line wholly or partially in
+      ;; the changed region. \"Restore\" lines which were CPP lines
+      ;; before the change and are no longer so.
+      ;;
+      ;; That is, set syntax-table properties on characters that would
+      ;; otherwise interact syntactically with those outside the CPP
+      ;; line(s).
+      ;;
+      ;; This function is called from an after-change function, BEGG ENDD
+      ;; and OLD-LEN being the standard parameters. It prepares the
+      ;; buffer for font locking, hence must get called before
+      ;; `font-lock-after-change-function'.
+      ;;
+      ;; Point is undefined both before and after this function call, the
+      ;; buffer will have been widened, and match-data saved. The return
+      ;; value is ignored. ..."
+      ;;
+      ;; "Note: SPEED _MATTERS_ IN THIS FUNCTION!!!"
+      (c-save-buffer-state
+       ((limits #f))
+       ;; "Add needed properties to each CPP construct in the region."
+       (goto-char (c-new-BEG))
+       (if (begin (set! limits (c-literal-limits)) limits)
+           (goto-char (cdr limits)))    ; "Go past any literal."
+       (skip-chars-backward " \t")
+       (let ((pps-position (point)) (pps-state #f) (mbeg #f))
+         (while (and (< (point) (c-new-END))
+                     (re-search-forward (%c-langvar 'c-anchored-cpp-prefix)
+                                        (c-new-END) #t))
+           ;; "If we've found a \"#\" inside a macro/string/comment,
+           ;; ignore it."
+           (unless
+               (or (save-excursion
+                     (goto-char (match-beginning 0))
+                     (let ((here (point)))
+                       (and (save-match-data (c-beginning-of-macro))
+                            (< (point) here))))
+                   (begin
+                     (set! pps-state
+                           (parse-partial-sexp pps-position (point)
+                                               #f #f pps-state))
+                     (set! pps-position (point))
+                     (or (list-ref pps-state 3) ; "in a string?"
+                         (and (list-ref pps-state 4)
+                              (not (eq? (list-ref pps-state 7)
+                                        'syntax-table)))))) ; "in a comment?"
+             (goto-char (match-beginning 1))
+             (set! mbeg (point))
+             (if (> (c-no-comment-end-of-macro) mbeg)
+                 (c-neutralize-CPP-line mbeg (point)) ; "\"punctuation\""
+                 (forward-line))))))                 ; "no infinite loop with, e.g., \"#//\""
+)
 
     ;; ---------------------------------------------------------------
     ;; `c-with-string-fences'` seams (`cc-defs.el:1774')
