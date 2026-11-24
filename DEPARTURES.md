@@ -16852,3 +16852,104 @@ index alists the port builds - C, C++ on the same fixture, and
 Objective-C with its C submenu - are what `imenu--generic-function` and
 `cc-imenu-objc-function` answer on the same text, also identical.
 `test/progmodes/cc-menus-test.scm` (20) pins them.
+
+## electric.el, the save hooks, and `real-this-command` (2026-11-24)
+
+`schemacs/electric.scm` ports the half of `lisp/electric.el` the modes
+connect to - `electric-indent-mode` and its local variant, the two
+hooks, `electric-indent-inhibit`, `electric--after-char-pos`, the
+post-self-insert function and the C-j binding - and two primitives it
+needed landed under it: `before-save-hook`/`after-save-hook` in
+`files.scm`, and `real-this-command` in `simple.scm`.
+
+### Not carried from `electric.el`, and why
+
+- **`Electric-command-loop` and `Electric-pop-up-window`** - the
+  obsolete pre-command-loop helpers. They need `ding`, `sit-for` and
+  `fit-window-to-buffer`, none of which this tree has, and no mode
+  here calls them.
+- **`electric-layout-mode` and `electric-quote-mode`** (and their
+  local variants) - both are built on `pcase`, which is not ported
+  (this tree's ports have rewritten Emacs's `pcase` sites by hand);
+  the quote modes also need `define-widget`. Porting `pcase` is a
+  tranche of its own.
+- **`electric-indent--yank-advice`** - `advice.el` is not ported, so
+  the `yank` entry in `electric-indent-actions` has no effect here.
+  The `before-save` entry works; it is a hook.
+
+### Representation departures
+
+1. **`electric-indent-mode` is a `:global` minor-mode variable in
+   `default-value`'s table, and a buffer's local binding (made by
+   `electric-indent-local-mode`) is a buffer slot**, which the
+   `electric-indent-mode-value` reader checks first. Emacs has one
+   symbol whose value is both. `electric-indent-local-mode`'s
+   `:variable` is a reader/writer pair over that slot, and
+   `electric-indent-just-newline`'s dynamic nil binding is
+   `call-with-buffer-local`, the tree's spelling of `specbind` for a
+   buffer-local.
+2. **`electric-indent-functions-without-reindent` holds procedures**,
+   because `indent-line-function` holds one here where Emacs holds a
+   symbol; `yaml-indent-line` is omitted (there is no yaml mode). The
+   four `indent-relative`-family names Emacs lists are all here.
+3. **`real-this-command` is `*real-this-command*`** - a parameter in
+   `simple.scm`, set beside `*this-command*` by the command loop
+   (`keyboard.c:1507`). The save hook's command list is
+   `(save-buffer)` alone: Emacs's other entry, `basic-save-buffer`, is
+   a function this tree folds into `save-buffer`.
+4. **The `electric-indent-actions` `:set` reaches
+   `electric-indent--activate-indent-actions` through an internal
+   forward variable**, because the defcustom comes before the function
+   in the file and a Scheme procedure must exist when the clause is
+   evaluated. The variable is set after the definition.
+5. **Loading the library runs `(electric-indent-mode 1)`.** Emacs is
+   *dumped* with the mode on and its `post-self-insert-hook` entry in
+   place (`:init-value t` - measured: a `-Q --batch` Emacs has the
+   entry before `(require 'electric)`); this tree has no dump, so the
+   load is where that state is made, as `startup.scm` does for
+   `global-font-lock-mode`. The call is non-interactive, so it echoes
+   nothing.
+
+### The save hooks this added
+
+`before-save-hook` and `after-save-hook` are `files.el:6136`/`:6143`
+defcustoms (parameters here). `save-buffer` now runs the first after
+`ensure-final-newline-on-save!` and before the write, with errors
+demoted as `basic-save-buffer` demotes them (`with-demoted-errors
+"Before-save hook error: %S"`, `files.el:6227`), and the second after
+the "Wrote" message, where `basic-save-buffer` runs it. **This is a
+departure fixed rather than introduced**: `files.scm` had no save
+hooks at all, and its own comment said so.
+
+### Verified
+
+`test/electric-test.scm` (32) - the mode's default and its hook, the
+C-j binding, seven newline scenarios (each `emacs -Q --batch`'s answer
+for the same buffer and setting), `electric-indent-inhibit`'s
+buffer-localness, `can-reindent-p`, the local mode's kill-the-slot
+rule, the save hooks' order and effect, the `before-save` action's
+install/remove, and the `real-this-command` guard. Targeted suites:
+tty-editor, files, cmds, fill, abbrev, loadup, subr, keymap, indentc
+all pass; `tools/pty-check.py imports scratch indent save-y-n
+coding-roundtrip` 5/5; `tools/gen-imports.scm --check` clean; the
+touched libraries compile without warnings.
+
+### Still open in this cluster
+
+`elec-pair.el` is not ported. Its functions use `pcase` (the list
+pattern, in five places) and `atomic-change-group`, which needs Emacs's
+change-group machinery (`prepare-change-group`,
+`activate-change-group`, `accept-change-group`, `cancel-change-group`
+over a `buffer-undo-list` variable and `undo-more`) - neither exists
+here, and neither is a small primitive. `proper-list-p` (`fns.c`) and
+`self-insert-uses-region-functions` (`simple.el:602`) are small and
+would come with it.
+
+`flymake.el` is not ported: its diagnostic backends, overlays, timers,
+process output and the flymake-cc compiler backend are a subsystem of
+their own.
+
+cc-mode.el's mode bodies name both - `electric-pair-inhibit-predicate`
+(`cc-mode.el:633`) and `flymake-diagnostic-functions`
+(`cc-mode.el:2940`) - so the `.c`/`.h` milestone waits on them, or on
+a user-approved reduced scope.

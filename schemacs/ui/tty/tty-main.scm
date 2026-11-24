@@ -49,6 +49,9 @@
     (only (schemacs textmodes paragraphs))
     ;; `fill.el`'s commands and the M-q binding it makes
     (only (schemacs textmodes fill))
+    ;; `electric.el`: the C-j binding and the post-self-insert hook its
+    ;; global mode installs at load, as the dump has them in Emacs.
+    (only (schemacs electric))
     ;; Help mode installs `*help-mode-function*`, which is what puts
     ;; `*Help*` in `help-mode`; `C-h b` is bound by `help.scm`.
     (only (schemacs help-mode))

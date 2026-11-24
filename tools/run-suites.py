@@ -65,6 +65,7 @@ SUITES = [
     'test/dired-mode-test.scm',
     'test/dired-test.scm',
     'test/editfns-test.scm',
+    'test/electric-test.scm',
     'test/engine-test.scm',
     'test/env-test.scm',
     'test/external/omarchy/omarchy-test.scm',

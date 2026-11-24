@@ -248,7 +248,8 @@
    ;; read the region - see the note at their definitions.
    upcase-region downcase-region
    %blank-line? *amalgamating-count% *amalgamating-undo-limit*
-   undo--last-change-was-undo-p undo-equiv-table *last-command* *this-command* *temporary-goal-column*
+   undo--last-change-was-undo-p undo-equiv-table *last-command* *this-command*
+   *real-this-command* *temporary-goal-column*
    *kill-do-not-save-duplicates* *kill-read-only-ok*
    *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
    *interprogram-cut-function* *interprogram-paste-function*
@@ -1382,6 +1383,16 @@ non-nil."
       ;; It replaces mg's `*this-command-kill*'/`*last-command-kill*'
       ;; pair, which was the same idea for the one thing mg needed it
       ;; for.
+      ;;--------------------------------------------------------------
+      (make-parameter #f))
+
+    (define *real-this-command*
+      ;; GNU Emacs's `real-this-command' (`keyboard.c:14378'): "The
+      ;; command for which the command loop is currently running", set
+      ;; beside `this-command' (`:1507') and *not* changed when the
+      ;; command itself changes `this-command'. That difference is what
+      ;; `electric-indent-save-hook' reads it for: a yank or a save is
+      ;; still that command even if it renames itself.
       ;;--------------------------------------------------------------
       (make-parameter #f))
 

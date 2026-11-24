@@ -84,6 +84,7 @@
     (only (schemacs custom) define-custom)
     (only (schemacs command)
           current-prefix-arg define-command called-interactively?
+          quit-condition?
           ;; `save-some-buffers-action-alist`'s `C-f` answer sets
           ;; `quit-flag`, as the C's lambda does.
           *quit-flag*
@@ -423,6 +424,7 @@ directory-name-p
    ;; files.el's directory creation and subr.el's temp-file macro
    make-directory with-temp-file
 save-buffer
+   *before-save-hook* *after-save-hook*
    set-visited-file-name
    write-file
    rename-uniquely
@@ -2841,6 +2843,16 @@ at point instead."
           (insert (default-directory))
           (message "Directory %s" (default-directory))))
 
+    (define-custom *before-save-hook* '()
+      "Normal hook that is run before a buffer is saved to its file.
+Used only by `save-buffer'."
+      :type 'hook :group 'files)
+
+    (define-custom *after-save-hook* '()
+      "Normal hook that is run after a buffer is saved to its file.
+Used only by `save-buffer'."
+      :type 'hook :group 'files)
+
     (define-command (save-buffer)
       ;; C-x C-s runs this. GNU Emacs's `save-buffer', which acts on
       ;; `(current-buffer)' and takes no argument but the prefix
@@ -2875,6 +2887,13 @@ at point instead."
                             name))))
             ;; Emacs settles the buffer's final line break before writing it.
             (ensure-final-newline-on-save! buffer)
+            ;; `basic-save-buffer' (`files.el:6227'): "Don't let errors
+            ;; prevent saving the buffer" - the hook runs before the
+            ;; file name is settled and before the write.
+            (guard (ex
+                    ((quit-condition? ex) (raise ex))
+                    (else (message "Before-save hook error: %s" ex)))
+              (run-hooks (*before-save-hook*)))
             ;; The buffer's own coding system, which is the character set
             ;; *and* the end of line - and the code points go out rather
             ;; than a string, because a buffer holding a byte character
@@ -2910,6 +2929,11 @@ at point instead."
             ;; (`xdisp.c:12594`). So a save said "Wrote ..." and
             ;; `*Messages*` stayed empty.
             (files--message "Wrote %s" path)
+            ;; "`after-save-hook' is run after the buffer has been
+            ;; saved" (`files.el:6291'), and after the "Wrote" message
+            ;; the write itself made, so a hook's message is the one
+            ;; seen.
+            (run-hooks (*after-save-hook*))
             path))))
 
     (define (set-visited-file-name filename . args)

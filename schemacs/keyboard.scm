@@ -126,7 +126,7 @@
     ;; (`casefiddle.c:418`); `casefiddle.scm` is below this library.
     (only (schemacs casefiddle) upcase-initials)
     (only (schemacs simple)
-          *last-command* *this-command*
+          *last-command* *this-command* *real-this-command*
           *select-active-regions*
           deactivate-mark clear-prefix! delete-char pending-uarg
           place-undo-boundary!
@@ -586,6 +586,9 @@
         ;; `yank'), which is why the promotion to `last-command' reads it
         ;; again after the command rather than using ACTION.
         (*this-command* action)
+        ;; `Vreal_this_command = cmd' (`keyboard.c:1507'), beside
+        ;; `this-command' and left alone when a command renames itself.
+        (*real-this-command* action)
         (place-undo-boundary! action)
         (clear-prefix!)
         (*pending-coding-system* #f)

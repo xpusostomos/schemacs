@@ -182,6 +182,7 @@
         (schemacs doc)
         (schemacs core easy-mmode)
         (schemacs editfns)
+        (schemacs electric)
         (schemacs progmodes elisp-mode)
         (schemacs newcomment)
         (schemacs novice)

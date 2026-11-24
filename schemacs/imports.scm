@@ -65,6 +65,7 @@
     (schemacs dispnew)
     (schemacs doc)
     (schemacs editfns)
+    (schemacs electric)
     (schemacs env)
     (schemacs eval)
     (schemacs face-remap)
@@ -254,6 +255,7 @@
     *after-init-hook*
     *after-make-frame-functions*
     *after-redisplay-hook*
+    *after-save-hook*
     *amalgamating-count%
     *amalgamating-undo-limit*
     *ascii-canon-table*
@@ -272,6 +274,7 @@
     *before-hack-local-variables-hook*
     *before-init-hook*
     *before-make-frame-hook*
+    *before-save-hook*
     *beginning-of-defun-function*
     *blink-cursor-blinks*
     *blink-cursor-delay*
@@ -492,6 +495,8 @@
     *easy-menu-avoid-duplicate-keys*
     *echo-area-buffer*
     *echo-buffers*
+    *electric-indent-actions*
+    *electric-indent-functions*
     *emacs-startup-hook*
     *enable-disabled-menus-and-buttons*
     *enable-kinsoku*
@@ -830,6 +835,7 @@
     *read-regexp-defaults-function*
     *read-string-function*
     *read-variable-function*
+    *real-this-command*
     *record-window-buffer-function*
     *recursive-edit-exit*
     *redisplay-in-progress*
@@ -2630,6 +2636,21 @@
     echo-area-message-buffer
     editor-excluded-libraries
     editor-libraries
+    electric--after-char-pos
+    electric-indent--activate-indent-actions
+    electric-indent-can-reindent-p
+    electric-indent-chars
+    electric-indent-functions-without-reindent
+    electric-indent-inhibit
+    electric-indent-just-newline
+    electric-indent-local-mode
+    electric-indent-local-mode-hook
+    electric-indent-mode
+    electric-indent-mode-hook
+    electric-indent-mode-value
+    electric-indent-post-self-insert-function
+    electric-indent-save-hook
+    electric-newline-and-maybe-indent
     elisp--preceding-sexp
     elisp-mode-syntax-propertize
     elt
@@ -4381,6 +4402,7 @@
     set!dired-buffers!
     set!dired-directory!
     set!dired-subdir-alist!
+    set!electric-indent-inhibit
     set!file-local-variables-alist
     set!font-lock-defaults!
     set!font-lock-fontify-region-function!
