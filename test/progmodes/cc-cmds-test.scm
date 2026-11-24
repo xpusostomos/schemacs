@@ -35,10 +35,12 @@
        c-syntactic-indentation set!c-syntactic-indentation
        c-block-comment-flag
        *c-tab-always-indent*
+       set!c-cleanup-list *c-electric-pound-behavior*
        c-make-noise-macro-regexps c-make-macro-with-semi-re)
  (only (schemacs progmodes cc-styles) c-set-style c-set-offset)
  (only (schemacs progmodes cc-engine)
        c-parsing-error c-electric-flag c-auto-newline c-hungry-delete-key
+       set!c-electric-flag set!c-auto-newline set!c-hungry-delete-key
        c-clear-found-types c-literal-limits c-literal-type
        c-beginning-of-macro c-end-of-macro c-query-and-set-macro-start
        *c-macro-start*)
@@ -63,9 +65,16 @@
        c-beginning-of-sentence-in-string c-end-of-sentence-in-string
        c-comment-indent c-outline-level c-in-comment-line-prefix-p
        c-scan-conditionals
+       c-electric-brace c-electric-semi&comma c-electric-colon
+       c-electric-slash c-electric-star c-electric-pound c-electric-paren
+       c-electric-backspace c-hungry-delete-backwards
+       c-electric-delete-forward c-hungry-delete-forward
+       c-electric-continued-statement c-electric-lt-gt
+       c-post-text-conversion
        c-fill-paragraph c-do-auto-fill c-indent-new-comment-line
        c-context-line-break c-context-open-line)
- (only (schemacs newcomment) comment-start comment-end *comment-multi-line*))
+ (only (schemacs newcomment) comment-start comment-end *comment-multi-line*)
+ (only (schemacs command) *last-command-event*))
 
 (test-begin "schemacs_editor_cc_cmds")
 
@@ -645,3 +654,176 @@
                 1 (c-query-and-set-macro-start))))
 
 (test-end "schemacs_editor_cc_cmds_filling")
+
+;;--------------------------------------------------------------
+;; The electric keys (`cc-cmds.el:409'-`:1568'')
+;;--------------------------------------------------------------
+;; Every expectation is `tools/cc-electric-diff''s Emacs side: the same
+;; command in `emacs -Q --batch' on the same text, key and flags. The
+;; one scenario that disagrees (`brace-elseif') is not pinned here - see
+;; that directory's README.
+(test-begin "schemacs_editor_cc_cmds_electric")
+
+(define (run-electric text command key arg auto cleanups hungry)
+  (fresh text)
+  (set!c-electric-flag #t)
+  (set!c-syntactic-indentation #t)
+  (set!c-auto-newline auto)
+  (set!c-hungry-delete-key hungry)
+  (if cleanups (set!c-cleanup-list cleanups))
+  (goto-char (point-max))
+  ;; `c-query-and-set-macro-start' writes this parameter (a `set', not a
+  ;; `parameterize'), and the macro-start tests above have left a
+  ;; position in it; an electric command that calls
+  ;; `c-newline-and-indent' would then think it is inside a macro and
+  ;; align backslashes.
+  (parameterize ((*c-macro-start* #f)
+                 (*last-command-event* key))
+    (cond ((eq? arg 'none) (command))
+          ((not arg) (command #f))
+          (else (command arg))))
+  (list (contents) (point)))
+
+(test-equal "c-electric-brace hangs a defun brace"
+            '("void f()\n{\n  " 14)
+            (run-electric "void f()\n" c-electric-brace 123 #f #t #f #f))
+
+(test-equal "c-electric-brace with auto-newline off"
+            '("void f()\n{" 11)
+            (run-electric "void f()\n" c-electric-brace 123 #f #f #f #f))
+
+(test-equal "c-electric-brace hangs a substatement brace"
+            '("if (x)\n  {\n    " 16)
+            (run-electric "if (x)\n" c-electric-brace 123 #f #t #f #f))
+
+(test-equal "c-electric-brace's numeric ARG suppresses the electrics"
+            '("void f()\n{{" 12)
+            (run-electric "void f()\n" c-electric-brace 123 2 #t #f #f))
+
+(test-equal "c-electric-brace with c-electric-flag off"
+            '("void f()\n{" 11)
+            (let ((b (fresh "void f()\n")))
+              (set!c-electric-flag #f)
+              (set!c-syntactic-indentation #t)
+              (set!c-auto-newline #t)
+              (goto-char (point-max))
+              (parameterize ((*c-macro-start* #f)
+                             (*last-command-event* 123))
+                (c-electric-brace #f))
+              (list (contents) (point))))
+
+(test-equal "c-electric-brace's empty-defun-braces cleanup"
+            '("void f() {}\n" 13)
+            (run-electric "void f() {\n  " c-electric-brace 125 #f #t
+                          '(empty-defun-braces) #f))
+
+(test-equal "c-electric-brace's one-liner-defun cleanup"
+            '("void f() {return 1;}\n" 22)
+            (run-electric "void f() { return 1;\n" c-electric-brace 125 #f #t
+                          '(one-liner-defun) #f))
+
+(test-equal "c-electric-brace's one-liner cleanup is undone when too long"
+            '("void f() { aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffffffffff gggggggggg;\n}\n" 92)
+            (run-electric
+             "void f() { aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffffffffff gggggggggg;\n"
+             c-electric-brace 125 #f #t '(one-liner-defun) #f))
+
+(test-equal "c-electric-semi&comma inserts a newline"
+            '("int x = 1;\n" 12)
+            (run-electric "int x = 1" c-electric-semi&comma 59 #f #t #f #f))
+
+(test-equal "c-electric-semi&comma adds none inside a paren list"
+            '("for (i = 0; i < n;" 19)
+            (run-electric "for (i = 0; i < n" c-electric-semi&comma 59 #f #t #f #f))
+
+(test-equal "c-electric-semi&comma's list-close-comma cleanup"
+            '("int a[] = {1, 2}," 18)
+            (run-electric "int a[] = {1, 2}" c-electric-semi&comma 44 #f #t
+                          '(list-close-comma) #f))
+
+(test-equal "c-electric-colon's scope-operator cleanup"
+            '("A: ::" 6)
+            (run-electric "A: :" c-electric-colon 58 #f #t #f #f))
+
+(test-equal "c-electric-slash in a line comment"
+            '("int x; ///" 11)
+            (run-electric "int x; //" c-electric-slash 47 #f #t #f #f))
+
+(test-equal "c-electric-star after a slash indents a comment-only line"
+            '("/*" 3)
+            (run-electric "  /" c-electric-star 42 #f #t #f #f))
+
+(test-equal "c-electric-pound aligns at the left edge"
+            '("#" 2)
+            (parameterize ((*c-electric-pound-behavior* '(alignleft)))
+              (run-electric "    " c-electric-pound 35 #f #t #f #f)))
+
+(test-equal "c-electric-paren's space-before-funcall cleanup"
+            '("foo (" 6)
+            (run-electric "foo" c-electric-paren 40 #f #t
+                          '(space-before-funcall) #f))
+
+(test-equal "c-electric-paren's compact-empty-funcall cleanup"
+            '("foo()" 6)
+            (run-electric "foo(" c-electric-paren 41 #f #t
+                          '(compact-empty-funcall) #f))
+
+(test-equal "c-electric-backspace with c-hungry-delete-key"
+            '("int x;" 7)
+            (run-electric "int x;   " c-electric-backspace 127 #f #t #f #t))
+
+(test-equal "c-hungry-delete-backwards"
+            '("int x;" 7)
+            (run-electric "int x; \t " c-hungry-delete-backwards 127 'none #t #f #t))
+
+(test-equal "c-electric-continued-statement reindents an else"
+            '("if (x)\n  y;\n else" 18)
+            (run-electric "if (x)\n  y;\nelse" c-electric-continued-statement
+                          101 'none #t #f #f))
+
+(test-equal "c-electric-lt-gt on an include delimiter"
+            '("#include <" 11)
+            (run-electric "#include " c-electric-lt-gt 60 #f #t #f #f))
+
+(test-end "schemacs_editor_cc_cmds_electric")
+
+;;----------------------------------------------------------------------
+;; Text conversion support (`cc-cmds.el:5152')
+;;----------------------------------------------------------------------
+;; `c-post-text-conversion' deletes the character the text-conversion
+;; machinery has just inserted and re-inserts it electrically. Every
+;; expectation is Emacs 31.1's own (`/tmp/ptc.el` measured the four
+;; rows on the same text).
+(test-begin "schemacs_editor_cc_cmds_text_conversion")
+
+(define (run-ptc text inserted ev)
+  (fresh text)
+  (set!c-electric-flag #t)
+  (set!c-syntactic-indentation #t)
+  (set!c-auto-newline #f)
+  (set!c-hungry-delete-key #f)
+  (goto-char (point-max))
+  (insert inserted)
+  (let ((result #f))
+    (parameterize ((*c-macro-start* #f)
+                   (*last-command-event* ev))
+      (set! result (c-post-text-conversion)))
+    (list (contents) (point) result)))
+
+(test-equal "an inserted brace is taken back and inserted electrically"
+            '("int f(){" 9 #t)
+            (run-ptc "int f()" "{" 123))
+
+(test-equal "an ordinary character is left alone"
+            '("int f()x" 9 #f)
+            (run-ptc "int f()" "x" 120))
+
+(test-equal "a semicolon goes through c-electric-semi&comma"
+            '("int a;" 7 #t)
+            (run-ptc "int a" ";" 59))
+
+(test-equal "a star goes through c-electric-star"
+            '("int a*" 7 #t)
+            (run-ptc "int a" "*" 42))
+
+(test-end "schemacs_editor_cc_cmds_text_conversion")

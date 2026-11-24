@@ -212,10 +212,11 @@
                37 (begin (at 1) (c-point 'bol 42)))
    (test-equal "and does not move point" 1 (point))
 
-   ;; The arms whose helpers are not ported say so.
-   (test-assert "c-point 'bod raises rather than guessing"
-                (guard (e (#t #t))
-                  (at 42) (c-point 'bod) #f))
+   ;; The defun boundaries, over `c-beginning-of-defun-1' and
+   ;; `c-end-of-defun-1'.  At 42, inside a macro's continuation, Emacs
+   ;; answers the buffer's own start and end (measured 31.1 first).
+   (test-equal "c-point 'bod" 1 (begin (at 42) (c-point 'bod)))
+   (test-equal "c-point 'eod" 103 (begin (at 42) (c-point 'eod)))
 
    ;; `c-is-escaped' asks about the character at POS: 36 is the newline
    ;; that the backslash at 35 escapes, and 35 itself is not escaped.

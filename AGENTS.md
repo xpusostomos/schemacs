@@ -17569,3 +17569,65 @@ plus the existing groups), `test/syntax-test.scm` gained the
 `skip_chars_bound` group, `imports.scm` is regenerated, and the full
 suite and pty batteries were run on the settled tree (see the commit
 message for their counts).
+
+# Handoff - cc-mode: the electric keys (2026-11-24)
+
+`cc-cmds.el:409-1568` is ported: every `c-electric-*` command, the
+`c-hanging-*` machinery they drive (`c-point-syntax`,
+`c-brace-newlines`, `c-try-one-liner`, `c-do-brace-electrics`), the two
+hungry deletes, the file's `put SYM 'delete-selection` block, and
+`c-post-text-conversion` (`:5152`). The gate is
+`tools/cc-electric-diff/`: **60 scenarios against Emacs 31.1, 0
+different, 1 known** (`brace-elseif`, explained there and in
+DEPARTURES.md's "cc-mode: the electric keys" section).
+
+## What the next session needs
+
+- **`c-tentative-buffer-changes` is new in cc-defs** and is how
+  `c-try-one-liner`/`c-point-syntax` undo their probe edits: it writes
+  the buffer's own undo list (the tree has no `buffer-undo-list`
+  binding), keeps the changes when the body's value is true, otherwise
+  `primitive-undo`s back to the saved tail, then restores
+  point/mark/active/modified. The body must edit the entry buffer.
+- **`c-end-of-defun-1` lives in cc-engine** (beside
+  `c-beginning-of-defun-1`, whose scan it shares - a named placement),
+  and `c-point`'s `'bod`/`'eod` now work.
+- **`c-benign-error` moved to cc-defs** (its Emacs home); cc-engine
+  re-exports it.
+- **A key event is an integer.** `c-last-command-char` answers the
+  integer byte code; Emacs's `?X` names the same integer, Scheme's `#\X`
+  is a different object. Four `c-semi&comma-*` criteria in cc-align
+  compared against `#\;` and were **always false** - fixed with
+  `(char->integer #\;)`, and the align test's probe now binds the
+  integer event. Any future port comparing against a character literal
+  is suspect.
+- The C++ brace scenario exposed a pre-existing zero-values bug in
+  `c-guess-basic-syntax` CASE 5A.3 (a `set!` as a clause's value);
+  fixed, and `tools/cc-cgbs-diff/` still passes.
+
+## The two things to do in the approved order
+
+1. **The `c-laomib-fix-elt` bug**: with the mode's change hooks
+   (`c-before-change`/`c-after-change`) installed, the C++ brace
+   scenarios raise there - `(cdr '())` where Emacs's `(cdr nil)` is
+   nil - in the bracelist machinery. It is real and the electric path
+   reaches it. Fix it in its own cc-engine pass and re-run
+   `tools/cc-decl-diff/`'s bracelist fixtures. The electric harness
+   deliberately stays hook-free until then, which is also why
+   `brace-elseif` is its one known difference (Emacs's mid-command
+   hooks; a static `c-indent-line` gives 2 in both editors).
+2. **cc-mode.el**: `c-basic-common-init`/`c-common-init`/
+   `c-font-lock-init`, the mode definitions, with `easy-menu-define`
+   still the one missing primitive (cc-mode.el's menus) and a
+   `def-edebug-spec` stub; then re-point the electric harness at the
+   real mode, install the hooks, close `brace-elseif`, and drive
+   `tools/cc-cmds-diff/` to 99/99. Then the `.c`/`.h` milestone.
+
+## Verified
+
+`test/progmodes/cc-cmds-test.scm` is 106 (groups 26 + 10 + 13 + 32 +
+21 + 4), `cc-engine-test` 629, `cc-align-test` 55, and every other cc
+suite passes; `schemacs/imports.scm` is regenerated (125 libraries,
+5099 names) and `python3 tools/pty-check.py imports scratch` is 2/2.
+`cc-cmds.scm` compiles at `#:optimization-level 1` (the Guile 3.0.11
+miscompile rule still applies).

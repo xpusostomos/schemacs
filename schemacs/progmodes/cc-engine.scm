@@ -102,14 +102,13 @@
   ;;     BODY/EOD/BOSWS/EOSWS arms call `cc-engine''s own functions, and
   ;;     Emacs reaches them through the obarray. `(schemacs editor
   ;;     cc-defs)' sits below this library and cannot call up to it, so
-  ;;     both live here. Their BOL/BOLL/EOL/EOLL/BOI/IOPL/IONL/BOPL/
-  ;;     BONL/EOPL/EONL arms are complete; BOD/EOD/BOSWS/EOSWS signal
-  ;;     until `c-beginning-of-defun-1', `c-end-of-defun-1' and the
-  ;;     syntactic-whitespace engine land, and each error names what it
-  ;;     waits for.
-  ;;   * `c-benign-error' is `cc-defs.el''s macro; it needs `message',
-  ;;     which is `editfns.scm''s here - above `cc-defs' - so it lives
-  ;;     in this library. Emacs's second half, `(ding)', is not ported
+  ;;     both live here. All their arms are complete now. `c-end-of-
+  ;;     defun-1' (`cc-defs.el:1833') is here for the same reason: the
+  ;;     helper it wraps, `c-beginning-of-defun-1', is this library's,
+  ;;     so the defsubst lives beside it rather than in cc-defs.
+  ;;   * `c-benign-error' is `cc-defs.el''s macro; it is defined there
+  ;;     and imported/re-exported here for the libraries that reach it
+  ;;     through this one. Emacs's second half, `(ding)', is not ported
   ;;     anywhere in this tree yet, so the echo-area message is the whole
   ;;     of it (named departure, the same one `novice.scm' carries).
   ;;
@@ -192,7 +191,7 @@
           c-next-single-property-change c-previous-single-property-change
           c-got-face-at
           %c-true %c-false c-get-lang-constant *c-buffer-is-cc-mode*
-          c-major-mode-is c-safe c-forward-sexp c-backward-sexp
+          c-major-mode-is c-safe c-forward-sexp c-backward-sexp c-benign-error
           c-go-list-forward c-go-list-backward c-down-list-backward
           c-up-list-forward c-up-list-backward c-down-list-forward
           c-go-up-list-forward c-safe-scan-lists
@@ -389,7 +388,8 @@
    c-state-mark-point-min-literal
    c-state-cache-top-lparen c-state-cache-top-paren
    c-state-cache-after-top-paren
-   c-get-cache-scan-pos c-beginning-of-defun-1 c-get-fallback-scan-pos
+   c-get-cache-scan-pos c-beginning-of-defun-1 c-end-of-defun-1
+   c-get-fallback-scan-pos
    c-state-balance-parens-backwards c-parse-state-get-strategy
    c-renarrow-state-cache c-append-lower-brace-pair-to-state-cache
    c-state-push-any-brace-pair c-append-to-state-cache
@@ -1967,6 +1967,24 @@
               (goto-char (- (match-end 0) 1))
               (loop)))))
 
+    ;; `c-end-of-defun-1' (`cc-defs.el:1833'): "Replacement for
+    ;; `end-of-defun' that use `c-beginning-of-defun-1'." It is a
+    ;; defsubst in cc-defs there, but the helper it wraps,
+    ;; `c-beginning-of-defun-1', is this library's here, so it lives
+    ;; beside it - a named placement departure (`c-point''s `eod' arm
+    ;; and cc-defs's own `c-point' long expansion are its callers).
+    (define (c-end-of-defun-1)
+      (let ((start (point)))
+        ;; Skip forward into the next defun block. Don't bother to avoid
+        ;; comments, literals etc, since beginning-of-defun doesn't do
+        ;; that anyway.
+        (skip-chars-forward "^}")
+        (c-beginning-of-defun-1)
+        (if (eq? (char-after (point)) #\{)
+            (c-forward-sexp))
+        (if (< (point) start)
+            (goto-char (point-max)))))
+
     ;; "Return a start position for building `c-state-cache' from
     ;; scratch. This will be at the top level, 2 defuns back."
     (define (c-get-fallback-scan-pos here)
@@ -3068,12 +3086,9 @@
     (define (set!c-parsing-error value)
       (set-buffer-local-value! (current-buffer) 'c-parsing-error value))
 
-    (define (c-benign-error format-string . args)
-      ;; `cc-defs.el:241': "Formats an error message for the echo area
-      ;; and dings, i.e. like `error' but doesn't abort." `ding' is not
-      ;; ported anywhere in this tree, so the echo-area half is the whole
-      ;; of it here (named departure; `novice.scm' carries the same one).
-      (apply message format-string args))
+    ;; `c-benign-error' (`cc-defs.el:241') is cc-defs's; it is imported
+    ;; and re-exported here for the libraries that already reach it
+    ;; through this one.
 
     (define (c-echo-parsing-error . quiet-args)
       ;; `cc-engine.el:637'.
@@ -3204,9 +3219,13 @@
                (back-to-indentation)
                (point)))
             ((bod)
-             (error "c-point 'bod' waits on `c-beginning-of-defun-1', which is not ported yet"))
+             (save-excursion
+               (c-beginning-of-defun-1)
+               (point)))
             ((eod)
-             (error "c-point 'eod' waits on `c-end-of-defun-1', which is not ported yet"))
+             (save-excursion
+               (c-end-of-defun-1)
+               (point)))
             ((bopl)
              (line-beginning-position 0))
             ((bonl)
@@ -15841,13 +15860,19 @@
                   (skip-chars-forward " \t")
                   (cond
                    ((begin (set! enum-pos (c-at-enum-brace)) enum-pos)
-                    (set! placeholder (c-point 'boi enum-pos)))
+                    ;; The clause's value is the cond's, and it is
+                    ;; tested by the enclosing `and`; `set!' answers the
+                    ;; unspecified value (zero values here), so answer
+                    ;; what it set - the Emacs `setq' value.
+                    (begin (set! placeholder (c-point 'boi enum-pos))
+                           placeholder))
                    ((let ((p (c-looking-at-or-maybe-in-bracelist
                               containing-sexp lim)))
                       (set! placeholder p)
                       (pair? p))
                     (set! tmpsymbol (if (cdr placeholder) 'topmost-intro-cont #f))
-                    (set! placeholder (c-point 'boi (car placeholder))))
+                    (begin (set! placeholder (c-point 'boi (car placeholder)))
+                           placeholder))
                    (else #f)))
                 (if (and (not (*c-auto-newline-analysis*))
                          (eq? tmpsymbol 'topmost-intro-cont))

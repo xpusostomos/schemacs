@@ -1,0 +1,60 @@
+brace-defun	c	c-electric-brace	123	nil	1	0	1	1	end	default	void f()\n
+brace-defun-noauto	c	c-electric-brace	123	nil	0	0	1	1	end	default	void f()\n
+brace-if	c	c-electric-brace	123	nil	1	0	1	1	end	default	if (x)\n
+brace-struct	c	c-electric-brace	123	nil	1	0	1	1	end	default	struct S\n
+brace-class	cpp	c-electric-brace	123	nil	1	0	1	1	end	default	class C\n
+brace-array	c	c-electric-brace	123	nil	1	0	1	1	end	default	int a[] = 
+brace-string	c	c-electric-brace	123	nil	1	0	1	1	end	default	char *s = "
+brace-comment	c	c-electric-brace	123	nil	1	0	1	1	end	default	/* hi
+brace-arg	c	c-electric-brace	123	2	1	0	1	1	end	default	void f()\n
+brace-else	c	c-electric-brace	123	nil	1	0	1	1	end	brace-else-brace	if (x) {\n  y;\n}\nelse\n
+brace-else-noauto	c	c-electric-brace	123	nil	0	0	1	1	end	brace-else-brace	if (x) {\n  y;\n}\nelse\n
+brace-elseif	c	c-electric-brace	123	nil	1	0	1	1	end	brace-elseif-brace	if (x) {\n  y;\n}\nelse if (z)\n
+brace-empty	c	c-electric-brace	125	nil	1	0	1	1	end	empty-defun-braces	void f() {\n  
+brace-one-liner	c	c-electric-brace	125	nil	1	0	1	1	end	one-liner-defun	void f() { return 1;\n
+brace-electric-off	c	c-electric-brace	123	nil	1	0	0	1	end	default	void f()\n
+brace-no-synind	c	c-electric-brace	123	nil	1	0	1	0	end	default	void f()\n
+brace-objc?	c	c-electric-brace	123	nil	1	0	1	1	end	default	@interface Foo\n
+semi-simple	c	c-electric-semi&comma	59	nil	1	0	1	1	end	default	int x = 1
+semi-parens	c	c-electric-semi&comma	59	nil	1	0	1	1	end	default	for (i = 0; i < n
+semi-noauto	c	c-electric-semi&comma	59	nil	0	0	1	1	end	default	int x = 1
+semi-arg	c	c-electric-semi&comma	59	2	1	0	1	1	end	default	int x = 1
+semi-string	c	c-electric-semi&comma	59	nil	1	0	1	1	end	default	char *s = "a
+semi-defun	c	c-electric-semi&comma	59	nil	1	0	1	1	end	defun-close-semi	void f() {\n}
+comma-close	c	c-electric-semi&comma	44	nil	1	0	1	1	end	list-close-comma	int a[] = {1, 2}
+semi-comment	c	c-electric-semi&comma	59	nil	1	0	1	1	end	default	int x; /* c */
+colon-scope	c	c-electric-colon	58	nil	1	0	1	1	end	default	A: :
+colon-scope-noauto	c	c-electric-colon	58	nil	0	0	1	1	end	default	A: :
+colon-case	c	c-electric-colon	58	nil	1	0	1	1	end	default	switch (x) {\ncase 1
+colon-label	c	c-electric-colon	58	nil	1	0	1	1	end	default	void f() {\nlab
+colon-access	cpp	c-electric-colon	58	nil	1	0	1	1	end	default	class C {\npublic
+colon-member	cpp	c-electric-colon	58	nil	1	0	1	1	end	default	struct S {\n  S() 
+colon-arg	c	c-electric-colon	58	2	1	0	1	1	end	default	void f() {\nlab
+slash-line	c	c-electric-slash	47	nil	1	0	1	1	end	default	int x; //
+slash-block-start	c	c-electric-slash	47	nil	1	0	1	1	end	default	/* x 
+star-bol	c	c-electric-star	42	nil	1	0	1	1	end	default	  /
+pound-align	c	c-electric-pound	35	nil	1	0	1	1	end	default	    
+pound-arg	c	c-electric-pound	35	2	1	0	1	1	end	default	    
+paren-space	c	c-electric-paren	40	nil	1	0	1	1	end	space-before-funcall	foo
+paren-empty	c	c-electric-paren	41	nil	1	0	1	1	end	compact-empty-funcall	foo(
+paren-catch	c	c-electric-paren	40	nil	1	0	1	1	end	brace-catch-brace	try {\n}\ncatch
+paren-elseif	c	c-electric-paren	40	nil	1	0	1	1	end	brace-elseif-brace	if (x) {\n  y;\n}\nelse if
+paren-plain	c	c-electric-paren	40	nil	1	0	1	1	end	default	int x
+paren-string	c	c-electric-paren	40	nil	1	0	1	1	end	space-before-funcall	char *s = "foo
+backspace-hungry	c	c-electric-backspace	127	nil	1	1	1	1	end	default	int x;   
+backspace-arg	c	c-electric-backspace	127	1	1	1	1	1	end	default	int x;   
+backspace-nohungry	c	c-electric-backspace	127	nil	1	0	1	1	end	default	int x;   
+hungry-back	c	c-hungry-delete-backwards	127	none	1	1	1	1	end	default	int x; 	 
+delete-hungry	c	c-electric-delete-forward	127	nil	1	1	1	1	7	default	int x;   
+hungry-fwd	c	c-hungry-delete-forward	127	none	1	1	1	1	7	default	int x;   
+continued-else	c	c-electric-continued-statement	101	none	1	0	1	1	end	default	if (x)\n  y;\nelse
+continued-while	c	c-electric-continued-statement	101	none	1	0	1	1	end	default	do {\n  x;\n} while
+lt-include	c	c-electric-lt-gt	60	nil	1	0	1	1	end	default	#include 
+lt-template	cpp	c-electric-lt-gt	60	nil	1	0	1	1	end	default	template 
+gt-template	cpp	c-electric-lt-gt	62	nil	1	0	1	1	end	default	vector<int
+lt-cpp-op	cpp	c-electric-lt-gt	60	nil	1	0	1	1	end	default	cout 
+brace-one-liner-long	c	c-electric-brace	125	nil	1	0	1	1	end	one-liner-defun	void f() { aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffffffffff gggggggggg;\n
+brace-one-liner-comment	c	c-electric-brace	125	nil	1	0	1	1	end	one-liner-defun	void f() { return 1; // c\n
+brace-empty-comment	c	c-electric-brace	125	nil	1	0	1	1	end	empty-defun-braces	void f() {\n  /* c */\n
+colon-case-noauto	c	c-electric-colon	58	nil	0	0	1	1	end	default	switch (x) {\ncase 1
+semi-for-body	c	c-electric-semi&comma	59	nil	1	0	1	1	end	default	void f() {\n  for (i = 0; i < n; i++)\n    x = i

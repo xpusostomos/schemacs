@@ -213,7 +213,9 @@
     (goto-char at)
     (parameterize ((*c-syntactic-element* elem)
                    (*c-syntactic-context* ctx)
-                   (*last-command-event* #\;))
+                   ;; A key event is an integer, as the keyboard makes it
+                   ;; (`c-last-command-char' answers the same integer).
+                   (*last-command-event* (char->integer #\;)))
       (cond
        ((eq? fn 'c-gnu-impose-minimum)
         (proc)

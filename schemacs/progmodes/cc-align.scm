@@ -1558,6 +1558,11 @@ indentation amount."
     ;;--------------------------------------------------------------
     ;; Useful for c-hanging-semi&comma-criteria
     ;;--------------------------------------------------------------
+    ;; **`c-last-command-char' answers an event, and an event is an
+    ;; integer** (`keyboard.c:8301': a character key is its byte code).
+    ;; Emacs's `?\;\' is that same integer; Guile's `#\;' is a character
+    ;; object and never `eqv?' to it, so the comparisons spell the
+    ;; conversion out (`char->integer').
 
     (define (c-semi&comma-inside-parenlist)
       "Controls newline insertion after semicolons in parenthesis lists.
@@ -1567,7 +1572,7 @@ newline is added.  In either case, checking is stopped.  This supports
 exactly the old newline insertion behavior."
       ;; "newline only after semicolon, but only if that semicolon is
       ;; not inside a parenthesis list (e.g. a for loop statement)"
-      (if (not (eqv? (c-last-command-char) #\;))
+      (if (not (eqv? (c-last-command-char) (char->integer #\;)))
           #f                            ; "continue checking"
           (if (guard (e ((quit-condition? e) (raise e))
                         (else #t))              ; "error t"
@@ -1584,7 +1589,7 @@ If a comma was inserted, no determination is made.  If a semicolon was
 inserted, and the following line is not blank, no newline is inserted.
 Otherwise, no determination is made."
       (save-excursion
-        (if (and (eqv? (c-last-command-char) #\;)
+        (if (and (eqv? (c-last-command-char) (char->integer #\;))
                  (= (forward-line 1) 0)
                  (bolp)                 ; "forward-line has funny behavior at eob."
                  (not (looking-at "^[ \t]*$")))
@@ -1602,7 +1607,7 @@ For other semicolon contexts, no determination is made."
                    (if (c-safe (up-list -1) #t)
                        (c-point 'bol)
                        -1))))
-        (if (and (eqv? (c-last-command-char) #\;)
+        (if (and (eqv? (c-last-command-char) (char->integer #\;))
                  (eq? (car-safe (car-safe syntax)) 'inclass)
                  (eq? (car-safe (car-safe (cdr-safe syntax))) 'topmost-intro)
                  (= (c-point 'bol) bol))

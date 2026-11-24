@@ -16470,3 +16470,150 @@ parameter-setter trap and the `(symbolp nil)` trap). Every expectation
 is Emacs 31.1's, measured by `/tmp/measure-fill.el`'s method.
 `test/syntax-test.scm` gained the `schemacs_editor_skip_chars_bound`
 group (4): the marker-bound behaviour of both scans, and no-bound.
+
+# cc-mode: the electric keys (2026-11-24)
+
+`cc-cmds.el:409'-`:1568'` is ported: every `c-electric-*` command, the
+`c-hanging-*` machinery they drive, the two hungry deletes and the
+file's `put SYM 'delete-selection` block, plus `c-post-text-conversion`
+(`:5152') now that the commands it dispatches over exist. The gate is
+`tools/cc-electric-diff/` - 60 scenarios against Emacs 31.1, 0
+different, 1 known (see below) - and `test/progmodes/cc-cmds-test.scm`'s
+`schemacs_editor_cc_cmds_electric` (21) and
+`schemacs_editor_cc_cmds_text_conversion` (4) groups.
+
+## What landed, in Emacs's file order
+
+`c-electric-backspace', `c-hungry-delete-backwards' (with its
+`c-hungry-backspace' alias), `c-electric-delete-forward',
+`c-hungry-delete-forward', `c--unsafe-post-self-insert-hook-functions',
+`c--call-post-self-insert-hook-more-safely-1' and its macro,
+`c-electric-pound', `c-point-syntax', `c-brace-newlines',
+`c-try-one-liner', `c-do-brace-electrics', `c-electric-brace',
+`c-electric-slash', `c-electric-star', `c-electric-semi&comma',
+`c-electric-colon', `c-electric-lt-gt', `c-electric-paren',
+`c-electric-continued-statement', the `delete-selection` property
+block, and `c-post-text-conversion'.
+
+`self-insert-command` is called with the event passed explicitly
+(`cmds.c:263''s `(count char)`), and the `let` that disables
+`post-self-insert-hook` is a `parameterize` of `*post-self-insert-hook*`
+(`cmds.c:524`).
+
+## Primitives this tranche needed
+
+**`c-tentative-buffer-changes'** (`cc-defs.el:656'), the macro
+`c-try-one-liner` and `c-point-syntax` stand on. Emacs `let`-binds
+`buffer-undo-list`; here the undo list is the buffer's field, so the
+macro installs its working list in the buffer (a boundary consed onto
+the old one, or the empty list when undo is disabled) and the cleanup
+puts back what it found. Three named departures:
+
+- the body must edit the buffer that was current on entry (Emacs's
+  binding is buffer-local, so a body that switched buffers would have
+  its cleanup read another buffer's list); both callers stay put;
+- `undo-in-progress` is not bound around `primitive-undo` - nothing in
+  this tree reads it;
+- BODY's value reaches the after-thunk through a box, because a
+  `dynamic-wind` after-thunk takes no value; on a non-local exit the box
+  is still `#f`, which is Emacs's `-tnt-chng-keep` before its `setq`.
+
+**`c-end-of-defun-1'** (`cc-defs.el''s defsubst) is placed in
+`cc-engine.scm' beside `c-beginning-of-defun-1', whose buffer-wide
+scan it shares - the same placement departure `c-forward-syntactic-ws'
+records. `c-point''s `'bod`/`'eod` arms now call the pair, and the old
+"raises rather than guessing" test became Emacs-measured answers
+(bod 1, eod 103 on the cc-engine fixture at 42).
+
+**`c-benign-error'** moved from `cc-engine.scm' to `cc-defs.scm',
+where `cc-defs.el` defines it; cc-engine imports and re-exports it.
+Its `(ding)` half is still not ported (no `ding`); the message is all.
+
+**`c-set-region-active`** and **`c-last-command-char`** were already in
+cc-defs; the electric commands read the latter every time.
+
+## The event is an integer - and cc-align's criteria had dead comparisons
+
+A key event in this tree is the integer byte code
+(`keyboard.c:8301`), and `c-last-command-char` answers it. Emacs's `?\;`
+names the same integer 59; Scheme's `#\;` is a character object. The
+four `c-semi&comma-*` criteria in `cc-align.scm' compared
+`(c-last-command-char)` with `#\;` and were therefore **always false** -
+`c-semi&comma-inside-parenlist' never suppressed the newline, and
+`c-semi&comma-no-newlines-*` never allowed one. The electric pass's
+differential is what found it (the semi scenarios' text differed). The
+comparisons are `(char->integer #\;)` now, through a new
+`%c-last-command-char=?' helper beside `%c-char-before=?'/
+`%c-char-after=?' in cc-cmds. `test/progmodes/cc-align-test.scm''s
+probe bound `(*last-command-event* #\;)' - a character - which had made
+the dead comparisons look alive; it binds `(char->integer #\;)' now,
+as the keyboard does.
+
+## A pre-existing zero-values bug the C++ brace scenario exposed
+
+`c-guess-basic-syntax''s CASE 5A.3 (the brace-list check) ended two
+`cond` clauses with a bare `set!' whose *value* is the clause's answer,
+where the C's `setq` answers the new value. Guile's `set!` answers the
+unspecified value, and in that position the caller's continuation is
+single-valued: the first C++ brace scenario died with "Zero values
+returned to single-valued continuation". Both clauses are
+`(begin (set! placeholder ...) placeholder)` now. (Found while running
+the differential on the tree's previously verified engine code; the
+c-guess-basic-syntax differential in `tools/cc-cgbs-diff/` still
+passes.)
+
+## Not carried, each with what it waits for
+
+- The `electric-pair-mode` blocks in five of the commands:
+  `electric-pair-mode` (`simple.el`) and
+  `electric-pair-post-self-insert-function` are not ported.
+- The `blink-paren-function` courtesy at the end of
+  `c-electric-brace'/`c-electric-lt-gt'/`c-electric-paren':
+  `blink-matching-open` (`simple.el`) is not ported. The variable reads
+  nil in Emacs unless that feature is loaded, so the branch does not run
+  there either.
+- `c-electric-delete` and `c-hungry-delete` (`:469', `:486'): XEmacs's
+  `delete-forward-p` variants; not bound on GNU Emacs.
+- `c-align-cpp-indent-to-body`, `c-electric-pragma`, the abbreviation
+  helpers and `c-toggle-cpp-indent-to-body` (`:1457'-`:1547'): they
+  need `abbrev.el` (`define-abbrev`, `abbrev-symbol`, `mapatoms`,
+  `local-abbrev-table`, `last-abbrev-location`), which is not ported.
+- `post-text-conversion-hook` (`keyboard.c''s
+  `Vpost_text_conversion_hook`): `c-post-text-conversion` is carried
+  (four Emacs-measured rows in the cc-cmds test), but the input
+  machinery that would call it is not ported, so nothing invokes it yet.
+
+## The differential, and its one known difference
+
+`tools/cc-electric-diff/'s README has the commands, the twelve-column
+scenario format and the replay. **60 scenarios, 0 different, 1 known**
+(`brace-elseif'): Emacs leaves the cursor at column 3 after the
+`brace-elseif-brace` cleanup where a fresh parse gives 2, because
+Emacs's `c-after-change` hooks run between the cleanup's delete and its
+insert; a static `c-indent-line` on the settled text gives 2 in both
+editors. That is the harness, not the command - and it is also why the
+harness deliberately does **not** install the mode's change hooks.
+
+**A bug found by trying to install them**: with `c-before-change'/
+`c-after-change' on the buffers, the C++ brace scenarios raise inside
+`c-laomib-fix-elt' - `(cdr '())' where Emacs's `(cdr nil)' is nil - in
+the already-ported bracelist machinery. It is real, it is reachable
+from the electric path, and it is left for its own cc-engine pass
+(with `tools/cc-decl-diff/'s bracelist fixtures re-run); the harness
+stays hook-free so that an electric regression cannot hide behind it.
+
+## Tests
+
+- `test/progmodes/cc-cmds-test.scm` is 106: the new
+  `schemacs_editor_cc_cmds_electric` group (21, every expectation
+  Emacs-measured - the same scenarios as the differential's, one per
+  fresh buffer) and `schemacs_editor_cc_cmds_text_conversion` (4).
+  `run-electric` binds `(*c-macro-start* #f)` because
+  `c-query-and-set-macro-start' `set's the parameter and the macro
+  tests above leave a position in it.
+- `test/progmodes/cc-align-test.scm` (55) and
+  `test/progmodes/cc-engine-test.scm` (629) were updated for the two
+  fixes above.
+- All cc suites pass, `schemacs/imports.scm` is regenerated (125
+  libraries, 5099 names), and `tools/pty-check.py imports scratch' is
+  2/2.

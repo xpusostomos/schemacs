@@ -56,7 +56,10 @@
     (only (schemacs core syntax-macros) setq when-e)
     (only (schemacs intervals) get put)
     (only (schemacs buffer) current-buffer buffer-local-value
-          make-overlay overlay-put delete-overlay)
+          make-overlay overlay-put delete-overlay
+          buffer-modified-p set-buffer-modified-p buffer-live-p
+          set!mark-active set-buffer
+          text-editor-undo-list set!text-editor-undo-list)
     (only (schemacs core cl-seq)
           cl-set-difference cl-intersection cl-delete-duplicates)
     (only (schemacs fns) mapcan)
@@ -67,7 +70,7 @@
     ;; narrow.
     (only (schemacs editfns) point goto-char point-min point-max
           save-restriction narrow-to-region char-after char-before eolp
-          save-excursion delete-and-extract-region)
+          save-excursion delete-and-extract-region message)
     (only (schemacs cmds) forward-char backward-char)
     ;; `c-langelem-col' reads the column of an anchor position.
     (only (schemacs indentc) current-column)
@@ -97,7 +100,7 @@
     (only (schemacs search) re-search-forward re-search-backward looking-at)
     ;; `c-region-is-active-p' (`cc-defs.el:497') is `region-active-p'
     ;; on any Emacs that has it, which is this one (`simple.el`'s).
-    (only (schemacs simple) region-active-p)
+    (only (schemacs simple) region-active-p mark set-mark primitive-undo)
     ;; `c-sentence-end' (`cc-defs.el:572') is Emacs's
     ;; `(sentence-end)', paragraphs.el's function.
     (only (schemacs textmodes paragraphs) sentence-end)
@@ -112,7 +115,8 @@
    c--mapcan c--set-difference c--intersection c--delete-duplicates
    %c-true %c-false
    c-emacs-features c-with-syntax-table c-int-to-char c-characterp
-   c-keep-region-active c-region-is-active-p
+   c-keep-region-active c-region-is-active-p c-set-region-active
+   c-benign-error
    c-register-emacs-variable-reader!
    c-add-language c-lang-major-mode-is *c-buffer-is-cc-mode*
    *c-lang-var-overrides*
@@ -121,7 +125,7 @@
    c-concat-separated c-make-bare-char-alt
    c-make-keywords-re c-lang-constant-documentation c-literal-datum?
    c-major-mode-is *c-langs-are-parametric* *c-lang-const-expansion*
-   c-save-buffer-state
+   c-save-buffer-state c-tentative-buffer-changes
    c-font-lock-flush
    c-put-overlay c-delete-overlay
    c-with-string-fences *c-string-fences-set-flag*
@@ -205,6 +209,24 @@
   ;; XEmacs." Emacs's macro compiles the `region-active-p' arm when the
   ;; function exists, which it does here.
   (region-active-p))
+
+(define (c-set-region-active activate)
+  ;; `cc-defs.el:506': "Activate the region if ACTIVE is non-nil,
+  ;; deactivate it otherwise. Covers the differences between Emacs and
+  ;; XEmacs." Emacs's arm is `(setq mark-active ,activate)'; the
+  ;; variable is `buffer.c''s `mark-active' here, and its setter sets
+  ;; the current buffer's value (`buffer.scm').
+  (set!mark-active activate))
+
+(define (c-benign-error format-string . args)
+  ;; `cc-defs.el:241': "Formats an error message for the echo area and
+  ;; dings, i.e. like `error' but doesn't abort." Emacs's macro signals
+  ;; a `c-benign-error' condition, which is caught by `c-safe' and the
+  ;; like; this tree's `c-safe' catches every error, so the message is
+  ;; all the behavior there is. `ding' is not ported anywhere in the
+  ;; tree (the same named departure `novice.scm' carries), so the
+  ;; echo-area half is the whole of it.
+  (apply message format-string args))
 
 (define (c-keep-region-active)
   ;; `cc-defs.el:2092': "Do whatever is necessary to keep the region
@@ -951,6 +973,103 @@
   (syntax-rules ()
     ((_ (bindings ...) body ...)
      (with-silent-modifications (let* (bindings ...) body ...)))))
+
+;;----------------------------------------------------------------------
+;; `c-tentative-buffer-changes' (`cc-defs.el:656')
+;;----------------------------------------------------------------------
+;; "Eval BODY and optionally restore the buffer contents to the state it
+;; was in before BODY. Any changes are kept if the last form in BODY
+;; returns non-nil. Otherwise it's undone using the undo facility, and
+;; various other buffer state that might be affected by the changes is
+;; restored. ..."
+;;
+;; **Emacs's macro `let'-binds `buffer-undo-list'; this tree's undo list
+;; is the buffer's field (`text-editor-undo-list'), so the macro installs
+;; its working list in the buffer itself and the cleanup puts back what
+;; it found.** The shape is otherwise Emacs's, including the boundary
+;; cons that is spliced back out when the changes are kept.
+;;
+;; **The body must edit the buffer that was current on entry** - the
+;; binding Emacs gives `buffer-undo-list' is buffer-local, so a body that
+;; switched buffers would have its cleanup read another buffer's list.
+;; Both callers here (`c-point-syntax' and `c-try-one-liner') stay in
+;; the original buffer. `undo-in-progress', which Emacs binds around
+;; `primitive-undo', is not carried: nothing in this tree reads it.
+;;
+;; BODY's value reaches the cleanup through a box, because a Scheme
+;; `dynamic-wind' after-thunk takes no value; on a non-local exit the box
+;; is still #f, which is Emacs's `-tnt-chng-keep' before the `setq'.
+(define-syntax c-tentative-buffer-changes
+  (syntax-rules ()
+    ((_ body ...)
+     (%c-tentative-buffer-changes (lambda () body ...)))))
+
+(define (%c-tentative-buffer-changes thunk)
+  (let* ((ed (current-buffer))
+         (saved (text-editor-undo-list ed))
+         (old-undo (if (eq? saved #t) #t (cons '() saved)))
+         (keep #f))
+    ;; Emacs: `buffer-undo-list' becomes nil when undo is disabled, else
+    ;; the old list with a boundary consed on; `old-undo-list' keeps the
+    ;; disabled symbol.
+    (set!text-editor-undo-list ed (if (eq? saved #t) '() old-undo))
+    (let ((state (%c-tnt-chng-record-state old-undo)))
+      (dynamic-wind
+        (lambda () #f)
+        (lambda () (set! keep (thunk)))
+        (lambda () (%c-tnt-chng-cleanup keep state ed))))))
+
+(define (%c-tnt-chng-record-state old-undo-list)
+  ;; The C's saved-state vector, element for element (`cc-defs.el:690').
+  (vector old-undo-list                  ; 0
+          (current-buffer)               ; 1
+          (point)                        ; 2
+          (mark #t)                      ; 3
+          (c-region-is-active-p)         ; 4
+          (buffer-modified-p)))          ; 5
+
+(define (%c-tnt-chng-cleanup keep state ed)
+  ;; The C's `c-tnt-chng-cleanup' (`cc-defs.el:708'), with
+  ;; `buffer-undo-list' read and written through the buffer's slot.
+  (let ((saved-undo-list (vector-ref state 0)))
+    (let ((current (text-editor-undo-list ed)))
+      (cond
+       ((eq? current saved-undo-list)
+        ;; No change was done after all: drop the boundary.
+        (set!text-editor-undo-list ed (cdr saved-undo-list)))
+       (keep
+        (if (eq? saved-undo-list #t)
+            (begin
+              (c-benign-error
+               "Can't save additional undo list in c-tnt-chng-cleanup")
+              (set!text-editor-undo-list ed #t))
+            ;; Find and remove the undo boundary.
+            (let loop ((p current))
+              (if (not (eq? (cdr p) saved-undo-list))
+                  (loop (cdr p))
+                  (set-cdr! p (cdr saved-undo-list))))))
+       (else
+        (let ((end-undo-list (if (eq? saved-undo-list #t)
+                                 '()
+                                 ;; `primitive-undo' will remove the boundary.
+                                 (cdr saved-undo-list))))
+          (let loop ()
+            (unless (eq? (text-editor-undo-list ed) end-undo-list)
+              (set!text-editor-undo-list ed
+                (primitive-undo 1 (text-editor-undo-list ed)))
+              (loop))))
+        (if (eq? saved-undo-list #t)
+            (set!text-editor-undo-list ed #t)))))
+
+    ;; Restore the buffer state, however the undo went.
+    (when (buffer-live-p (vector-ref state 1))
+      (set-buffer (vector-ref state 1))
+      (goto-char (vector-ref state 2))
+      (set-mark (vector-ref state 3))
+      (c-set-region-active (vector-ref state 4))
+      (when (and (not (vector-ref state 5))
+                 (buffer-modified-p))
+        (set-buffer-modified-p #f)))))
 
 ;; `c-font-lock-flush' (`cc-defs.el:233'): "Declare the region
 ;; BEG...END's fontification as out-of-date. On XEmacs and older Emacsen,

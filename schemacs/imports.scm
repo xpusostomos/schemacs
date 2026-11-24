@@ -111,7 +111,7 @@
     (schemacs progmodes cc-align)
     (schemacs progmodes cc-cmds)
     (schemacs progmodes cc-defs)
-    (schemacs progmodes cc-engine)
+    (except (schemacs progmodes cc-engine)  c-benign-error)
     (schemacs progmodes cc-fonts)
     (schemacs progmodes cc-langs)
     (schemacs progmodes cc-mode)
@@ -1303,6 +1303,7 @@
     c-block-comment-prefix
     c-block-in-arglist-dwim
     c-brace-anchor-point
+    c-brace-newlines
     c-brace-stack-at
     c-bs-at-toplevel-p
     c-bs-cache
@@ -1384,6 +1385,7 @@
     c-directly-in-class-called-p
     c-display-defun-name
     c-do-auto-fill
+    c-do-brace-electrics
     c-do-declarators
     c-doc-bright-comment-start-re
     c-doc-comment-style
@@ -1399,12 +1401,24 @@
     c-down-list-backward
     c-down-list-forward
     c-echo-parsing-error
+    c-electric-backspace
+    c-electric-brace
+    c-electric-colon
+    c-electric-continued-statement
+    c-electric-delete-forward
     c-electric-flag
+    c-electric-lt-gt
+    c-electric-paren
+    c-electric-pound
+    c-electric-semi&comma
+    c-electric-slash
+    c-electric-star
     c-emacs-features
     c-enclosing-c++-attribute
     c-end-of-current-token
     c-end-of-decl-1
     c-end-of-defun
+    c-end-of-defun-1
     c-end-of-literal
     c-end-of-macro
     c-end-of-sentence-in-comment
@@ -1533,6 +1547,9 @@
     c-hanging-braces-alist
     c-hanging-colons-alist
     c-hanging-semi&comma-criteria
+    c-hungry-backspace
+    c-hungry-delete-backwards
+    c-hungry-delete-forward
     c-hungry-delete-key
     c-in-after-change-fontification
     c-in-comment-line-prefix-p
@@ -1762,7 +1779,9 @@
     c-parsing-error
     c-partial-ws-p
     c-point
+    c-point-syntax
     c-position-wrt-ml-delims
+    c-post-text-conversion
     c-pps-to-string-delim
     c-preprocessor-face-name
     c-previous-single-property-change
@@ -1846,6 +1865,7 @@
     c-set-doc-comment-re-element
     c-set-doc-comment-res
     c-set-offset
+    c-set-region-active
     c-set-style
     c-set-style-1
     c-set-style-history
@@ -1919,6 +1939,7 @@
     c-syntactic-re-search-forward
     c-syntactic-skip-backward
     c-syntax-table-hwm
+    c-tentative-buffer-changes
     c-toggle-auto-hungry-state
     c-toggle-auto-newline
     c-toggle-comment-style
@@ -1930,6 +1951,7 @@
     c-truncate-bs-cache
     c-truncate-lit-pos-cache
     c-truncate-lit-pos/state-cache
+    c-try-one-liner
     c-unescaped-nls-in-string-p
     c-unfind-coalesced-tokens
     c-unfind-enclosing-token
