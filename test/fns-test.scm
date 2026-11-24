@@ -379,4 +379,18 @@
           (guard (e (#t #t)) (%substring s 9) #f)
           (guard (e (#t #t)) (%substring s -9) #f))))
 
+;;------------------------------------------------------------------
+;; `proper-list-p' (`fns.c:244') - measured on Emacs 31.1:
+;; (3 0 nil nil nil), and a circular list is nil too.
+;;------------------------------------------------------------------
+(test-equal '(3 0 #f #f #f #f)
+  (let ((x (list 1 2)))
+    (set-cdr! (cdr x) x)
+    (list (proper-list-p '(1 2 3))
+          (proper-list-p '())
+          (proper-list-p '(1 . 2))
+          (proper-list-p "abc")
+          (proper-list-p 5)
+          (proper-list-p x))))
+
 (test-end "schemacs_editor_fns")

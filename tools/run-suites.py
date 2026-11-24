@@ -118,6 +118,7 @@ SUITES = [
     'test/scroll-bar-test.scm',
     'test/search-test.scm',
     'test/select-test.scm',
+    'test/simple-test.scm',
     'test/startup-test.scm',
     'test/subr-test.scm',
     'test/syntax-test.scm',

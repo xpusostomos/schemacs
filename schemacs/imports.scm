@@ -1072,8 +1072,10 @@
     abbreviate-file-name
     abbrevs-changed
     abort-recursive-edit
+    accept-change-group
     access-keymap
     accessible-keymaps
+    activate-change-group
     activate-mark
     adaptive-fill-first-line-regexp
     adaptive-fill-mode
@@ -1111,6 +1113,7 @@
     assoc-default
     assoc-delete-all
     assq-delete-all
+    atomic-change-group
     attribute-value
     attributes-set
     auto-coding-alist-lookup
@@ -2041,6 +2044,7 @@
     call-process
     call-with-buffer-local
     called-interactively?
+    cancel-change-group
     cancel-timer
     canonically-space-region
     capitalize
@@ -3939,6 +3943,7 @@
     prefix-argument-description
     prefix-echo-pending?
     prefix-numeric-value
+    prepare-change-group
     prepare-to-modify-buffer
     prepare-to-modify-buffer-1
     previous-buffer
@@ -3969,6 +3974,7 @@
     prog1
     prog2
     progn
+    proper-list-p
     propertize
     propertized-buffer-identification
     provide-theme
@@ -5127,6 +5133,7 @@
     undo-equiv-table
     undo-insertion-entry?
     undo-modified-entry?
+    undo-more
     undo-redo
     unexpand-abbrev
     unfill-paragraph

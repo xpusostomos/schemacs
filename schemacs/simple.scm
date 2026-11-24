@@ -15,7 +15,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
- (only (schemacs undo) undo-insertion-entry? undo-deletion-entry? undo-modified-entry? text-editor-undo-boundary!)
+ (only (schemacs undo) undo-insertion-entry? undo-deletion-entry? undo-modified-entry? text-editor-undo-boundary! *undo-limit*)
     (scheme base)
     (scheme char)
     (scheme case-lambda)
@@ -146,7 +146,7 @@
           ;; `count-lines` narrows to its range and counts inside it -
           ;; the narrowing is `editfns.c`'s, and `save-restriction` is
           ;; what puts the old bounds back.
-          narrow-to-region point-min save-restriction)
+          narrow-to-region point-min save-restriction widen)
     ;; The line movement's screen geometry: `vertical-motion` is
     ;; `indent.c`'s and lives in `indent.c`'s library since 2026-11-07,
     ;; with the row walk under it. `current-column` and `move-to-column`
@@ -221,8 +221,10 @@
     ;; `define-minor-mode' is `easy-mmode.el`'s, and it is what builds
     ;; `overwrite-mode' and `binary-overwrite-mode' below.
     (only (schemacs core easy-mmode) define-minor-mode)
-    ;; what the code it generates calls
-    (only (schemacs subr) add-minor-mode run-hooks run-mode-hooks)
+    ;; what the code it generates calls, and `undo-more`'s and
+    ;; `cancel-change-group`'s `last`
+    (only (schemacs subr) add-minor-mode run-hooks run-mode-hooks
+          user-error last)
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
     (only (schemacs subr)
@@ -254,7 +256,10 @@
    *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
    *interprogram-cut-function* *interprogram-paste-function*
    *select-active-regions* *yank-pop-change-selection*
-   *pending-undo-list* *prefix-cu* *prefix-digits* *prefix-negative*
+   *pending-undo-list* undo-more
+   prepare-change-group activate-change-group accept-change-group
+   cancel-change-group atomic-change-group
+   *prefix-cu* *prefix-digits* *prefix-negative*
    amalgamating-command? backward-char backward-delete-char
    *backward-delete-char-untabify-method* backward-delete-char-untabify
    backward-kill-word backward-word backward-word-position
@@ -2096,6 +2101,153 @@ node `(elisp) Word Motion' for details."
                        ed (if (< pos 0) (+ at (string-length text)) at)))))
                   (loop rest n #f)))))))
       )
+
+    (define (undo-more n)
+      ;; GNU Emacs's `undo-more' (`simple.el:3635'): "Undo back N
+      ;; undo-boundaries beyond what was already undone recently.
+      ;; Call `undo-start' to get ready to undo recent changes,
+      ;; then call `undo-more' one or more times to undo them."
+      ;;
+      ;; It is placed after `primitive-undo' rather than before it as
+      ;; in Emacs, because a Scheme library resolves the callee when
+      ;; the definition form is evaluated.
+      ;;
+      ;; `undo-in-progress' is not carried: `primitive-undo' here does
+      ;; not read it.
+      ;;--------------------------------------------------------------
+      (unless (list? (*pending-undo-list*))
+        (user-error "No further undo information"))
+      (let ((rest (primitive-undo n (*pending-undo-list*))))
+        (*pending-undo-list* (if (null? rest) #t rest))))
+
+    ;;----------------------------------------------------------------
+    ;; Atomic change groups - `subr.el:4336'-`:4429', placed in this
+    ;; library because `undo-more' and `primitive-undo' are here and
+    ;; `subr.scm' sits below them (a named placement departure).
+    ;;----------------------------------------------------------------
+
+    (define (prepare-change-group . rest)
+      ;; GNU Emacs's `prepare-change-group' (`subr.el:4336'): "Return a
+      ;; handle for the current buffer's state, for a change group."
+      ;; The handle records the buffer and its undo list; BUFFER
+      ;; overrides the current buffer.
+      ;;--------------------------------------------------------------
+      (let ((buffer (and (pair? rest) (car rest))))
+        (if buffer
+            (list (cons buffer (text-editor-undo-list buffer)))
+            (list (cons (current-buffer)
+                        (text-editor-undo-list (current-buffer)))))))
+
+    (define (activate-change-group handle)
+      ;; GNU Emacs's `activate-change-group' (`subr.el:4374'):
+      ;; "Activate a change group made with `prepare-change-group'."
+      ;;
+      ;; An insertion at the front of the undo list would otherwise be
+      ;; merged with the change the group is about to make, so an
+      ;; "empty insertion" - harmless, but a merge boundary - is pushed
+      ;; with the same position.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (elt)
+         (let ((buffer (car elt)))
+           (if (eq? (text-editor-undo-list buffer) #t)
+               (set!text-editor-undo-list buffer '())
+               (let ((list (text-editor-undo-list buffer)))
+                 (when (and (pair? list) (pair? (car list))
+                            (number? (car (car list))))
+                   (set!text-editor-undo-list
+                    buffer
+                    (cons (cons (car (car list)) (car (car list)))
+                          list)))))))
+       handle))
+
+    (define (accept-change-group handle)
+      ;; GNU Emacs's `accept-change-group' (`subr.el:4395'): "Finish a
+      ;; change group ... by accepting its changes as final." A buffer
+      ;; whose undo was disabled when the handle was made gets it
+      ;; disabled again.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (elt)
+         (when (eq? (cdr elt) #t)
+           (set!text-editor-undo-list (car elt) #t)))
+       handle))
+
+    (define (cancel-change-group handle)
+      ;; GNU Emacs's `cancel-change-group' (`subr.el:4403'): "Finish a
+      ;; change group ... by reverting all of its changes."
+      ;;
+      ;; The undo log is truncated *in place* at the saved cons cell, so
+      ;; that an undo running from elsewhere in the list sees the same
+      ;; object; the cell's original contents are put back on the way
+      ;; out. `pending-undo-list' is bound for the duration, as the
+      ;; Emacs `let' binds it, and restored afterwards.
+      ;;--------------------------------------------------------------
+      (for-each
+       (lambda (elt0)
+         (let ((buffer (car elt0))
+               (saved (cdr elt0)))
+           (with-current-buffer buffer
+             (save-restriction
+               (widen)
+               (let ((old-car (and (pair? saved) (car saved)))
+                     (old-cdr (and (pair? saved) (cdr saved)))
+                     (pending (text-editor-undo-list buffer)))
+                 (dynamic-wind
+                  (lambda () (*pending-undo-list* pending))
+                  (lambda ()
+                    ;; Temporarily truncate the undo log at SAVED.
+                    (when (pair? saved)
+                      (set-car! saved '())
+                      (set-cdr! saved '()))
+                    ;; Make sure there's no confusion.
+                    (when (and (pair? saved)
+                               (not (eq? saved (last pending))))
+                      (error "Undoing to some unrelated state"))
+                    ;; Undo it all.
+                    (save-excursion
+                      (let loop ()
+                        (when (list? (*pending-undo-list*))
+                          (undo-more 1)
+                          (loop))))
+                    ;; Revert the undo info to what it was when we
+                    ;; grabbed the state.
+                    (set!text-editor-undo-list buffer saved))
+                  (lambda ()
+                    ;; Reset the modified cons cell to its original
+                    ;; content, and `pending-undo-list' to its old value.
+                    (when (pair? saved)
+                      (set-car! saved old-car)
+                      (set-cdr! saved old-cdr))
+                    (*pending-undo-list* #f))))))))
+       handle))
+
+    (define-syntax atomic-change-group
+      ;; GNU Emacs's `atomic-change-group' (`subr.el:4278'): "Like
+      ;; `progn' but perform BODY as an atomic change group. This means
+      ;; that if BODY exits abnormally, all of its changes to the
+      ;; current buffer are undone. This works regardless of whether
+      ;; undo is enabled in the buffer."
+      ;;
+      ;; Emacs also binds `undo-outer-limit' and `undo-strong-limit' so
+      ;; that its tiered truncation cannot cut the group; this tree has
+      ;; only `undo-limit', and binding it high is the same guarantee.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ body ...)
+         (let ((handle (prepare-change-group))
+               (success #f))
+           (parameterize ((*undo-limit* (- (expt 2 62) 1)))
+             (dynamic-wind
+              (lambda () (activate-change-group handle))
+              (lambda ()
+                (let ((value (begin body ...)))
+                  (set! success #t)
+                  value))
+              (lambda ()
+                (if success
+                    (accept-change-group handle)
+                    (cancel-change-group handle)))))))))
 
     (define-command (undo count)
       ;; GNU Emacs's `undo'. Repeating it undoes further back, and when

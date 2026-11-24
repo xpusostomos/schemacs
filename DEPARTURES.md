@@ -16953,3 +16953,34 @@ cc-mode.el's mode bodies name both - `electric-pair-inhibit-predicate`
 (`cc-mode.el:633`) and `flymake-diagnostic-functions`
 (`cc-mode.el:2940`) - so the `.c`/`.h` milestone waits on them, or on
 a user-approved reduced scope.
+
+## `proper-list-p`, `undo-more` and the change groups (2026-11-24)
+
+The primitives `elec-pair.el` needs under its own logic; they are
+`fns.c` and `subr.el`/`simple.el` work, ported before the mode.
+
+- **`proper-list-p`** is in `fns.scm` (`fns.c:244`): Floyd's tortoise
+  and hare under the C's `FOR_EACH_TAIL_SAFE`, answering the length for
+  a proper list and `#f` for a dotted or circular one. Measured on
+  Emacs 31.1: `(3 0 nil nil nil)` for the four cases and a cycle.
+- **`undo-more`** is in `simple.scm` (`simple.el:3635`), placed after
+  `primitive-undo` rather than before it as in Emacs because a Scheme
+  library resolves the callee when the definition is evaluated.
+  `undo-in-progress` is not carried - `primitive-undo` here does not
+  read it.
+- **The change groups** - `prepare-change-group`,
+  `activate-change-group`, `accept-change-group`,
+  `cancel-change-group` and the `atomic-change-group` macro - are in
+  `simple.scm`, a named placement departure: Emacs has them in
+  `subr.el`, which here sits below `primitive-undo`/`undo-more` and
+  could not call them. `buffer-undo-list` is the buffer's undo slot
+  behind `text-editor-undo-list`, and the saved cons cell is truncated
+  in place and restored exactly as the C's `setcar`/`setcdr` pair does.
+  Emacs also binds `undo-outer-limit` and `undo-strong-limit` so that
+  its tiered truncation cannot cut a group; this tree has only
+  `*undo-limit*`, bound to `2^62-1` for the group's duration, which is
+  the same guarantee.
+- **Verified**: `test/simple-test.scm` (10) pins `undo-more`'s group
+  and its `t` end, and `atomic-change-group`'s four measured cases
+  (success keeps `"abcX"`, an error restores `"abc"`, both again with
+  undo disabled and the disabled flag preserved). `fns-test.scm` 42.

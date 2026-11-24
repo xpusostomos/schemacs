@@ -87,6 +87,7 @@
           nth
           elt
           %length
+          proper-list-p
           mapcar
           mapcan
           %substring
@@ -532,6 +533,29 @@
             ((char-table? sequence) (+ #x3FFFFF 1))
             ((not sequence) 0)
             (else (error "Wrong type argument: sequencep, ~s" sequence))))
+
+    (define (proper-list-p object)
+      ;; GNU Emacs's `proper-list-p' (`fns.c:244'): "Return OBJECT's
+      ;; length if it is a proper list, nil otherwise. A proper list is
+      ;; neither circular nor dotted (i.e., its last cdr is nil)."
+      ;;
+      ;; The C walks with `FOR_EACH_TAIL_SAFE`, which is Floyd's
+      ;; tortoise and hare: a circular list is recognised as soon as the
+      ;; fast pointer meets the slow one, and a dotted one by its last
+      ;; cdr not being nil. Both answers are `#f'.
+      ;;--------------------------------------------------------------
+      (let loop ((tail object) (tortoise object) (step 0) (len 0))
+        (cond
+         ((null? tail) len)
+         ((not (pair? tail)) #f)
+         ((and (> step 1) (eq? tail tortoise)) #f)
+         (else
+          (loop (cdr tail)
+                (if (even? step)
+                    (if (pair? tortoise) (cdr tortoise) tortoise)
+                    tortoise)
+                (+ step 1)
+                (+ len 1))))))
 
     (define (nthcdr n list)
       ;; GNU Emacs's `nthcdr' (`fns.c:1750`): "Take cdr N times on
