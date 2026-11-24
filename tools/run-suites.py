@@ -105,6 +105,7 @@ SUITES = [
     'test/progmodes/cc-engine-test.scm',
     'test/progmodes/cc-fonts-test.scm',
     'test/progmodes/cc-langs-test.scm',
+    'test/progmodes/cc-menus-test.scm',
     'test/progmodes/cc-mode-test.scm',
     'test/progmodes/cc-styles-test.scm',
     'test/progmodes/cc-vars-test.scm',

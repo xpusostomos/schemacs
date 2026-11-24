@@ -16798,3 +16798,57 @@ rows pin both answers.
 6. **`imenu--make-index-alist`'s index shape is Emacs's**: the rescan
    item is consed on the front when `imenu-auto-rescan` is nil, and
    `imenu--cleanup` detaches the markers, both measured and pinned.
+
+## cc-menus (`cc-menus.el`), 2026-11-24
+
+`schemacs/progmodes/cc-menus.scm` ports `lisp/progmodes/cc-menus.el`:
+the imenu generic expressions the CC modes install (`cc-imenu-init`),
+Java's, and Objective-C's index function. It is what cc-mode.el's mode
+bodies call, and the second of the primitives the mode tranche was
+waiting on.
+
+### The expressions are GITE's, and 31.1 differs
+
+The port follows **GITE's source** (Emacs 32.0.50), as the whole cc-mode
+work does. The installed Emacs 31.1's `cc-menus.el` builds a different
+Objective-C expression - its `general-func-index` is 3 rather than 4,
+its `objc-base-index` 9/10 rather than 3/4, its `proto-index` 9 rather
+than 3, its method class has `_,` where GITE has `*,`, and it places
+the general-function regexp before the Objective-C alternatives instead
+of after them. The two are different files; a dump of GITE's variables
+is what the port was verified against, and its index answers were
+measured by loading GITE's `cc-menus.el` into the installed Emacs.
+
+### Departures
+
+1. **`cc-imenu-init`'s index function is a procedure here where Emacs
+   passes a symbol.** Emacs `funcall`s `imenu-create-index-function`, so
+   `(cc-imenu-init nil 'cc-imenu-objc-function)` names it through the
+   obarray. This tree has no function obarray, so the mode body will
+   pass the procedure (`cc-imenu-objc-function` unquoted); `cc-imenu-init`
+   stores whatever it is given, as Emacs stores whatever it is given.
+2. **The imenu variables are buffer-local accessors**, not symbol
+   values: `cc-imenu-init` writes `set!imenu-generic-expression`,
+   `set!imenu-case-fold-search` and `set!imenu-create-index-function`.
+3. **The `cc-imenu-objc-generic-expression-*-index` variables are set
+   as load-time side effects of building the expression**, exactly as
+   Emacs's `defvar` initialiser's `prog2`/`progn` do. A redefinition of
+   `cc-imenu-c++-generic-expression` after load does not update them in
+   either editor.
+4. **`cc-imenu-c-prototype-macro-regexp` is a plain variable read at
+   load** (Emacs `defvar`s it; it is not in `cus-start.el`, so the
+   `define-custom` rule does not apply). Setting it in an init file
+   before `cc-menus` loads includes the prototype entry, as in Emacs.
+
+### Verified
+
+A character-for-character dump of `cc-imenu-c++-generic-expression`,
+`cc-imenu-c-generic-expression`, `cc-imenu-java-generic-expression`,
+`cc-imenu-objc-generic-expression`, the four Objective-C indices and the
+two selector helpers was taken from GITE's file in a running Emacs and
+from the port: **identical** (the only textual differences were Guile's
+`#t`/`#f` print spellings and `"".'s empty list versus nil). The three
+index alists the port builds - C, C++ on the same fixture, and
+Objective-C with its C submenu - are what `imenu--generic-function` and
+`cc-imenu-objc-function` answer on the same text, also identical.
+`test/progmodes/cc-menus-test.scm` (20) pins them.

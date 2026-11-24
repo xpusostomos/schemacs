@@ -116,6 +116,7 @@
     (except (schemacs progmodes cc-engine)  c-benign-error)
     (schemacs progmodes cc-fonts)
     (schemacs progmodes cc-langs)
+    (schemacs progmodes cc-menus)
     (schemacs progmodes cc-mode)
     (schemacs progmodes cc-styles)
     (schemacs progmodes cc-vars)
@@ -2049,6 +2050,24 @@
     category-table
     category-table-p
     cc-choose-style-for-mode
+    cc-imenu-c++-generic-expression
+    cc-imenu-c-generic-expression
+    cc-imenu-c-prototype-macro-regexp
+    cc-imenu-init
+    cc-imenu-java-build-type-args-regex
+    cc-imenu-java-comment-regexp
+    cc-imenu-java-ellipsis-regexp
+    cc-imenu-java-generic-expression
+    cc-imenu-java-method-arg-regexp
+    cc-imenu-java-type-spec-regexp
+    cc-imenu-objc-function
+    cc-imenu-objc-generic-expression
+    cc-imenu-objc-generic-expression-general-func-index
+    cc-imenu-objc-generic-expression-noreturn-index
+    cc-imenu-objc-generic-expression-objc-base-index
+    cc-imenu-objc-generic-expression-proto-index
+    cc-imenu-objc-method-to-selector
+    cc-imenu-objc-remove-white-space
     cd
     cd-absolute
     cd-path

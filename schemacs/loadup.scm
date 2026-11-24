@@ -158,6 +158,7 @@
         (schemacs core cl-seq)
         (schemacs eval)
         (schemacs progmodes cc-langs)
+        (schemacs progmodes cc-menus)
         (schemacs progmodes cc-mode)
         (schemacs progmodes cc-vars)
         (schemacs progmodes cc-styles)
