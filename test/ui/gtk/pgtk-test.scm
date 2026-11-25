@@ -1823,5 +1823,15 @@
                 (pixel 4 (- bottom 2)))
     (test-equal "its ink stops at the text area's bottom, not the mode line"
                 white
+                (pixel 4 (+ bottom 3))))
+  ;; The cursor is a glyph string too (`draw_window_cursor` hands it the
+  ;; window), so its box stops at the same line.
+  (dn:clear-frame-area! d)
+  (dn:draw-window-cursor! d w y 0 1 'filled-box-cursor 1 "X" token)
+  (let ((pixel (shot-of d)))
+    (test-assert "the cursor box is drawn inside the text area"
+                 (not (equal? white (pixel 4 (- bottom 2)))))
+    (test-equal "and it stops at the bottom as well"
+                white
                 (pixel 4 (+ bottom 3)))))
 (test-end "schemacs_pgtk_text_area_clip")

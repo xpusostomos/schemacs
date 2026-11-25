@@ -17553,11 +17553,20 @@ the backend's ink for it is still a cell at the row's top - the clip
 has nothing to trim until per-face fonts are drawn. Two smaller gaps
 beside that:
 
-- **the cursor is not clipped.** `draw-window-cursor!` takes no window
-  (its arguments are the pixel row, the column, the cell count, the
-  type and the glyph), so a cursor on a partially visible row could
-  paint into the mode line once rows are taller. Passing the window
-  through the generic is the fix when per-face fonts land.
+- **the cursor is clipped with the row.** `draw-window-cursor!` and
+  `erase-window-cursor!` take the window, as the C's
+  `draw_window_cursor (struct window *w, ...)` does, and the Gtk
+  methods clip to the text area like the glyph runs; the pgtk test
+  draws a filled box five pixels above the bottom and finds the pixels
+  below it untouched. The saved-cursor record grew the window, and
+  `render!`'s terminal placement was still reading its second and third
+  elements as the row and column: a window reached `set-terminal-cursor!`
+  as the row and the terminal's `cmgoto` raised ("Wrong type argument in
+  position 1") on the first redisplay. The pty battery found it, and
+  `tty-editor-test`'s "the terminal cursor is placed at the cursor's
+  frame row and column" now pins the call - the test display records it
+  in a `terminal-cursor` slot, and the test fails with the shifted
+  indices.
 - A terminal has no partially visible row at all: a row there is one
   cell and the grid is whole cells, so `pos-visible-in-window-p` never
   answers the six-element list on the terminal front end.
@@ -17581,11 +17590,13 @@ sliver (`#f` without PARTIALLY, the same list with it), and
 row used to be dropped and the answer was 56.
 
 `test/ui/gtk/pgtk-test.scm`'s `schemacs_pgtk_text_area_clip` draws a
-run by hand five pixels above the text area's bottom - the place only a
-row taller than its cell could put it - and reads the pixels back: the
-cells inside the area carry the region face's background and the pixel
-below the area's bottom is still the cleared frame. Verified to fail
-with the clip disabled (`(3 3 2)`, the run's ink, instead of white).
+run - and then a filled cursor box - by hand five pixels above the text
+area's bottom, the place only a row taller than its cell could put
+them, and reads the pixels back: the cells inside the area carry the
+region face's background, the cursor box is painted, and the pixel
+below the area's bottom is still the cleared frame for both. Each half
+was verified to fail with its clip disabled (`(3 3 2)`, the run's ink,
+and `(235 217 128)`, the cursor's colour, instead of white).
 
 `tools/pty-check.py` gained **`show-paren-context`**: with
 `show-paren-context-when-offscreen` turned on in the init, a closing

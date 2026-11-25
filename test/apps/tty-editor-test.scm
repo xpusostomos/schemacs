@@ -84,7 +84,8 @@
        x-file-dialog window-system-display?)
  (only (schemacs test-display) <test-display> test-display-script
        set!test-display-script test-display-glyphs
-       test-display-frames-deleted test-display-cursor)
+       test-display-frames-deleted test-display-cursor
+       test-display-terminal-cursor)
  (only (schemacs keymap) *current-keymap* *default-keymap*)
  ;; `kbd' - the tree's spelling of a key, and the event a test presses.
  (only (schemacs character) kbd)
@@ -1689,6 +1690,28 @@
     (set-point ed (buffer-z ed))
     (parameterize ((*current-frame* frame))
       (cursor-screen-position (window-of frame)))))
+
+;; **The terminal's cursor is placed at the cursor's frame row and
+;; column**, which is a different call from drawing it: `render!` reads
+;; the saved `*phys-cursor*` record when it places the terminal cursor.
+;; A change to that record's shape - the window it gained so the cursor
+;; could be clipped - shifted the numbers once: a window reached
+;; `set-terminal-cursor!` as the row, and the terminal's `cmgoto` raised
+;; "Wrong type argument in position 1". The test display's
+;; `terminal-cursor` slot is that call's record.
+(test-equal "the terminal cursor is placed at the cursor's frame row and column"
+  #t
+  (let* ((frame (test-frame (allocate-buffer)))
+         (ed (frame-editor frame))
+         (window (window-of frame)))
+    (with-current-buffer ed (insert "abc"))
+    (set-point ed (buffer-beg ed))
+    (set-point ed (buffer-z ed))
+    (parameterize ((*current-frame* frame))
+      (render! frame)
+      (let* ((at (cursor-screen-position window))
+             (saved (test-display-terminal-cursor *test-display*)))
+        (equal? saved (list (car at) (cdr at)))))))
 
 ;; ... and it is a column on the last line, so moving point backward and
 ;; forward again returns to it.

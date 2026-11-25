@@ -5634,7 +5634,7 @@ buffer size, the line number and the column number."
 
     (define *phys-cursor* (make-parameter #f))
     ;; ^ Where the cursor was last *painted*, and what was under it, as
-    ;; `(DISPLAY ROW COLUMN CELLS TEXT TOKEN)' - GNU Emacs's
+    ;; `(DISPLAY WINDOW ROW COLUMN CELLS TEXT TOKEN)' - GNU Emacs's
     ;; `w->phys_cursor` and `w->phys_cursor_on_p` (`window.h`). The
     ;; cursor is drawn over a row, so it has to be taken off again before
     ;; the next one is drawn; Emacs does that in `erase_phys_cursor`
@@ -5652,8 +5652,8 @@ buffer size, the line number and the column number."
           (*phys-cursor* #f)
           (apply erase-window-cursor! saved))))
 
-    (define (note-phys-cursor! display row column cells text token)
-      (*phys-cursor* (list display row column cells text token)))
+    (define (note-phys-cursor! display window row column cells text token)
+      (*phys-cursor* (list display window row column cells text token)))
 
     (define (clear-garbaged-frames! frame windows)
       ;; GNU Emacs's `clear_garbaged_frames` (`xdisp.c:13699`) for the one
@@ -6141,6 +6141,7 @@ buffer size, the line number and the column number."
                        (glyph (phys-cursor-glyph row (cdr at))))
                   (note-phys-cursor!
                    (current-display)
+                   selected
                    (window-to-frame-pixel-y
                     selected
                     (window-pixel-y
@@ -6150,6 +6151,7 @@ buffer size, the line number and the column number."
                    (cursor-cells buffer (window-point selected))
                    (car glyph) (cdr glyph))
                   (draw-window-cursor! (current-display)
+                                       selected
                                        ;; **The cursor's pixel y**, which
                                        ;; is `w->cursor.y` in the C: the
                                        ;; sum of the heights of the rows
@@ -6191,7 +6193,11 @@ buffer size, the line number and the column number."
         ;; whatever cell the last glyph write left it in.
         (let ((phys (*phys-cursor*)))
           (when phys
-            (set-terminal-cursor! (car phys) (cadr phys) (caddr phys))))
+            ;; `(DISPLAY WINDOW ROW COLUMN ...)': the cursor is placed at
+            ;; the row and column, not at the window that carries them.
+            (set-terminal-cursor! (list-ref phys 0)
+                                  (list-ref phys 2)
+                                  (list-ref phys 3))))
         ;; The screen is what was drawn: the display's flush, which for
         ;; this terminal honours the full-repaint `clear-frame-area!'
         ;; asked for (partial-update optimizations desync the physical

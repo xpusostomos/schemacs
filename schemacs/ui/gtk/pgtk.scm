@@ -297,7 +297,10 @@
           ;; frame's cell (the per-face fonts this backend does not draw
           ;; yet, but which `xdisp.c` lays out) stops at the mode line
           ;; rather than painting over it or the window below.
-          window-body-top window-top window-height window-minibuffer-p)
+          window-body-top window-top window-height window-minibuffer-p
+          ;; the cursor's window is remembered for the erase, and may
+          ;; have been deleted by the time the next redisplay asks for it
+          window-live-p)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
     (only (schemacs faces)
@@ -2782,6 +2785,7 @@
       ;; row above the mode line (`window_text_bottom_y`).
       ;;--------------------------------------------------------------
       (and window
+           (window-live-p window)
            (let* ((ch *cell-height*)
                   (top (* (window-body-top window) ch))
                   (bottom (* (+ (window-top window) (window-height window)
@@ -3318,8 +3322,8 @@
       ;;--------------------------------------------------------------
       (or (face-token-background token) (frame-background-colour frame)))
 
-    (define-method (draw-window-cursor! (d <pgtk-display>) row column cells
-                                        type width text token)
+    (define-method (draw-window-cursor! (d <pgtk-display>) window row column
+                                        cells type width text token)
       ;; The cursor at the cell, in the shape TYPE.
       ;;
       ;; A *filled box* is not a black rectangle painted over the text -
@@ -3345,6 +3349,13 @@
           ;; lines to an empty square, but the cursor flashes /" - the
           ;; glyph was right, the place was not. X stays a cell, the
           ;; horizontal pitch being one per frame, as in the run draw.
+          ;; **The cursor is clipped to the text area with the row**:
+          ;; `get_glyph_string_clip_rects` applies to the cursor's glyph
+          ;; string too, so a cursor on a row cut off at the bottom stops
+          ;; at the same line its text does.
+          (with-pgtk-clip
+           d (pgtk-text-area-clip d window)
+           (lambda ()
           (let ((left (cell-x column))
                 (top row)
                 (box-w (* *cell-width* (max 1 cells))))
@@ -3375,10 +3386,10 @@
                                              (max 1 width))
                                   box-w (max 1 width))
                  (cairo-fill cr))
-                (else #t)))))))
+                (else #t)))))))))
 
-    (define-method (erase-window-cursor! (d <pgtk-display>) row column cells
-                                        text token)
+    (define-method (erase-window-cursor! (d <pgtk-display>) window row column
+                                         cells text token)
       ;; Put the glyph at the old cursor position back: GNU Emacs's
       ;; `erase_phys_cursor`'s last act, `draw_phys_cursor_glyph (w,
       ;; cursor_row, hl)` - the glyph at the *old* cursor position drawn
@@ -3389,6 +3400,10 @@
       ;;--------------------------------------------------------------
       (let ((cr (pgtk-cr d)))
         (when cr
+          ;; the glyph goes back inside the text area, like the draw
+          (with-pgtk-clip
+           d (pgtk-text-area-clip d window)
+           (lambda ()
           (let* ((left (cell-x column))
                  (top row)
                  (box-w (* *cell-width* (max 1 cells))))
@@ -3405,7 +3420,7 @@
               (apply cairo-set-source-rgb
                      cr
                      (or (face-token-foreground token) (list 0.0 0.0 0.0)))
-              (pgtk-show-text! d text left (+ top *font-ascent*)))))))
+              (pgtk-show-text! d text left (+ top *font-ascent*)))))))))
 
     (define (pgtk-present! d gtk-cr)
       ;; Paint what we have drawn into the context Gtk handed us. This is

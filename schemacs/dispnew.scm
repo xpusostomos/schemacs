@@ -631,9 +631,10 @@
     ;;     draw_phys_cursor_glyph (w, cursor_row, hl);
     ;;
     ;; - the glyph at the *previous* cursor position, redrawn in its own
-    ;; face. `(erase-window-cursor! display row column cells text token)',
-    ;; with the arguments `draw-window-cursor!' takes less TYPE and
-    ;; WIDTH: there is no shape to draw, only the glyph to put back.
+    ;; face. `(erase-window-cursor! display window row column cells text
+    ;; token)', with the arguments `draw-window-cursor!' takes less TYPE
+    ;; and WIDTH: there is no shape to draw, only the glyph to put back,
+    ;; clipped to WINDOW's text area as the draw is.
     ;;
     ;; **This is not optional once a frame stops being repainted whole.**
     ;; The cursor is painted *over* a row, so moving it leaves the old
@@ -646,8 +647,13 @@
     (define-generic draw-window-cursor!)
     ;; Put the display cursor at pixel ROW, COLUMN (frame coordinates),
     ;; in the shape TYPE, over the text TEXT drawn in TOKEN's face.
-    ;; Emacs's `draw_window_cursor'. `(draw-window-cursor! display row
-    ;; column cells type width text token)'.
+    ;; Emacs's `draw_window_cursor'. `(draw-window-cursor! display window
+    ;; row column cells type width text token)'.
+    ;;
+    ;; **WINDOW is the one being drawn**, as in the C's `draw_window_cursor
+    ;; (struct window *w, ...)`: a backend clips the cursor to the window's
+    ;; text area as it clips a glyph string (`get_glyph_string_clip_rects`),
+    ;; which matters on a row cut off at the bottom.
     ;;
     ;; CELLS is how many cells the *glyph* under the cursor takes: a
     ;; cursor over a double-width character is drawn over two cells, as

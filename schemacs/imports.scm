@@ -4569,6 +4569,7 @@
     set!test-display-line-height
     set!test-display-rows
     set!test-display-script
+    set!test-display-terminal-cursor
     set!text-editor-buffer-name
     set!text-editor-cache-long-scans
     set!text-editor-file-name
@@ -5080,6 +5081,7 @@
     test-display-line-height
     test-display-rows
     test-display-script
+    test-display-terminal-cursor
     text-editor-buffer-name
     text-editor-cache-long-scans
     text-editor-cursor-column

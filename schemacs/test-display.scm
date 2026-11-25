@@ -74,6 +74,9 @@
           display-cell-size display-color-cells display-set-size!
           face-metrics
           draw-window-cursor! erase-window-cursor! flush-display!
+          ;; The generic the `terminal-cursor` slot below records, so
+          ;; the method attaches to the display interface's own.
+          set-terminal-cursor!
           cursor-to! raw-cursor-to! clear-to-end! clear-frame!
           update-begin! update-end! set-terminal-modes! reset-terminal-modes!
           key-event->key line-height
@@ -93,6 +96,7 @@
           test-display-script set!test-display-script
           test-display-glyphs set!test-display-glyphs
           test-display-cursor set!test-display-cursor
+          test-display-terminal-cursor set!test-display-terminal-cursor
           test-display-frames-deleted set!test-display-frames-deleted)
 
   (begin
@@ -126,6 +130,12 @@
       ;; The last cursor position asked for, as `(ROW COLUMN TYPE)'.
       (cursor      #:init-value #f #:accessor test-display-cursor
                    #:setter set!test-display-cursor)
+      ;; Where the terminal's own cursor was *placed*, as `(ROW COLUMN)' -
+      ;; `set-terminal-cursor!`'s record. It is a separate call from the
+      ;; drawn cursor, and the two are fed from different arguments in
+      ;; `render!`; a test that reads this one sees a mix-up between them.
+      (terminal-cursor #:init-value #f #:accessor test-display-terminal-cursor
+                       #:setter set!test-display-terminal-cursor)
       ;; How many frames have been deleted off this display - what
       ;; `delete-frame-display!' counts, which is a *terminal's* answer
       ;; (a tty keeps its frames and its surface; a window system
@@ -254,12 +264,19 @@
     (define-method (update-window-begin! (d <test-display>)) #t)
     (define-method (update-window-end! (d <test-display>)) #t)
 
-    (define-method (erase-window-cursor! (d <test-display>) row column cells
-                                        text token)
+    (define-method (set-terminal-cursor! (d <test-display>) row column)
+      ;; `render!` places the terminal's cursor once the frame is drawn,
+      ;; from the saved cursor record. Recording it is what lets a test
+      ;; see the two numbers that call is fed.
+      ;;--------------------------------------------------------------
+      (set!test-display-terminal-cursor d (list row column)))
+
+    (define-method (erase-window-cursor! (d <test-display>) window row column
+                                         cells text token)
       (set!test-display-cursor d #f))
 
-    (define-method (draw-window-cursor! (d <test-display>) row column cells
-                                        type width text token)
+    (define-method (draw-window-cursor! (d <test-display>) window row column
+                                        cells type width text token)
       (set!test-display-cursor d (list row column type)))
 
     (define-method (flush-display! (d <test-display>)) #t)

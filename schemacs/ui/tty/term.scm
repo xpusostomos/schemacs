@@ -1481,15 +1481,15 @@
           (%tty-write-byte (char->integer #\return))
           (flush-output-port (current-output-port)))))
 
-    (define-method (erase-window-cursor! (d <tty-display>) row column cells
-                                         text token)
+    (define-method (erase-window-cursor! (d <tty-display>) window row column
+                                         cells text token)
       ;; Nothing to do: a terminal has one cursor that moves when the
       ;; next glyph is written, so there is never an old one left behind.
       ;;--------------------------------------------------------------
       #t)
 
-    (define-method (draw-window-cursor! (d <tty-display>) row column cells
-                                        type width text token)
+    (define-method (draw-window-cursor! (d <tty-display>) window row column
+                                        cells type width text token)
       ;; **A terminal does not draw its cursor here**, and the C says so
       ;; structurally: `draw_window_cursor` is a hook of the
       ;; window-system redisplay interface, and a tty's `rif` is NULL
