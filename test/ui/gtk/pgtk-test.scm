@@ -56,6 +56,9 @@
  (prefix (schemacs frame) fr:)
  (prefix (only (schemacs test-display)
                <test-display> test-display-glyphs) td:)
+ ;; A run drawn by hand at a place only a taller row could put it - the
+ ;; text-area clip's check below.
+ (only (schemacs glyph) make-glyph make-glyph-row)
  (prefix (schemacs window) window:)
  
  (only (schemacs buffer) buffer-local-value set-buffer-local-value!
@@ -1781,3 +1784,44 @@
               2 (length (compute-applicable-methods
                          display-raise-frame (list d #f)))))
 (test-end "schemacs_pgtk_pointer_queries")
+
+;;------------------------------------------------------------------
+;; The text area's bottom clips a row that crosses it
+;;
+;; GNU Emacs lays out the row whose top is above `it.last_visible_y`
+;; and whose bottom crosses it (`try_window`'s loop), and the drawing
+;; layer stops its ink at the window's box
+;; (`get_glyph_string_clip_rects`). This backend draws every row one
+;; cell high today - the per-face fonts that would make a row taller are
+;; named in DEPARTURES.md - so no row it is given places ink past the
+;; bottom. The run is therefore called *directly*, at five pixels above
+;; the text area's bottom: the same call the redisplay makes, at a place
+;; only a taller row could put it. Without the clip the run's background
+;; paints into the mode line's row.
+;;------------------------------------------------------------------
+
+(test-begin "schemacs_pgtk_text_area_clip")
+(let* ((d (new-display))
+       (ed (allocate-buffer))
+       (frame (fr:new-frame ed 24 80))
+       (w (fr:frame-selected-window frame))
+       (ch (cdr (pt:pgtk-cell-size)))
+       (bottom (* (+ (fr:window-top w) (fr:window-height w)
+                     (if (fr:window-minibuffer-p w) 0 -1))
+                  ch))
+       (y (- bottom 5))
+       (token (xd:face->attribute 'region))
+       (g (make-glyph "X" token 1 'char #f 0))
+       (row (make-glyph-row (vector g) 1 0 y 1 1 1 0 0)))
+  (parameterize ((fr:*current-frame* frame))
+    (xd:render! frame))
+  (dn:clear-frame-area! d)
+  (dn:write-glyphs! d w row 'text 0 (vector g) 1)
+  (let ((pixel (shot-of d)))
+    (test-equal "a run's cells inside the text area are painted"
+                '(238 220 130)          ; the region face's background
+                (pixel 4 (- bottom 2)))
+    (test-equal "its ink stops at the text area's bottom, not the mode line"
+                white
+                (pixel 4 (+ bottom 3)))))
+(test-end "schemacs_pgtk_text_area_clip")

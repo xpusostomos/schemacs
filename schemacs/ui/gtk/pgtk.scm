@@ -292,7 +292,12 @@
           ;; body rectangle - the C's guarantee that a row never paints
           ;; outside its window (`build_frame_matrix` and
           ;; `fill_glyph_string` both work from the window's own box).
-          window-body-left window-body-width)
+          window-body-left window-body-width
+          ;; ...and vertically to the text area: a row taller than the
+          ;; frame's cell (the per-face fonts this backend does not draw
+          ;; yet, but which `xdisp.c` lays out) stops at the mode line
+          ;; rather than painting over it or the window below.
+          window-body-top window-top window-height window-minibuffer-p)
     ;; Opening a display initializes faces against it, as `term.sld''s
     ;; `with-terminal' does.
     (only (schemacs faces)
@@ -2760,6 +2765,45 @@
                      (list 1.0 1.0 1.0)))
           (cairo-paint cr))))
 
+    (define (pgtk-text-area-clip d window)
+      ;; WINDOW's text area as `(X Y WIDTH HEIGHT)` in frame pixels, or
+      ;; `#f` for a draw that is not a text row of a live window.
+      ;;
+      ;; GNU Emacs clips every glyph string to its window's box
+      ;; (`get_glyph_string_clip_rects`): a row is as tall as the tallest
+      ;; face's font, and `xdisp.c` lays out the row that crosses
+      ;; `it.last_visible_y` rather than leaving it out - "the row is
+      ;; built and clipped". This backend draws every row one cell high
+      ;; today (per-face fonts are named in DEPARTURES), so the clip has
+      ;; nothing to cut yet; it is the same guarantee as the horizontal
+      ;; one, and becomes load-bearing the moment a row is taller than
+      ;; its cell. A row's Y is already a frame pixel and the grid is
+      ;; whole cells, so the area is `window-body-top` rows down to the
+      ;; row above the mode line (`window_text_bottom_y`).
+      ;;--------------------------------------------------------------
+      (and window
+           (let* ((ch *cell-height*)
+                  (top (* (window-body-top window) ch))
+                  (bottom (* (+ (window-top window) (window-height window)
+                                (if (window-minibuffer-p window) 0 -1))
+                             ch)))
+             (list 0 top (car (pgtk-allocated-pixels d))
+                   (- bottom top)))))
+
+    (define (with-pgtk-clip d clip thunk)
+      ;; Run THUNK with cairo limited to CLIP, an `(X Y WIDTH HEIGHT)`
+      ;; rectangle, when there is one.
+      ;;--------------------------------------------------------------
+      (let ((cr (pgtk-cr d)))
+        (if (and cr clip)
+            (begin
+              (cairo-save cr)
+              (apply cairo-rectangle cr clip)
+              (cairo-clip cr)
+              (thunk)
+              (cairo-restore cr))
+            (thunk))))
+
     (define-method (clear-end-of-line! (d <pgtk-display>) window row area x
                                        width token)
       ;; Blank the cells [X, X+WIDTH) of row Y. A GUI fill already covers
@@ -2782,22 +2826,26 @@
                         (car (pgtk-cells d))))
              (width (min width (- right x))))
         (when (and cr (> width 0))
-          (apply cairo-set-source-rgb
-                 cr (or (face-token-background token)
-                        (colour->rgb (face-attribute 'default ':background))
-                        (list 1.0 1.0 1.0)))
-          (let* ((grid (car (pgtk-cells d)))
-                 (alloc (car (pgtk-allocated-pixels d)))
-                 ;; The leftover pixels of the last cell take the row's
-                 ;; face, as `fill_stretch_glyph` gives them to the last
-                 ;; glyph - the same rule as `%pgtk-write-run`.
-                 (rest (if (= (+ x width) grid)
-                           (- alloc (* *cell-width* grid))
-                           0)))
-            (cairo-rectangle cr (cell-x x) y
-                             (+ (* *cell-width* width) (max rest 0))
-                             *cell-height*)
-            (cairo-fill cr)))))
+          (with-pgtk-clip
+           d
+           (and (eq? area 'text) (pgtk-text-area-clip d window))
+           (lambda ()
+             (apply cairo-set-source-rgb
+                    cr (or (face-token-background token)
+                           (colour->rgb (face-attribute 'default ':background))
+                           (list 1.0 1.0 1.0)))
+             (let* ((grid (car (pgtk-cells d)))
+                    (alloc (car (pgtk-allocated-pixels d)))
+                    ;; The leftover pixels of the last cell take the row's
+                    ;; face, as `fill_stretch_glyph` gives them to the last
+                    ;; glyph - the same rule as `%pgtk-write-run`.
+                    (rest (if (= (+ x width) grid)
+                              (- alloc (* *cell-width* grid))
+                              0)))
+               (cairo-rectangle cr (cell-x x) y
+                                (+ (* *cell-width* width) (max rest 0))
+                                *cell-height*)
+               (cairo-fill cr)))))))
 
     (define-method (update-window-begin! (d <pgtk-display>)) #t)
     (define-method (update-window-end! (d <pgtk-display>)) #t)
@@ -3001,7 +3049,11 @@
             (right (if window
                        (+ (window-body-left window)
                           (window-body-width window))
-                       (car (pgtk-cells d)))))
+                       (car (pgtk-cells d))))
+            (clip (and (eq? area 'text) (pgtk-text-area-clip d window))))
+        (with-pgtk-clip
+         d clip
+         (lambda ()
         (if (= len 0)
             (clear-end-of-line! d window row area x 0 0)
             (let loop ((i 0) (col x0))
@@ -3044,7 +3096,7 @@
                   ;; drawn there.
                   (if (and (> cells 0) (= cells full))
                       (loop end (+ col cells))
-                      #t)))))))
+                      #t)))))))))
 
     (define-method (cursor-to! (d <pgtk-display>) window vpos hpos)
       ;; A window system has no terminal cursor to move: the cursor is

@@ -17508,45 +17508,59 @@ it costs the visible rows, not the buffer.
   (`frame.scm`), so `it.current_y` starts at the tab-line height with
   no scroll added.
 
-## The one renderer departure the numbers expose
+## The crossing row is laid out now, and clipped
 
-The six-element answer can describe a sliver the screen does not show.
-`display-window!` does not lay out a row whose bottom would cross the
-text area's bottom - Emacs lays it out and clips it at
-`it.last_visible_y` - so a tall row (a `text-scale-mode` row, or a row
-at the very bottom of a pixel-height Gtk frame) is reported partially
-visible by the geometry while this renderer draws nothing of it. The
-coordinates and the RTOP/RBOT/ROWH values are the ones Emacs computes
-for the same layout; the missing sliver is the existing rendering
-departure, not a departure in this function.
+The six-element answer needed a row Emacs builds and this renderer used
+to drop. `display-window!` refused to lay out a row whose bottom would
+cross the text area's bottom; Emacs's `try_window` loop
+(`xdisp.c:21707`) is *"while `it.current_y < it.last_visible_y`,
+`display_line`"*, so the row whose top is above the bottom and whose
+bottom crosses it **is** built, `window_end_pos` is taken from it, and
+the drawing layer clips its ink (`get_glyph_string_clip_rects`). The
+row walk is Emacs's now:
 
-## The crash the tall row found, and the row loop's stop
+- a row is laid out whenever its **top** is above `it.last_visible_y`;
+  the crossing row is the last one, and the next row's top is at or past
+  the limit, so the loop stops there. The blank rows below the buffer
+  follow the same rule;
+- `window-end` is the last built row's end. When that row is the line's
+  last one it is the next line's start (the newline is in the row), and
+  for a line cut in the middle of a wrapped paragraph it is the
+  slice's end - Emacs's `MATRIX_ROW_END_CHARPOS`;
+- the row loop **stops at the crossing row** instead of walking the
+  remaining lines at the same y (which used to overwrite
+  `window_end_pos` with a later line's start). Before this, a line
+  whose *first* row crossed the bottom made the cut branch's
+  `(list-ref slices (- rows-drawn 1))` index -1; the row is built now,
+  so `rows-drawn` is never zero there. That crash is what the synthetic
+  tall row in the test found.
 
-`display-window!`'s cut branch computed the window's end as
-`(+ line-start (cdr (list-ref slices (- rows-drawn 1))))`. When the
-*first* row of a line was the one that did not fit, `rows-drawn` was
-zero, the index was -1, and the redisplay raised `list-ref: Value out
-of range`. On a terminal every row is one cell, so a row that does not
-fit has its top at the text area's bottom and the loop never enters the
-branch; a `text-scale-mode` row taller than the cell reaches it, which
-is how the synthetic tall row above found it.
+**The pixel half is in the Gtk backend.** `write-glyphs!` and
+`clear-end-of-line!` clip a text row to the window's text area
+(`pgtk-text-area-clip`: `window-body-top` rows down to the row above
+the mode line), with `cairo-save`/`cairo-clip`/`cairo-restore`. A
+terminal needs no such clip - a row there is one cell and the grid is
+whole cells, so no row can cross - and the terminal's
+`write-glyphs!` is untouched.
 
-Two things changed there, both about what the renderer can actually
-have drawn:
+**What is still missing is the reason a row would be taller at all.**
+This tree's Gtk backend draws every row one cell high: `face-metrics`
+answers the *frame's* font and `pgtk-ensure-font!` resizes the whole
+frame from the current buffer's default face (the file says why). The
+renderer's row heights are per face (`row-metrics`), so the crossing
+row exists in the matrix and in `pos-visible-in-window-p`'s answer, but
+the backend's ink for it is still a cell at the row's top - the clip
+has nothing to trim until per-face fonts are drawn. Two smaller gaps
+beside that:
 
-- with zero rows drawn, the visible text ends at `line-start` - nothing
-  of the line is on the screen - rather than at a slice that does not
-  exist;
-- the row loop **stops** at a cut line. It used to walk the remaining
-  lines at the same y, each cut, and each overwriting `window_end_pos`
-  with a later line's start. Emacs's `try_window` loop ends once
-  `it.current_y` crosses `it.last_visible_y`, so it never processes
-  those lines at all; ours now stops in the same place.
-
-Emacs builds the overflowing row and clips it, so its `window-end`
-includes the sliver; this renderer draws no sliver, and the end is the
-start of the line that did not fit. That is the rendering departure
-above, not a different rule for where the drawn text ends.
+- **the cursor is not clipped.** `draw-window-cursor!` takes no window
+  (its arguments are the pixel row, the column, the cell count, the
+  type and the glyph), so a cursor on a partially visible row could
+  paint into the mode line once rows are taller. Passing the window
+  through the generic is the fix when per-face fonts land.
+- A terminal has no partially visible row at all: a row there is one
+  cell and the grid is whole cells, so `pos-visible-in-window-p` never
+  answers the six-element list on the terminal front end.
 
 ## Tests
 
@@ -17559,8 +17573,19 @@ position far below the window (nil), `point-max` (nil), POS t `(0 15)`,
 the short-buffer POS t `(0 5)`, the hscrolled negative X `(-10 0)`, and
 the same answers again after `render!` has filled the matrix - the two
 arms of the geometry, both measured. The tall-row group cannot be
-Emacs-measured (a terminal row is one cell), so its three expectations
-are the C's arithmetic and its comment says so.
+Emacs-measured (a terminal row is one cell), so those expectations are
+the C's arithmetic: the six-element list for the row cut at the bottom
+(`(0 15 0 2 1 5)`), a position in the next row (nil), POS t with the
+sliver (`#f` without PARTIALLY, the same list with it), and
+`window-end` 67 - the crossing row's end, next line's start - where the
+row used to be dropped and the answer was 56.
+
+`test/ui/gtk/pgtk-test.scm`'s `schemacs_pgtk_text_area_clip` draws a
+run by hand five pixels above the text area's bottom - the place only a
+row taller than its cell could put it - and reads the pixels back: the
+cells inside the area carry the region face's background and the pixel
+below the area's bottom is still the cleared frame. Verified to fail
+with the clip disabled (`(3 3 2)`, the run's ink, instead of white).
 
 `tools/pty-check.py` gained **`show-paren-context`**: with
 `show-paren-context-when-offscreen` turned on in the init, a closing

@@ -6052,10 +6052,11 @@
 ;; answers every face a three-pixel row; the arithmetic being pinned is
 ;; `pos_visible_p`'s (`xdisp.c:1693`): a row of height 3 whose top is 15
 ;; in a 16-pixel text area is off by 2 at the bottom, shows 1 pixel, and
-;; is row 5. It is also the case where the renderer declines to lay the
-;; row out at all - `display-window!` has no clip - so this group is the
-;; regression test for the crash that used to follow (`list-ref` with
-;; index -1) as well as for the six-element answer.
+;; is row 5. It is also the case that found a crash in the row walk
+;; (`list-ref` with index -1 when a line's first row did not fit), so
+;; this group is that regression test as well as the six-element
+;; answer: the crossing row is built, `window-end` is its end, and the
+;; drawing layer clips it.
 (define-class <tall-row-display> (<test-display>))
 
 (define-method (face-metrics (d <tall-row-display>) attrs)
@@ -6087,7 +6088,7 @@
            (pos-visible-in-window-p 60 w #t)))))
 
 (test-equal "POS t with a partially visible last row is nil unless PARTIALLY"
-  '(#f (0 15 0 2 1 5) 56)
+  '(#f (0 15 0 2 1 5) 67)
   (with-tall-row-frame
    (lambda (ed frame w)
      (render! frame)

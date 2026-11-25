@@ -3826,12 +3826,14 @@ buffer size, the line number and the column number."
       ;; electric commands, which run in exactly such a process, so the
       ;; nil answer is what Emacs gives and what callers can rely on.
       ;;
-      ;; **The one departure left is the renderer's, not this
-      ;; function's**: a row whose bottom would cross the text area's
-      ;; bottom is not laid out at all (`display-window!` says why), so
-      ;; the six-element answer can describe a sliver the screen does
-      ;; not show. Emacs lays the row out and clips it. The coordinates
-      ;; are the same ones Emacs computes for that layout.
+      ;; **The crossing row is laid out and clipped**, as Emacs does
+      ;; it: `display-window!` builds the row whose top is above the
+      ;; text area's bottom and whose bottom crosses it (`try_window`'s
+      ;; loop), and `write-glyphs!`/`clear-end-of-line!` clip a text
+      ;; row's ink to the window's text area. So the six-element answer
+      ;; describes a sliver the screen really shows. The Gtk backend
+      ;; draws every row one cell high today (per-face fonts are named
+      ;; in DEPARTURES.md); a terminal's rows cannot cross.
       ;;--------------------------------------------------------------
       (let* ((window (if (and (pair? args) (car args))
                          (car args)
@@ -4638,7 +4640,12 @@ buffer size, the line number and the column number."
                     ;; skipped; unbuilt ones are cleared again every time.
                     (let ((metrics (row-metrics ed line-start 0)))
                       (let blank ((r row) (yy y))
-                        (if (< r vheight)
+                        ;; A blank row whose top is above the text area's
+                        ;; bottom is built too, including the one that
+                        ;; crosses it - `try_window`'s loop asks only that
+                        ;; `it.current_y < it.last_visible_y`, and the
+                        ;; drawing layer clips the crossing row.
+                        (if (and (< r vheight) (< yy y-limit))
                             (let ((slot (glyph-matrix-row-ref desired r)))
                               (when slot
                                 (build-blank-row! slot ed x0 yy width metrics))
@@ -4647,7 +4654,17 @@ buffer size, the line number and the column number."
                     (let* ((drawn (min (length slices) (- vheight row)))
                            (next-row
                             (let rloop ((rest slices) (k 0) (yy y) (r row))
-                              (if (or (>= k drawn) (null? rest))
+                              ;; `try_window`'s `while (it.current_y <
+                              ;; it.last_visible_y)`: a row is laid out
+                              ;; while its *top* is above the text area's
+                              ;; bottom. The row whose top is above it and
+                              ;; whose bottom crosses it **is** laid out,
+                              ;; which is what Emacs does; the drawing
+                              ;; layer clips its ink
+                              ;; (`get_glyph_string_clip_rects`), and the
+                              ;; next row's top is then past the limit so
+                              ;; this stops.
+                              (if (or (>= k drawn) (null? rest) (>= yy y-limit))
                                   (cons r yy)
                                   (let* ((slice (car rest))
                                          (metrics (row-metrics
@@ -4655,16 +4672,6 @@ buffer size, the line number and the column number."
                                                    (- (cdr slice) (car slice))))
                                          (slot (and desired
                                                     (glyph-matrix-row-ref desired r))))
-                                    ;; **A row that would not fit in the
-                                    ;; window's text area is not laid out
-                                    ;; at all.** Emacs lays it out and
-                                    ;; clips it at `it.last_visible_y`;
-                                    ;; this renderer has no per-window
-                                    ;; clip, so a half row here paints
-                                    ;; over the mode line.
-                                    (if (> (+ yy (cdr metrics)) y-limit)
-                                        (cons r yy)
-                                        (begin
                                     (when slot
                                       ;; **A row of an hscrolled line gives
                                       ;; its first cell to the left
@@ -4714,7 +4721,7 @@ buffer size, the line number and the column number."
                                                                 width)))
                                                     0 metrics)))
                                     (rloop (cdr rest) (+ k 1)
-                                           (+ yy (cdr metrics)) (+ r 1)))))))))
+                                           (+ yy (cdr metrics)) (+ r 1)))))))
                       ;; **`w->window_end_pos` is recorded here, as the
                       ;; rows are built.** The C writes it in
                       ;; `display_line` as it walks (`xdisp.c`), and
@@ -4733,36 +4740,28 @@ buffer size, the line number and the column number."
                              (next (line-next-start ed line-start))
                              (end (cond (cut?
                                          ;; this line was cut off by the
-                                         ;; bottom: the last row that fits
-                                         ;; ends it. **No row of the line
-                                         ;; may fit at all** - a row
-                                         ;; taller than the text area
-                                         ;; (`text-scale-mode`) whose top
-                                         ;; is inside it - and then the
-                                         ;; visible text ends where this
-                                         ;; line begins. Without this
-                                         ;; case `list-ref`'s index was
-                                         ;; -1: a crash, not a missing
-                                         ;; sliver.
-                                         (if (zero? rows-drawn)
-                                             line-start
-                                             (+ line-start
-                                                (cdr (list-ref
-                                                      slices (- rows-drawn 1))))))
+                                         ;; bottom: the last row built -
+                                         ;; the one that crossed it - ends
+                                         ;; it. `rows-drawn` is never zero
+                                         ;; here: the loop lays a row out
+                                         ;; whenever its top is above the
+                                         ;; limit and the line has one.
+                                         (+ line-start
+                                            (cdr (list-ref
+                                                  slices (- rows-drawn 1)))))
                                         (next next)
                                         (else (text-editor-get-end-of-line
                                                ed line-start)))))
                         (set!%window-end-pos window (- (buffer-z ed) end))
                         (set!%window-end-vpos window (- last-row 1))
                         (set!%window-end-valid? window #t)
-                        ;; **Nothing below a line that did not fit can
-                        ;; be on the screen**: Emacs's `try_window` loop
-                        ;; ends once `it.current_y` crosses
-                        ;; `it.last_visible_y`, and the row that crossed
-                        ;; it was built and clipped. Here the row was
-                        ;; not built, so the loop stops in the same place
-                        ;; with nothing left to draw.
-                        (if cut?
+                        ;; `try_window`'s loop continues only while the
+                        ;; top of the next row is above the text area's
+                        ;; bottom; once it is not (the crossing row was
+                        ;; the last one laid out) there is nothing more
+                        ;; on the screen to record.
+                        (if (or (>= (cdr next-row) y-limit)
+                                (>= (car next-row) vheight))
                             #t
                             (if next
                                 (loop (car next-row) (cdr next-row) next)
@@ -4783,8 +4782,7 @@ buffer size, the line number and the column number."
                                 (let ((metrics (row-metrics ed line-start 0)))
                                   (let blank ((r (car next-row))
                                               (yy (cdr next-row)))
-                                    (if (and (< r vheight)
-                                             (<= (+ yy (cdr metrics)) y-limit))
+                                    (if (and (< r vheight) (< yy y-limit))
                                         (let ((slot (glyph-matrix-row-ref
                                                      desired r)))
                                           (when slot
