@@ -15,5 +15,6 @@
 
 # build artifacts
 .guile-cairo/
+build/
 __pycache__/
 *.pyc

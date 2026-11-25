@@ -48,6 +48,7 @@
     (only (schemacs casefiddle) casify-region)
     (only (schemacs frame) *minibuffer*)
     (only (schemacs custom) define-custom)
+    (only (schemacs core syntax-macros) when-e)
     (only (schemacs core easy-mmode) define-minor-mode))
 
   (export
@@ -372,7 +373,17 @@
                 (set! pos (- pos 1)))
               (skip-syntax-backward " ")
               (set! end (point))
-              (when (> end start)
+              ;; **`when-e`, not `when`.** This `when` is the value of
+              ;; the `if`'s consequent (`abbrev.el:800`), and Elisp's
+              ;; `when` answers nil when the test fails; Scheme's
+              ;; answers the unspecified value, which is *true*, so a
+              ;; caller's `(when found ...)` would act on it. See
+              ;; `abbrev--default-expand` below - the reported bug was
+              ;; "Wrong type argument in position 1: #<unspecified>"
+              ;; when typing a space in a C buffer (`c-mode` sets
+              ;; `abbrev-mode` t, as Emacs's does) with no abbrev
+              ;; before point.
+              (when-e (> end start)
                 (set! name (buffer-substring-no-properties start end))
                 (goto-char pos)              ; restore point
                 (list (abbrev-symbol name tables) name start end)))
@@ -400,13 +411,29 @@
                                        (set! start (point))
                                        (forward-word 1)
                                        (set! end (min (point) lim)))
-                                     (when (looking-back re
-                                                         (line-beginning-position))
+                                     ;; `when-e`: this is an operand of
+                                     ;; the `and`, and Elisp's `when`
+                                     ;; answers nil when there is no
+                                     ;; match. A Scheme `when` answers
+                                     ;; the unspecified value, which is
+                                     ;; true, so the `and` would go on
+                                     ;; to read `start`/`end` from a
+                                     ;; previous table's attempt.
+                                     (when-e (looking-back re
+                                                           (line-beginning-position))
                                        (set! start (match-beginning 1))
                                        (set! end (match-end 1)))))
                                (set! name (buffer-substring-no-properties start end))
                                (let ((abbrev (abbrev--symbol name table)))
-                                 (when abbrev
+                                 ;; `when-e` again: this is the last
+                                 ;; operand of the `and`, so Elisp's
+                                 ;; `when` answers nil here and makes
+                                 ;; `res` nil when the word is not an
+                                 ;; abbrev. A Scheme `when` leaves the
+                                 ;; unspecified value in `res`, which
+                                 ;; is true, and `abbrev--before-point`
+                                 ;; then answers it instead of nil.
+                                 (when-e abbrev
                                    (let ((enable-fun
                                           (abbrev-get abbrev ':enable-function)))
                                      (and (or (not enable-fun) (enable-fun))
@@ -488,7 +515,12 @@
       ;; function to use for `abbrev-expand-function'."
       ;;--------------------------------------------------------------
       (let ((found (abbrev--before-point)))
-        (when found
+        ;; `when-e`: Emacs's `abbrev--default-expand` answers nil when
+        ;; there is no abbrev before point ("Return it if found, nil
+        ;; otherwise"), and `internal_self_insert`/`insert-tab` read
+        ;; `expand-abbrev`'s answer as a test. A Scheme `when` would
+        ;; answer the unspecified value, which is true.
+        (when-e found
           (let ((sym (list-ref found 0))
                 (name (list-ref found 1))
                 (wordstart (list-ref found 2))

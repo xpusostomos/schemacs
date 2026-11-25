@@ -391,6 +391,7 @@
    *inhibit-local-variables-regexps* *inhibit-local-variables-suffixes*
    *inhibit-local-variables-ignore-case* inhibit-local-variables-p
    *major-mode-remap-alist* *major-mode-remap-defaults* major-mode-remap
+   %mode-function
    *initial-major-mode*
    expand-file-name
 directory-name-p
@@ -3959,7 +3960,10 @@ The path separator is colon in GNU and GNU-like systems."
       ;; file became, and `%mode-function' loads one on first use - the
       ;; same moment Emacs's autoload fires.
       ;;--------------------------------------------------------------
-      '((scheme-mode . (schemacs progmodes scheme))
+      '((c-mode . (schemacs progmodes cc-mode))
+        (c++-mode . (schemacs progmodes cc-mode))
+        (c-or-c++-mode . (schemacs progmodes cc-mode))
+        (scheme-mode . (schemacs progmodes scheme))
         (emacs-lisp-mode . (schemacs progmodes elisp-mode))
         (lisp-interaction-mode . (schemacs progmodes elisp-mode))
         (lisp-mode . (schemacs core lisp-mode))

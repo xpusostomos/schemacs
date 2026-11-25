@@ -203,6 +203,7 @@
     %lisp-el-special-forms-and-macros
     %mark-marker
     %marker-charpos
+    %mode-function
     %nested?
     %nonexistent-modtime-nsecs
     %prefix-flag?
@@ -329,12 +330,14 @@
     *c-font-lock-fontify-region-function*
     *c-fontify-new-found-type-function*
     *c-guess-basic-syntax-function*
+    *c-guess-region-max*
     *c-hanging-braces-alist*
     *c-hanging-colons-alist*
     *c-hanging-semi&comma-criteria*
     *c-ignore-auto-fill*
     *c-indent-comment-alist*
     *c-indent-comments-syntactically-p*
+    *c-initialization-hook*
     *c-insert-tab-function*
     *c-label-minimum-indentation*
     *c-lang-const-expansion*
@@ -347,6 +350,7 @@
     *c-mark-wrong-style-of-comment*
     *c-max-one-liner-length*
     *c-maybe-labelp*
+    *c-mode-common-hook*
     *c-noise-macro-names*
     *c-noise-macro-with-parens-names*
     *c-objc-method-arg-min-delta-to-bracket*
@@ -517,6 +521,7 @@
     *electric-pair-skip-whitespace-chars*
     *electric-pair-text-pairs*
     *electric-quote-chars*
+    *emacs-lisp-docstring-fill-column*
     *emacs-startup-hook*
     *enable-disabled-menus-and-buttons*
     *enable-kinsoku*
@@ -555,6 +560,7 @@
     *font-lock-comment-end-skip*
     *font-lock-comment-start-skip*
     *font-lock-defaults*
+    *font-lock-extend-region-functions*
     *font-lock-extra-managed-props*
     *font-lock-fontified*
     *font-lock-fontify-region-function*
@@ -985,6 +991,7 @@
     *temporary-goal-column*
     *text-property-append*
     *text-property-default-nonsticky*
+    *text-property-default-nonsticky-value-function*
     *text-property-offset-function*
     *text-property-prepend*
     *text-property-replace*
@@ -1110,6 +1117,7 @@
     activate-change-group
     activate-mark
     adaptive-fill-first-line-regexp
+    adaptive-fill-function-value
     adaptive-fill-mode
     adaptive-fill-regexp
     add-face-text-property
@@ -1306,6 +1314,10 @@
     c++-font-lock-keywords-1
     c++-font-lock-keywords-2
     c++-font-lock-keywords-3
+    c++-mode
+    c++-mode-hook
+    c++-mode-map
+    c++-mode-syntax-table
     c--delete-duplicates
     c--intersection
     c--mapcan
@@ -1329,6 +1341,7 @@
     c-after-change-mark-abnormal-strings
     c-after-change-unmark-ml-strings
     c-after-conditional
+    c-after-font-lock-init
     c-after-special-operator-id
     c-after-statement-terminator-p
     c-alnum
@@ -1371,6 +1384,7 @@
     c-backward-token-1
     c-backward-token-2
     c-backward-typed-enum-colon
+    c-basic-common-init
     c-basic-matchers-after
     c-basic-matchers-before
     c-basic-offset
@@ -1383,6 +1397,7 @@
     c-before-change-de-typedef
     c-before-change-fix-comment-escapes
     c-before-change-include-<>
+    c-before-context-fl-expand-region
     c-beg-pos
     c-beginning-of-current-token
     c-beginning-of-decl-1
@@ -1445,10 +1460,12 @@
     c-comment-line-break-function
     c-comment-only-line-offset
     c-comment-prefix-regexp
+    c-common-init
     c-complex-decl-matchers
     c-compose-keywords-list
     c-concat-separated
     c-constant-face-name
+    c-context-expand-fl-region
     c-context-line-break
     c-context-open-line
     c-cpp-define-name
@@ -1505,7 +1522,10 @@
     c-electric-continued-statement
     c-electric-delete-forward
     c-electric-flag
+    c-electric-indent-local-mode-hook
+    c-electric-indent-mode-hook
     c-electric-lt-gt
+    c-electric-pair-inhibit-predicate
     c-electric-paren
     c-electric-pound
     c-electric-semi&comma
@@ -1525,6 +1545,7 @@
     c-end-of-token
     c-end-pos
     c-evaluate-offset
+    c-extend-after-change-region
     c-extend-font-lock-region-for-macros
     c-extend-region-for-CPP
     c-face-name-p
@@ -1557,7 +1578,9 @@
     c-font-lock-enum-body
     c-font-lock-enum-tail
     c-font-lock-flush
+    c-font-lock-fontify-region
     c-font-lock-ids-with-dollar
+    c-font-lock-init
     c-font-lock-invalid-single-quotes
     c-font-lock-keywords
     c-font-lock-keywords-1
@@ -1672,7 +1695,9 @@
     c-indentation-style
     c-init-bs-cache
     c-init-language-vars
+    c-init-language-vars-for
     c-initialize-builtin-style
+    c-initialize-cc-mode
     c-inside-block-syms
     c-int-to-char
     c-intersect-lists
@@ -1720,6 +1745,7 @@
     c-laomib-put-cache
     c-last-command-char
     c-least-enclosing-brace
+    c-leave-cc-mode-mode
     c-lineup-2nd-brace-entry-in-arglist
     c-lineup-C-comments
     c-lineup-ObjC-method-args
@@ -1803,6 +1829,7 @@
     c-make-font-lock-extra-types-blurb
     c-make-font-lock-search-form
     c-make-font-lock-search-function
+    c-make-inherited-keymap
     c-make-init-lang-vars-fun
     c-make-inverse-face
     c-make-keywords-re
@@ -1832,7 +1859,12 @@
     c-ml-string-opener-around-point
     c-ml-string-opener-at-or-around-point
     c-ml-string-opener-intersects-region
+    c-mode
+    c-mode-base-map
+    c-mode-hook
+    c-mode-map
     c-mode-symbol
+    c-mode-syntax-table
     c-mode-var
     c-mode-var-boundp
     c-most-enclosing-brace
@@ -1865,6 +1897,8 @@
     c-on-identifier
     c-one-line-string-p
     c-open-string-opener
+    c-or-c++-mode
+    c-or-c++-mode--regexp
     c-outline-level
     c-override-default-keywords
     c-parse-ps-state-below
@@ -1879,6 +1913,7 @@
     c-point
     c-point-syntax
     c-position-wrt-ml-delims
+    c-post-command
     c-post-text-conversion
     c-pps-to-string-delim
     c-preprocessor-face-name
@@ -1933,6 +1968,7 @@
     c-restore-<->-as-parens
     c-restore-<>-properties
     c-restore-string-fences
+    c-run-mode-hooks
     c-run-special-indent-hook
     c-safe
     c-safe-position
@@ -1969,6 +2005,7 @@
     c-set-style-1
     c-set-style-history
     c-set-stylevar-fallback
+    c-setup-doc-comment-style
     c-setup-filladapt
     c-setup-paragraph-variables
     c-shift-line-indentation
@@ -2262,8 +2299,10 @@
     comment-kill
     comment-line
     comment-line-break-function
+    comment-line-break-function-value
     comment-make-bol-ws
     comment-make-extra-lines
+    comment-multi-line
     comment-normalize-vars
     comment-only-p
     comment-or-uncomment-region
@@ -2712,6 +2751,7 @@
     electric-pair-delete-pair
     electric-pair-field-search-size
     electric-pair-inhibit-if-helps-balance
+    electric-pair-inhibit-predicate-value
     electric-pair-local-mode
     electric-pair-local-mode-hook
     electric-pair-mode
@@ -2886,6 +2926,8 @@
     fill-nobreak-p
     fill-nonuniform-paragraphs
     fill-paragraph
+    fill-paragraph-function
+    fill-paragraph-handle-comment
     fill-paragraph-semlf
     fill-polish-nobreak-p
     fill-region
@@ -2946,6 +2988,7 @@
     font-lock-extend-after-change-region-function
     font-lock-extend-jit-lock-region-after-change
     font-lock-extend-region-multiline
+    font-lock-extend-region-wholelines
     font-lock-fillin-text-property
     font-lock-flush
     font-lock-flush-function
@@ -2961,6 +3004,7 @@
     font-lock-keywords
     font-lock-mode
     font-lock-mode-enable-in-buffer
+    font-lock-mode-hook
     font-lock-mode-internal
     font-lock-mode-on?
     font-lock-prepend-text-property
@@ -3503,7 +3547,9 @@
     lisp--define-face
     lisp--el-funcall-position-p
     lisp--el-match-keyword
+    lisp--fill-line-simple
     lisp--local-defform-body-p
+    lisp-adaptive-fill
     lisp-body-indent
     lisp-cl-font-lock-keywords
     lisp-cl-font-lock-keywords-1
@@ -3516,6 +3562,8 @@
     lisp-el-font-lock-keywords-1
     lisp-el-font-lock-keywords-2
     lisp-extended-loop-p
+    lisp-fill-paragraph
+    lisp-fill-paragraphs-as-doc-string
     lisp-font-lock-syntactic-face-function
     lisp-indent-259
     lisp-indent-calc-next
@@ -3885,6 +3933,7 @@
     ngettext
     noninteractive
     normal-auto-fill-function
+    normal-auto-fill-function-value
     normal-mode
     normal-splash-screen
     not-modified
@@ -4023,6 +4072,7 @@
     posn-x-y
     ppss-comment-depth
     ppss-comment-or-string-start
+    ppss-string-terminator
     preceding-char
     prefix-argument-description
     prefix-echo-pending?
@@ -4488,6 +4538,7 @@
     set!cache-long-scans
     set!cd-path
     set!comment-end
+    set!comment-multi-line
     set!comment-start
     set!dir-local-variables-alist
     set!dired-actual-switches!
@@ -4497,7 +4548,10 @@
     set!electric-indent-inhibit
     set!electric-pair-skip-whitespace-function
     set!file-local-variables-alist
+    set!fill-paragraph-function
+    set!fill-paragraph-handle-comment
     set!font-lock-defaults!
+    set!font-lock-extend-after-change-region-function!
     set!font-lock-fontify-region-function!
     set!font-lock-keywords!
     set!font-lock-mode!

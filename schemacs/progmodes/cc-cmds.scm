@@ -234,7 +234,7 @@
           *sentence-end-double-space*)
     (only (schemacs textmodes fill)
           fill-paragraph fill-context-prefix do-auto-fill
-          *fill-paragraph-function*)
+          fill-paragraph-function)
     (only (schemacs intervals) put)
     (only (schemacs marker)
           make-marker set-marker copy-marker markerp marker-position
@@ -242,7 +242,7 @@
     (only (schemacs newcomment)
           comment-start comment-end set!comment-start set!comment-end
           comment-start-skip indent-for-comment comment-column
-          *comment-multi-line*)
+          comment-multi-line)
     (only (schemacs search) looking-at match-end match-beginning match-string
           match-string-no-properties string-match save-match-data
           re-search-backward re-search-forward regexp-quote)
@@ -5357,12 +5357,16 @@ If point is in any other situation, i.e. in normal code, do nothing.
 Optional prefix ARG means justify paragraph as well."
       (interactive "*P")
       (c-with-string-fences
-       (parameterize ((*fill-paragraph-function*
-                       ;; "Avoid infinite recursion."
-                       (if (not (eq? (*fill-paragraph-function*) c-fill-paragraph))
-                           (*fill-paragraph-function*)
-                           #f)))
-         (c-mask-paragraph #t #f fill-paragraph arg))
+       ;; Emacs's `let` of a buffer-local variable: `call-with-buffer-local`,
+       ;; not `parameterize` (the variable is a slot store now).
+       (call-with-buffer-local
+        'fill-paragraph-function
+        ;; "Avoid infinite recursion."
+        (if (not (eq? (fill-paragraph-function) c-fill-paragraph))
+            (fill-paragraph-function)
+            #f)
+        (lambda ()
+          (c-mask-paragraph #t #f fill-paragraph arg)))
        ;; "Always return t.  This has the effect that if filling isn't
        ;; done above, it isn't done at all, and it's therefore
        ;; effectively disabled in normal code."
@@ -5459,7 +5463,7 @@ If a fill prefix is specified, it overrides all the above."
                         (*c-lit-type* (c-literal-type (*c-lit-limits*))))
                       (memq (*c-lit-type*) '(c c++)))
                     ;; "Some sort of comment."
-                    (if (or (*comment-multi-line*)
+                    (if (or (comment-multi-line)
                             (save-excursion
                               (goto-char (car (*c-lit-limits*)))
                               (end-of-line)
@@ -5619,9 +5623,11 @@ inside a preprocessor directive."
                               (goto-char (match-end 0)))
                           (point))
                         (point))))
-           (parameterize ((*comment-multi-line* #t)
-                          (*fill-prefix* #f))
-             (c-indent-new-comment-line #f #t)))
+           (call-with-buffer-local
+            'comment-multi-line #t
+            (lambda ()
+              (parameterize ((*fill-prefix* #f))
+                (c-indent-new-comment-line #f #t)))))
 
           ((eq? (*c-lit-type*) 'string)
            (if (and (number? (*c-macro-start*))

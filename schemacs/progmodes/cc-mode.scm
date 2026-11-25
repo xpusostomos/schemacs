@@ -1,44 +1,35 @@
 (define-library (schemacs progmodes cc-mode)
-  ;; `lisp/progmodes/cc-mode.el' - the mode itself. This pass carries
-  ;; the change machinery's found-type half, in the file's order - the
-  ;; two buffer-local flags, `c-unfind-enclosing-token',
-  ;; `c-unfind-coalesced-tokens', `c-before-change-de-typedef',
-  ;; `c-after-change-de-typedef' and `c-update-new-id' - the
-  ;; string-fence layer those functions and the change hooks stand on
-  ;; (the `c-min-syn-tab-mkr'/`c-max-syn-tab-mkr' pair, `c-put-syn-tab',
-  ;; `c-clear-syn-tab', `c-clear-string-fences',
-  ;; `c-restore-string-fences', `c-multiline-string-check-final-quote'
-  ;; and `c-remove-string-fences', with `c-with-string-fences'' two
-  ;; seams installed as this library loads), and the three string
-  ;; change functions of `:1472'-`:1771':
-  ;; `c-before-change-check-unbalanced-strings',
-  ;; `c-after-change-mark-abnormal-strings' and
-  ;; `c-after-change-escape-NL-in-string', with the helpers they use
-  ;; (`c-unescaped-nls-in-string-p',
-  ;; `c-multiline-string-start-is-being-detached',
-  ;; `c-pps-to-string-delim', `c-bc-changed-stringiness' and
-  ;; `c-open-string-opener'), the `#include' bracket and comment-escape
-  ;; pairs, and the quote parsing (`c-quoted-number-*' and
-  ;; `c-parse-quotes-before/after-change').
+  ;; `lisp/progmodes/cc-mode.el' - the mode itself. **The file is
+  ;; carried in two passes** and the sections are in Emacs's order among
+  ;; themselves, not between the passes: the change machinery came
+  ;; first (`:503' onwards - the found-type helpers, the string-fence
+  ;; layer with its seams, the three string change functions and their
+  ;; helpers, the `#include' bracket and comment-escape pairs, the quote
+  ;; parsing, the CPP propertizers, `c-before-change'/`c-after-change'
+  ;; and the fl-decl region expanders), and the setup half is at the end
+  ;; (`:170'-`:930', `:2211', `:2752': `c-initialize-cc-mode',
+  ;; `c-basic-common-init', `c-common-init', `c-font-lock-init',
+  ;; `c-extend-after-change-region', the context fontification, the
+  ;; electric-indent hook pair, `c-electric-pair-inhibit-predicate',
+  ;; `c-post-command'), followed by the C and C++ modes
+  ;; (`:2860'-`:3040') and the autoload wiring in `files.scm'.
   ;;
-  ;; **Not carried yet**, and the reason this library is partial:
+  ;; **Not carried yet**:
   ;;
-  ;;   * the ml-string change machinery (`c-before-change-check-ml-strings'
-  ;;     and `c-after-change-unmark-ml-strings' and the
-  ;;     `c-depropertize-ml-string' family). The propertization itself
-  ;;     (`c-maybe-re-mark-ml-string') is in cc-engine and is what
-  ;;     `c-after-change-mark-abnormal-strings' calls for C++;
-  ;;   * `c-depropertize-CPP', `c-neutralize-syntax-in-CPP',
-  ;;     `c-extend-font-lock-region-for-macros',
-  ;;     `c-change-expand-fl-region', and `c-called-from-text-property-change-p';
-  ;;   * `c-before-change' and `c-after-change' themselves, which call
-  ;;     every entry of `c-get-state-before-change-functions' and
-  ;;     `c-before-font-lock-functions';
-  ;;   * the mode definitions (`c-basic-common-init', `c-common-init',
-  ;;     `c-mode' and its siblings), which install the two change
-  ;;     functions on `before-change-functions' and
-  ;;     `after-change-functions' and set `indent-line-function' and
-  ;;     the rest.
+  ;;   * `c-mode-menu' (the language constant) and the two
+  ;;     `easy-menu-define' calls - the menu is the next piece;
+  ;;   * the abbrev tables (`abbrev.el` is not ported),
+  ;;     `c-bind-special-erase-keys' (`normal-erase-is-backspace` is
+  ;;     not ported), `c-submit-bug-report' (reporter.el),
+  ;;     `c-macro-expand' (a cpp subprocess), `c-subword-mode'
+  ;;     (cc-subword.el), `cc-guess.el' (its `c-guess-region-max` is
+  ;;     carried for `c-or-c++-mode`), `flymake-cc`,
+  ;;     `editorconfig-indent-size-vars`, `yank-handled-properties`,
+  ;;     `post-text-conversion-hook`, and hideshow (its three variables
+  ;;     are stored, so a ported hideshow reads them);
+  ;;   * `objc-mode', `java-mode', `idl-mode', `pike-mode' and
+  ;;     `awk-mode' - mechanical once C/C++ work, and the next cc-mode
+  ;;     pass.
   ;;
   ;; **The buffer-local variables** are accessor pairs over the
   ;; buffer's slot, the tree's spelling (`c-current-comment-prefix` in
@@ -83,6 +74,7 @@
           c-save-buffer-state c-with-string-fences
           c-syntax-table-hwm set!c-syntax-table-hwm c-major-mode-is
           c-go-up-list-backward c-go-list-forward c-go-list-backward
+          c-set-keymap-parent *c-buffer-is-cc-mode*
           *c-restore-string-fences-function*
           *c-clear-string-fences-function*)
     (only (schemacs progmodes cc-engine)
@@ -134,7 +126,93 @@
           c-maybe-stale-found-type set!c-maybe-stale-found-type
           c-new-id-start set!c-new-id-start
           c-new-id-end set!c-new-id-end
-          c-new-id-is-type set!c-new-id-is-type)
+          c-new-id-is-type set!c-new-id-is-type
+          ;; the mode setup's own reaches
+          c-state-cache-init c-init-bs-cache
+          c-laomib-cache set!c-laomib-cache
+          c-electric-flag set!c-electric-flag
+          c-add-type-1 c-beginning-of-syntax)
+    (only (guile) delq)
+    (only (schemacs buffer)
+          with-current-buffer buffer-list hook-value
+          *change-major-mode-hook*)
+    (only (schemacs frame) *post-command-hook*)
+    (only (schemacs insdel) *before-change-functions* *after-change-functions*)
+    (only (schemacs subr) run-hooks add-hook remove-hook run-mode-hooks kbd
+          substitute-key-definition)
+    (only (schemacs intervals) put get *text-property-default-nonsticky*)
+    (only (schemacs fns) copy-alist string-equal)
+    (only (schemacs newcomment)
+          comment-start comment-end comment-start-skip
+          comment-multi-line set!comment-multi-line comment-region)
+    (only (schemacs textmodes fill)
+          set!fill-paragraph-function set!fill-paragraph-handle-comment
+          fill-paragraph indent-new-comment-line comment-indent-new-line)
+    (only (schemacs font-lock)
+          set!font-lock-defaults! set!font-lock-fontify-region-function!
+          set!font-lock-extend-after-change-region-function!
+          font-lock-extend-region-wholelines
+          *font-lock-extend-region-functions*
+          *font-lock-support-mode*
+          *font-lock-fontify-region-function*)
+    (only (schemacs font-core) font-lock-mode font-lock-mode-hook)
+    (only (schemacs files) *mode-require-final-newline* major-mode-remap
+          %mode-function)
+    (only (schemacs keymap) make-sparse-keymap *default-keymap* define-key)
+    (only (schemacs command) define-command)
+    (only (schemacs custom) define-custom)
+    (only (schemacs core derived) define-derived-mode)
+    (only (schemacs electric)
+          electric-indent-mode-value set!electric-indent-inhibit
+          electric-indent-mode-hook electric-indent-local-mode-hook)
+    (only (schemacs elec-pair) *electric-pair-inhibit-predicate*)
+    (only (schemacs textprop) put-text-property)
+    (only (schemacs core regexp-opt) regexp-opt)
+    (only (schemacs progmodes prog-mode) prog-mode prog-mode-map)
+    (only (schemacs textmodes paragraphs) backward-sentence forward-sentence)
+    (only (schemacs indent) indent-for-tab-command)
+    (only (schemacs progmodes cc-defs) c-lang-const c-mode-symbol)
+    (only (schemacs progmodes cc-langs)
+          c-init-language-vars c-lang-set-local! c-lang-var-value)
+    (only (schemacs progmodes cc-vars)
+          *c-default-style* *c-old-style-variable-behavior*
+          *c-style-variables-are-local-p* c-indentation-style
+          c-offsets-alist set!c-offsets-alist
+          c-block-comment-flag set!c-block-comment-flag
+          *c-require-final-newline*
+          *c-mode-common-hook* *c-initialization-hook*
+          c-make-noise-macro-regexps c-make-macro-with-semi-re)
+    (only (schemacs progmodes cc-styles)
+          c-initialize-builtin-style c-set-style cc-choose-style-for-mode
+          c-setup-paragraph-variables c-set-offset)
+    (only (schemacs progmodes cc-cmds)
+          c-indent-line c-indent-region c-do-auto-fill
+          c-indent-new-comment-line c-fill-paragraph c-update-modeline
+          c-beginning-of-statement c-end-of-statement
+          c-indent-exp c-mark-function c-beginning-of-defun c-end-of-defun
+          c-forward-conditional c-backward-conditional c-up-conditional
+          c-backslash-region c-toggle-auto-newline c-toggle-electric-state
+          c-toggle-hungry-state c-show-syntactic-information c-indent-defun
+          c-indent-line-or-region c-electric-delete-forward
+          c-electric-backspace c-hungry-delete-forward
+          c-hungry-delete-backwards c-electric-pound c-electric-brace
+          c-electric-slash c-electric-star c-electric-semi&comma
+          c-electric-colon c-electric-lt-gt c-electric-paren
+          c-scope-operator c-toggle-comment-style c-display-defun-name
+          c-defun-name-and-limits c-cpp-define-name c-comment-indent
+          c-outline-level)
+    ;; **Imported for their load-time effects**, as Emacs's
+    ;; `(require 'cc-fonts)`/`(cc-require 'cc-align)` are: cc-fonts
+    ;; registers the `c-font-lock-keywords' variables in font-lock's
+    ;; keyword table (which is how `font-lock-eval-keywords` finds the
+    ;; symbols `c-font-lock-init` puts in `font-lock-defaults`), and
+    ;; cc-align's line-up functions register themselves by symbol.
+    ;; cc-guess.el (`cc-require 'cc-guess`) is not ported.
+    (schemacs progmodes cc-fonts)
+    (schemacs progmodes cc-align)
+    (only (schemacs progmodes cc-menus)
+          cc-imenu-init cc-imenu-c-generic-expression
+          cc-imenu-c++-generic-expression)
     )
 
   (export
@@ -175,9 +253,32 @@
    ;; `cc-mode.el:2364': the after-change function and its flag
    c-after-change
    c-in-after-change-fontification set!c-in-after-change-fontification
-   %c-clear-syn-tab-properties-full)
+   %c-clear-syn-tab-properties-full
+   ;; the mode setup (`cc-mode.el:170'-`:930', `:2211', `:2752')
+   c-leave-cc-mode-mode c-init-language-vars-for c-initialize-cc-mode
+   c-mode-base-map c-make-inherited-keymap
+   c-basic-common-init c-setup-doc-comment-style c-common-init
+   c-font-lock-init c-after-font-lock-init c-extend-after-change-region
+   c-context-expand-fl-region c-before-context-fl-expand-region
+   c-font-lock-fontify-region
+   c-electric-indent-mode-hook c-electric-indent-local-mode-hook
+   c-electric-pair-inhibit-predicate c-post-command
+   ;; the modes (`cc-mode.el:2860'-`:3040')
+   *c-guess-region-max* c-mode-syntax-table c-mode-map c-mode-hook c-mode
+   c-or-c++-mode--regexp c-or-c++-mode
+   c++-mode-syntax-table c++-mode-map c++-mode-hook c++-mode
+   c-run-mode-hooks)
 
   (begin
+
+    (define (setq-local name value)
+      ;; What `(setq-local NAME VALUE)' does - the same two-line helper
+      ;; `scheme.scm` and `text-mode.scm` carry (Emacs has it in
+      ;; `subr.el`; this tree's `set-buffer-local-value!` lives in
+      ;; `buffer.scm`, which those libraries cannot reach without a
+      ;; second spelling, so each mode library has its own copy).
+      ;;--------------------------------------------------------------
+      (set-buffer-local-value! (current-buffer) name value))
 
     ;; ---------------------------------------------------------------
     ;; `c-unfind-enclosing-token' and `c-unfind-coalesced-tokens'
@@ -2067,5 +2168,849 @@
                                c-neutralize-syntax-in-CPP)
     (c-register-lang-function! 'c-change-expand-fl-region
                                c-change-expand-fl-region)
+
+        ;;==================================================================
+    ;; The mode setup (`cc-mode.el:170'-`:930', `:2211', `:2752').
+    ;;
+    ;; This file was ported change-machinery first (the sections above
+    ;; are `cc-mode.el:503' onwards); the setup half is here, at the
+    ;; end, in Emacs's own order among itself. The pieces Emacs's
+    ;; `c-initialize-cc-mode' and `c-basic-common-init' name but this
+    ;; tree has not got are called out at their sites: abbrevs
+    ;; (`c-populate-abbrev-table' needs `abbrev.el''s tables),
+    ;; `normal-erase-is-backspace' (no such variable here),
+    ;; `editorconfig-indent-size-vars', `yank-handled-properties',
+    ;; hideshow's three regexp variables (set anyway - they are data a
+    ;; ported hideshow can read), `cc-subword.el''s `c-subword-mode',
+    ;; `reporter.el''s `c-submit-bug-report' and the cpp subprocess
+    ;; behind `c-macro-expand'.
+    ;;==================================================================
+
+    ;;------------------------------------------------------------------
+    ;; `c-leave-cc-mode-mode' (`cc-mode.el:178')
+    ;;------------------------------------------------------------------
+    (define (c-leave-cc-mode-mode)
+      (when (*c-buffer-is-cc-mode*)
+        (save-restriction
+          (widen)
+          (let ((lst (buffer-list)))
+            (call-with-current-continuation
+             (lambda (found)
+               (for-each
+                (lambda (b)
+                  (if (and (not (eq? b (current-buffer)))
+                           (with-current-buffer b (*c-buffer-is-cc-mode*)))
+                      (found #f)))
+                lst)
+               (remove-hook *post-command-hook* c-post-command #t))))
+          (c-save-buffer-state
+           ()
+           (c-clear-char-properties (point-min) (point-max) 'category)
+           (c-clear-char-properties (point-min) (point-max) 'syntax-table)
+           (c-clear-char-properties (point-min) (point-max) 'c-fl-syn-tab)
+           (c-clear-char-properties (point-min) (point-max) 'c-is-sws)
+           (c-clear-char-properties (point-min) (point-max) 'c-in-sws)
+           (c-clear-char-properties (point-min) (point-max) 'c-type)
+           (if (%c-true (%c-langvar 'c-has-quoted-numbers))
+               (c-clear-char-properties (point-min) (point-max)
+                                        'c-digit-separator))
+           ;; awk-mode's `c-awk-NL-prop': cc-awk.el is not ported.
+           ))
+        (*c-buffer-is-cc-mode* #f)))
+
+    ;;------------------------------------------------------------------
+    ;; `c-init-language-vars-for' (`cc-mode.el:201')
+    ;;------------------------------------------------------------------
+    (define (c-init-language-vars-for mode)
+      (cond ((eq? mode 'c-mode) (c-init-language-vars c-mode))
+            ((eq? mode 'c++-mode) (c-init-language-vars c++-mode))
+            ((eq? mode 'objc-mode) (c-init-language-vars objc-mode))
+            ((eq? mode 'java-mode) (c-init-language-vars java-mode))
+            ((eq? mode 'idl-mode) (c-init-language-vars idl-mode))
+            ((eq? mode 'pike-mode) (c-init-language-vars pike-mode))
+            ((eq? mode 'awk-mode) (c-init-language-vars awk-mode))
+            (else (error "Unsupported mode ~a" mode))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-initialize-cc-mode' (`cc-mode.el:219')
+    ;;------------------------------------------------------------------
+    (define (c-initialize-cc-mode . rest)
+      "Initialize CC Mode for use in the current buffer.
+If the optional NEW-STYLE-INIT is nil or left out then all necessary
+initialization to run CC Mode for the C language is done.  Otherwise
+only some basic setup is done, and a call to `c-init-language-vars' or
+`c-init-language-vars-for' is necessary too (which gives more
+control).  See \"cc-mode.el\" for more info."
+      (let ((new-style-init (and (pair? rest) (car rest))))
+        (*c-buffer-is-cc-mode* #t)
+        (let ((initprop 'cc-mode-is-initialized)
+              (c-initialization-ok #f))
+          (unless (get 'c-initialize-cc-mode initprop)
+            (dynamic-wind
+             (lambda () #f)
+             (lambda ()
+               (put 'c-initialize-cc-mode initprop #t)
+               (c-initialize-builtin-style)
+               (run-hooks (*c-initialization-hook*))
+               ;; "Fix obsolete variables." `c-comment-continuation-stars'
+               ;; is not carried; there is nothing to fix.
+               (add-hook *change-major-mode-hook* c-leave-cc-mode-mode)
+               ;; "Connect up with Emacs's electric-pair-mode." Emacs does
+               ;; this from an `eval-after-load'; `elec-pair.el''s file is
+               ;; this library here, so the body runs now. **The check is
+               ;; the *global* `c-buffer-is-cc-mode'**, which was just set
+               ;; t - Emacs's own quirk, ported as it stands.
+               (for-each
+                (lambda (buf)
+                  (with-current-buffer
+                   buf
+                   (when (*c-buffer-is-cc-mode*)
+                     (set-buffer-local-value! (current-buffer)
+                                              'electric-pair-inhibit-predicate
+                                              c-electric-pair-inhibit-predicate))))
+                (buffer-list))
+               (set! c-initialization-ok #t)
+               ;; "Connect up with Emacs's electric-indent-mode":
+               ;; `electric.scm' is ported, so both hooks are real.
+               (add-hook electric-indent-mode-hook c-electric-indent-mode-hook)
+               (add-hook electric-indent-local-mode-hook
+                         c-electric-indent-local-mode-hook)
+               ;; "Setup hideshow variables": hideshow.el is not ported;
+               ;; the three are stored as Emacs stores them, so a ported
+               ;; hideshow reads the buffer's own values.
+               (set-buffer-local-value! (current-buffer) 'hs-block-start-regexp
+                                        "\\s(\\|{\\|\"")
+               (set-buffer-local-value! (current-buffer) 'hs-block-end-regexp
+                                        "\\s)\\|}\\|\"")
+               (set-buffer-local-value! (current-buffer) 'hs-c-start-regexp
+                                        "/[*/]"))
+             ;; "Will try initialization hooks again if they failed."
+             (lambda ()
+               (put 'c-initialize-cc-mode initprop c-initialization-ok))))
+          ;; "Set up text conversion": `post-text-conversion-hook' is not
+          ;; ported (there is no text-conversion input path); the
+          ;; function it would carry, `c-post-text-conversion', is.
+          (unless new-style-init
+            (c-init-language-vars-for 'c-mode)))))
+
+    ;;------------------------------------------------------------------
+    ;; Common routines: the maps (`cc-mode.el:276'-`:472')
+    ;;------------------------------------------------------------------
+    (define c-mode-base-map #f)
+    ;; ^ "Keymap shared by all CC Mode related modes."
+
+    (define (c-make-inherited-keymap)
+      (let ((map (make-sparse-keymap)))
+        (c-set-keymap-parent map c-mode-base-map)
+        map))
+
+    ;; `c-define-abbrev-table' and `c-populate-abbrev-table'
+    ;; (`cc-mode.el:284', `:303') are not carried: both are built on
+    ;; `abbrev.el''s tables (`define-abbrev-table', `define-abbrev',
+    ;; `intern-soft', `local-abbrev-table'), which this tree has not got.
+    ;; `c-basic-common-init' calls nothing in their place.
+
+    ;; `c-bind-special-erase-keys' (`cc-mode.el:319') waits on
+    ;; `normal-erase-is-backspace', which is not ported; the two
+    ;; C-c <delete> bindings it chooses between are below, bound the
+    ;; Emacs-on-tty way.
+
+    (if c-mode-base-map
+        #f
+        (begin
+          (set! c-mode-base-map (make-sparse-keymap))
+          (c-set-keymap-parent c-mode-base-map prog-mode-map)
+
+          ;; "Separate M-BS from C-M-h. The former should remain
+          ;; backward-kill-word."
+          (define-key c-mode-base-map (kbd "C-M-h") c-mark-function)
+          (define-key c-mode-base-map (kbd "M-C-q") c-indent-exp)
+          (substitute-key-definition backward-sentence
+                                     c-beginning-of-statement
+                                     c-mode-base-map *default-keymap* (vector))
+          (substitute-key-definition forward-sentence
+                                     c-end-of-statement
+                                     c-mode-base-map *default-keymap* (vector))
+          (substitute-key-definition indent-new-comment-line
+                                     c-indent-new-comment-line
+                                     c-mode-base-map *default-keymap* (vector))
+          (substitute-key-definition indent-for-tab-command
+                                     c-indent-line-or-region
+                                     c-mode-base-map *default-keymap* (vector))
+          ;; "indent-new-comment-line has changed name to
+          ;; comment-indent-new-line in Emacs 21."
+          (substitute-key-definition comment-indent-new-line
+                                     c-indent-new-comment-line
+                                     c-mode-base-map *default-keymap* (vector))
+
+          (define-key c-mode-base-map (kbd "M-C-a") c-beginning-of-defun)
+          (define-key c-mode-base-map (kbd "M-C-e") c-end-of-defun)
+
+          (define-key c-mode-base-map (kbd "C-c C-n") c-forward-conditional)
+          (define-key c-mode-base-map (kbd "C-c C-p") c-backward-conditional)
+          (define-key c-mode-base-map (kbd "C-c C-u") c-up-conditional)
+
+          (substitute-key-definition fill-paragraph c-fill-paragraph
+                                     c-mode-base-map *default-keymap* (vector))
+
+          ;; "Bind the electric deletion functions to C-d and DEL."
+          (define-key c-mode-base-map (kbd "C-d") c-electric-delete-forward)
+          (define-key c-mode-base-map (kbd "DEL") c-electric-backspace)
+          (define-key c-mode-base-map (kbd "C-c C-d") c-hungry-delete-forward)
+          ;; Emacs also writes `[?\C-c ?\d]' and `[?\C-c ?\C-\d]' to
+          ;; `c-hungry-delete-backwards', and the **measured** answer is
+          ;; that they do not win: `(key-binding (kbd "C-c C-d"))' in a
+          ;; real `c-mode' buffer is `c-hungry-delete-forward', and C-c d
+          ;; is nil. The observable bindings are what is carried; the two
+          ;; `<delete>' forms are the tty's own key events, in this
+          ;; keymap currency event symbols, and Emacs answers the same
+          ;; command for `C-c C-<delete>' as for `C-c C-d'.
+          (define-key c-mode-base-map (vector 3 'deletechar)
+                      c-hungry-delete-forward)
+          (define-key c-mode-base-map (vector 3 '(control deletechar))
+                      c-hungry-delete-forward)
+
+          (define-key c-mode-base-map (kbd "#") c-electric-pound)
+          (define-key c-mode-base-map (kbd "{") c-electric-brace)
+          (define-key c-mode-base-map (kbd "}") c-electric-brace)
+          (define-key c-mode-base-map (kbd "/") c-electric-slash)
+          (define-key c-mode-base-map (kbd "*") c-electric-star)
+          (define-key c-mode-base-map (kbd ";") c-electric-semi&comma)
+          (define-key c-mode-base-map (kbd ",") c-electric-semi&comma)
+          (define-key c-mode-base-map (kbd ":") c-electric-colon)
+          (define-key c-mode-base-map (kbd "(") c-electric-paren)
+          (define-key c-mode-base-map (kbd ")") c-electric-paren)
+
+          (define-key c-mode-base-map (kbd "C-c C-\\") c-backslash-region)
+          (define-key c-mode-base-map (kbd "C-c C-a") c-toggle-auto-newline)
+          ;; C-c C-b: `c-submit-bug-report' (reporter.el) is not ported.
+          (define-key c-mode-base-map (kbd "C-c C-c") comment-region)
+          (define-key c-mode-base-map (kbd "C-c C-l") c-toggle-electric-state)
+          (define-key c-mode-base-map (kbd "C-c C-o") c-set-offset)
+          (define-key c-mode-base-map (kbd "C-c C-q") c-indent-defun)
+          (define-key c-mode-base-map (kbd "C-c C-s")
+                      c-show-syntactic-information)
+          (define-key c-mode-base-map (kbd "C-c .") c-set-style)
+          ;; C-c C-w: `c-subword-mode' (cc-subword.el) is not ported.
+          (define-key c-mode-base-map (kbd "C-c C-k") c-toggle-comment-style)
+          (define-key c-mode-base-map (kbd "C-c C-z") c-display-defun-name)))
+
+    ;;------------------------------------------------------------------
+    ;; `c-basic-common-init' (`cc-mode.el:598')
+    ;;------------------------------------------------------------------
+    (define (c-basic-common-init mode default-style)
+      "Initialize the syntax handling routines and the line breaking/filling code.
+Intended to be used by other packages that embed CC Mode.
+
+MODE is the CC Mode flavor to set up, e.g. `c-mode' or `java-mode'.
+DEFAULT-STYLE tells which indentation style to install.  It has the
+same format as `c-default-style'.
+
+Note that `c-init-language-vars' must be called before this function.
+This function cannot do that since `c-init-language-vars' is a macro
+that requires a literal mode spec at compile time."
+      (*c-buffer-is-cc-mode* mode)
+
+      ;; (c-populate-abbrev-table) - abbrev.el is not ported.
+
+      ;; "these variables should always be buffer local; they do not
+      ;; affect indentation style." The four comment variables are the
+      ;; language's (`c-lang-defvar' set them buffer-locally already),
+      ;; and the paragraph ones are `paragraphs.scm''s accessor pairs,
+      ;; which are buffer-local by construction.
+      (set-buffer-local-value! (current-buffer) 'comment-start
+                               (comment-start))
+      (set-buffer-local-value! (current-buffer) 'comment-end
+                               (comment-end))
+      (set-buffer-local-value! (current-buffer) 'comment-start-skip
+                               (comment-start-skip))
+
+      ;; "Prepare for the use of `electric-pair-mode'."
+      (set-buffer-local-value! (current-buffer)
+                               'electric-pair-inhibit-predicate
+                               c-electric-pair-inhibit-predicate)
+
+      (set-buffer-local-value! (current-buffer)
+                               'parse-sexp-ignore-comments #t)
+      (setq-local 'indent-line-function c-indent-line)
+      (setq-local 'indent-region-function c-indent-region)
+      (setq-local 'normal-auto-fill-function c-do-auto-fill)
+      (set!comment-multi-line #t)
+      (setq-local 'comment-line-break-function c-indent-new-comment-line)
+      ;; `editorconfig-indent-size-vars': editorconfig is not ported.
+
+      ;; "Prevent time-wasting activity on C-y." `yank-handled-properties'
+      ;; is not ported (there is no such variable to filter).
+
+      ;; "For the benefit of adaptive fill, which otherwise mis-fills."
+      (set!fill-paragraph-handle-comment #f)
+
+      ;; "Install `c-fill-paragraph' on `fill-paragraph-function'."
+      (set!fill-paragraph-function c-fill-paragraph)
+
+      ;; "Initialize the cache for `c-looking-at-or-maybe-in-bracelist'."
+      ;; **Emacs's nil is the empty list here**: both caches are searched
+      ;; with `memv', and `(memv x #f)' is an error.
+      (set!c-laomib-cache '())
+      ;; "Initialize the cache for non brace-list braces."
+      (set!c-no-bracelist-cache '())
+      ;; "Initialize the three literal sub-caches."
+      (c-truncate-lit-pos/state-cache 1)
+      ;; "Initialize the cache of brace pairs, and opening
+      ;; braces/brackets/parens."
+      (c-state-cache-init)
+      ;; "Initialize the "brace stack" cache."
+      (c-init-bs-cache)
+
+      ;; "Keep track of where `c-fl-syn-tab' text properties are set."
+      (set!c-min-syn-tab-mkr #f)
+      (set!c-max-syn-tab-mkr #f)
+
+      ;; "We use the syntax-table text property to change the syntax of
+      ;; some chars, potentially in every language, so set this up."
+      (set-buffer-local-value! (current-buffer)
+                               'parse-sexp-lookup-properties #t)
+
+      ;; "Use this in Emacs 21+ to avoid meddling with the
+      ;; rear-nonsticky property on each character." The buffer's own
+      ;; list is Emacs's: the global value with the four properties
+      ;; consed on where they are absent (`textprop.scm' reads it).
+      (set-buffer-local-value!
+       (current-buffer) 'text-property-default-nonsticky
+       (let loop ((props '(syntax-table c-fl-syn-tab category c-type))
+                  (lst (*text-property-default-nonsticky*)))
+         (if (null? props)
+             lst
+             (loop (cdr props)
+                   (if (assq (car props) lst)
+                       lst
+                       (cons (cons (car props) #t) lst))))))
+
+      (c-clear-found-types)
+
+      ;; "now set the mode style based on default-style"
+      (let* ((style (cc-choose-style-for-mode mode default-style)))
+        ;; "Override style variables if `c-old-style-variable-behavior'
+        ;; is set. Also override if we are using global style variables,
+        ;; have already initialized a style once, and are switching to a
+        ;; different style."
+        (c-set-style
+         style
+         (not (or (*c-old-style-variable-behavior*)
+                  (and (not (*c-style-variables-are-local-p*))
+                       (c-indentation-style)
+                       (not (string-equal (c-indentation-style) style)))))))
+      (c-setup-paragraph-variables)
+
+      ;; "we have to do something special for c-offsets-alist so that the
+      ;; buffer local value has its own alist structure."
+      (set!c-offsets-alist (copy-alist (c-offsets-alist)))
+
+      ;; "setup the comment indent variable in an Emacs version portable
+      ;; way"
+      (setq-local 'comment-indent-function c-comment-indent)
+      ;; "What sort of comments are default for M-;?"
+      (set!c-block-comment-flag (%c-langvar 'c-block-comment-is-default))
+
+      ;; "In Emacs 24.4 onwards, prevent Emacs's built in electric
+      ;; indentation from messing up CC Mode's, and set
+      ;; `c-electric-flag' if `electric-indent-mode' has been called by
+      ;; the user."
+      (set!electric-indent-inhibit #t)
+      (set!c-electric-flag (electric-indent-mode-value))
+
+      (c-update-modeline)
+
+      ;; "Install the functions that ensure that various internal caches
+      ;; don't become invalid due to buffer changes."
+      (add-hook *before-change-functions* c-before-change #f #t)
+      (set!c-just-done-before-change #f)
+      (add-hook *after-change-functions* c-after-change #f #t)
+      (add-hook *post-command-hook* c-post-command #f #t)
+
+      (set!font-lock-extend-after-change-region-function!
+       c-extend-after-change-region))
+
+    (define (c-setup-doc-comment-style)
+      "Initialize the variables that depend on the value of `c-doc-comment-style'."
+      (when (font-lock-mode-on?)
+        ;; "Force font lock mode to reinitialize itself."
+        (font-lock-mode -1)
+        (font-lock-mode 1)))
+
+    ;;------------------------------------------------------------------
+    ;; `c-common-init' (`cc-mode.el:797')
+    ;;------------------------------------------------------------------
+    (define (c-common-init . rest)
+      "Common initialization for all CC Mode modes.
+In addition to the work done by `c-basic-common-init' and
+`c-font-lock-init', this function sets up various other things as
+customary in CC Mode modes but which aren't strictly necessary for CC
+Mode to operate correctly.
+
+MODE is the symbol for the mode to initialize, like `c-mode'.  See
+`c-basic-common-init' for details.  It's only optional to be
+compatible with old code; callers should always specify it."
+      (let ((mode (and (pair? rest) (car rest))))
+        (parameterize ((*case-fold-search* #f))
+          (unless mode
+            ;; "Called from an old third party package. The fallback is
+            ;; to initialize for C."
+            (c-init-language-vars-for 'c-mode))
+
+          (c-basic-common-init mode (*c-default-style*))
+          (when mode
+            ;; "Only initialize font locking if we aren't called from an
+            ;; old package."
+            (c-font-lock-init))
+
+          ;; "Starting a mode is a sort of "change". So call the change
+          ;; functions..."
+          (save-restriction
+            (widen)
+            (set!c-new-BEG (point-min))
+            (set!c-new-END (point-max))
+            (save-excursion
+              (let ((before-change-functions '())
+                    (after-change-functions '()))
+                (parameterize ((*before-change-functions*
+                                before-change-functions)
+                               (*after-change-functions*
+                                after-change-functions))
+                  ;; Emacs `funcall`s each *symbol*; here the symbol is
+                  ;; resolved through the language-function registry
+                  ;; (`c-register-lang-function!'), as the change hooks
+                  ;; do.
+                  (for-each (lambda (fn)
+                              ((%c-lang-function fn) (point-min) (point-max)))
+                            (%c-langvar 'c-get-state-before-change-functions))
+                  (for-each (lambda (fn)
+                              ((%c-lang-function fn)
+                               (point-min) (point-max)
+                               (- (point-max) (point-min))))
+                            (%c-langvar 'c-before-font-lock-functions))))))
+
+          (setq-local 'outline-regexp "[^#\n\r]")
+          (setq-local 'outline-level c-outline-level)
+          (setq-local 'add-log-current-defun-function
+                      (lambda ()
+                        (or (c-cpp-define-name)
+                            (car (c-defun-name-and-limits #f)))))
+          (let ((rfn (assq mode (*c-require-final-newline*))))
+            (when rfn
+              ;; `mode-require-final-newline' is `files.scm''s
+              ;; parameter; Emacs's `(boundp ...)' arm is the one taken.
+              (and (cdr rfn)
+                   (set-buffer-local-value! (current-buffer)
+                                            'require-final-newline
+                                            (*mode-require-final-newline*))))))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-font-lock-init' (`cc-mode.el:2752'), `c-after-font-lock-init'
+    ;; and `c-extend-after-change-region'
+    ;;------------------------------------------------------------------
+    (define (c-font-lock-init)
+      "Set up the font-lock variables for using the font-lock support in CC Mode.
+This does not load the font-lock package.  Use after
+`c-basic-common-init' and after cc-fonts has been loaded.
+This function is called from `c-common-init', once per mode initialization."
+      (set!font-lock-defaults!
+       (list (if (c-major-mode-is 'awk-mode)
+                 ;; "awk-mode currently has only one font lock level."
+                 'awk-font-lock-keywords
+                 (map c-mode-symbol
+                      (list "font-lock-keywords" "font-lock-keywords-1"
+                            "font-lock-keywords-2" "font-lock-keywords-3")))
+             #f #f
+             (%c-langvar 'c-identifier-syntax-modifications)
+             c-beginning-of-syntax
+             (cons 'font-lock-mark-block-function c-mark-function)))
+
+      ;; "Prevent `font-lock-default-fontify-region' extending the region
+      ;; it will fontify to whole lines by removing
+      ;; `font-lock-extend-region-wholelines' from
+      ;; `font-lock-extend-region-functions'. (Emacs only). This fixes
+      ;; Emacs bug #19669." Emacs's `delq' is over *symbols* and the list
+      ;; is global; here the list holds the procedures themselves.
+      (*font-lock-extend-region-functions*
+       (delq font-lock-extend-region-wholelines
+             (*font-lock-extend-region-functions*)))
+
+      (set!font-lock-fontify-region-function! c-font-lock-fontify-region)
+
+      (add-hook font-lock-mode-hook c-after-font-lock-init #f #t))
+
+    (define (c-after-font-lock-init)
+      ;; "Put on `font-lock-mode-hook'. This function ensures our
+      ;; after-change function will get executed before the font-lock
+      ;; one."
+      (when (memq c-after-change (hook-value *after-change-functions*))
+        (remove-hook *after-change-functions* c-after-change #t)
+        (add-hook *after-change-functions* c-after-change #f #t)))
+
+    ;; "Emacs 22 and later."
+    (define (c-extend-after-change-region beg end old-len)
+      "Extend the region to be fontified, if necessary."
+      ;; "Note: the parameter OLD-LEN is ignored here."
+      (when (eq? (*font-lock-support-mode*) 'jit-lock-mode)
+        (save-restriction
+          (widen)
+          (c-save-buffer-state
+           () ;; "Protect the undo-list from put-text-property."
+           (if (< (c-new-BEG) beg)
+               (put-text-property (c-new-BEG) beg 'fontified #f))
+           (if (> (c-new-END) end)
+               (put-text-property end (c-new-END) 'fontified #f)))))
+      (cons (c-new-BEG) (c-new-END)))
+
+    ;;------------------------------------------------------------------
+    ;; `c-change-expand-fl-region's context half (`cc-mode.el:2669')
+    ;;------------------------------------------------------------------
+    (define (c-context-expand-fl-region beg end)
+      ;; "Return a cons (NEW-BEG . NEW-END), where NEW-BEG is the
+      ;; beginning of a "local" declaration containing BEG (see
+      ;; `c-fl-decl-start') or BOL BEG is in.  NEW-END is beginning of
+      ;; the line after the one END is in."
+      (c-save-buffer-state
+       ()
+       (cons (or (c-fl-decl-start beg) (c-doc-fl-decl-start beg)
+                 (c-point 'bol beg))
+             (or (c-fl-decl-end end) (c-doc-fl-decl-end end)
+                 (c-point 'bonl (- end 1))))))
+
+    ;; `c-context-expand-fl-region' (`cc-mode.el:2669') is named by the
+    ;; `c-before-context-fontification-functions' language constant
+    ;; (`cc-langs.el:589'), which `c-before-context-fl-expand-region'
+    ;; holds as symbols and resolves through this registry (Emacs
+    ;; funcalls the symbol through its obarray). The registration has to
+    ;; follow both definitions - a registration is a procedure value,
+    ;; and a Scheme forward reference is unbound.
+    (c-register-lang-function! 'c-context-expand-fl-region
+                               c-context-expand-fl-region)
+
+    (define (c-before-context-fl-expand-region beg end)
+      ;; "Expand the region (BEG END) as specified by
+      ;; `c-before-context-fontification-functions'.  Return a cons of
+      ;; the bounds of the new region."
+      (save-restriction
+        (widen)
+        (save-excursion
+          (let ((new-beg beg) (new-end end)
+                (new-region (cons beg end)))
+            ;; Emacs `funcall's each SYMBOL through the obarray; this
+            ;; tree's language-function registry is what stands in for
+            ;; it (`c-register-lang-function!'), so the symbol has to be
+            ;; resolved before it is applied. Applying it raw raised
+            ;; "Wrong type to apply: c-context-expand-fl-region" from
+            ;; the redisplay the first time a C buffer's region was
+            ;; context-expanded (2026-11-25).
+            (for-each (lambda (fn)
+                        (set! new-region ((%c-lang-function fn) new-beg new-end))
+                        (set! new-beg (car new-region))
+                        (set! new-end (cdr new-region)))
+                      (%c-langvar 'c-before-context-fontification-functions))
+            new-region))))
+
+    (define (c-font-lock-fontify-region beg end . rest)
+      ;; "Effectively advice around `font-lock-fontify-region' which
+      ;; extends the region (BEG END), for example, to avoid context
+      ;; fontification chopping off the start of the context.  Do not
+      ;; extend the region if it's already been done (i.e. from an
+      ;; after-change fontification)."
+      (let ((verbose (and (pair? rest) (car rest))))
+        (save-restriction
+          (widen)
+          (let ((new-beg #f) (new-end #f) (new-region #f))
+            (c-save-buffer-state
+             ()
+             (c-with-string-fences
+              (parameterize ((*case-fold-search* #f))
+                (if (and (c-in-after-change-fontification)
+                         (< beg (c-new-END)) (> end (c-new-BEG)))
+                    ;; "Region and the latest after-change fontification
+                    ;; region overlap. Determine the upper and lower
+                    ;; bounds of our adjusted region separately."
+                    (begin
+                      (if (<= beg (c-new-BEG))
+                          (set!c-in-after-change-fontification #f))
+                      (set! new-beg
+                            (if (and (>= beg (c-point 'bol (c-new-BEG)))
+                                     (<= beg (c-new-BEG)))
+                                ;; "Either jit-lock has accepted
+                                ;; `c-new-BEG', or has (probably)
+                                ;; extended the change region spuriously
+                                ;; to BOL..."
+                                (c-new-BEG)
+                                (begin
+                                  (set! new-region
+                                        (c-before-context-fl-expand-region
+                                         beg end))
+                                  (set! new-end (cdr new-region))
+                                  (car new-region))))
+                      (set! new-end
+                            (if (and (>= end (c-point 'bol (c-new-END)))
+                                     (<= end (c-new-END)))
+                                (c-new-END)
+                                (or new-end
+                                    (cdr (c-before-context-fl-expand-region
+                                          beg end))))))
+                    ;; "Context (etc.) fontification."
+                    (begin
+                      (set! new-region
+                            (c-before-context-fl-expand-region beg end))
+                      (set! new-beg (car new-region))
+                      (set! new-end (cdr new-region))))
+                ;; "Finally invoke font lock's functionality."
+                ((*font-lock-fontify-region-function*)
+                 new-beg new-end verbose))))))))
+
+    ;; `c-force-redisplay' (`cc-fonts.scm') calls this function through
+    ;; a seam because cc-fonts sits below this library; the seam's
+    ;; default raises "not yet initialised", so cc-mode has to install
+    ;; the real function as it loads - Emacs needs no such line because
+    ;; its `c-force-redisplay' calls the (forward-referenced) function
+    ;; directly. Without this, a new type found during fontification
+    ;; (`c-fontify-new-found-type') raised that error in the redisplay
+    ;; (2026-11-25).
+    (*c-font-lock-fontify-region-function* c-font-lock-fontify-region)
+
+    ;;------------------------------------------------------------------
+    ;; The electric-indent hook pair (`cc-mode.el:2824')
+    ;;------------------------------------------------------------------
+    (define (c-electric-indent-mode-hook)
+      ;; "Emacs has en/disabled `electric-indent-mode'. Propagate this
+      ;; through to each CC Mode buffer."
+      (for-each
+       (lambda (buf)
+         (with-current-buffer
+          buf
+          (when (*c-buffer-is-cc-mode*)
+            ;; "Don't use `c-toggle-electric-state' here due to
+            ;; recursion."
+            (set!c-electric-flag (electric-indent-mode-value))
+            (c-update-modeline))))
+       (buffer-list)))
+
+    (define (c-electric-indent-local-mode-hook)
+      ;; "Emacs has en/disabled `electric-indent-local-mode' for this
+      ;; buffer. Propagate this through to this buffer's value of
+      ;; `c-electric-flag'."
+      (when (*c-buffer-is-cc-mode*)
+        (set!c-electric-flag (electric-indent-mode-value))
+        (c-update-modeline)))
+
+    ;;------------------------------------------------------------------
+    ;; "Connection with Emacs's electric-pair-mode"
+    ;;------------------------------------------------------------------
+    (define (c-electric-pair-inhibit-predicate char)
+      "Return t to inhibit the insertion of a second copy of CHAR.
+
+At the time of call, point is just after the newly inserted CHAR.
+
+When CHAR is \" and not within a comment, t will be returned if
+the quotes on the current line are already balanced.  For other
+cases, the default value of `electric-pair-inhibit-predicate' is
+called and its value returned.
+
+This function is the appropriate value of
+`electric-pair-inhibit-predicate' for CC Mode modes, which mark
+invalid strings with such a syntax table text property on the
+opening \" and the next unescaped end of line."
+      ;; Emacs's CHAR is `last-command-event', an integer there; a
+      ;; character here.
+      (let ((ch (if (char? char) char (integer->char char))))
+        (if (and (char=? ch #\")
+                 (not (memq (%c-cadr (c-semi-pp-to-literal (- (point) 1)))
+                            '(c c++))))
+            (not (c-open-string-opener))
+            ((*electric-pair-inhibit-predicate*) ch))))
+
+    ;;------------------------------------------------------------------
+    ;; `c-post-command' (`cc-mode.el:2211')
+    ;;------------------------------------------------------------------
+    (define (c-post-command)
+      ;; "If point was inside of a new identifier and no longer is,
+      ;; record that fact."
+      (when (and (*c-buffer-is-cc-mode*)
+                 (c-new-id-start) (c-new-id-end)
+                 (or (> (point) (c-new-id-end))
+                     (< (point) (c-new-id-start))))
+        (when (c-new-id-is-type)
+          (c-add-type-1 (c-new-id-start) (c-new-id-end)))
+        (set!c-new-id-start #f)
+        (set!c-new-id-end #f)
+        (set!c-new-id-is-type #f)))
+
+    (define-syntax c-run-mode-hooks
+      ;; `(defmacro c-run-mode-hooks (&rest hooks) ... (if
+      ;; (cc-bytecomp-fboundp 'run-mode-hooks) `(run-mode-hooks ,@hooks)
+      ;; ...))' (`cc-mode.el:987'). `run-mode-hooks' is `subr.scm`'s, so
+      ;; the first arm is the only one.
+      (syntax-rules ()
+        ((_ hook ...) (run-mode-hooks hook ...))))
+
+    ;;==================================================================
+    ;; Support for C (`cc-mode.el:2860'-`:2960')
+    ;;==================================================================
+
+    ;; `c-guess-region-max' is `cc-guess.el:93''s defcustom - cc-guess
+    ;; is not ported - carried here because `c-or-c++-mode' is its one
+    ;; reader in this file.
+    (define-custom *c-guess-region-max* 50000
+      "The maximum region size for examining indent information with `c-guess'.
+It takes a long time to examine indent information from a large region;
+this option helps you limit that time.  nil means no limit."
+      :version "24.1"
+      :type 'integer
+      :group 'c)
+
+    (define c-mode-syntax-table
+      ((c-lang-const c-make-mode-syntax-table c)))
+    ;; ^ "Syntax table used in `c-mode' buffers." Emacs calls the
+    ;; constant's *function* for a table of this mode's own; the language
+    ;; constant `c-mode-syntax-table' is the evaluated table used while
+    ;; the constants themselves are computed.
+
+    (define c-mode-map
+      (let ((map (c-make-inherited-keymap)))
+        map))
+    ;; ^ "Keymap used in `c-mode' buffers."
+    ;; "Add bindings which are only useful for C." C-c C-e is
+    ;; `c-macro-expand', which needs a cpp subprocess: not ported.
+
+    (define c-mode-hook '())
+    ;; ^ `c-mode-hook', made by `define-derived-mode' in Emacs.
+
+    ;; `(easy-menu-define c-c-menu c-mode-map "C Mode Commands." (cons "C"
+    ;; (c-lang-const c-mode-menu c)))' - the menu waits on the
+    ;; `c-mode-menu' language constant, which is not carried yet; the
+    ;; keymap and the mode are the milestone.
+
+    (define-derived-mode (c-mode prog-mode "C" c-mode-map c-mode-hook
+                                 c-mode-syntax-table)
+      "Major mode for editing C code.
+
+To submit a problem report, enter `\\[c-submit-bug-report]' from a
+`c-mode' buffer.  This automatically sets up a mail buffer with version
+information already added.  You just need to add a description of the
+problem, including a reproducible test case, and send the message.
+
+To see what version of CC Mode you are running, enter `\\[c-version]'.
+
+The hook `c-mode-common-hook' is run with no args at mode
+initialization, then `c-mode-hook'.
+
+Key bindings:
+\\{c-mode-map}"
+      :after-hook (begin (c-make-noise-macro-regexps)
+                         (c-make-macro-with-semi-re)
+                         (c-update-modeline))
+      (c-initialize-cc-mode #t)
+      ;; `(setq abbrev-mode t)' - the variable is `abbrev.scm''s
+      ;; buffer-local slot, which its reader consults.
+      (set-buffer-local-value! (current-buffer) 'abbrev-mode #t)
+      (c-init-language-vars-for 'c-mode)
+      (c-common-init 'c-mode)
+      (cc-imenu-init cc-imenu-c-generic-expression)
+      ;; `flymake-diagnostic-functions': flymake is not ported.
+      (c-run-mode-hooks (*c-mode-common-hook*)))
+
+    (define c-or-c++-mode--regexp
+      ;; "A regexp applied to C header files to check if they are really
+      ;; C++." The body is Emacs's `eval-when-compile' expression, run
+      ;; at load: a `let` of the two pieces with the header list spliced
+      ;; into `regexp-opt`.
+      (let ((id "[a-zA-Z_][a-zA-Z0-9_]*") (ws "[ \t]+") (ws-maybe "[ \t]*")
+            (headers '("string" "string_view" "iostream" "map" "unordered_map"
+                       "set" "unordered_set" "vector" "tuple")))
+        (string-append
+         "^" ws-maybe "\\(?:"
+         "using" ws "\\(?:namespace" ws
+         "\\|" id "::"
+         "\\|" id ws-maybe "=\\)"
+         "\\|" "\\(?:inline" ws "\\)?namespace"
+         "\\(?:" ws "\\(?:" id "::\\)*" id "\\)?" ws-maybe "{"
+         "\\|" "class" ws id
+         "\\(?:" ws "final" "\\)?" ws-maybe "[:{;\n]"
+         "\\|" "struct" ws id "\\(?:" ws "final" ws-maybe "[:{\n]"
+         "\\|" ws-maybe ":\\)"
+         "\\|" "template" ws-maybe "<.*?>"
+         "\\|" "#include" ws-maybe "<" (regexp-opt headers) ">"
+         "\\)")))
+
+    (define-command (c-or-c++-mode)
+      "Analyze buffer and enable either C or C++ mode.
+
+Some people and projects use .h extension for C++ header files
+which is also the one used for C header files.  This makes
+matching on file name insufficient for detecting major mode that
+should be used.
+
+This function attempts to use file contents to determine whether
+the code is C or C++ and based on that chooses whether to enable
+`c-mode' or `c++-mode'."
+      (interactive)
+      (let ((mode
+             (if (save-excursion
+                   (save-restriction
+                     (save-match-data
+                       (widen)
+                       (goto-char (point-min))
+                       (re-search-forward c-or-c++-mode--regexp
+                                          (+ (point) (*c-guess-region-max*))
+                                          #t))))
+                 'c++-mode
+                 'c-mode)))
+        ;; Emacs's `(funcall (if (fboundp 'major-mode-remap)
+        ;; (major-mode-remap mode) mode))'. `major-mode-remap` answers a
+        ;; *symbol*, which `funcall` resolves through the obarray; this
+        ;; tree's `%mode-function` is that resolution (and its autoload).
+        ((%mode-function (major-mode-remap mode)))))
+
+    ;;==================================================================
+    ;; Support for C++ (`cc-mode.el:2990'-`:3040')
+    ;;==================================================================
+
+    (define c++-mode-syntax-table
+      ((c-lang-const c-make-mode-syntax-table c++)))
+    ;; ^ "Syntax table used in c++-mode buffers."
+
+    (define c++-mode-map
+      (let ((map (c-make-inherited-keymap)))
+        map))
+    ;; ^ "Keymap used in c++-mode buffers."
+    ;; C-c C-e (`c-macro-expand') is not ported.
+    (define-key c++-mode-map (kbd "C-c :") c-scope-operator)
+    (define-key c++-mode-map "<" c-electric-lt-gt)
+    (define-key c++-mode-map ">" c-electric-lt-gt)
+
+    (define c++-mode-hook '())
+    ;; ^ `c++-mode-hook', made by `define-derived-mode' in Emacs.
+
+    (define-derived-mode (c++-mode prog-mode "C++" c++-mode-map c++-mode-hook
+                                   c++-mode-syntax-table)
+      "Major mode for editing C++ code.
+To submit a problem report, enter `\\[c-submit-bug-report]' from a
+c++-mode buffer.  This automatically sets up a mail buffer with
+version information already added.  You just need to add a description
+of the problem, including a reproducible test case, and send the
+message.
+
+To see what version of CC Mode you are running, enter `\\[c-version]'.
+
+The hook `c-mode-common-hook' is run with no args at mode
+initialization, then `c++-mode-hook'.
+
+Key bindings:
+\\{c++-mode-map}"
+      :after-hook (begin (c-make-noise-macro-regexps)
+                         (c-make-macro-with-semi-re)
+                         (c-update-modeline))
+      (c-initialize-cc-mode #t)
+      (set-buffer-local-value! (current-buffer) 'abbrev-mode #t)
+      (c-init-language-vars-for 'c++-mode)
+      (c-common-init 'c++-mode)
+      (cc-imenu-init cc-imenu-c++-generic-expression)
+      (c-run-mode-hooks (*c-mode-common-hook*)))
 
     ))

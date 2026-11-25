@@ -228,7 +228,10 @@
   'text-mode (visit "/tmp/auto-mode-test.txt" "hello\n"))
 
 (test-equal "a file whose mode this tree has not got keeps the default"
-  'fundamental-mode (visit "/tmp/auto-mode-test.c" "int main(void) {}\n"))
+  ;; `.c' used to be the example here; it opens in `c-mode` now
+  ;; (`test/progmodes/cc-mode-test.scm` pins that), so the example is an
+  ;; extension `auto-mode-alist` names nothing for.
+  'fundamental-mode (visit "/tmp/auto-mode-test.zzz" "hello\n"))
 
 ;; ------------------------------------------------------------------
 ;; The Lisp indentation engine (`lisp-mode.el:880-1500'): `calculate-

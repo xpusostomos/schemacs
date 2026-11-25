@@ -6,16 +6,19 @@
   (only (schemacs command) *quit-flag* quit-condition?)
   (only (schemacs buffer)
         *current-buffer* allocate-buffer get-buffer-create set-buffer
-        erase-buffer buffer-z set-point buffer-pt set-buffer-local-value!)
+        erase-buffer buffer-z set-point buffer-pt set-buffer-local-value!
+        buffer-local-value buffer-modified-p restore-buffer-modified-p)
   (only (schemacs editfns)
         insert point point-max goto-char save-restriction narrow-to-region)
   (only (schemacs frame) *current-frame* new-frame)
+  (only (schemacs files) find-file-noselect)
+  (only (schemacs paren) show-paren--default)
   (only (schemacs syntax)
         char-syntax string-to-syntax matching-paren modify-syntax-entry
         parse-partial-sexp syntax-ppss syntax-table standard-syntax-table
         copy-syntax-table set-syntax-table with-syntax-table
         forward-word-position backward-word-position scan-sexps scan-lists
-        skip-chars-forward skip-chars-backward
+        skip-chars-forward skip-chars-backward syntax-propertize
         *parse-sexp-ignore-comments*)
   (only (schemacs marker) make-marker marker-position set-marker)
   (only (schemacs font-lock)
@@ -441,6 +444,38 @@
          (list (list-ref before 0) (list-ref before 8))
          (list (list-ref after 0) (list-ref after 8)))))))
 
+;; The `(setq pt-min ...)`-as-test bug (2026-11-25): the state a
+;; zero-length `parse-partial-sexp' returns - what the OLD-PPSS branch
+;; stores when it parses from PT-MIN to PT-MIN - has neither a toplevel
+;; position nor an `nth 2'. Emacs's `(and ... (setq pt-min (or ...))
+;; (<= pt-min pos) ...)' stops at the setq's nil and takes the cache
+;; path; a Scheme `set!' answers the unspecified value, which is true,
+;; so the first port went on to compare nil and raised "Wrong type
+;; argument in position 2: #f" from the `<'. Emacs 31.1's answers for
+;; this sequence are the expectations.
+;;
+;; A fresh buffer, so the cache holds only this sequence - with an
+;; earlier narrowing in the same buffer Emacs's own fourth answer is
+;; (0 nil 1 ...) instead, which is a different branch, not this bug.
+(test-assert "a state with no usable position falls back instead of raising"
+  (parameterize ((*current-frame* (new-frame (allocate-buffer) 24 80))
+                 (*current-buffer* #f))
+    (let ((b (get-buffer-create "*ppss-trivial*")))
+      (set-buffer b)
+      (erase-buffer)
+      (set-syntax-table (copy-syntax-table (standard-syntax-table)))
+      (insert "() ()")
+      (let ((high (syntax-ppss 6)))
+        (test-equal "the state after a complete sexp records its start"
+          (list 0 4) (list (list-ref high 0) (list-ref high 2))))
+      (let ((trivial (syntax-ppss 4)))
+        (test-equal "a zero-length parse's state has no nth 2"
+          (list 0 #f) (list (list-ref trivial 0) (list-ref trivial 2))))
+      (let ((inside (syntax-ppss 2)))
+        (test-equal "and a query before it falls back instead of raising"
+          (list 1 1 #f) (list (list-ref inside 0) (list-ref inside 1)
+                              (list-ref inside 2)))))))
+
 (test-end "schemacs_editor_ppss_cache")
 
 ;;----------------------------------------------------------------------
@@ -563,3 +598,73 @@
                10 (point))))
 
 (test-end "schemacs_editor_skip_chars_bound")
+
+;;--------------------------------------------------------------
+;; The two departures behind "the cursor jumps down and the buffer is
+;; marked modified when a .scm file is opened" (2026-11-25).
+;;
+;; 1. `find_defun_start' (`syntax.c:585') asks `syntax-ppss' for the
+;;    start of the enclosing comment, and `syntax-ppss' MOVES POINT to
+;;    its argument (measured on Emacs 31.1: `(syntax-ppss 6)' with
+;;    point at 2 leaves point 6). The C saves `opoint' and restores it
+;;    right after the call (`syntax.c:606'); the port did not, so a
+;;    backward `scan-sexps' over a source file whose comments carry
+;;    quotes - `charset.scm' - left point at the comment being examined.
+;;    `show-paren' runs exactly that scan from its idle timer, so the
+;;    cursor jumped a page or more down by itself a moment after a file
+;;    was opened.
+;;
+;; 2. `syntax-propertize' must run under `with-silent-modifications':
+;;    its property writes raise MODIFF, and only the macro's save and
+;;    restore of the modified flag keeps a freshly opened buffer from
+;;    reading as modified. The port bound the two inhibit parameters but
+;;    neither the undo list nor the flag, so the mode line showed
+;;    `-UU-:**-' on a file nothing had changed, and the next `C-x C-s'
+;;    would have written it.
+;;
+;; Every expectation below is Emacs 31.1's own answer, measured on the
+;; same buffer with the same calls (`/tmp/measure-spfix2.el').
+;;--------------------------------------------------------------
+(test-begin "schemacs_editor_silent_propertize")
+
+(with-buffer
+ (lambda (b)
+   (insert "0123456789abcdefghij")
+   (set-buffer-local-value!
+    b 'syntax-propertize-function
+    (lambda (start end) (put-text-property start end 'syntax-table '(1))))
+   (restore-buffer-modified-p #f)
+   (test-equal "the buffer starts unmodified" #f (buffer-modified-p b))
+   (syntax-propertize 10)
+   (test-equal "syntax-propertize's property writes leave it unmodified"
+               #f (buffer-modified-p b))
+   (test-equal "and point is untouched" 21 (point))
+   (test-equal "the chunk reaches the end of the buffer, as Emacs's does"
+               21 (buffer-local-value b 'syntax-propertize--done))))
+
+;; The backward scan and `show-paren' on the real file whose comments
+;; trigger `back_comment''s lossage arm. A small fixture cannot: the
+;; backward walk has to cross a comment *inside* the sexp being
+;; scanned, and the `syntax-ppss' probe only runs when the walk loses
+;; the comment style - charset.scm is the case Chris saw bounce.
+(parameterize ((*current-frame* (new-frame (allocate-buffer) 24 80))
+               (*current-buffer* #f))
+  (let ((b (find-file-noselect "schemacs/charset.scm")))
+    (set-buffer b)
+    (set-buffer-local-value! b 'syntax-propertize--done 0)
+    (restore-buffer-modified-p #f)
+    (goto-char (- (point-max) 1))
+    (let ((start (point)))
+      (test-equal "a backward scan over the whole form answers Emacs's position"
+                  1 (scan-sexps start -1))
+      (test-equal "and leaves point where it was" start (point))
+      (test-equal "and the properties it set do not mark the buffer modified"
+                  #f (buffer-modified-p b)))
+    ;; `show-paren' from the top of the file is what its idle timer runs
+    ;; a moment after the file is opened.
+    (goto-char 1)
+    (show-paren--default)
+    (test-equal "show-paren's scan leaves point at the buffer start"
+                1 (point))))
+
+(test-end "schemacs_editor_silent_propertize")

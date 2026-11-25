@@ -182,6 +182,7 @@
    lookup-char-property
    interval-plist-get
    *text-property-default-nonsticky*
+   *text-property-default-nonsticky-value-function*
    *char-property-alias-alist*
    *char-property-alias-alist-function*
    *default-text-properties*
@@ -1174,12 +1175,21 @@
       ;;--------------------------------------------------------------
       (if (pair? set) (and (memq sym set) #t) (and set #t)))
 
+    (define *text-property-default-nonsticky-value-function*
+      ;; The *buffer's* `text-property-default-nonsticky' list, which a
+      ;; major mode can set buffer-locally (`c-basic-common-init' does).
+      ;; A seam: this library is below the buffer, so it cannot read a
+      ;; buffer slot; `textprop.scm', which can, installs the reader.
+      ;; Until then the parameter is the value, as it was.
+      ;;--------------------------------------------------------------
+      (make-parameter (lambda () (*text-property-default-nonsticky*))))
+
     (define (default-nonsticky sym)
       ;; The `text-property-default-nonsticky' entry for SYM, or #f: a
       ;; pair whose cdr says whether the property is non-sticky by
       ;; default.
       ;;--------------------------------------------------------------
-      (assq sym (*text-property-default-nonsticky*)))
+      (assq sym ((*text-property-default-nonsticky-value-function*))))
 
     (define (nonsticky-by-default? entry sym)
       ;; The `(and (consp tmp) (not (nilp (cdr tmp))))' test, which

@@ -102,6 +102,7 @@
    comment-enter-backward comment-continue
    comment-styles
    *comment-style* *comment-multi-line*
+   comment-multi-line set!comment-multi-line
    comment-indent-default comment-choose-indent comment-indent
    indent-for-comment
    ;; the region commands - `newcomment.el:799' onwards
@@ -244,6 +245,16 @@ It also affects \\[indent-new-comment-line].  However, if you want this
 behavior for explicit filling, you might as well use \\[newline-and-indent]."
       :type 'boolean
       :group 'comment)
+
+    ;; **The parameter is the default, the slot is the buffer's value.**
+    ;; A major mode sets it buffer-locally - `c-basic-common-init` does
+    ;; - and Emacs's `let' of it (`cc-cmds.el:5622') is
+    ;; `call-with-buffer-local`; `paragraph-start`'s pattern.
+    (define (comment-multi-line)
+      (buffer-local-value (current-buffer) 'comment-multi-line
+                          (*comment-multi-line*)))
+    (define (set!comment-multi-line value)
+      (set-buffer-local-value! (current-buffer) 'comment-multi-line value))
 
     ;;----------------------------------------------------------------
     ;; `comment-string-strip' (`newcomment.el:349') and

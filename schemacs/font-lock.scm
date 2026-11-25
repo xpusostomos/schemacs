@@ -111,6 +111,7 @@
    *font-lock-defaults*
    *font-lock-extra-managed-props*
    *font-lock-fontify-region-function* font-lock-fontify-region-function
+   *font-lock-extend-region-functions* *font-lock-support-mode*
    set!font-lock-fontify-region-function!
    *font-lock-fontified*
    *font-lock-keywords*
@@ -171,10 +172,12 @@
    font-lock-set-defaults
    font-lock-set-defaults-done?
    font-lock-specified-p
+   font-lock-extend-region-wholelines font-lock-extend-region-multiline
    font-lock-unfontify-buffer
    font-lock-unfontify-region
    font-lock-value-in-major-mode
    set!font-lock-defaults!
+   set!font-lock-extend-after-change-region-function!
    set!font-lock-mode!
    set!font-lock-keywords!)
 
@@ -614,6 +617,9 @@
       (font-lock-buffer-local *font-lock-fontify-buffer-function*))
     (define (font-lock-extend-after-change-region-function)
       (font-lock-buffer-local *font-lock-extend-after-change-region-function*))
+    (define (set!font-lock-extend-after-change-region-function! value)
+      (set!font-lock-buffer-local!
+       *font-lock-extend-after-change-region-function* value))
 
     (define (font-lock-major-mode)
       (font-lock-buffer-local *font-lock-major-mode*))
@@ -1567,9 +1573,6 @@
          font-lock-default-fontify-region)
         (set!font-lock-unfontify-region-function!
          font-lock-default-unfontify-region)
-        (*font-lock-extend-region-functions*
-         (list font-lock-extend-region-wholelines
-               font-lock-extend-region-multiline))
         #t)))
 
     ;;----------------------------------------------------------------
@@ -1729,5 +1732,17 @@
        (unless (font-lock-fontified)
          (save-excursion (font-lock-fontify-region beg end)))))
     (*font-lock-fontify-buffer-function* font-lock-default-fontify-buffer)
+
+    ;; `font-lock-extend-region-functions`' *default* (`font-lock.el:1075`),
+    ;; set here for the same reason as the four above: the functions it
+    ;; names are defined above, and Emacs's `defvar` value is assigned
+    ;; once at load, **not re-set on every `font-lock-set-defaults`** -
+    ;; that reset was this port's, and it undid
+    ;; `c-font-lock-init`'s global `delq` of
+    ;; `font-lock-extend-region-wholelines` (`cc-mode.el:2809`), which
+    ;; Emacs applies to this one list for every buffer.
+    (*font-lock-extend-region-functions*
+     (list font-lock-extend-region-wholelines
+           font-lock-extend-region-multiline))
 
     ))

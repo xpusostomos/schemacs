@@ -334,7 +334,17 @@
       ;; delayed-after-hook-functions)` (`derived.el:294`); `run-mode-hooks`
       ;; runs the delayed thunks after the mode's own hook.
       ;;--------------------------------------------------------------
-      (syntax-rules ()
+      ;; **`:after-hook` is a *literal*.** With an empty literals list it
+      ;; was a pattern variable, so the four keyword clauses matched every
+      ;; ordinary mode body as well - a five-element call with two body
+      ;; forms matched `(:after-hook after body ...)' with the *first*
+      ;; body form as the "keyword" - and, being earlier in the clause
+      ;; list, shadowed the plain clauses. Measured: a mode whose body was
+      ;; `(set! log 'B1) (set! log 'B2)' logged only B2, *after*
+      ;; `after-change-major-mode-hook' - which is why font-lock saw a
+      ;; buffer with no `font-lock-defaults' yet at mode-hook time and
+      ;; never registered with jit-lock.
+      (syntax-rules (:after-hook)
         ((_ (child parent name map hook syntax) docstring :after-hook after body ...)
          (begin
            (derived-mode-set-parent 'child (if (eq? 'parent 'fundamental-mode) #f 'parent))

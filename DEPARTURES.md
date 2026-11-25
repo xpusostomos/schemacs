@@ -17604,3 +17604,554 @@ paren whose opener is 40 lines up shows "Matches (" in the echo area,
 and the same point in a three-line file (opener on screen) shows
 nothing. Verified to fail with the option left off - the positive half
 then finds no message - and to pass three times in a row.
+
+# cc-mode: the mode definitions, and the `.c`/`.h` milestone (2026-11-25)
+
+`cc-mode.el`'s setup half is ported and the first visible milestone is
+met: **a `.c` or `.h` file visits in `c-mode`/`c++-mode` through
+`auto-mode-alist`'s autoload, with the mode's syntax table, keymap,
+fontification and change hooks running for real.** Every expectation in
+the new tests is Emacs 31.1's, measured in `emacs -Q --batch` in a real
+`c-mode` buffer first.
+
+## What landed
+
+`schemacs/progmodes/cc-mode.scm`, after the change machinery, in the
+file's own order: `c-leave-cc-mode-mode` (`:178`),
+`c-init-language-vars-for` (`:201`), `c-initialize-cc-mode` (`:219`),
+`c-mode-base-map` and its bindings (`:276`-`:472'), `c-basic-common-init`
+(`:598`), `c-setup-doc-comment-style` (`:775`), `c-common-init` (`:797`),
+`c-font-lock-init` (`:2752`), `c-after-font-lock-init`,
+`c-extend-after-change-region`, `c-context-expand-fl-region`,
+`c-before-context-fl-expand-region`, `c-font-lock-fontify-region`,
+`c-electric-indent-mode-hook`, `c-electric-indent-local-mode-hook`,
+`c-electric-pair-inhibit-predicate`, `c-post-command` (`:2211`),
+`c-run-mode-hooks`, and the C and C++ support (`:2860`-`:3040`'):
+`c-mode-syntax-table`, `c-mode-map`, `c-mode`, `c-or-c++-mode` with
+`c-or-c++-mode--regexp`, `c++-mode-syntax-table`, `c++-mode-map`,
+`c++-mode`. `files.scm`'s `%mode-autoloads` names the three modes;
+`loadup.scm` already listed the library, and `imports.scm` is
+regenerated (132 libraries, 5438 names).
+
+Emacs's `(require 'cc-fonts)` and `(cc-require 'cc-align)` are imports
+here, for their load-time effects: cc-fonts registers the
+`c-font-lock-keywords` variables in font-lock's keyword table (which is
+how `font-lock-eval-keywords` finds the *symbols* `c-font-lock-init`
+puts in `font-lock-defaults`), and cc-align registers its line-up
+functions by symbol.
+
+## The buffer-local stores this needed, and why they are deltas on shared files
+
+`c-basic-common-init` is mostly Emacs's `set (make-local-variable ...)`
+calls. A dozen of those variables were still *parameters only*, so a
+mode's buffer-local set reached nothing. Each now follows the
+`paragraph-start` pattern (`paragraphs.scm`): the parameter is the
+default, the buffer slot is the buffer's value, the reader is a
+procedure, and Elisp's `let` of the variable is
+`call-with-buffer-local`. The files and the new spellings:
+
+| Emacs variable | file | new reader |
+|---|---|---|
+| `fill-paragraph-function` | `textmodes/fill.scm` | `fill-paragraph-function` (+ setter) |
+| `fill-paragraph-handle-comment` | `textmodes/fill.scm` | `fill-paragraph-handle-comment` (+ setter) |
+| `adaptive-fill-function` | `textmodes/fill.scm` | `adaptive-fill-function-value` |
+| `normal-auto-fill-function` | `textmodes/fill.scm` | `normal-auto-fill-function-value` |
+| `comment-line-break-function` | `textmodes/fill.scm` | `comment-line-break-function-value` |
+| `comment-multi-line` | `newcomment.scm` | `comment-multi-line` (+ setter) |
+| `electric-pair-inhibit-predicate` | `elec-pair.scm` | `electric-pair-inhibit-predicate-value` |
+| `text-property-default-nonsticky` | `intervals.scm` + `textprop.scm` | `*text-property-default-nonsticky-value-function*` (a seam: `intervals.scm` is below the buffer; `textprop.scm` installs the buffer's list) |
+
+`fill.scm`'s own `let`s of the first two (Emacs `fill.el:903`, `:910`)
+are `call-with-buffer-local` now, and so is `c-fill-paragraph`'s
+(`cc-cmds.el:4851`); a `parameterize` would not shadow a buffer's own
+value, which is the one place this tree's two representations of "the
+buffer's value" cannot both be right. **The rule for a ported Elisp
+`let` of a buffer-local variable is `call-with-buffer-local`, not
+`parameterize`.**
+
+**The global default of `text-property-default-nonsticky` is still
+`'()` here**; Emacs's is `((composition . t) (syntax-table . t)
+(display . t))`. cc buffers get Emacs's list (the global plus the four
+cc properties, as `c-basic-common-init` builds it), so cc-mode is
+right; every other buffer's stickiness is unchanged and is a departure
+of its own, not fixed in this pass.
+
+## The shared bug this found: `font-lock-set-defaults` re-set the extend-region list
+
+`font-lock-default-fontify-region` explains why the list's default is a
+`defvar` assigned at load: `c-font-lock-init` removes
+`font-lock-extend-region-wholelines` from
+`font-lock-extend-region-functions` **globally**, once any cc buffer is
+initialised (Emacs bug #19669's workaround). This port set the list
+inside `font-lock-set-defaults`, i.e. on every buffer's turn-on, which
+put `wholelines` back and made the `delq` have no effect at all. The
+assignment moved to load time at the end of `font-lock.scm`; the
+`delq` now sticks, as in Emacs.
+
+## The C files and C++ files
+
+Measured through `find-file-noselect`, on this tree:
+
+| file | contents | mode |
+|---|---|---|
+| `x.c` | `int main(void){}` | `c-mode` (`mode-name` "C/*l") |
+| `x.h` | `class Foo { public: int x; };` | `c++-mode` ("C++//l") |
+| `x.h` | `#include <stdio.h>` + `int f(void);` | `c-mode` |
+| `.cc`/`.cpp`/`.hpp`/`.cxx` | anything | `c++-mode` |
+
+`c-or-c++-mode` calls the chosen mode through `%mode-function`
+(`files.scm`, now exported), because Emacs's `(funcall (major-mode-remap
+mode))` relies on the obarray resolving a symbol. The mode names, the
+comment syntax (`"/* "`/`" */"`/`"\\(?://+\\|/\\*+\\)\\s *"`), the
+installed functions, `require-final-newline` t, the syntax classes
+(`/` `.`, `{` `(`, `_` `_`, `@` `.`), the five keymap bindings
+(`C-M-h`, `{`, `C-c C-n`, `M-C-a`, `C-c .`), the four keyword symbols in
+`font-lock-defaults`, the `((_ . w) ($ . w))` syntax alist, the change
+hooks and the region extender all match Emacs 31.1 exactly, and
+`int main` fontifies as `font-lock-type-face` +
+`font-lock-function-name-face`.
+
+## `lisp-fill-paragraph` was the mode variables' flip side
+
+`lisp-mode-variables` and `scheme-mode-variables` stored the *symbol*
+`'lisp-fill-paragraph` in `fill-paragraph-function`, as Emacs does; the
+function itself was not ported. That was invisible while the slot was
+unread, and broke `M-q` in Scheme and Lisp buffers the moment
+`fill-paragraph` began to honour the slot ("Wrong type to apply:
+lisp-fill-paragraph"). The function is ported now
+(`lisp--fill-line-simple` and `lisp-adaptive-fill` with it), and both
+modes store the *procedure* - the same symbol-to-procedure translation
+`indent-line-function` already needed. `lisp-fill-paragraphs-as-doc-string`
+and `emacs-lisp-docstring-fill-column` are carried (`lisp-mode.el:1519`,
+`:1529`). `lisp-adaptive-fill` is placed beside them rather than at
+Emacs's `:702` - a named placement departure.
+
+## A `let` over a parameter that did nothing
+
+`default-indent-new-line`'s force branch bound
+`*comment-auto-fill-only-comments*` with `let` - a **silent no-op**, since
+the callee reads the parameter itself. It is `parameterize` now
+(`fill.scm`).
+
+## Not carried, and what each waits on
+
+- `c-mode-menu` (the language constant, whose items name
+  `c-macro-expand`, `c-guess-*` and `c-subword-mode`) and the two
+  `easy-menu-define` calls: the menu is the next piece; every command it
+  names that is ported exists.
+- `c-populate-abbrev-table` / `c-define-abbrev-table`: `abbrev.el`'s
+  tables (`define-abbrev-table`, `define-abbrev`, `intern-soft`,
+  `local-abbrev-table`) are not ported.
+- `c-bind-special-erase-keys` and its hook: `normal-erase-is-backspace`
+  is not ported. The two `C-c <delete>` bindings are bound the
+  Emacs-on-tty way.
+- `c-submit-bug-report` (reporter.el), `c-macro-expand` (a cpp
+  subprocess), `c-subword-mode` (cc-subword.el), `cc-guess.el`
+  (`c-guess-region-max` is carried in `cc-mode.scm` for
+  `c-or-c++-mode`), `flymake-cc`, `editorconfig-indent-size-vars`,
+  `yank-handled-properties`, and hideshow's three variables (stored in
+  the buffer, so a ported hideshow reads them; hideshow itself is not
+  ported).
+- `objc-mode`, `java-mode`, `idl-mode`, `pike-mode`, `awk-mode`: their
+  tables and menus are mechanical now - the machinery is in place - and
+  are the next cc-mode pass.
+- `post-text-conversion-hook`: there is no text-conversion input path.
+
+## Tests
+
+`test/progmodes/cc-mode-test.scm` grew the
+`schemacs_editor_cc_mode_definitions` group (13), every answer measured
+on Emacs 31.1 first: the two mode names, the comment syntax, the
+installed functions, `require-final-newline`, the syntax classes as
+*characters* (this tree's `char-syntax` answers the designator, Emacs
+its integer), the five key bindings, the hooks and the region extender,
+the four keyword symbols and the two-entry syntax alist, real
+fontification through the mode, and the three autoload paths (`.c`,
+`.h`-as-C++, `.h`-as-C, and `c-or-c++-mode` by content). The file is 123
+passes.
+
+The shared files' suites were run on the way through: textprop 46, fill
+39, newcomment 13, elec-pair 50, electric 32, font-lock 19, jit-lock 21,
+fns 42, loadup 16, and every cc suite (cc-defs 59, cc-langs 37,
+cc-vars 32, cc-engine 629, cc-cmds 122, cc-align 55, cc-styles 60,
+cc-fonts 60).
+
+# `define-derived-mode`'s `:after-hook` was a pattern *variable* (2026-11-25)
+
+Found while wiring cc-mode's font-lock: the new `c-mode` buffer had
+`font-lock-mode` on, `font-lock-defaults` present, and yet
+`font-lock-set-defaults-done?` false and `jit-lock-mode` never on - so
+the editor drew no faces at all until something called
+`font-lock-ensure` by hand. The chain was one line in
+`schemacs/core/derived.scm`.
+
+## The bug
+
+`define-derived-mode`'s `syntax-rules` had an **empty literals list**,
+so `:after-hook` in the four keyword clauses was a *pattern variable*
+that could match anything. The clause
+
+    ((_ (child parent name map hook) :after-hook after body ...) ...)
+
+therefore matched an ordinary five-element mode call with two body
+forms, binding the *first body form* to the "keyword", the second to
+`after`, and the rest to `body`. Being earlier in the clause list, it
+shadowed the plain clause that should have matched. Measured with a toy
+mode whose body was two `set!`s: the first never ran, and the second ran
+*after* `after-change-major-mode-hook` - so every mode's body ran
+outside `delay-mode-hooks` and after the mode hooks.
+
+`emacs-lisp-mode`, `scheme-mode`, `prog-mode`, `dired-mode`,
+`text-mode`, `special-mode` and the rest were all in that state: the
+mode's hooks ran before the mode's body set the variables they inspect.
+It is the general shape of `font-lock`'s failure - `turn-on-font-lock-if-desired`
+runs from `after-change-major-mode-hook`, asks `font-lock-specified-p`,
+sees no `font-lock-defaults` yet, skips `font-lock-mode-internal`, and
+the mode variable is left on by the minor-mode setter with nothing
+behind it. `jit-lock-register` never ran, so `font-lock-save-text-properties`
+- and every redisplay-driven fontification - never happened for a buffer
+opened with `global-font-lock-mode` already on. (A buffer visited before
+global Font Lock was enabled then turning it on worked: the
+`buffer-list` walk calls `turn-on-font-lock` directly.)
+
+`:after-hook` is a literal in the patterns now — `(syntax-rules
+(:after-hook) ...)`, an unbound identifier matching an unbound one, so
+cc-mode's `:after-hook` call sites keep working — and the plain
+clauses are reached again.
+
+## What it fixed, measured
+
+- `tools/pty-check.py`'s **`font-lock-scheme` passes** for the first
+  time. It is the check this file has carried as a "documented
+  pre-existing failure" all along; the failure was this, not the
+  terminal or the face machinery. A `drive` of the same file now shows
+  the keyword face's SGR on row 0.
+- In the editor, `(font-lock-set-defaults-done?)` and
+  `(jit-lock-mode-on?)` are `#t` for a visited file with
+  `global-font-lock-mode` on (they were `#f`) - queried through the
+  REPL back door.
+- A headless reproduction: global Font Lock on, then `find-file-noselect`
+  of a `.scm`, gives `done #t jlo #t` (was `done #f jlo #f`).
+
+## Method note
+
+The decisive experiment was a toy `define-derived-mode` call whose body
+took a list of `(*delay-mode-hooks*)` alongside a log from a hook on
+`after-change-major-mode-hook`: the hook ran first and the body read
+`#f`. A minimal `syntax-rules` with the same clause text behaved
+correctly, which is what narrowed it to the *matching* rather than the
+template: the difference had to be another clause matching first, and
+the missing literal is what let it.
+
+**A compiled library bakes its macro expansions**: every library that
+uses `define-derived-mode` must be recompiled after this fix, or the old
+expansion keeps running. The full compile sweep and the suite battery
+were run afterwards.
+
+## The nil that a Scheme `if` does not return (same day)
+
+`lisp-adaptive-fill` — new in this pass — was written `(if TEST "")`
+with no alternative, as the Elisp text reads. A Scheme `if` with no
+alternative answers the **unspecified** value, which is true, so
+`fill-context-prefix` took it for a prefix and
+`(string-length #<unspecified>)` raised the first time `M-q` in an
+Emacs Lisp comment reached it (`prog-mode-test`'s "M-q in a comment
+fills the paragraph"). It is `(if TEST "" #f)`. Same family as the
+`when`-in-value-position notes; a test with point at the end of a line
+or a non-docstring string would not see it, which is why it took the
+comment case.
+
+# cc-mode: the literal-skip loop that spun, and the parenthesis that
+# caused it (2026-11-25)
+
+Opening any real `.c` file hung the editor. The cause was a misplaced
+closing parenthesis in this tree's port of `c-find-decl-prefix-search`
+(`cc-engine.el:6330`): the `(and (< (point) cfd-limit) (c-got-face-at
+(point) c-literal-faces))` that is the Emacs `while`'s condition value
+had been closed one level too deep, so the reader's tree was
+
+    (unless (and <test> ... (goto-char ...))    ; the goto was the and's
+                 (and (< ...) ...))             ; last operand
+
+    (while (begin (unless ...)))                ; the condition was the
+                                                ; unless alone
+
+instead of Emacs's
+
+    (while
+        (progn
+          (unless <test>
+            (goto-char ...))
+          (and (< (point) cfd-limit)
+               (c-got-face-at (point) c-literal-faces))))
+
+The `begin` therefore held only the `unless`, whose value - the
+unspecified value when its test is true, or whatever the skip returned
+when it is false - is true in Scheme, so the loop spun with no way out
+the first time the declaration-spot search found a `[{}();,]` match
+inside a block comment (a comma in the file's trailing comment was the
+usual trigger). `tools/pty-check.py`'s new `c-mode-eof-comment` is the
+regression: a header comment long enough that the search's
+1000-character lookback stays inside it, then a trailing comment with a
+comma that runs to the end of the buffer - measured to hang the
+unfixed editor and to redraw in milliseconds here.
+
+**Why the existing differentials did not catch it.** They called the
+individual cc-engine functions with hand-built arguments; this is
+control flow *inside* a syntax-rules macro, only reachable through
+`c-find-decl-spots` and the font-lock matcher. A whole-buffer
+`font-lock-ensure` of `src/minibuf.c` (97,533 characters) is the
+smallest end-to-end probe that reaches it; it fontifies in 19.6 s here
+after the fix.
+
+**A balanced file can be the wrong shape, and this one was.** The
+surrounding parens compensated, so the reader accepted it, the compiler
+accepted it, and only running it showed the difference. The way out was
+not hand-counting: the form was rebuilt programmatically (nested
+`list`s written with `pretty-print`), spliced by line range, and the
+parsed result checked for the intended shape (a `begin` of two forms,
+the second an `and`) before the editor was run.
+
+# cc-mode: two errors PgDn in a C file raised (2026-11-25)
+
+Chris, scrolling a C file in the Gtk editor: `show-paren--snap` into
+`syntax-ppss` raised `<: Wrong type argument in position 2: #f`, and
+moving to the end raised ``c-font-lock-fontify-region' is not yet
+initialised`. Both are porting departures, both reproduced headlessly on
+`src/alloc.c`-sized input, and both are now pinned by tests that were
+each seen failing on the unfixed code.
+
+## 1. `syntax-ppss`: the `setq` that *is* the test
+
+Emacs's OLD-PPSS branch (`syntax.el:641`) is
+
+    ((and (not old-pos) old-ppss
+          (setq pt-min (or (syntax-ppss-toplevel-pos old-ppss)
+                           (nth 2 old-ppss)))
+          (<= pt-min pos) (< (- pos pt-min) syntax-ppss-max-span))
+     ...)
+
+The `setq` is an operand of the `and`, so when the stored state has
+neither a toplevel position nor an `nth 2` - the docstring says outright
+that positions 2 and 6 "cannot be relied upon", and a zero-length
+`parse-partial-sexp` returns exactly such a state - the `setq` answers
+nil and the `and` stops; the cache path runs instead. The port had
+rewritten this as a `let` whose body was the rest of the test, so the
+comparison went ahead with the nil `m`. Scheme's `set!` answers the
+unspecified value (true), so the faithful shape has to stand the value
+in: `(begin (set! pt-min ...) pt-min)` is the `setq` as a condition.
+The failure needs the state a zero-length parse leaves: query 6, query
+4, then 2 in `"() ()"` reproduces it. Guile reports the `(<= m pos)`
+as `<: Wrong type argument in position 2: #f` (measured: `<=` names
+itself `<` in that error and points at the nil operand), which is the
+exact message Chris pasted. `test/syntax-test.scm`'s "a state with no usable position
+falls back instead of raising" is the regression, with Emacs 31.1's own
+answers as the expectations.
+
+## 2. The missing seam, and the language function applied raw
+
+`c-force-redisplay` (`cc-fonts.el`, in `cc-fonts.scm`) calls
+`c-font-lock-fontify-region`, which is `cc-mode.el`'s - a forward
+reference Emacs resolves through its obarray. Here cc-fonts sits below
+cc-mode, so the call goes through
+`*c-font-lock-fontify-region-function*`, and **cc-mode never installed
+it**: the seam kept its "not yet initialised" default. cc-mode now
+installs it right after `c-font-lock-fontify-region` is defined.
+
+With that fixed, the same path raised `Wrong type to apply:
+c-context-expand-fl-region`: `c-before-context-fl-expand-region`
+applied each entry of the language constant raw, but the constant holds
+*symbols* (`cc-langs.el:589`) and Emacs `funcall`s them through the
+obarray. Here they are resolved through `c-register-lang-function!`'s
+registry and `%c-lang-function`, and `c-context-expand-fl-region` is
+now registered (the registration must follow both definitions - a
+registration is a procedure value, so a forward reference is unbound).
+Both of `(c-before-context-fl-expand-region 4 6)` on `"int x;\n"` -
+Emacs's `(1 . 7)` - and the seam's identity are pinned in
+`test/progmodes/cc-mode-test.scm`.
+
+Why the font-lock suites did not see either: the seam and the language
+function are only reached from `c-fontify-new-found-type`, which needs
+a *displayed window* and jit-lock (it runs from the redisplay/timer),
+and the ppss bug needs the zero-length state only a large real buffer's
+cache produces. The unit tests drive the functions directly with the
+measured states; `src/alloc.c`'s first PgDn-size region
+(`font-lock-fontify-region 214797 215724`) is the end-to-end shape that
+raised before the fix and runs clean after it.
+
+**Named gap found while fixing 1**: Emacs wraps the whole branch
+selection of `syntax-ppss` in `(condition-case nil ... (args-out-of-range
+(parse-partial-sexp (point-min) pos)))` - the guard for a cache built
+before the buffer was narrowed further (`syntax.el:780`). This tree has
+no `args-out-of-range` condition type - out-of-range positions raise a
+plain `error` - so the handler is not carried rather than imitated with
+a message match. Nothing in the tests reaches it.
+
+# `abbrev--before-point` answered the unspecified value (2026-11-25)
+
+Typing `void ` (the space) into a `.c` file raised `Wrong type argument
+in position 1: #<unspecified>` and the space was never inserted. The
+path is Emacs's own: `c-mode` sets `(setq abbrev-mode t)`
+(`cc-mode.el:2934`), so `internal_self_insert`'s
+"expand the abbrev before the inserted character if it has no word
+syntax and the preceding one has" branch (`cmds.c:412`) calls
+`expand-abbrev` on the space after a word.
+
+## The departure
+
+`abbrev--before-point` (`abbrev.el:783`) builds its answer with
+
+    (setq res
+          (and (or (not enable-fun) (funcall enable-fun))
+               (let ((re ...))
+                 (if (null re)
+                     (let ((lim ...)) (backward-word 1) ...)
+                   (when (looking-back re (line-beginning-position))
+                     (setq start ...) (setq end ...))))
+               (setq name (buffer-substring start end))
+               (let ((abbrev (abbrev--symbol name table)))
+                 (when abbrev
+                   ...))))
+
+**Both `when`s are values the `and` reads.** Elisp's `when` answers nil
+when its test fails; Scheme's answers the unspecified value, which is
+true. So when the word before point is not an abbrev - the ordinary
+case - the last `and` operand came back true and `res` held the
+unspecified value instead of nil. The `while` then looped (it tests
+`(car res)`, and the unspecified value is not a pair here, so it is not
+even that), and `abbrev--before-point` returned that value.
+`abbrev--default-expand` (`abbrev.el:1065`) guards the expansion with
+`(when found ...)` - true for the unspecified value - and did
+`(list-ref found 0)`: "Wrong type argument in position 1:
+#<unspecified>", from `internal-self-insert`, which is why the space
+was never inserted. The same `when`-as-value bug sat in the
+`abbrev-start-location` branch (`(when (> end start) ...)` as the
+`if`'s consequent) and in `abbrev--default-expand`'s own `(when found
+...)`, which made `expand-abbrev` answer the unspecified value where
+Emacs answers nil.
+
+Fixed with `when-e` (this tree's Elisp-value `when`,
+`scheme/core/syntax-macros.scm`) at the three sites whose values are
+read, and at `abbrev--default-expand`'s guard. Measured on Emacs 31.1
+first: in a c-mode buffer with `abbrev-mode` t and "void" before point,
+`(abbrev--before-point)` and `(expand-abbrev)` both answer nil, and in a
+table with a non-matching `:regexp` they answer nil with point left at
+5. All four answers are pinned in `test/abbrev-test.scm` (25 passes),
+each seen failing before the fix.
+
+## Why it took a user to find it
+
+No existing test had a word typed in a buffer where `abbrev-mode` is on
+and no abbreviation is defined - the abbrev tests define their abbrevs,
+and the cc-mode tests drive engine functions, not the self-insert
+command. `tools/pty-check.py`'s new `c-mode-space` is the end-to-end
+one: open an `int f (void);` file, press `v o i d SPC`, and wait for
+the mode line's column to reach 5 (the text wait cannot be used -
+font-lock puts escapes between `void` and `int`). Seen failing on the
+unfixed tree with the user's exact message in the echo area and the
+column still at 4.
+
+The general shape is the tree's recurring `when`-in-value-position
+class, here inside a ported function whose Emacs source reads a `when`
+as an `and` operand: grep a ported `and` for a `when` in its last
+position.
+
+
+# Opening a `.scm` file jumped the cursor and marked the buffer
+# modified (2026-11-25)
+
+Chris: "when I open a .scm file, initially it is at the top, then it
+bounces down about 4 pages ... and the buffer is marked as modified".
+Both front ends, every Scheme file, a small jump on most and a
+page-sized one on `charset.scm`. Two departures, one for each symptom,
+both in `src/syntax.c`'s port.
+
+## 1. `find_defun_start` did not restore point around `syntax-ppss`
+
+Emacs's `find_defun_start` (`syntax.c:585`) opens with
+
+    ptrdiff_t opoint = PT, opoint_byte = PT_BYTE;
+
+and its `comment-use-syntax-ppss` arm calls `(syntax-ppss pos)` and then
+
+    TEMP_SET_PT_BOTH (opoint, opoint_byte);      /* syntax.c:606 */
+
+because **`syntax-ppss` moves point to its argument** - measured on
+Emacs 31.1: `(syntax-ppss 6)` with point at 2 leaves point 6. The port
+called `(syntax-ppss pos)` and never put point back.
+
+Reaching it needs `back_comment`'s *lossage* arm (`syntax.c`'s "mixing
+comment styles" path), which a `;;` comment carrying `"` characters
+triggers; `schemacs/charset.scm` is full of them. Measured on the
+unfixed tree in a real `scheme-mode` buffer:
+
+    (scan-sexps 74794 -1)  ->  1        (Emacs's answer: 1)
+    point afterwards       ->  7504     (Emacs: 74794)
+
+and `show-paren` runs exactly that backward scan from its idle timer a
+moment after a file is opened, so the cursor landed on the comment the
+scan had parsed to - 10% of the way into `charset.scm`, or a few
+hundred characters into a smaller file ("less than a page"). The fix
+is the C's: save `(buffer-pt ed)` at entry and `set-point` it back
+right after the `syntax-ppss` call. `find_defun_start` is the only
+caller of `syntax-ppss` in `syntax.c` (`grep Qsyntax_ppss src/*.c`).
+
+## 2. `syntax-propertize`'s `with-silent-modifications` was half the macro
+
+`syntax-propertize` writes `syntax-table` properties, and Emacs runs
+the mode's function under `with-silent-modifications` (`subr.el:5473`):
+
+    (let ((modified (buffer-modified-p))
+          (buffer-undo-list t)
+          (inhibit-read-only t)
+          (inhibit-modification-hooks t))
+      (unwind-protect (progn ,@body)
+        (when (memq modified '(nil autosaved))
+          (restore-buffer-modified-p modified))))
+
+The port had replaced the macro with a `parameterize` of the two
+inhibit parameters only - the undo list was not bound and the modified
+flag was never restored. A property write raises `MODIFF`
+(`textprop.c:89` reaches `modiff_incr`), so **every propertize run left
+the buffer `buffer-modified-p` true** even though no text changed - the
+`-UU-:**-` Chris saw, and one `C-x C-s` away from writing a file nobody
+had edited.
+
+The macro lives in `subr.scm`, which is above `syntax.scm` (`editfns.scm`
+imports this library, and `subr.scm` builds on `editfns.scm`), so it
+cannot be imported here. `%call-with-silent-modifications` in
+`syntax.scm` is the macro's body, binding for binding, with the C's
+`unwind-protect` spelled `dynamic-wind`; `syntax-propertize` calls it
+around its `save-excursion`/`with-syntax-table` pair. The earlier
+header note saying "the two bindings carried and the two not" is
+replaced: the two that were not are the ones that matter here.
+
+## Verification
+
+Every expectation in the new `schemacs_editor_silent_propertize` group
+(`test/syntax-test.scm`, 8 passes) is Emacs 31.1's own answer on the
+same buffer and calls: a dummy propertize function leaves a buffer
+unmodified with point at 21 and the chunk limit at 21, and the backward
+scan over `charset.scm` answers 1 with point unchanged. With the two
+fixes locally reverted the group fails exactly as the user saw:
+
+    FAIL syntax-propertize's property writes leave it unmodified  (#t)
+    FAIL and leaves point where it was                            (7504)
+    FAIL and the properties it set do not mark the buffer modified (#t)
+    FAIL show-paren's scan leaves point at the buffer start        (7504)
+
+`tools/pty-check.py`'s new `scm-open` is the end-to-end one: `C-x C-f`
+`schemacs/charset.scm` in a fresh editor, leave it idle for three
+seconds, and assert the mode line is at the top and unmodified. On the
+reverted tree it fails with the user's exact screen -
+
+    -UU-:**- charset.scm 10% (149,70)   (Scheme)
+
+- and with the fixes it reads `-UU-:--- charset.scm Top (1,0)`.
+
+## Not carried
+
+The C's `error ("syntax-ppss modified the buffer!")` assertion beside
+the restore compares `CHARS_MODIFF`; nothing here edits text to
+propertize, and the modified-state restore of fix 2 makes the check
+moot.

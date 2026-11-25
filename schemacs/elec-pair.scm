@@ -87,6 +87,7 @@
    *electric-pair-pairs*
    *electric-pair-text-pairs*
    *electric-pair-skip-self* *electric-pair-inhibit-predicate*
+   electric-pair-inhibit-predicate-value
    *electric-pair-preserve-balance* *electric-pair-delete-adjacent-pairs*
    *electric-pair-open-newline-between-pairs* *electric-pair-skip-whitespace*
    *electric-pair-skip-whitespace-chars*
@@ -798,6 +799,22 @@ insert a matching closing delimiter."
               (const :tag "Always pair" ignore)
               function))
 
+    (define (electric-pair-inhibit-predicate-value)
+      ;; Emacs's `electric-pair-inhibit-predicate' is a defcustom that a
+      ;; major mode sets *buffer-locally* - `c-basic-common-init` sets
+      ;; `c-electric-pair-inhibit-predicate` in every CC Mode buffer.
+      ;; The parameter is the default; this is the buffer's value, in
+      ;; `electric-pair-mode-value`'s shape above. Emacs's
+      ;; `(default-value 'electric-pair-inhibit-predicate)` - what
+      ;; `c-electric-pair-inhibit-predicate` falls back to - is the
+      ;; parameter.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (if (and buffer
+                 (local-variable-p 'electric-pair-inhibit-predicate buffer))
+            (buffer-local-value buffer 'electric-pair-inhibit-predicate)
+            (*electric-pair-inhibit-predicate*))))
+
     (define electric-pair-field-search-size #f)
     ;; ^ GNU Emacs's `electric-pair-field-search-size'. A plain `defvar':
     ;; nil or an integer, and nothing `let'-binds it.
@@ -930,7 +947,7 @@ The decision is taken by order of preference:
                   (or unconditional
                       (not (electric-pair--save-literal-point-excursion
                              (goto-char pos)
-                             ((*electric-pair-inhibit-predicate*)
+                             ((electric-pair-inhibit-predicate-value)
                               (*last-command-event*))))))
              (save-excursion (electric-pair--insert pair num)))
             (else #f))))))

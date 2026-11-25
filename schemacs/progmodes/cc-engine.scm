@@ -12954,21 +12954,15 @@
                      (while
                          (begin
                            (unless
-                               (and
-                                (or (match-end 1)
-                                    (and (let ((d (%c-langvar
-                                                   'c-dposr-cpp-macro-depth)))
-                                           (and d (match-end (+ 1 d)))))
-                                (c-got-face-at (- (point) 1)
-                                               c-literal-faces)
-                                (not (c-got-face-at (point)
-                                                    c-literal-faces)))
-                             (goto-char
-                              (c-next-single-property-change
-                               (point) 'face #f (*cfd-limit*))))
-                           (and (< (point) (*cfd-limit*))
-                                (c-got-face-at (point)
-                                               c-literal-faces)))))
+                               (and (or (match-end 1)
+                                        (and (let ((d (%c-langvar 'c-dposr-cpp-macro-depth)))
+                                               (and d (match-end (+ 1 d))))))
+                                    (c-got-face-at (- (point) 1) c-literal-faces)
+                                    (not (c-got-face-at (point) c-literal-faces)))
+                               (goto-char
+                                (c-next-single-property-change (point) 'face #f (*cfd-limit*))))
+                              (and (< (point) (*cfd-limit*))
+                                   (c-got-face-at (point) c-literal-faces))))
                      #t)    ; "Continue the loop over pseudo matches."
                     ((and (%c-langvar 'c-opt-identifier-concat-key)
                           (match-string 1)

@@ -73,6 +73,8 @@
     (only (schemacs buffer) current-buffer
           fetch-char set-point buffer-pt buffer-beg buffer-z
           *inhibit-read-only*
+          buffer-modified-p restore-buffer-modified-p
+          text-editor-undo-list set!text-editor-undo-list
           buffer-local-value set-buffer-local-value!)
     (only (schemacs chartab)
           make-char-table char-table? char-table-p char-table-ref char-table-set
@@ -145,6 +147,7 @@
    with-syntax-table syntax-ppss syntax-ppss-depth syntax-ppss-context
    syntax-ppss-toplevel-pos syntax-ppss-flush-cache syntax-propertize
    ppss-comment-or-string-start ppss-comment-depth
+   ppss-string-terminator
    syntax-propertize-wholelines syntax-propertize-multiline
    ;; the variables
    *parse-sexp-lookup-properties* *parse-sexp-ignore-comments*
@@ -1267,6 +1270,22 @@ by `find-word-boundary-function-table'.  It is also not interactive."
       ;;--------------------------------------------------------------
       (let* ((ed (current-buffer))
              (beg (buffer-beg ed))
+             ;; **`ptrdiff_t opoint = PT, opoint_byte = PT_BYTE;'**
+             ;; (`syntax.c:587'). The position `find_defun_start`
+             ;; answers *from* is not the caller's to lose:
+             ;; `syntax-ppss` moves point to its argument (measured on
+             ;; Emacs 31.1 - `(syntax-ppss 6)` in a buffer at point 2
+             ;; leaves point 6 - and this tree's does the same), and the
+             ;; C puts the old point back immediately after the call.
+             ;; Without the restore, a backward `scan-sexps` over a
+             ;; buffer that reaches `back_comment`'s lossage arm left
+             ;; point where the comment probe had parsed to - measured
+             ;; on `charset.scm`: `(scan-sexps 74794 -1)` answered 1 as
+             ;; Emacs does but left point at 7504, and the editor's idle
+             ;; `show-paren` runs exactly that scan, so the cursor
+             ;; jumped a page or more down whenever a `.scm` file was
+             ;; opened.
+             (opoint (buffer-pt ed))
              ;; `scan_newline' (`search.c') with count -1: the C backs up
              ;; to the start of the line, and walks one line at a time
              ;; after that. That scan is `search.c''s, and `search.scm'
@@ -1280,6 +1299,14 @@ by `find-word-boundary-function-table'.  It is also not interactive."
                       (loop (- q 1)))))))
         (if (*comment-use-syntax-ppss*)
             (let ((boc (list-ref (syntax-ppss pos) 8)))
+              ;; "`TEMP_SET_PT_BOTH (opoint, opoint_byte)'"
+              ;; (`syntax.c:606'). The C's `syntax-ppss modified the
+              ;; buffer!' assertion beside it compares CHARS_MODIFF and
+              ;; is not carried: nothing here edits the text of a buffer
+              ;; to propertize it, and `syntax-propertize` now restores
+              ;; the modified state that its property writes would
+              ;; otherwise raise.
+              (set-point ed opoint)
               (if (integer? boc) boc pos))
             (if (not (*open-paren-in-column-0-is-defun-start*))
                 beg
@@ -2768,12 +2795,31 @@ by `find-word-boundary-function-table'.  It is also not interactive."
                      ((and old-pos (< (- pos old-pos) 2000))
                       (parse-partial-sexp old-pos pos #f #f old-ppss #f))
                      ;; "Use OLD-PPSS if possible and close enough."
+                     ;;
+                     ;; **The `setq' is the test.** Emacs writes
+                     ;; `(and (not old-pos) old-ppss (setq pt-min (or
+                     ;; ...)) (<= pt-min pos) ...)': when the state has
+                     ;; neither a toplevel position nor an `nth 2' -
+                     ;; which the docstring says outright ("values at
+                     ;; positions 2 and 6 ... cannot be relied upon") -
+                     ;; the `setq' answers nil and `and' stops there,
+                     ;; taking the cache path instead. A Scheme `set!'
+                     ;; answers the unspecified value, which is true, so
+                     ;; the port must stand the value in explicitly:
+                     ;; `(begin (set! pt-min ...) pt-min)' is the C's
+                     ;; `setq' as a condition. The first version used a
+                     ;; `let' and compared against the nil `m', raising
+                     ;; "Wrong type argument in position 2: #f" from the
+                     ;; `<` whenever a C buffer's `beginning-of-defun'
+                     ;; reused a toplevel ppss (2026-11-25).
                      ((and (not old-pos) old-ppss
-                           (let ((m (or (syntax-ppss-toplevel-pos old-ppss)
-                                        (%nth 2 old-ppss))))
-                             (set! pt-min m)
-                             (and (<= m pos)
-                                  (< (- pos m) (*syntax-ppss-max-span*)))))
+                           (begin
+                             (set! pt-min
+                                   (or (syntax-ppss-toplevel-pos old-ppss)
+                                       (%nth 2 old-ppss)))
+                             pt-min)
+                           (<= pt-min pos)
+                           (< (- pos pt-min) (*syntax-ppss-max-span*)))
                       ;; The OLD-PPSS branch updates `last` - measured on
                       ;; Emacs 31.1: `(syntax-ppss 15)' then
                       ;; `(syntax-ppss 6)' leaves `last` at 6 - but not
@@ -2881,6 +2927,16 @@ by `find-word-boundary-function-table'.  It is also not interactive."
       ;; in, or nil."
       ;;--------------------------------------------------------------
       (list-ref ppss 8))
+
+    (define (ppss-string-terminator ppss)
+      ;; GNU Emacs's `ppss-string-terminator' - the `string-terminator'
+      ;; slot of the `ppss' structure (`syntax.el:104'): "Non-nil if
+      ;; inside a string. (it is the character that will terminate the
+      ;; string, or t if the string should be terminated by a generic
+      ;; string delimiter.)" The fourth element of a `parse-partial-sexp'
+      ;; state list.
+      ;;--------------------------------------------------------------
+      (list-ref ppss 3))
 
     (define (ppss-comment-depth ppss)
       ;; GNU Emacs's `ppss-comment-depth' (`syntax.el'), the accessor
@@ -3032,6 +3088,45 @@ by `find-word-boundary-function-table'.  It is also not interactive."
       (set-buffer-local-value! (current-buffer) 'syntax-propertize--done value)
       (set! %syntax-propertize-done value))
 
+    (define (%call-with-silent-modifications thunk)
+      ;; GNU Emacs's `with-silent-modifications` (`subr.el:5473`) as a
+      ;; procedure, for this library only.
+      ;;
+      ;; **Why it is spelled here and not imported.** The macro lives in
+      ;; `subr.scm`, which is above this library (`editfns.scm` imports
+      ;; this one and `editfns.scm` is below `subr.scm`), so
+      ;; `syntax-propertize` cannot call it. The two `inhibit` parameters
+      ;; alone are NOT the macro: they suppress the change hooks, but a
+      ;; property write still raises MODIFF, so without the undo list
+      ;; bound and the modified flag restored a propertize run leaves the
+      ;; buffer `buffer-modified-p` true although nothing a user would
+      ;; call an edit happened. That was the `-UU-:**-` on a `.scm` file
+      ;; just opened (2026-11-25) - and the next `C-x C-s` would write a
+      ;; file nobody had changed.
+      ;;
+      ;; The body is `subr.scm`'s macro, binding for binding:
+      ;;
+      ;;   (let ((modified (buffer-modified-p))
+      ;;         (buffer-undo-list t)
+      ;;         (inhibit-read-only t)
+      ;;         (inhibit-modification-hooks t))
+      ;;     (unwind-protect (progn ,@body)
+      ;;       (when (memq modified '(nil autosaved))
+      ;;         (restore-buffer-modified-p modified))))
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer))
+            (modified (buffer-modified-p (current-buffer)))
+            (undo-list (text-editor-undo-list (current-buffer))))
+        (parameterize ((*inhibit-read-only* #t)
+                       (*inhibit-modification-hooks* #t))
+          (dynamic-wind
+            (lambda () (set!text-editor-undo-list buffer #t))
+            thunk
+            (lambda ()
+              (set!text-editor-undo-list buffer undo-list)
+              (unless modified
+                (restore-buffer-modified-p #f)))))))
+
     (define (syntax-propertize pos)
       ;; GNU Emacs's `syntax-propertize' (`syntax.el:395'): "Ensure that
       ;; syntax-table properties are set until POS (a buffer point)."
@@ -3071,14 +3166,15 @@ by `find-word-boundary-function-table'.  It is also not interactive."
                      (append (*before-change-functions*)
                              (list syntax-ppss-flush-cache)))))
                 ;; `(save-excursion (with-silent-modifications (with-syntax-table ...)))'
-                ;; - the `with-silent-modifications` is spelled out; see
-                ;; the note in the previous version of this function and
-                ;; DEPARTURES.md for the two bindings carried and the two
-                ;; not.
-                (parameterize ((*inhibit-modification-hooks* #t)
-                               (*inhibit-read-only* #t))
-                 (save-excursion
-                  (lambda ()
+                ;; - `with-silent-modifications` is `%call-with-silent-modifications`
+                ;; above, which is `subr.scm`'s macro spelled here because this
+                ;; library cannot import that one. It restores the modified flag
+                ;; the property writes raise (`-UU-:**-` on a freshly opened
+                ;; `.scm` file was this missing, 2026-11-25).
+                (%call-with-silent-modifications
+                 (lambda ()
+                  (save-excursion
+                   (lambda ()
                    (with-syntax-table (or (*syntax-ppss-table*) (syntax-table))
                     (lambda ()
                      (let* ((start (max (min (%propertize-done) (%point-max))
@@ -3129,7 +3225,7 @@ by `find-word-boundary-function-table'.  It is also not interactive."
                                          (lambda () (%set-propertize-done! saved))))))
                             (if new
                                 (extend (cdr funs) (car new) (cdr new))
-                                (extend (cdr funs) b e))))))))))))))))
+                                (extend (cdr funs) b e)))))))))))))))))
       #f)
 
     ))

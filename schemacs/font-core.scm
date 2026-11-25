@@ -64,7 +64,8 @@
           set!font-lock-mode!))
 
   (export *font-lock-function* font-lock-change-mode
-          font-lock-default-function font-lock-mode turn-on-font-lock
+          font-lock-default-function font-lock-mode font-lock-mode-hook
+          turn-on-font-lock
           global-font-lock-mode *font-lock-global-modes*
           turn-on-font-lock-if-desired font-lock-mode-enable-in-buffer)
 

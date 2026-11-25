@@ -20,7 +20,8 @@
  (only (guile) hash-ref hash-set! make-hash-table hash-for-each sort string<?)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (schemacs buffer) allocate-buffer set-buffer current-buffer buffer-local-value
-       set-buffer-local-value! buffer-z)
+       set-buffer-local-value! buffer-z get-buffer-create with-current-buffer
+       erase-buffer major-mode mode-name hook-value)
  (only (schemacs editfns) insert goto-char point point-min point-max widen
        save-restriction save-excursion buffer-substring)
  (only (schemacs search) match-beginning match-end)
@@ -70,7 +71,31 @@
        c-fl-decl-start c-fl-decl-end
        c-doc-fl-decl-start c-doc-fl-decl-end c-change-expand-fl-region)
  (only (schemacs progmodes cc-engine) c-doc-line-join-re set!c-doc-line-join-re)
- (only (schemacs font-lock) set!font-lock-mode!))
+ (only (schemacs font-lock) set!font-lock-mode! font-lock-defaults
+       set!font-lock-defaults! font-lock-ensure
+       font-lock-extend-after-change-region-function)
+ (only (schemacs font-core) font-lock-mode)
+ (only (schemacs keymap) lookup-key)
+ (only (schemacs subr) kbd)
+ (only (schemacs syntax) char-syntax)
+ (only (schemacs progmodes cc-cmds)
+       c-indent-line c-indent-region c-do-auto-fill c-fill-paragraph
+       c-mark-function c-electric-brace c-forward-conditional
+       c-beginning-of-defun c-hungry-delete-forward)
+ (only (schemacs progmodes cc-styles) c-set-style)
+ (only (schemacs textmodes fill) fill-paragraph-function
+       fill-paragraph-handle-comment normal-auto-fill-function-value)
+ (only (schemacs newcomment) comment-start comment-end comment-start-skip
+       comment-multi-line)
+ (only (schemacs files) find-file-noselect)
+ (only (schemacs progmodes cc-mode)
+       c-mode c++-mode c-or-c++-mode c-mode-map c-mode-syntax-table
+       c++-mode-map c++-mode-syntax-table c-mode-hook c++-mode-hook
+       c-extend-after-change-region c-basic-common-init c-common-init
+       c-font-lock-init c-initialize-cc-mode c-init-language-vars-for
+       c-before-context-fl-expand-region c-font-lock-fontify-region)
+ (only (schemacs progmodes cc-fonts)
+       c-force-redisplay *c-font-lock-fontify-region-function*))
 
 (test-begin "schemacs_editor_cc_mode")
 
@@ -884,3 +909,178 @@
   (begin (before-buffer) (after-edit 1 #f)))
 
 (test-end "schemacs_editor_cc_mode_after_change")
+
+;; ------------------------------------------------------------------
+;; The mode definitions (`cc-mode.el:2860'-`:3040')
+;;
+;; Every answer here is Emacs 31.1's, measured with `emacs -Q --batch'
+;; in a real `c-mode' buffer first:
+;;
+;;   mode=c-mode name="C/*l"
+;;   comment-start="/* " end=" */" skip="\\(?://+\\|/\\*+\\)\\s *"
+;;   indent-line=c-indent-line indent-region=c-indent-region ppps-ignore=t
+;;   fill-fn=c-fill-paragraph normal-af=c-do-auto-fill multi=t
+;;   require-nl=t
+;;   keys=C-M-h->c-mark-function {->c-electric-brace
+;;        C-c C-n->c-forward-conditional M-C-a->c-beginning-of-defun
+;;        C-c .->c-set-style
+;;   syntax: / 46, * 46, { 40, _ 95, @ 46
+;; ----------------------------------------------------------------
+(test-begin "schemacs_editor_cc_mode_definitions")
+
+(define (mode-buffer name text)
+  (let ((b (get-buffer-create name)))
+    (with-current-buffer b
+      (erase-buffer)
+      (insert text)
+      (goto-char (point-min)))
+    b))
+
+(test-equal "c-mode's name and mode line are Emacs's"
+  (list 'c-mode "C/*l")
+  (let ((b (mode-buffer "mode-defs-1.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (list (major-mode) (mode-name)))))
+
+(test-equal "c++-mode's name and mode line are Emacs's"
+  (list 'c++-mode "C++//l")
+  (let ((b (mode-buffer "mode-defs-2.cc" "int x;\n")))
+    (with-current-buffer b
+      (c++-mode)
+      (list (major-mode) (mode-name)))))
+
+(test-equal "the comment syntax is the language's"
+  (list "/* " " */" "\\(?://+\\|/\\*+\\)\\s *")
+  (let ((b (mode-buffer "mode-defs-3.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (list (comment-start) (comment-end) (comment-start-skip)))))
+
+(test-equal "the mode installs its indentation, filling and comment functions"
+  (list #t #t #t #t #t #t #t)
+  (let ((b (mode-buffer "mode-defs-4.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (list (eq? (buffer-local-value b 'indent-line-function #f) c-indent-line)
+            (eq? (buffer-local-value b 'indent-region-function #f) c-indent-region)
+            (eq? (buffer-local-value b 'parse-sexp-ignore-comments #f) #t)
+            (eq? (fill-paragraph-function) c-fill-paragraph)
+            (eq? (fill-paragraph-handle-comment) #f)
+            (eq? (normal-auto-fill-function-value) c-do-auto-fill)
+            (comment-multi-line)))))
+
+(test-equal "the mode asks for a final newline, as Emacs's c-require-final-newline does"
+  #t
+  (let ((b (mode-buffer "mode-defs-5.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (buffer-local-value b 'require-final-newline #f))))
+
+(test-equal "the syntax table is c-mode's, character for character"
+  ;; The tree's `char-syntax' answers the designator *character*
+  ;; (Emacs answers its integer code); the classes are Emacs's.
+  (list #\. #\. #\( #\_ #\.)
+  (let ((b (mode-buffer "mode-defs-6.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (list (char-syntax #\/) (char-syntax #\*) (char-syntax #\{)
+            (char-syntax #\_) (char-syntax #\@)))))
+
+(test-equal "the mode's keymap binds the C commands"
+  (list #t #t #t #t #t #t)
+  (let ((b (mode-buffer "mode-defs-7.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (list (eq? (lookup-key c-mode-map (kbd "C-M-h")) c-mark-function)
+            (eq? (lookup-key c-mode-map (kbd "{")) c-electric-brace)
+            (eq? (lookup-key c-mode-map (kbd "C-c C-n")) c-forward-conditional)
+            (eq? (lookup-key c-mode-map (kbd "M-C-a")) c-beginning-of-defun)
+            (eq? (lookup-key c-mode-map (kbd "C-c .")) c-set-style)
+            ;; Measured on Emacs 31.1: C-c C-d is the *forward* hungry
+            ;; delete, despite the later `[?\C-c ?\d]' entries in
+            ;; `cc-mode.el' naming the backward one.
+            (eq? (lookup-key c-mode-map (kbd "C-c C-d"))
+                 c-hungry-delete-forward)))))
+
+(test-equal "the mode installs its change hooks and the font-lock region extender"
+  (list #t #t #t)
+  (let ((b (mode-buffer "mode-defs-8.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (list (and (memq c-before-change
+                       (hook-value *before-change-functions*)) #t)
+            (and (memq c-after-change
+                       (hook-value *after-change-functions*)) #t)
+            (eq? (font-lock-extend-after-change-region-function)
+                 c-extend-after-change-region)))))
+
+(test-equal "font-lock's defaults name the four c levels and c's syntax table fix"
+  (list 4 2)
+  (let ((b (mode-buffer "mode-defs-9.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (list (length (car (font-lock-defaults)))
+            (length (list-ref (font-lock-defaults) 3))))))
+
+(test-equal "a C buffer fontifies through the real mode"
+  (list 'font-lock-type-face 'font-lock-function-name-face)
+  (let ((b (mode-buffer "mode-defs-10.c" "int main (void)\n{\n  return 0;\n}\n")))
+    (with-current-buffer b
+      (c-mode)
+      (font-lock-mode 1)
+      (font-lock-ensure)
+      (list (get-text-property 1 'face) (get-text-property 5 'face)))))
+
+(test-equal "a .c file opens in c-mode through auto-mode-alist's autoload"
+  'c-mode
+  (let ((f "/tmp/sc-cc-mode-defs.c"))
+    (with-output-to-file f
+      (lambda () (display "int main (void) { return 0; }\n")))
+    (with-current-buffer (find-file-noselect f)
+      (major-mode))))
+
+(test-equal "a .h file of C++ is c++-mode, and one of C is c-mode"
+  '(c++-mode c-mode)
+  (let ((f1 "/tmp/sc-cc-mode-defs-cpp.h") (f2 "/tmp/sc-cc-mode-defs-c.h"))
+    (with-output-to-file f1 (lambda () (display "class Foo {\npublic:\n  int x;\n};\n")))
+    (with-output-to-file f2 (lambda () (display "#include <stdio.h>\nint f(void);\n")))
+    (list (with-current-buffer (find-file-noselect f1) (major-mode))
+          (with-current-buffer (find-file-noselect f2) (major-mode)))))
+
+(test-equal "c-or-c++-mode picks by content, as Emacs's regexp does"
+  '(c-mode c++-mode)
+  (let ((b1 (mode-buffer "mode-defs-11.c" "int f(void);\n"))
+        (b2 (mode-buffer "mode-defs-12.c" "template <typename T>\nvoid f(T x) {}\n")))
+    (list (with-current-buffer b1 (c-or-c++-mode) (major-mode))
+          (with-current-buffer b2 (c-or-c++-mode) (major-mode)))))
+
+(test-equal "the context-fontification seam is installed"
+  #t
+  (let ((b (mode-buffer "mode-defs-8.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (eq? (*c-font-lock-fontify-region-function*) c-font-lock-fontify-region))))
+
+(test-equal "c-before-context-fl-expand-region resolves the language function"
+  (list #f (cons 1 7))
+  (let ((b (mode-buffer "mode-defs-9.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      ;; `c-force-redisplay' used to raise "`c-font-lock-fontify-region'
+      ;; is not yet initialised" (the seam was never installed), and the
+      ;; expansion used to raise "Wrong type to apply:
+      ;; c-context-expand-fl-region" (the language constant holds the
+      ;; symbol; Emacs funcalls it through the obarray).
+      (list (c-force-redisplay (current-buffer) 1 6)
+            (c-before-context-fl-expand-region 4 6)))))
+
+(test-equal "context expansion widens to the whole declaration, as Emacs's does"
+  (cons 16 25)
+  (let ((b (mode-buffer "mode-defs-10.c"
+                        "int f (void)\n{\n  int y;\n  return 0;\n}\n")))
+    (with-current-buffer b
+      (c-mode)
+      (c-before-context-fl-expand-region 20 24))))
+
+(test-end "schemacs_editor_cc_mode_definitions")

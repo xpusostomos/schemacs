@@ -35,7 +35,8 @@
           re-search-forward syntax-propertize-rules)
     (only (schemacs core lisp-mode)
           lisp-indent-line lisp-indent-function lisp-indent-specform
-          lisp-indent-defform *calculate-lisp-indent-last-sexp*)
+          lisp-indent-defform *calculate-lisp-indent-last-sexp*
+          lisp-fill-paragraph lisp-adaptive-fill)
     (only (schemacs syntax)
           parse-partial-sexp skip-chars-forward skip-chars-backward
           forward-comment backward-prefix-chars syntax-ppss string-to-syntax)
@@ -522,7 +523,9 @@
       (setq-local 'paragraph-start "$\\|\\f")
       (setq-local 'paragraph-separate "$\\|\\f")
       (setq-local 'paragraph-ignore-fill-prefix #t)
-      (setq-local 'fill-paragraph-function 'lisp-fill-paragraph)
+      ;; The C stores the *symbol*; a symbol is not callable here, so
+      ;; the procedure goes in (`lisp-mode-variables`' shape).
+      (setq-local 'fill-paragraph-function lisp-fill-paragraph)
       ;; "Adaptive fill mode gets in the way of auto-fill"
       (setq-local 'adaptive-fill-mode #f)
       ;; The C stores the *symbol*; a symbol is not callable here, so

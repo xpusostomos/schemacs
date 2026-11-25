@@ -49,7 +49,8 @@
     (only (schemacs command) define-command)
     (only (schemacs core derived) define-derived-mode)
     (only (schemacs buffer)
-          current-buffer major-mode set-buffer-local-value! buffer-local-value)
+          current-buffer major-mode set-buffer-local-value! buffer-local-value
+          call-with-buffer-local)
     ;; the syntax-table writers, and `make-syntax-table', which is
     ;; subr.el's; the scanner the indentation engine runs
     (only (schemacs syntax)
@@ -57,7 +58,7 @@
           skip-chars-forward skip-chars-backward skip-syntax-forward skip-syntax-backward
           backward-prefix-chars char-syntax *parse-sexp-ignore-comments*
           forward-comment scan-error? string-to-syntax
-          ppss-comment-or-string-start)
+          ppss-comment-or-string-start ppss-string-terminator)
     (only (schemacs indent) indent-line-to)
     (only (schemacs newcomment) indent-for-comment comment-indent-default)
     (only (schemacs core lisp)
@@ -71,11 +72,13 @@
           line-end-position forward-line goto-char preceding-char
           char-after char-before buffer-substring save-excursion point-min
           ;; `indent-code-rigidly` (`lisp-mode.el:1650`), below.
-          delete-region point-marker)
+          delete-region point-marker
+          ;; `lisp-fill-paragraph` (`lisp-mode.el:1543`), below.
+          narrow-to-region save-restriction widen insert)
     (only (schemacs marker) copy-marker markerp marker-position set-marker)
     (only (schemacs indentc)
           current-column current-indentation indent-to)
-    (only (schemacs search) looking-at re-search-forward
+    (only (schemacs search) looking-at re-search-forward looking-back
           match-beginning match-end save-match-data syntax-propertize-rules)
     (only (scheme read) read)
     (only (guile) module-ref open-input-string last-pair resolve-module)
@@ -94,7 +97,15 @@
     (only (schemacs intervals) get put)
     (only (schemacs textprop) get-text-property)
     (only (schemacs search) match-string)
-    (only (schemacs custom) define-custom))
+    (only (schemacs custom) define-custom)
+    ;; `lisp-fill-paragraph` (`lisp-mode.el:1543`) and the values
+    ;; `lisp-mode-variables` stores in the buffer.
+    (only (schemacs fns) line-number-at-pos)
+    (only (schemacs textmodes fill)
+          fill-comment-paragraph fill-paragraph fill-column
+          *fill-column-override*)
+    (only (schemacs textmodes paragraphs) paragraph-start paragraph-separate)
+    (only (schemacs core derived) derived-mode-p))
 
   (export lisp-data-mode lisp-data-mode-syntax-table
           lisp-mode lisp-mode-syntax-table lisp-mode-map lisp-mode-hook
@@ -109,6 +120,8 @@
           lisp-cl-font-lock-keywords lisp-cl-font-lock-keywords-1
           lisp-cl-font-lock-keywords-2
           lisp--define-face
+          lisp-fill-paragraph lisp--fill-line-simple lisp-adaptive-fill
+          *emacs-lisp-docstring-fill-column* lisp-fill-paragraphs-as-doc-string
           ;; the indentation engine
           lisp-ppss lisp-indent-state? lisp-indent-initial-state
           lisp-indent-calc-next lisp-indent-region lisp-indent-line
@@ -851,8 +864,11 @@
         (when lisp-syntax
           (set-syntax-table lisp-mode-syntax-table))
         (setq-local 'paragraph-ignore-fill-prefix #t)
-        (setq-local 'fill-paragraph-function 'lisp-fill-paragraph)
-        (setq-local 'adaptive-fill-function 'lisp-adaptive-fill)
+        ;; The C stores the *symbol*; a symbol is not callable here, so
+        ;; the procedure goes in, as `indent-line-function`'s two do
+        ;; just below.
+        (setq-local 'fill-paragraph-function lisp-fill-paragraph)
+        (setq-local 'adaptive-fill-function lisp-adaptive-fill)
         ;; The C stores *functions*; a symbol is not callable here, so
         ;; the procedures themselves go in (the same shape every other
         ;; function-valued buffer-local takes).
@@ -1948,6 +1964,142 @@ Lisps."
       (setq-local 'syntax-propertize-function lisp-mode-syntax-propertize))
 
     ;; ---------------------------------------------------------------
+
+    ;; ---------------------------------------------------------------
+    ;; `lisp-fill-paragraph' (`lisp-mode.el:1543'), with the two
+    ;; variables it reads (`:1519', `:1529') and `lisp--fill-line-simple'
+    ;; (`:1646'). Its Emacs home is here, before `indent-code-rigidly';
+    ;; `lisp-adaptive-fill' (`:702') is carried with them rather than
+    ;; where Emacs has it - a named placement departure, because its
+    ;; only readers are the fill machinery this block is about.
+    ;;--------------------------------------------------------------
+    (define-custom *emacs-lisp-docstring-fill-column* 72
+      "Value of `fill-column' to use when filling a docstring.
+Any non-integer value means do not use a different value of
+`fill-column' when filling docstrings."
+      :type '(choice (integer)
+                     (const :tag "Use the current `fill-column'" t))
+      :group 'lisp)
+
+    (define lisp-fill-paragraphs-as-doc-string #t)
+    ;; ^ "(defvar lisp-fill-paragraphs-as-doc-string t ...)"
+    ;; (`lisp-mode.el:1529'). A plain variable: nothing `let`-binds it.
+
+    (define (lisp-adaptive-fill)
+      ;; "Return fill prefix found at point. Value for
+      ;; `adaptive-fill-function'."
+      ;;
+      ;; **The else is #f, not dropped**: Emacs's `(if TEST "")` answers
+      ;; nil, and a Scheme `if` with no alternative answers the
+      ;; *unspecified* value - which is true, so the fill machinery took
+      ;; it for a prefix and `(string-length #<unspecified>)` raised.
+      ;;--------------------------------------------------------------
+      (if (looking-at "\\s-+\"[^\n\"]+\"\\s-*$") "" #f))
+
+    (define (lisp--fill-line-simple)
+      ;; "If we're not inside a string, then do very basic filling.
+      ;; This avoids corrupting embedded strings in code."
+      ;;--------------------------------------------------------------
+      (narrow-to-region (line-beginning-position) (line-end-position))
+      (goto-char (point-min))
+      (while-e (and (not (eobp))
+                    (re-search-forward "\\_>" #f #t))
+        (when (> (current-column) (fill-column))
+          (let ((start (point)))
+            (backward-sexp)
+            (if (looking-back "[[(]" (point-min))
+                (goto-char start)
+                (begin
+                  (skip-chars-backward " \t")
+                  (insert "\n")
+                  (forward-sexp)))))
+        (unless (eobp)
+          (forward-char 1))))
+
+    (define-command (lisp-fill-paragraph . rest)
+      "Like \\[fill-paragraph], but handle Emacs Lisp comments and docstrings.
+If any of the current line is a comment, fill the comment or the
+paragraph of it that point is in, preserving the comment's indentation
+and initial semicolons."
+      (interactive "P")
+      (let ((justify (and (pair? rest) (car rest))))
+        (or (fill-comment-paragraph justify)
+            ;; "Since fill-comment-paragraph returned nil, that means
+            ;; we're not in a comment: Point is on a program line; we are
+            ;; interested particularly in docstring lines."
+            ;;
+            ;; The C `let`-binds `paragraph-start', `paragraph-separate'
+            ;; and `fill-column' so that `forward-paragraph' and friends
+            ;; see them; the first two are buffer-local stores here and
+            ;; the third is the override parameter, so the C's one `let`
+            ;; is `call-with-buffer-local` twice around a `parameterize`.
+            (let ((new-ps
+                   (string-append (paragraph-start)
+                                  "\\|\\s-*\\([(;\"]\\|\\s-:\\|`(\\|#'(\\)"))
+                  (new-psep
+                   (string-append (paragraph-separate)
+                                  "\\|\\s-*\".*[,\\.]$"))
+                  (new-fc
+                   (if (and (integer? (*emacs-lisp-docstring-fill-column*))
+                            (derived-mode-p 'emacs-lisp-mode))
+                       (*emacs-lisp-docstring-fill-column*)
+                       (fill-column))))
+              (call-with-buffer-local
+               'paragraph-start new-ps
+               (lambda ()
+                 (call-with-buffer-local
+                  'paragraph-separate new-psep
+                  (lambda ()
+                    (parameterize ((*fill-column-override* new-fc))
+                      (let* ((ppss (syntax-ppss))
+                             (start (point))
+                             ;; "Avoid recursion if we're being called
+                             ;; directly with `M-x lisp-fill-paragraph' in
+                             ;; an `emacs-lisp-mode' buffer."
+                             (string-start
+                              (ppss-comment-or-string-start ppss)))
+                        (call-with-buffer-local
+                         'fill-paragraph-function #t
+                         (lambda ()
+                           (save-excursion
+                             (save-restriction
+                               ;; "If we're not inside a string, then do
+                               ;; very basic filling. This avoids
+                               ;; corrupting embedded strings in code."
+                               (if (not string-start)
+                                   (lisp--fill-line-simple)
+                                   (when lisp-fill-paragraphs-as-doc-string
+                                     ;; "If we're in a string, then narrow
+                                     ;; (roughly) to that string before
+                                     ;; filling."
+                                     (when (ppss-string-terminator ppss)
+                                       (goto-char string-start)
+                                       ;; "The string may be unterminated
+                                       ;; -- in that case, don't narrow."
+                                       (when (guard (e (#t #f))
+                                                   (forward-sexp 1)
+                                                   #t)
+                                         (narrow-to-region
+                                          (+ 1 string-start)
+                                          (- (point) 1))))
+                                     ;; "Move back to where we were."
+                                     (goto-char start)
+                                     ;; "We should fill the first line of
+                                     ;; a string separately (since it's
+                                     ;; usually a doc string)."
+                                     (if (= (line-number-at-pos) 1)
+                                         (narrow-to-region
+                                          (line-beginning-position)
+                                          (line-beginning-position 2))
+                                         (save-excursion
+                                           (goto-char (point-min))
+                                           (forward-line 1)
+                                           (narrow-to-region
+                                            (point) (point-max))))
+                                     (fill-paragraph justify)))))))))))))))
+        ;; "Never return nil."
+        #t))
+
     ;; `indent-code-rigidly' (`lisp-mode.el:1650'), the last function
     ;; before `(provide 'lisp-mode)`. It is what `c-indent-command`
     ;; (`cc-cmds.el`) calls for its numeric-argument branch.

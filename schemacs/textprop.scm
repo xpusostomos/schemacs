@@ -1056,7 +1056,7 @@
       ;; this (and `front-sticky`, so its own characters are in it).
       ;;--------------------------------------------------------------
       (let* ((prev-pos (- position 1))
-             (default (assq prop (*text-property-default-nonsticky*)))
+             (default (assq prop ((iv:*text-property-default-nonsticky-value-function*))))
              ;; The C's `ignore_previous_character = pos <= BUF_BEGV' -
              ;; the *restriction*, so that the previous character is
              ;; never read outside it. `iv:object-beg-position' is
@@ -1161,6 +1161,20 @@
     ;; only asks when the buffer is read-only and `inhibit-read-only' is
     ;; nil.
     (*get-text-property-function* get-text-property)
+
+    ;; **`text-property-default-nonsticky`'s buffer-local reader.** The
+    ;; variable is `intervals.c`'s and that library is below the buffer's
+    ;; slots; this library is above both and installs the answer: the
+    ;; current buffer's own list - a major mode conses cc-mode's four
+    ;; properties onto it (`c-basic-common-init`), as Emacs's
+    ;; `make-local-variable` + `setq` does - over the global default.
+    (iv:*text-property-default-nonsticky-value-function*
+     (lambda ()
+       (let ((buffer (current-buffer)))
+         (if buffer
+             (buffer-local-value buffer 'text-property-default-nonsticky
+                                 (iv:*text-property-default-nonsticky*))
+             (iv:*text-property-default-nonsticky*)))))
 
     ;; **`char-property-alias-alist`'s buffer-local reader.** The variable
     ;; is `intervals.c`'s and the reader there is below the buffer's

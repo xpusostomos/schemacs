@@ -87,6 +87,39 @@
     (test-equal "all-caps abbreviation upcases the expansion" "TESTING"
                 (buffer-substring-no-properties 1 (point)))))
 
+;; **No abbrev before point answers nil, not the unspecified value.**
+;; This is the reported bug: `c-mode` sets `abbrev-mode` t (as Emacs's
+;; `(setq abbrev-mode t)` does), so `internal_self_insert`'s
+;; `expand-abbrev` runs on every word followed by a space; the port's
+;; `abbrev--before-point` used a Scheme `when` in value position, whose
+;; unspecified value is *true*, so `abbrev--default-expand` did
+;; `(list-ref #<unspecified> 0)` - "Wrong type argument in position 1:
+;; #<unspecified>" on typing `void ' in a C buffer. Measured on Emacs
+;; 31.1: both calls below answer nil, and point is left at 5.
+(let ((tbl (make-abbrev-table)))
+  (define-abbrev tbl "tt" "testing")
+  (let ((b (fresh-buffer)))
+    (set!local-abbrev-table tbl)
+    (set!abbrev-mode-variable! #t)
+    (insert "void")
+    (test-equal "a word that is not an abbrev answers nil" #f
+                (expand-abbrev))))
+
+;; The `:regexp` table's own `when` is an operand of the `and` that
+;; builds `res`; a Scheme `when` answering the unspecified value there
+;; makes the `and` go on to read `start`/`end` from the previous
+;; attempt. Emacs answers nil here too.
+(let ((tbl (make-abbrev-table)))
+  (abbrev-table-put tbl ':regexp "\\<x\\(\\w+\\)")
+  (define-abbrev tbl "tt" "testing")
+  (let ((b (fresh-buffer)))
+    (set!local-abbrev-table tbl)
+    (set!abbrev-mode-variable! #t)
+    (insert "void")
+    (test-equal "a non-matching :regexp table answers nil too" #f
+                (expand-abbrev))
+    (test-equal "and point is left where it was" 5 (point))))
+
 ;; `abbrev-mode` is the buffer-local variable, as in C's abbrev.c.
 (let ((b (fresh-buffer)))
   (test-equal "abbrev-mode is off by default" #f (abbrev-mode-variable))

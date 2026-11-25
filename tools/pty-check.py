@@ -1311,6 +1311,174 @@ def check_font_lock_scheme():
     return []
 
 
+def check_c_mode():
+    """A .c file opens in `c-mode`, and TAB indents by the gnu style.
+
+    The cc-mode milestone end to end: `find-file' -> `set-auto-mode' ->
+    `auto-mode-alist' -> the mode's autoload -> `c-initialize-cc-mode' and
+    `c-basic-common-init' -> `c-indent-line', plus the mode line Emacs
+    31.1 draws for it ("C/*l", measured in `emacs -Q --batch').
+    `int main (void) {`'s body is two columns in with the default gnu
+    style, on Emacs and here.
+
+    The mode line is also what tells the *mode* apart from the text: a
+    file that opened in fundamental-mode would indent nothing and say
+    "(Fundamental)".
+    """
+    C_n = b"\x0e"
+    path = "/tmp/pty-check-cmode.c"
+    open(path, "w").write("int main (void)\n{\nreturn 0;\n}\n")
+    out = drive([C_n, C_n, TAB], path)
+    screen = screen_of(out)
+    problems = []
+    if "C/*l" not in screen:
+        problems.append("the mode line does not say C/*l (the mode was "
+                        "not chosen): %r" % screen.split("\n")[-3:])
+    rows = [r for r in screen.split("\n") if "return 0;" in r]
+    if not rows:
+        problems.append("the return line is not on screen: %r" % screen[-200:])
+    elif not rows[0].startswith("  return 0;"):
+        # Leading blanks are drawn as spaces, so the row's own text tells
+        # the indentation; a tab would show as spaces too.
+        problems.append("TAB did not indent the line by two columns: %r"
+                        % rows[0])
+    return problems
+
+
+def check_c_mode_eof_comment():
+    """Opening a C file that ends inside a block comment must not hang.
+
+    The find-decl literal-skip loop (`c-find-decl-prefix-search',
+    cc-engine.el:6330) had a misplaced parenthesis in its port: the
+    `(and (< (point) cfd-limit) (c-got-face-at ...))' that is the loop's
+    condition sat in the *`unless` body's* position, so the loop's test
+    was the `unless` alone - always true - and the editor spun for ever
+    the first time it fontified a C buffer whose text ends inside an
+    unterminated `/* ... */'. The screen stayed blank, which is what
+    "opening a .c file hangs" looked like.
+    """
+    path = "/tmp/pty-check-cmode-eof.c"
+    # The shape that triggers it: a header comment long enough that the
+    # declaration search's 1000-character lookback stays inside it, a few
+    # includes, then a block comment containing a decl-prefix character
+    # (the comma) and running to the end of the buffer.  Measured: this
+    # file spins the unfixed editor and fontifies in milliseconds here.
+    header = ("/* header comment "
+              + "lorem ipsum dolor sit amet consectetur adipiscing elit "
+                "sed do eiusmod tempor " * 20
+              + "*/\n")
+    includes = ("#include <config.h>\n#include <errno.h>\n"
+                "#include <binary-io.h>\n#include \"lisp.h\"\n")
+    tail = ("/* the first element, is used for the outermost minibuffer "
+            "invocation, the next element is used for a recursive "
+            "minibuffer invocation, etc.\n")
+    open(path, "w").write(header + includes + tail)
+    # The modified flag in the mode line ("-UU-:**-") is the mark of the
+    # redisplay *after* the insertion: the first screen shows "-UU-:---"
+    # until the character is in the buffer.  Waiting for it, rather than
+    # letting the quiet window decide, is what makes a slow redraw a slow
+    # redraw and a hung editor a failure.
+    out = drive([b"a", WAIT(b"-UU-:**-")], path)
+    screen = screen_of(out)
+    problems = []
+    # The give-up marker contains the text that was waited for, so it is
+    # tested first - a check that asserts on its own WAIT text passes on
+    # a timeout.
+    if "gave up waiting" in out:
+        problems.append("the editor never redrew after the key (the "
+                        "literal-skip loop hung): %r" % screen[-200:])
+    if "C/*l" not in screen:
+        problems.append("the C buffer never drew: %r" % screen[-200:])
+    if "Wrong type argument" in screen:
+        problems.append("an error reached the echo area: %r"
+                        % [r for r in screen.split("\n") if "Wrong" in r])
+    return problems
+
+
+def check_c_mode_space():
+    """Typing a space in a C buffer must not raise.
+
+    `c-mode` sets `abbrev-mode` t, as Emacs's own `(setq abbrev-mode t)`
+    does (`cc-mode.el:2934`), so `internal_self_insert`'s
+    `expand-abbrev` runs on the space that follows a word. The port's
+    `abbrev--before-point` had a Scheme `when` where Elisp has one:
+    when no abbrev is before point the `when` answered the unspecified
+    value - which is *true* - so `abbrev--default-expand` ran
+    `(list-ref #<unspecified> 0)` and the echo area said "Wrong type
+    argument in position 1: #<unspecified>", and the space was never
+    inserted. Opening the file and pressing the keys is the whole
+    reproduction; the buffer text and the echo area are the assertions.
+    """
+    path = "/tmp/pty-check-cmode-space.c"
+    open(path, "w").write("int f (void);\n")
+    # `void ' at point 1 gives "void int f (void);". The wait is for the
+    # mode line's column: after "void" point is at column 4, and the
+    # space - which the broken editor never inserted, because the raise
+    # came first - leaves it at column 5. A text wait cannot be used
+    # here: font-lock puts escape sequences between "void" and "int",
+    # so the raw stream holds no contiguous "void int".
+    out = drive([b"v", b"o", b"i", b"d", b" ", WAIT(b"All (1,5)")], path)
+    screen = screen_of(out)
+    problems = []
+    if "gave up waiting" in out:
+        problems.append("the space never reached the buffer: %r"
+                        % screen[-200:])
+    if "Wrong type argument" in screen:
+        problems.append("an error reached the echo area: %r"
+                        % [r for r in screen.split("\n") if "Wrong" in r])
+    if "void int f (void)" not in screen:
+        problems.append("the typed text is not in the buffer: %r"
+                        % screen[-200:])
+    return problems
+
+
+def check_scm_open():
+    """Opening a large .scm file must stay at the top, unmodified.
+
+    Two departures in `src/syntax.c`'s port made a Scheme buffer jump and
+    dirty itself a moment after it was opened (2026-11-25):
+
+    * `find_defun_start` (`syntax.c:585`) asks `syntax-ppss` for the
+      start of the enclosing comment, and `syntax-ppss` moves point to
+      its argument; the C restores the old point right after the call
+      (`:606`) and the port did not.  `show-paren` runs that backward
+      scan from its idle timer, so the cursor landed on the comment the
+      scan had parsed to - about 10% into `schemacs/charset.scm`.
+    * `syntax-propertize` must run under `with-silent-modifications`;
+      the port bound the two inhibit flags but neither the undo list nor
+      the modified flag, so the same scan left the buffer modified and
+      the mode line read `-UU-:**-` on a file nobody had changed.
+
+    The user's keys are the reproduction: `C-x C-f` the file, then
+    leave the editor idle - the jump and the `**` arrive about a second
+    later from `show-paren`'s timer.  Measured on the unfixed tree: the
+    view was at `10% (149,70)` with `-UU-:**-`; fixed: at the top with
+    `-UU-:---`.
+    """
+    path = os.path.join(REPO, "schemacs/charset.scm")
+    out = drive([C_x + C_f, WAIT(b"Find file:"), C_a, C_k,
+                 path.encode(), RET, WAIT(b"charset.scm"),
+                 ("sleep", 3.0)], None)
+    screen = screen_of(out)
+    problems = []
+    # The give-up marker contains the text that was waited for; test it
+    # first (the file's rule: a check that asserts on its own WAIT text
+    # passes on a timeout).
+    if "gave up waiting" in out:
+        problems.append("the file never drew: %r" % screen[-200:])
+    # With Column Number mode on - the harness's init turns it on - the
+    # position construct draws `Top (1,0)`; the word is what says the
+    # window's start is `point-min`.
+    if "Top " not in screen:
+        problems.append("the view moved off the top of the file: %r"
+                        % [r for r in screen.split("\n")
+                           if "charset.scm" in r or " L" in r][:4])
+    if ":**" in screen:
+        problems.append("the buffer was marked modified by opening it: %r"
+                        % [r for r in screen.split("\n") if ":**" in r])
+    return problems
+
+
 def check_isearch_ring():
     """C-s C-s searches for the last search's string.
 
@@ -6076,6 +6244,10 @@ CHECKS = {
     "isearch-highlight": check_isearch_highlight,
     "isearch-ring": check_isearch_ring,
     "font-lock-scheme": check_font_lock_scheme,
+    "c-mode": check_c_mode,
+    "c-mode-eof-comment": check_c_mode_eof_comment,
+    "c-mode-space": check_c_mode_space,
+    "scm-open": check_scm_open,
     "prompt-after-delete-other-windows": check_prompt_after_delete_other_windows,
     "isearch-line-end": check_isearch_line_end,
     "occur": check_occur,

@@ -135,7 +135,7 @@
           comment-beginning comment-forward comment-enter-backward
           comment-string-strip comment-normalize-vars comment-indent
           comment-indent-default comment-column comment-styles
-          *comment-style* *comment-multi-line*
+          *comment-style* *comment-multi-line* comment-multi-line
           *comment-auto-fill-only-comments*)
     (only (schemacs minibuffer) minibufferp minibuffer-prompt-end)
     (only (schemacs custom) define-custom)
@@ -157,8 +157,11 @@
    *adaptive-fill-regexp* adaptive-fill-regexp set!adaptive-fill-regexp
    *adaptive-fill-first-line-regexp* adaptive-fill-first-line-regexp
    set!adaptive-fill-first-line-regexp
-   *adaptive-fill-function* *fill-paragraph-function*
-   *fill-paragraph-handle-comment* *fill-nobreak-predicate*
+   *adaptive-fill-function* adaptive-fill-function-value
+   *fill-paragraph-function*
+   fill-paragraph-function set!fill-paragraph-function
+   *fill-paragraph-handle-comment* fill-paragraph-handle-comment
+   set!fill-paragraph-handle-comment *fill-nobreak-predicate*
    *fill-nobreak-invisible* *colon-double-space*
    *fill-separate-heterogeneous-words-with-space*
    *fill-individual-varying-indent* *enable-kinsoku*
@@ -190,7 +193,8 @@
    auto-fill-mode turn-on-auto-fill turn-off-auto-fill
    do-auto-fill default-indent-new-line internal-auto-fill
    *auto-fill-inhibit-regexp* *inhibit-auto-fill*
-   comment-line-break-function normal-auto-fill-function
+   comment-line-break-function comment-line-break-function-value
+   normal-auto-fill-function normal-auto-fill-function-value
    comment-indent-new-line comment-valid-prefix-p indent-new-comment-line
    with-buffer-unmodified-if-unchanged
    )
@@ -226,12 +230,29 @@ or belong to different categories."
       :group 'fill)
 
     (define *fill-paragraph-function* (make-parameter #f))
-    ;; ^ GNU Emacs's `fill-paragraph-function' (`fill.el:63'). A parameter
-    ;; because `fill-paragraph' `let`-binds it around its own call.
+    ;; ^ GNU Emacs's `fill-paragraph-function' (`fill.el:63'): a
+    ;; `defvar' that `fill-paragraph' `let`-binds around its own call,
+    ;; and that a major mode sets buffer-locally (`c-basic-common-init'
+    ;; is one). The parameter is the default, the slot is the buffer's
+    ;; value, and the `let' is `call-with-buffer-local' - the
+    ;; `paragraph-start' pattern in `paragraphs.scm'.
+    (define (fill-paragraph-function)
+      (buffer-local-value (current-buffer) 'fill-paragraph-function
+                          (*fill-paragraph-function*)))
+    (define (set!fill-paragraph-function value)
+      (set-buffer-local-value! (current-buffer) 'fill-paragraph-function value))
 
     (define *fill-paragraph-handle-comment* (make-parameter #t))
     ;; ^ GNU Emacs's `fill-paragraph-handle-comment' (`fill.el:71'),
-    ;; `let`-bound by `fill-paragraph' as it tries each strategy.
+    ;; `let`-bound by `fill-paragraph' as it tries each strategy, and
+    ;; set buffer-locally by a mode whose filling does its own comment
+    ;; handling. Same store as `fill-paragraph-function' above.
+    (define (fill-paragraph-handle-comment)
+      (buffer-local-value (current-buffer) 'fill-paragraph-handle-comment
+                          (*fill-paragraph-handle-comment*)))
+    (define (set!fill-paragraph-handle-comment value)
+      (set-buffer-local-value! (current-buffer)
+                               'fill-paragraph-handle-comment value))
 
     (define-custom *enable-kinsoku* #t
       "Non-nil means to apply Kinsoku rules when filling.
@@ -325,6 +346,12 @@ the line to be filled, and should return either a string to use as the
 fill prefix, or nil to use the value of `adaptive-fill-regexp'."
       :type 'function
       :group 'fill)
+    ;; A major mode sets it buffer-locally (`lisp-mode-variables` sets
+    ;; `lisp-adaptive-fill`); the parameter is the default and this is
+    ;; the buffer's value, `adaptive-fill-regexp`'s shape above.
+    (define (adaptive-fill-function-value)
+      (buffer-local-value (current-buffer) 'adaptive-fill-function
+                          (*adaptive-fill-function*)))
 
     (define-custom *fill-nobreak-predicate* '()
       "List of predicates for recognizing places not to break a line.
@@ -553,8 +580,8 @@ Remove indentation from each line."
     (define (fill-match-adaptive-prefix)
       ;; GNU Emacs's `fill-match-adaptive-prefix' (`fill.el:238').
       ;;--------------------------------------------------------------
-      (let ((str (or (and (*adaptive-fill-function*)
-                          ((*adaptive-fill-function*)))
+      (let ((str (or (and (adaptive-fill-function-value)
+                          ((adaptive-fill-function-value)))
                      (and (adaptive-fill-regexp)
                           (looking-at (adaptive-fill-regexp))
                           (match-string 0)))))
@@ -1226,28 +1253,34 @@ If `fill-paragraph-function' is nil, return the `fill-prefix' used for filling."
                (not (eq? (region-beginning) (region-end)))
                (or (fill-region (region-beginning) (region-end) justify) #t))
           ;; "2. Try fill-paragraph-function."
-          (and (not (eq? (*fill-paragraph-function*) #t))
-               (or (*fill-paragraph-function*)
+          (and (not (eq? (fill-paragraph-function) #t))
+               (or (fill-paragraph-function)
                    (and (minibufferp) (= 1 (point-min))))
-               (let ((function (or (*fill-paragraph-function*)
+               (let ((function (or (fill-paragraph-function)
                                    ;; "In the minibuffer, don't count the
                                    ;; width of the prompt."
                                    fill-minibuffer-function)))
                      ;; "If fill-paragraph-function is set, it probably
                      ;; takes care of comments and stuff. If not, it will
                      ;; have to set fill-paragraph-handle-comment back to
-                     ;; t explicitly or return nil." The C's two bindings
-                     ;; are the `parameterize` below, which is what makes
-                     ;; this tree's spelling of them the same thing.
-                 (parameterize ((*fill-paragraph-handle-comment* #f)
-                                (*fill-paragraph-function* #t))
-                   (function justify))))
+                     ;; t explicitly or return nil." The C's two `let`s
+                     ;; are `call-with-buffer-local` here: both variables
+                     ;; are buffer-local stores (`paragraph-start`'s
+                     ;; shape), so a `parameterize` would not shadow a
+                     ;; buffer's own value.
+                 (call-with-buffer-local
+                  'fill-paragraph-function #t
+                  (lambda ()
+                    (call-with-buffer-local
+                     'fill-paragraph-handle-comment #f
+                     (lambda () (function justify)))))))
           ;; "3. Try our syntax-aware filling code."
-          (and (*fill-paragraph-handle-comment*)
+          (and (fill-paragraph-handle-comment)
                ;; "Our code only handles \n-terminated comments right now."
                (comment-start) (equal? (comment-end) "")
-               (parameterize ((*fill-paragraph-handle-comment* #f))
-                 (fill-comment-paragraph justify)))
+               (call-with-buffer-local
+                'fill-paragraph-handle-comment #f
+                (lambda () (fill-comment-paragraph justify))))
           ;; "4. If it all fails, default to the good ol' text paragraph
           ;; filling."
           (let ((before (point))
@@ -1256,7 +1289,7 @@ If `fill-paragraph-function' is nil, return the `fill-prefix' used for filling."
                 (fill-pfx #f))
             ;; "Try to prevent code sections and comment sections from
             ;; being filled together."
-            (call-with-buffer-local 'paragraph-start (if (and (*fill-paragraph-handle-comment*)
+            (call-with-buffer-local 'paragraph-start (if (and (fill-paragraph-handle-comment)
                                      (comment-start-skip))
                                 (string-append
                                  (paragraph-start) "\\\\|[ \t]*\\(?:"
@@ -1280,7 +1313,7 @@ If `fill-paragraph-function' is nil, return the `fill-prefix' used for filling."
                       ;; preceding point on a non-comment line, skip such
                       ;; comment lines, so they are not filled together
                       ;; (bug#80449)."
-                      (when (and (*fill-paragraph-handle-comment*)
+                      (when (and (fill-paragraph-handle-comment)
                                  (comment-start-skip)
                                  (< beg before))
                         (save-excursion
@@ -2239,6 +2272,13 @@ details."
     ;; the procedure, so the assignment to it is below the definition -
     ;; a forward reference would be an unbound variable when the library
     ;; is loaded interpreted.
+    ;;
+    ;; A major mode sets it buffer-locally (`c-basic-common-init` sets
+    ;; `c-do-auto-fill`), so the variable is the default and this reader
+    ;; is the buffer's value - the `paragraph-start` pattern.
+    (define (normal-auto-fill-function-value)
+      (buffer-local-value (current-buffer) 'normal-auto-fill-function
+                          normal-auto-fill-function))
 
     (define (auto-fill-function-value)
       ;; The buffer's `auto-fill-function` - GNU Emacs's buffer-local of
@@ -2592,7 +2632,7 @@ unless optional argument SOFT is non-nil."
                                           (point))
                                         (point))
                                        #f #t))))))
-                      (if (and (*comment-multi-line*) (> (string-length comend) 0))
+                      (if (and (comment-multi-line) (> (string-length comend) 0))
                           (indent-according-to-mode)
                           (begin
                             (insert-and-inherit #\newline)
@@ -2623,7 +2663,7 @@ unless optional argument SOFT is non-nil."
                                             (current-buffer)
                                             'comment-indent-function
                                             comment-indent-default)))
-                                   (continuep (or (*comment-multi-line*)
+                                   (continuep (or (comment-multi-line)
                                                   (cadr (assoc (*comment-style*)
                                                                comment-styles)))))
                               (%with-comment-indent-bindings
@@ -2647,6 +2687,13 @@ unless optional argument SOFT is non-nil."
     ;; is only setq-ed - and its readers are all in this library, so no
     ;; cross-module write.
     (define comment-line-break-function comment-indent-new-line)
+    ;; A major mode sets it buffer-locally (`c-basic-common-init` sets
+    ;; `c-indent-new-comment-line`), so the variable is the default and
+    ;; this reader is the buffer's value - `normal-auto-fill-function`'s
+    ;; shape above.
+    (define (comment-line-break-function-value)
+      (buffer-local-value (current-buffer) 'comment-line-break-function
+                          comment-line-break-function))
 
     (define-command (default-indent-new-line . rest)
       ;; GNU Emacs's `default-indent-new-line' (`simple.el:9193'): "Break
@@ -2666,11 +2713,18 @@ unless optional argument SOFT is non-nil."
       (interactive (list #f #t))
       (let ((soft (and (pair? rest) (car rest)))
             (force (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
-        (if (and (comment-start) comment-line-break-function)
+        (if (and (comment-start) (comment-line-break-function-value))
             (if force
-                (let ((*comment-auto-fill-only-comments* #f))
-                  (comment-line-break-function soft))
-                (comment-line-break-function soft))
+                ;; **`parameterize`, not `let`**: `*comment-auto-fill-only-comments*`
+                ;; is a parameter, and a `let` over a parameter's name
+                ;; shadows the *object* in this scope only - the callee,
+                ;; several frames down in this library, reads the
+                ;; parameter itself and never sees it. (Measured on the
+                ;; other side: Emacs `let`-binds the variable and its
+                ;; callee sees nil.)
+                (parameterize ((*comment-auto-fill-only-comments* #f))
+                  ((comment-line-break-function-value) soft))
+                ((comment-line-break-function-value) soft))
             (begin
               ;; "Insert the newline before removing empty space so that
               ;; markers get preserved better."
@@ -2713,7 +2767,7 @@ for `auto-fill-function' when turning Auto Fill mode on."
                 (lambda (v)
                   (set!buffer-auto-fill-function
                    (current-buffer)
-                   (if v normal-auto-fill-function #f))))
+                   (if v (normal-auto-fill-function-value) #f))))
 
     (define-command (turn-on-auto-fill)
       "Unconditionally turn on Auto Fill mode."
