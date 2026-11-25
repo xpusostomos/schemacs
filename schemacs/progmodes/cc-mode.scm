@@ -16,8 +16,6 @@
   ;;
   ;; **Not carried yet**:
   ;;
-  ;;   * `c-mode-menu' (the language constant) and the two
-  ;;     `easy-menu-define' calls - the menu is the next piece;
   ;;   * the abbrev tables (`abbrev.el` is not ported),
   ;;     `c-bind-special-erase-keys' (`normal-erase-is-backspace` is
   ;;     not ported), `c-submit-bug-report' (reporter.el),
@@ -49,7 +47,13 @@
     (only (schemacs editfns) point point-max point-min goto-char
           bobp eobp char-before char-after buffer-substring-no-properties
           save-excursion forward-line narrow-to-region save-restriction
-          widen)
+          widen
+          ;; The two menu items whose command is an Emacs *form* rather
+          ;; than a symbol - "Uncomment Region" and "Show Current Style
+          ;; Name" - are evaluated in this library (`easy-menu-make-
+          ;; symbol`'s thunk), so the names they use must be imported
+          ;; here, as the tree's rule always says.
+          message region-beginning region-end)
     (only (schemacs search) looking-at match-end match-beginning
           re-search-forward re-search-backward search-forward save-match-data)
     (only (schemacs syntax) skip-syntax-backward skip-chars-backward skip-chars-forward
@@ -210,6 +214,7 @@
     ;; cc-guess.el (`cc-require 'cc-guess`) is not ported.
     (schemacs progmodes cc-fonts)
     (schemacs progmodes cc-align)
+    (only (schemacs core easymenu) easy-menu-define)
     (only (schemacs progmodes cc-menus)
           cc-imenu-init cc-imenu-c-generic-expression
           cc-imenu-c++-generic-expression)
@@ -267,6 +272,9 @@
    *c-guess-region-max* c-mode-syntax-table c-mode-map c-mode-hook c-mode
    c-or-c++-mode--regexp c-or-c++-mode
    c++-mode-syntax-table c++-mode-map c++-mode-hook c++-mode
+   ;; the menus' variables (Emacs's `c-c-menu'/`c-c++-menu', which
+   ;; `easy-menu-define' makes)
+   c-c-menu c-c++-menu
    c-run-mode-hooks)
 
   (begin
@@ -2881,11 +2889,6 @@ this option helps you limit that time.  nil means no limit."
     (define c-mode-hook '())
     ;; ^ `c-mode-hook', made by `define-derived-mode' in Emacs.
 
-    ;; `(easy-menu-define c-c-menu c-mode-map "C Mode Commands." (cons "C"
-    ;; (c-lang-const c-mode-menu c)))' - the menu waits on the
-    ;; `c-mode-menu' language constant, which is not carried yet; the
-    ;; keymap and the mode are the milestone.
-
     (define-derived-mode (c-mode prog-mode "C" c-mode-map c-mode-hook
                                  c-mode-syntax-table)
       "Major mode for editing C code.
@@ -2914,6 +2917,9 @@ Key bindings:
       (cc-imenu-init cc-imenu-c-generic-expression)
       ;; `flymake-diagnostic-functions': flymake is not ported.
       (c-run-mode-hooks (*c-mode-common-hook*)))
+
+    (easy-menu-define c-c-menu c-mode-map "C Mode Commands."
+                      (cons "C" (c-lang-const c-mode-menu c)))
 
     (define c-or-c++-mode--regexp
       ;; "A regexp applied to C header files to check if they are really
@@ -2983,6 +2989,9 @@ the code is C or C++ and based on that chooses whether to enable
     (define-key c++-mode-map (kbd "C-c :") c-scope-operator)
     (define-key c++-mode-map "<" c-electric-lt-gt)
     (define-key c++-mode-map ">" c-electric-lt-gt)
+
+    (easy-menu-define c-c++-menu c++-mode-map "C++ Mode Commands."
+                      (cons "C++" (c-lang-const c-mode-menu c++)))
 
     (define c++-mode-hook '())
     ;; ^ `c++-mode-hook', made by `define-derived-mode' in Emacs.

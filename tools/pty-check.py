@@ -1395,6 +1395,39 @@ def check_c_mode_eof_comment():
     return problems
 
 
+
+def check_c_menu():
+    """A .c file's buffer contributes its C menu to the menu bar.
+
+    `easy-menu-define' in `c-mode' (`cc-mode.el:2880') binds
+    `[menu-bar c]' into `c-mode-map' with the items of `c-mode-menu';
+    the terminal's menu bar draws the buffer's maps as the frame's first
+    row (`display_menu_bar`), and F10 plus the arrow keys walk them. The
+    bar is on only under `MENUBAR_CONFIG_HOME'.
+    """
+    path = "/tmp/pty-check-cmenu.c"
+    open(path, "w").write("int a;\n")
+    problems = []
+    out = drive([], path, config=MENUBAR_CONFIG_HOME)
+    rows = screen_of(out).split("\n")
+    if not rows:
+        problems.append("no screen")
+    else:
+        names = rows[0].split()
+        if "C" not in names:
+            problems.append("the menu bar has no C menu: %r" % (rows[0],))
+        if not all(n in names for n in ("File", "Edit")):
+            problems.append("the global menus are missing: %r" % (rows[0],))
+    # F10 opens File; three rights reach the C menu, which is last because
+    # the buffer's map contributes after the global ones.
+    screen = screen_of(drive([b"\x1b[21~", b"\x1bOC", b"\x1bOC", b"\x1bOC"],
+                             path, config=MENUBAR_CONFIG_HOME))
+    if "Comment Out Region" not in screen:
+        problems.append("the C menu did not drop down: %r"
+                        % screen.split("\n")[-4:])
+    return problems
+
+
 def check_c_mode_space():
     """Typing a space in a C buffer must not raise.
 
@@ -6247,6 +6280,7 @@ CHECKS = {
     "c-mode": check_c_mode,
     "c-mode-eof-comment": check_c_mode_eof_comment,
     "c-mode-space": check_c_mode_space,
+    "c-menu": check_c_menu,
     "scm-open": check_scm_open,
     "prompt-after-delete-other-windows": check_prompt_after_delete_other_windows,
     "isearch-line-end": check_isearch_line_end,

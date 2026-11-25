@@ -1425,7 +1425,9 @@
     c-bs-prev-stack
     c-c++-make-ml-string-closer-re
     c-c++-make-ml-string-opener-re
+    c-c++-menu
     c-c++-vsemi-p
+    c-c-menu
     c-cache-to-parse-ps-state
     c-calc-comment-indent
     c-calc-offset

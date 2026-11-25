@@ -18155,3 +18155,180 @@ The C's `error ("syntax-ppss modified the buffer!")` assertion beside
 the restore compares `CHARS_MODIFF`; nothing here edits text to
 propertize, and the modified-state restore of fix 2 makes the check
 moot.
+## A Gtk click cost seconds rebuilding both bars (2026-11-26)
+
+Chris: *"If I'm in gtk schemacs and I click in a different window, it seems
+to take about 4 seconds before the cursor appears in the other window.
+That's slow."* Measured, the whole cost was the menu bar and tool bar
+widget trees being rebuilt on the click's redisplay, and the cause is the
+price of a guile-gi call here.
+
+### What was measured
+
+A click is two events (press, release); each redisplay after one cost
+**2.4-2.7 s**, and `statprof` over a real (synthetic but fully dispatched)
+click put **76 %** of it in `class-precedence-list` - GOOPS dispatch inside
+guile-gi, at ~2-3.5 ms per GObject call - with `pgtk-create-one-menuitem`
+(2.64 s cumulative for the menu) and the tool-bar item builders under it.
+A REPL-driven redisplay was 103 ms; one with `update-mode-lines?` forced,
+111 ms. So the cost was the widget rebuild, not the redisplay.
+
+The menu bar's array differed across the click in **exactly two slots**:
+the enabled flags of "Replace String..." and "Replace RegExp..." (the
+selected window moved to a read-only buffer). The tool bar's vector
+differed in the same kind of slot: `enabled`, which `update_frame_tool_bar`
+applies with `gtk_widget_set_sensitive` (`gtkutil.c:6107`).
+
+### What Emacs does, and what this tree does now
+
+* **Tool bar.** Emacs keeps each `GtkToolItem` and walks the new items
+  against the existing ones: a changed image or label presence recreates
+  only that item (`xg_tool_item_stale_p`, `gtkutil.c:6040`), a changed
+  label text is set on the existing label (`gtk_label_set_text`), and a
+  changed `enabled` is `gtk_widget_set_sensitive`. This tree rebuilt every
+  button whenever the item vector changed. Now `pgtk-set-frame-toolbar`
+  has the same two-tier shape: **a vector that differs only in enabled
+  flags is patched** (`pgtk-toolbar-enable-slots-only?` +
+  `pgtk-update-toolbar-enables!`, one `set-sensitive` per changed item),
+  and anything else rebuilds every button, as before.
+* **Menu bar.** Emacs's `set_frame_menubar` really does recreate the
+  widget tree whenever `menu_items` differs (`memcmp`, `xmenu.c:1082`) -
+  there is no in-place update in the C - which in C is cheap. Here a
+  rebuild is ~30 menu items' worth of GObject calls (seconds). The
+  departure: when the built array differs **only in booleans** (the
+  enabled slot at `base+1`, `MENU_ITEMS_ITEM_ENABLE`, and selected at
+  `base+6`) the existing widgets are patched instead
+  (`gtk_widget_set_sensitive`, `gtk_check_menu_item_set_active`), and
+  `pgtk-install-menubar!`'s widget table answers which widget an item's
+  `call_data` index was built as. Any other difference still rebuilds,
+  which is the C's behaviour.
+
+Measured after: the same click's processing went from **2.86 s to
+0.20-0.41 s**, and a live widget read confirmed the patch moves the
+button's `sensitive` property (`0 -> 1` and back) while a non-boolean
+change answers "rebuild". The user, using the editor: *"it seems very
+fast now."*
+
+### The Guile miscompile found on the way
+
+The first implementation was Emacs's own per-item reuse loop
+(`xg_tool_item_stale_p` and the state table of built widgets). It worked
+when the library was compiled at `#:optimization-level 1` and **SIGSEGV'd
+at the default level 2** within 4-6 s of starting a Gtk editor, with no
+Lisp error and no REPL involvement - the same class as the
+`c-append-backslashes-forward` miscompile in `cc-cmds.scm` (Guile 3.0.11;
+see that Makefile rule). Bisected: with the tool-bar fill disabled the
+editor survived, and a straight rebuild through the same helpers
+(`pgtk-make-tool-item`, the image resolver, `set-sensitive`) survived at
+level 2, so the crash was in the reuse bookkeeping itself. Rather than
+compile the whole front end at -O1, the two-tier shape above (which is
+closer to Emacs than a plain rebuild, and exercises none of the
+miscompiled construct) was adopted, and no -O1 rule is needed.
+
+### Not carried
+
+`xg_tool_item_stale_p`'s per-item reuse: an image or label *text* change
+now rebuilds the whole bar rather than that one item; the items vector
+itself says when anything but an enabled flag changed, so the observable
+bar is the same. The menu bar's in-place patch is keyed on the boolean
+slots only; a menu whose *contents* change still rebuilds, as in Emacs.
+
+# cc-mode: the menus, the implicit-int branch, and a keymap-list bug
+# (2026-11-26)
+
+Three pieces of cc-mode that were still named as open, and one shared
+primitive bug the first of them exposed.
+
+## The mode menus (`cc-mode.el:2880`, `:3007`)
+
+`c-mode-menu` (`cc-langs.el:275`) is carried, with the two
+`easy-menu-define` calls, so a C or C++ buffer's menu bar now shows its
+"C" / "C++" menu: Comment Out Region, Uncomment Region, Indent
+Expression, Indent Line or Region, Fill Comment Paragraph, the two
+statement motions, the preprocessor group (Up/Backward/Forward
+Conditional, Backslashify), the Style submenu and the Toggle submenu.
+
+**Omitted, because their commands are not ported**, which is the same
+accounting `menu-bar.scm` keeps: "Macro Expand Region" (`c-macro-expand`
+runs cpp as a subprocess), the Style submenu's two guess entries
+(`cc-guess.el`) and the "Subword mode" toggle (`cc-subword.el`). A menu
+item naming a missing command signals when it is clicked.
+
+Two model departures, both forced by this tree's shape:
+
+* **`:selected` holds a call, not the variable symbol.** Emacs writes
+  `:selected c-syntactic-indentation`; here the variable is an accessor,
+  so a bare symbol would evaluate to the procedure and the toggle would
+  always look selected. The data holds `(c-syntactic-indentation)`,
+  `(c-electric-flag)`, `(c-auto-newline)` and `(c-hungry-delete-key)`.
+* **A command that is a *form* is evaluated in the menu's defining
+  library** (`easy-menu-make-symbol`'s thunk), where Emacs evaluates in
+  the global environment. So cc-mode now imports the names those two
+  forms use - `message`, `region-beginning` and `region-end` - beside
+  `comment-region` and `c-indentation-style` which it already had. This
+  is the tree's standing import rule, not a special case: a name lives
+  in the file its Emacs source lives in, and the way to it is an import.
+  Verified live on a Gtk editor: Comment Out Region commented a region,
+  Uncomment Region uncommented it, the Syntactic indentation toggle
+  flipped `c-syntactic-indentation`, and Show Current Style Name echoed
+  "Style Name: gnu".
+
+**A correction to an earlier note in this file**: `message` formats with
+Emacs's own `%` conversions (`styled_format`, editfns.c:3440), not with
+Guile's `~a`, so the menu's `"Style Name: %s"` is Emacs's string exactly.
+The first port of the item used `~a` on the strength of a stale note and
+printed the literal text; the measurement ("Style Name: %s" with "gnu"
+answers "Style Name: gnu") is the record.
+
+Tests: `cc-mode-test.scm`'s `schemacs_editor_cc_mode_menu` group pins
+the data (first item, the cpp conditional present for C and absent for
+awk, the Toggle item's `:selected` and `:style`) and both bindings
+(`[menu-bar c]` in `c-mode-map`, `[menu-bar c++]` in `c++-mode-map`, and
+the two menu variables). `tools/pty-check.py`'s new `c-menu` is the
+end-to-end one: with the menu bar on, a `.c` file's bar row carries `C`,
+and F10 then three right arrows drops the C menu down showing "Comment
+Out Region".
+
+## The C implicit-int branch of `c-forward-type` (`cc-engine.el:9577`)
+
+The branch was carried with a signalling stub where Emacs calls
+`c-forward-declarator` (the declarator landed in a later tranche and the
+stub was never revisited), so every C type modifier followed by a `(`
+raised "not ported". It is the C's expression now - a `(` after the
+modifier only keeps the implicit-int answer off when it actually starts
+a declarator - and matches Emacs 31.1 on all six measured rows:
+
+    register count;        no-id, point 10
+    static x;              no-id, point 24
+    auto int y;            t, point 36
+    register (*fp)(void);  nil, point 48
+    register foo(void);    no-id, point 70
+    int z;                 t, point 85
+
+`cc-engine-test.scm`'s `schemacs_editor_cc_engine_implicit_int` group
+pins them.
+
+## `lookup-key` over a keymap list resolved prefixes per map
+
+**A shared-primitive bug, found by F10 doing nothing in a C buffer.**
+`key-binding` passes `lookup-key` the whole `current-active-maps` list.
+Emacs's `access_keymap_1` accumulates, for one event, every map's answer
+*when they are prefixes*, into a keymap list `(keymap P1 P2 ...)`, and
+the next event is then looked up in all of them (`keymap.c:416-420`).
+The port's `%maps-event-binding` did a first-match search instead: it
+found the C mode map's own `[menu-bar]` prefix - created by the menu's
+`easy-menu-define` - and never reached the global map's
+`[menu-bar file]`, so `(key-binding [menu-bar file])` was nil in a C
+buffer and `menu-bar-open` popped nothing. With a `.txt` or `.scm` file
+the mode map has no `menu-bar` prefix, which is why only a language
+mode's buffers were affected.
+
+The fix delegates to `access-keymap`, which already implemented the C's
+list walk (and its accumulation, built for the parent-prefix case), with
+the `(t . DEF)` default kept as the fallback when nothing specific is
+found. `subr-test.scm` pins both measured answers: a list of maps finds
+the file menu past another map's prefix, and the list's `[menu-bar]`
+prefix is a keymap list holding both.
+
+`tools/pty-check.py`'s `c-menu` is the regression: on the old code the
+F10 navigation showed no menu at all.

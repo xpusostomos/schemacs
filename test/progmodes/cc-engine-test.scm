@@ -2552,3 +2552,44 @@
   (ml-change-case ml-f5 15 23 24 #f))
 
 (test-end "schemacs_editor_cc_engine_ml_change")
+
+;;----------------------------------------------------------------------
+;; `c-forward-type' and C's implicit int
+;;----------------------------------------------------------------------
+;; The C-only branch (`cc-engine.el:9577'): a type modifier followed by
+;; something that is not a declarator is an implicit-int declaration,
+;; e.g. "register count;". The test that matters is the third and fourth
+;; rows: a `(' after the modifier only stops the branch when it starts a
+;; declarator. Every answer is Emacs 31.1's on the same text.
+(define (with-implicit-int-buffer thunk)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "register count;\nstatic x;\nauto int y;\n"
+            "register (*fp)(void);\nregister foo(void);\nint z;\n")
+    (set-buffer-local-value! b 'major-mode 'c-mode)
+    (set-buffer-local-value! b 'parse-sexp-ignore-comments #t)
+    (c-init-language-vars c-mode)
+    (set-syntax-table ((c-lang-const c-make-mode-syntax-table c)))
+    (thunk)))
+
+(with-implicit-int-buffer
+ (lambda ()
+   (define (ftype pos)
+     (parameterize ((*c-buffer-is-cc-mode* 'c-mode))
+       (goto-char pos)
+       (c-clear-found-types)
+       (let ((r (c-forward-type))) (list r (point)))))
+   (test-begin "schemacs_editor_cc_engine_implicit_int")
+   (test-equal "register count; is an implicit-int declaration"
+               '(no-id 10) (ftype 1))
+   (test-equal "static x; too"
+               '(no-id 24) (ftype 17))
+   (test-equal "auto int y; is a primitive type, not implicit int"
+               '(#t 36) (ftype 27))
+   (test-equal "a '(' that starts a declarator keeps the implicit-int answer off"
+               '(#f 48) (ftype 39))
+   (test-equal "register foo(void); is still an implicit-int declaration"
+               '(no-id 70) (ftype 61))
+   (test-equal "int z; is an ordinary type"
+               '(#t 85) (ftype 81))
+   (test-end "schemacs_editor_cc_engine_implicit_int")))

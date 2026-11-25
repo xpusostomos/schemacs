@@ -468,6 +468,13 @@
    ;; The queue itself, and the drain that dispatches it, for the test
    ;; that pins a queued key being delivered rather than stranded.
    pgtk-queue pgtk-drain-queue!
+   ;; What an unchanged bar is compared against, and the two rules that
+   ;; let a changed one be patched instead of rebuilt: which widget a
+   ;; `menu_items' index was built as, and whether two tool-bar item
+   ;; vectors differ only in enabled flags. Exported for the tests that
+   ;; pin those rules without a window.
+   pgtk-menubar-widgets pgtk-menubar-widget-at
+   pgtk-toolbar-enable-slots-only?
    ;; The current frame written to a PNG: how a windowed editor is
    ;; checked without a pair of eyes on it.
    pgtk-write-screenshot!
@@ -1149,6 +1156,13 @@
       (menubar-vector #:init-value #f #:accessor pgtk-menubar-vector)
       (menubar-used  #:init-value 0 #:accessor pgtk-menubar-used)
       (menubar-height #:init-value 0 #:accessor pgtk-menubar-height)
+      ;; The menu-item widget for each `menu_items' index (`call_data'),
+      ;; so a change that only flips an enabled or selected slot is
+      ;; applied to the widgets in place instead of rebuilding the bar -
+      ;; see `pgtk-update-menubar-toggles!'. Emacs keeps the same fact
+      ;; on the widgets themselves: `widget_value.call_data' is the
+      ;; index, and the widget is reachable from the menu item.
+      (menubar-widgets #:init-value '() #:accessor pgtk-menubar-widgets)
       ;; Whether the bar is currently taken down. An empty bar is hidden
       ;; once and then left alone; see `pgtk-set-frame-menubar`.
       (menubar-hidden #:init-value #f #:accessor pgtk-menubar-hidden?)
@@ -1168,6 +1182,14 @@
       (toolbar        #:init-value #f #:accessor pgtk-toolbar)
       (toolbar-held   #:init-value '() #:accessor pgtk-toolbar-held)
       (toolbar-items  #:init-value #f #:accessor pgtk-toolbar-items)
+      ;; One entry per button currently in the bar, in the toolbar's own
+      ;; order: `(TI . BUTTON)' for a button, `separator' for a
+      ;; separator. `TI' is the `GtkToolItem' and BUTTON the `GtkButton'
+      ;; whose sensitivity an enabled-only change patches - what
+      ;; `update_frame_tool_bar` keeps in its `GtkToolItem`s to decide
+      ;; whether an item is stale (`xg_tool_item_stale_p`,
+      ;; `gtkutil.c:6040`).
+      (toolbar-widgets #:init-value #f #:accessor pgtk-toolbar-widgets)
       (toolbar-height #:init-value 0 #:accessor pgtk-toolbar-height)
       (toolbar-hidden #:init-value #f #:accessor pgtk-toolbar-hidden?)
       (surface #:init-value #f #:accessor pgtk-surface)
@@ -4112,6 +4134,17 @@
           (widget:set-tooltip-text w (widget-value-help item)))
         (cons w (if (eq? type 'radio) (or group w) #f))))
 
+    (define *menubar-widget-sink* (make-parameter #f))
+    ;; ^ Collects `(INDEX . WIDGET)' for every menu item
+    ;; `pgtk-install-menubar!` creates, so a later change that only flips
+    ;; an enabled or selected slot is applied to the widget instead of
+    ;; rebuilding the bar (`pgtk-update-menubar-toggles!`). Emacs has no
+    ;; such table: `widget_value.call_data` is the index there and the
+    ;; widget it belongs to is the menu item itself.
+    ;;
+    ;; A popup's menu (`x-popup-menu`) leaves it #f, so its widgets are
+    ;; not recorded as if they were the bar's.
+
     (define (pgtk-create-one-menuitem d item select-proc group)
       ;; gtkutil.c's `xg_create_one_menuitem` (`:3317`): the widget, its
       ;; tooltip, and the activate signal for a command.
@@ -4122,6 +4155,13 @@
              (made (pgtk-make-menu-item d label key item group))
              (w (car made))
              (type (widget-value-button-type item)))
+        ;; The bar's item for this `call_data' index, for the in-place
+        ;; enabled/selected update. `call_data' is the `menu_items'
+        ;; index (`digest_single_submenu'), and only real entries have
+        ;; one - a separator or a pane label does not.
+        (let ((sink (*menubar-widget-sink*)))
+          (when (and sink (integer? (widget-value-call-data item)))
+            (sink (widget-value-call-data item) w)))
         ;; A submenu item has no command of its own; only a final item
         ;; does, which is the C's `item->call_data && !item->contents`.
         (when (and select-proc
@@ -4220,14 +4260,17 @@
       (let ((size (toolbar:get-icon-size tb)))
         (if (integer? size) size (slot-ref size 'value))))
 
-    (define (pgtk-icon-from-theme d tb names)
-      ;; gtkutil.c's `find_icon_from_name` (`:5962`) over what
-      ;; `x-gtk-map-stock` answers for the file: a name beginning `n:`
-      ;; is a themed icon name, and any other name is tried as one too
-      ;; (Gtk3 has no stock items left, so
-      ;; `gtk_icon_theme_has_icon` is the only test). The first name the
-      ;; theme has is the button's image; `#f` means fall back to the
-      ;; XPM Emacs ships.
+    (define (pgtk-theme-icon-name tb names)
+      ;; `find_icon_from_name`'s search (`gtkutil.c:5962`) without making
+      ;; the image: a name beginning `n:` is a themed icon name, and any
+      ;; other name is tried as one too (Gtk3 has no stock items left, so
+      ;; `gtk_icon_theme_has_icon` is the only test). Answers the first
+      ;; name the theme has, or #f.
+      ;;
+      ;; **The name, not the widget**, because `update_frame_tool_bar`
+      ;; decides whether a button is stale from the icon's *name*
+      ;; (`xg_tool_item_stale_p`), so the search and the `GtkImage` are
+      ;; two steps here as they are there.
       ;;--------------------------------------------------------------
       (let* ((theme (icon-theme:get-for-screen (widget:get-screen tb)))
              (names (if (string? names) (list names) names)))
@@ -4242,21 +4285,33 @@
                                 (char=? (string-ref raw 1) #\:)))
                    (icon (if named? (substring raw 2) raw)))
               (if (icon-theme:has-icon? theme icon)
-                  (pgtk-hold-toolbar-widget!
-                   d (image:new-from-icon-name icon
-                                               (pgtk-toolbar-icon-size tb)))
+                  icon
                   (loop (cdr rest)))))))))
 
-    (define (pgtk-toolbar-image d tb images enabled selected)
+    (define (pgtk-icon-from-theme d tb names)
+      ;; The themed `GtkImage` for the first name the theme has, or #f so
+      ;; the caller falls back to the XPM Emacs ships. The first name the
+      ;; theme has is the button's image because that is what real Emacs
+      ;; draws (see `pgtk-toolbar-image-spec`); this is the widget half.
+      ;;--------------------------------------------------------------
+      (let ((icon (pgtk-theme-icon-name tb names)))
+        (and icon
+             (pgtk-hold-toolbar-widget!
+              d (image:new-from-icon-name icon (pgtk-toolbar-icon-size tb))))))
+
+    (define (pgtk-toolbar-image-spec d tb images enabled selected)
       ;; The `:image` half of `update_frame_tool_bar`
       ;; (`gtkutil.c:5985`): IMAGES is one spec or a vector of four for
       ;; the button states (`enum tool_bar_item_image`,
       ;; `dispextern.h:3500`: enabled-selected, enabled-deselected,
-      ;; disabled-selected, disabled-deselected). The file is first
-      ;; looked up in `x-gtk-map-stock`, and a name the icon theme has
-      ;; becomes the image - the desktop's own icon, as real Emacs
-      ;; draws it; otherwise the XPM file is handed to `GtkImage`,
-      ;; which asks GdkPixbuf for it (no parser of ours in between).
+      ;; disabled-selected, disabled-deselected). Answers a descriptor
+      ;; the stale test can compare - `(icon . NAME)' for a themed icon,
+      ;; `(file . FILE)' for the XPM - rather than a widget.
+      ;;
+      ;; **The theme's icon comes first, the XPM only as the fallback**,
+      ;; which is `update_frame_tool_bar`'s order (`gtkutil.c:5904`): a
+      ;; desktop theme is what real Emacs shows, and the file is what it
+      ;; falls back to when the theme has none of the mapped names.
       ;;--------------------------------------------------------------
       (let* ((image (if (and (vector? images)
                              (>= (vector-length images) 4))
@@ -4268,16 +4323,26 @@
                         images))
              (file (and (pair? image) (image-property image ':file))))
         (and file
-             ;; **The theme's icon first, the XPM only as the
-             ;; fallback**, which is `update_frame_tool_bar`'s order
-             ;; (`gtkutil.c:5904`): a desktop theme is what real Emacs
-             ;; shows, and the file is what it falls back to when the
-             ;; theme has none of the mapped names.
-             (or (pgtk-icon-from-theme d tb (x-gtk-map-stock file))
-                 (let ((w (pgtk-hold-toolbar-widget! d (make <GtkImage>))))
-                   (guard (e (else #f))
-                     (image:set-from-file w file)
-                     w))))))
+             (or (let ((icon (pgtk-theme-icon-name tb (x-gtk-map-stock file))))
+                   (and icon (cons 'icon icon)))
+                 (cons 'file file)))))
+
+    (define (pgtk-toolbar-image-widget d tb descriptor)
+      ;; The `GtkImage' for a descriptor - `gtk_image_new_from_icon_name'
+      ;; or the XPM read by GdkPixbuf, as `update_frame_tool_bar` makes
+      ;; it (`gtkutil.c:6062`). Every proxy is held for the display's
+      ;; life; see `pgtk-hold-toolbar-widget!`.
+      ;;--------------------------------------------------------------
+      (case (car descriptor)
+        ((icon)
+         (pgtk-hold-toolbar-widget!
+          d (image:new-from-icon-name (cdr descriptor)
+                                      (pgtk-toolbar-icon-size tb))))
+        ((file)
+         (let ((w (pgtk-hold-toolbar-widget! d (make <GtkImage>))))
+           (guard (e (else #f))
+             (image:set-from-file w (cdr descriptor))
+             w)))))
 
     ;;----------------------------------------------------------------
     ;; The desktop's tool bar style - `xsettings.c`'s GSettings half
@@ -4387,7 +4452,9 @@
       (let* ((ti (pgtk-hold-toolbar-widget! d (make <GtkToolItem>)))
              (wevent (pgtk-hold-toolbar-widget! d (make <GtkEventBox>)))
              (wb (pgtk-hold-toolbar-widget! d (make <GtkButton>)))
-             (vb (pgtk-hold-toolbar-widget! d (make <GtkBox>))))
+             (vb (pgtk-hold-toolbar-widget! d (make <GtkBox>)))
+             (wl (and label (> (string-length label) 0)
+                      (pgtk-hold-toolbar-widget! d (make <GtkLabel>)))))
         (orientable:set-orientation
          vb (symbol->enum <GtkOrientation>
                           (if horiz 'horizontal 'vertical)))
@@ -4396,10 +4463,9 @@
         (widget:set-focus-on-click wb #f)
         (when (and image (not text-image))
           (box:pack-start vb image #t #t 0))
-        (when (and label (> (string-length label) 0))
-          (let ((wl (pgtk-hold-toolbar-widget! d (make <GtkLabel>))))
-            (label:set-text wl label)
-            (box:pack-start vb wl #t #t 0)))
+        (when wl
+          (label:set-text wl label)
+          (box:pack-start vb wl #t #t 0))
         (when (and image text-image)
           (box:pack-start vb image #t #t 0))
         (container:add wb vb)
@@ -4411,7 +4477,10 @@
                  (lambda (widget)
                    (pgtk-tool-bar-selection! d key)
                    #f))
-        (cons ti wb)))
+        ;; The label widget is answered as well because `xg_tool_item_stale_p`
+        ;; sets a changed label's text on the existing widget rather than
+        ;; recreating the button (`gtkutil.c:6170`).
+        (list ti wb wl)))
 
     (define (pgtk-ensure-toolbar! d)
       ;; `xg_create_tool_bar` (`gtkutil.c:5524`) and `xg_pack_tool_bar`
@@ -4472,51 +4541,111 @@
           (set! (pgtk-toolbar-height d) 0)
           (widget:hide tb))))
 
-    (define (pgtk-fill-toolbar! d tb items)
-      ;; The item loop of `update_frame_tool_bar` (`gtkutil.c:5941`),
-      ;; over the 12-slot vector `update-tool-bar` built. **The buttons
-      ;; are rebuilt rather than patched**: the C keeps a widget per item
-      ;; and replaces only the stale ones, but the whole rebuild happens
-      ;; only when the item vector has changed (`xg_update_tool_bar`'s
-      ;; `last_tool_bar` comparison), which is the same moment the C
-      ;; would be doing per-item work.
+    (define (pgtk-toolbar-enable-slots-only? old new)
+      ;; Whether OLD and NEW (the 12-slot item vectors) differ only in
+      ;; `enabled' flags - what an ordinary command changes when, say,
+      ;; Save becomes applicable or Cut when the mark is set. The slot is
+      ;; `TOOL_BAR_ITEM_ENABLED_P'; anything else - an image, a label,
+      ;; the number of items - needs the widgets rebuilt.
+      ;;--------------------------------------------------------------
+      (and (vector? old)
+           (= (vector-length old) (vector-length new))
+           (let loop ((i 0))
+             (cond
+              ((>= i (vector-length new)) #t)
+              ((equal? (vector-ref old i) (vector-ref new i))
+               (loop (+ i 1)))
+              (else
+               (and (= (modulo i tool-bar-item-nslots)
+                       tool-bar-item-enabled-p)
+                    (boolean? (vector-ref old i))
+                    (boolean? (vector-ref new i))
+                    (loop (+ i 1))))))))
+
+    (define (pgtk-update-toolbar-enables! d old new)
+      ;; Apply an enabled-only change to the existing buttons: one
+      ;; `gtk_widget_set_sensitive` per changed item, which is the loop
+      ;; `update_frame_tool_bar` runs (`gtkutil.c:6107`). Answers #f when
+      ;; the widget table does not match the items, so the caller
+      ;; rebuilds.
+      ;;--------------------------------------------------------------
+      (let* ((states (pgtk-toolbar-widgets d))
+             (n (/ (vector-length new) tool-bar-item-nslots)))
+        (and (vector? states)
+             (= (vector-length states) n)
+             (let loop ((i 0))
+               (cond
+                ((>= i (vector-length new)) #t)
+                ((equal? (vector-ref old i) (vector-ref new i))
+                 (loop (+ i 1)))
+                (else
+                 (let* ((item (quotient i tool-bar-item-nslots))
+                        (cell (vector-ref states item))
+                        (button (and (pair? cell) (cdr cell))))
+                   (and button
+                        (begin
+                          (widget:set-sensitive
+                           button (if (vector-ref new i) #t #f))
+                          (loop (+ i 1)))))))))))
+
+    (define (pgtk-rebuild-toolbar! d tb items)
+      ;; Build every button afresh - `update_frame_tool_bar`'s creation
+      ;; branch without its per-item reuse. The C keeps the existing
+      ;; `GtkToolItem`s when `xg_tool_item_stale_p` says they still
+      ;; describe the item; here a change that only flips an enabled
+      ;; flag never reaches this function
+      ;; (`pgtk-update-toolbar-enables!` patches it), so a rebuild means
+      ;; the items themselves changed and rebuilding is what the C does
+      ;; for the stale ones. The table of what was built is kept for the
+      ;; next enabled-only change.
       ;;--------------------------------------------------------------
       (for-each (lambda (w) (container:remove tb w))
                 (container:get-children tb))
       (let* ((style (tool-bar-get-system-style))
              (text-image (eq? style 'text-image-horiz))
              (horiz (or (eq? style 'both-horiz) text-image))
-             (n (/ (vector-length items) tool-bar-item-nslots)))
+             (n (/ (vector-length items) tool-bar-item-nslots))
+             (states (make-vector n #f)))
         (let loop ((i 0))
           (when (< i n)
             (let* ((base (* i tool-bar-item-nslots))
-                   (ref (lambda (slot) (vector-ref items (+ base slot))))
-                   (type (ref tool-bar-item-type)))
+                   (type (vector-ref items (+ base tool-bar-item-type))))
               (if (eq? type #t)
-                  (toolbar:insert
-                   tb (pgtk-hold-toolbar-widget! d (make <GtkSeparatorToolItem>)) i)
-                  (let* ((enabled (ref tool-bar-item-enabled-p))
-                         (selected (ref tool-bar-item-selected-p))
-                         (vert-only (ref tool-bar-item-vert-only))
-                         ;; "label = (EQ (style, Qimage) || (vert_only &&
-                         ;; horiz)) ? Qnil : PROP (LABEL)".
-                         (label (if (or (eq? style 'image)
-                                        (and vert-only horiz))
-                                    #f
-                                    (ref tool-bar-item-label)))
-                         (image (if (eq? style 'text)
-                                    #f
-                                    (pgtk-toolbar-image
-                                     d tb (ref tool-bar-item-images)
-                                     enabled selected)))
-                         (help (or (ref tool-bar-item-help)
-                                   (ref tool-bar-item-caption)))
+                  (begin
+                    (toolbar:insert
+                     tb (pgtk-hold-toolbar-widget! d (make <GtkSeparatorToolItem>))
+                     i)
+                    (vector-set! states i 'separator))
+                  (let* ((enabled (vector-ref items (+ base tool-bar-item-enabled-p)))
+                         (selected (vector-ref items (+ base tool-bar-item-selected-p)))
+                         (vert-only (vector-ref items (+ base tool-bar-item-vert-only)))
+                         (raw-label (if (or (eq? style 'image)
+                                            (and vert-only horiz))
+                                        #f
+                                        (vector-ref items (+ base tool-bar-item-label))))
+                         ;; The C passes NULL for a nil label and "" for a
+                         ;; non-string one (`gtkutil.c:6008`).
+                         (label (cond ((not raw-label) #f)
+                                      ((string? raw-label) raw-label)
+                                      (else "")))
+                         (descriptor (if (eq? style 'text)
+                                         #f
+                                         (pgtk-toolbar-image-spec
+                                          d tb
+                                          (vector-ref items (+ base tool-bar-item-images))
+                                          enabled selected)))
+                         (help (or (vector-ref items (+ base tool-bar-item-help))
+                                   (vector-ref items (+ base tool-bar-item-caption))))
+                         (image (and descriptor
+                                     (pgtk-toolbar-image-widget d tb descriptor)))
                          (made (pgtk-make-tool-item
-                                d (ref tool-bar-item-key) help image label
-                                horiz text-image)))
-                    (widget:set-sensitive (cdr made) (if enabled #t #f))
-                    (toolbar:insert tb (car made) i))))
-            (loop (+ i 1))))))
+                                d (vector-ref items (+ base tool-bar-item-key))
+                                help image label horiz text-image)))
+                    (widget:set-sensitive (cadr made) (if enabled #t #f))
+                    (toolbar:insert tb (car made) i)
+                    (vector-set! states i (cons (car made) (cadr made))))))
+            (loop (+ i 1))))
+        (set! (pgtk-toolbar-widgets d) states)))
 
     (define (pgtk-grow-by-toolbar! d)
       ;; `adjust_frame_size (f, -1, -1, 2, false, Qtool_bar_lines)`
@@ -4572,17 +4701,34 @@
                                (not (pgtk-toolbar-hidden? d))
                                (equal? (cons style items)
                                        (pgtk-toolbar-items d)))
-                    (pgtk-fill-toolbar! d tb items)
-                    (set! (pgtk-toolbar-items d) (cons style items))
-                    (widget:show-all tb)
-                    (set! (pgtk-toolbar-hidden? d) #f)
-                    ;; The C's `if (xg_update_tool_bar_sizes (f))
-                    ;; adjust_frame_size (...)` at the end of
-                    ;; `update_frame_tool_bar`. It runs here, when the
-                    ;; bar was (re)built or shown - not on every
-                    ;; redisplay; `tb_size_cb` above catches the later
-                    ;; allocation changes.
-                    (pgtk-grow-by-toolbar! d))))))))
+                    (let ((old (pgtk-toolbar-items d)))
+                      ;; **An enabled flag moving is patched, not
+                      ;; rebuilt.** Emacs walks its `GtkToolItem`s and
+                      ;; calls `gtk_widget_set_sensitive` on each
+                      ;; (`gtkutil.c:6107`), which is cheap in C; here a
+                      ;; rebuild is hundreds of guile-gi calls (measured
+                      ;; seconds per click when Save/Cut flip), so the
+                      ;; same observable result is reached by touching
+                      ;; the buttons that changed and nothing else.
+                      ;; Anything beyond an enabled flag still rebuilds,
+                      ;; as `xg_tool_item_stale_p` would make it.
+                      (if (and (pair? old)
+                               (eq? (car old) style)
+                               (pgtk-toolbar-enable-slots-only? (cdr old) items)
+                               (pgtk-update-toolbar-enables! d (cdr old) items))
+                          (set! (pgtk-toolbar-items d) (cons style items))
+                          (begin
+                            (pgtk-rebuild-toolbar! d tb items)
+                            (set! (pgtk-toolbar-items d) (cons style items))
+                            (widget:show-all tb)
+                            (set! (pgtk-toolbar-hidden? d) #f)
+                            ;; The C's `if (xg_update_tool_bar_sizes (f))
+                            ;; adjust_frame_size (...)` at the end of
+                            ;; `update_frame_tool_bar`. It runs here, when the
+                            ;; bar was (re)built or shown - not on every
+                            ;; redisplay; `tb_size_cb` above catches the later
+                            ;; allocation changes.
+                            (pgtk-grow-by-toolbar! d)))))))))))
 
     ;;----------------------------------------------------------------
     ;; Popup menus - `pgtk_menu_show` (`pgtkmenu.c:588`)
@@ -5276,15 +5422,24 @@
         ;; lives is the crash `pgtk-hold-widget!` exists to prevent.
         (for-each (lambda (w) (container:remove bar w))
                   (container:get-children bar))
+        (set! (pgtk-menubar-widgets d) '())
         (if (null? (widget-value-contents root))
             (begin
               (widget:hide bar)
               (set! (pgtk-menubar-hidden? d) #t))
             (begin
-              (pgtk-create-menus (widget-value-contents root) d
-                                 (lambda (call-data)
-                                   (pgtk-menu-selection! d call-data))
-                                 bar #t)
+              ;; The widget for each `call_data' index, so the next
+              ;; enabled/selected-only change can be patched in place -
+              ;; see `pgtk-update-menubar-toggles!`.
+              (parameterize ((*menubar-widget-sink*
+                              (lambda (i w)
+                                (set! (pgtk-menubar-widgets d)
+                                      (cons (cons i w)
+                                            (pgtk-menubar-widgets d))))))
+                (pgtk-create-menus (widget-value-contents root) d
+                                   (lambda (call-data)
+                                     (pgtk-menu-selection! d call-data))
+                                   bar #t))
               (widget:show-all bar)
               (set! (pgtk-menubar-hidden? d) #f)))))
 
@@ -5302,9 +5457,64 @@
           (set! (pgtk-menubar-hidden? d) #t)
           (set! (pgtk-menubar-vector d) #f)
           (set! (pgtk-menubar-used d) 0)
+          (set! (pgtk-menubar-widgets d) '())
           (for-each (lambda (w) (container:remove bar w))
                     (container:get-children bar))
           (widget:hide bar))))
+
+    (define (pgtk-menubar-widget-at d index)
+      ;; The widget built for the `menu_items' entry whose base index is
+      ;; INDEX, or #f when the bar's widgets are not from this array.
+      ;;--------------------------------------------------------------
+      (let ((cell (assv index (pgtk-menubar-widgets d))))
+        (and cell (cdr cell))))
+
+    (define (pgtk-update-menubar-toggles! d old new)
+      ;; Apply a change that is only enabled/selected flags to the
+      ;; existing widgets. Answers #f when anything else differs, so the
+      ;; caller rebuilds.
+      ;;
+      ;; **This is a performance departure from `set_frame_menubar`.** The
+      ;; C compares `menu_items` with `memcmp` and recreates the whole
+      ;; widget tree when it differs (`xmenu.c:1082`), which in C is
+      ;; cheap. Here every GObject call crosses guile-gi at a few
+      ;; milliseconds (GOOPS dispatch), so a rebuild that only reflects
+      ;; `:enable' changing - the ordinary case when the selected window
+      ;; moves to a read-only buffer, which disables the Replace items -
+      ;; cost seconds per click. When the arrays differ only in booleans
+      ;; (the enabled and selected slots), each item is patched instead
+      ;; (`gtk_widget_set_sensitive`, `gtk_check_menu_item_set_active`)
+      ;; and no widget is touched otherwise. Anything else - a label, a
+      ;; key, a structure - still rebuilds, which is the C's behaviour.
+      ;;
+      ;; The mapping is exact rather than a guess: `call_data' is the
+      ;; `menu_items' index, the enabled flag is at base+1
+      ;; (`MENU_ITEMS_ITEM_ENABLE') and selected at base+6
+      ;; (`MENU_ITEMS_ITEM_SELECTED'), so a differing index is an
+      ;; enabled slot only when INDEX-1 is a known item, and a selected
+      ;; slot only when INDEX-6 is.
+      ;;--------------------------------------------------------------
+      (and old
+           (= (vector-length old) (vector-length new))
+           (let loop ((i 0))
+             (cond
+              ((>= i (vector-length new)) #t)
+              ((equal? (vector-ref old i) (vector-ref new i))
+               (loop (+ i 1)))
+              (else
+               (let ((a (vector-ref old i)) (b (vector-ref new i)))
+                 (and (boolean? a) (boolean? b)
+                      (let ((w (pgtk-menubar-widget-at d (- i 1))))
+                        (if w
+                            (begin (widget:set-sensitive w (if b #t #f))
+                                   (loop (+ i 1)))
+                            (let ((w (pgtk-menubar-widget-at d (- i 6))))
+                              (and w
+                                   (begin
+                                     (when (is-a? w <GtkCheckMenuItem>)
+                                       (check-menu-item:set-active
+                                        w (if b #t #f)))
+                                     (loop (+ i 1))))))))))))))
 
     (define (pgtk-set-frame-menubar d)
       ;; GNU Emacs's `set_frame_menubar (f, false)` (`xmenu.c:970`): build
@@ -5415,7 +5625,13 @@
               (unless (and old
                            (> (vector-length vector) 0)
                            (equal? vector old))
-                (pgtk-install-menubar! d items (reverse submenus) vector))))))))))))))
+                (if (pgtk-update-menubar-toggles! d old vector)
+                    ;; Only enabled/selected flags moved: the widgets
+                    ;; already describe their items, so patch them and
+                    ;; keep the tree (see the function for why the C's
+                    ;; rebuild would be a performance departure here).
+                    (set! (pgtk-menubar-vector d) vector)
+                    (pgtk-install-menubar! d items (reverse submenus) vector)))))))))))))))
 
     (define (pgtk-title-frame! frame)
       ;; Give FRAME's window the frame's name as its title. GNU Emacs's

@@ -852,23 +852,29 @@
 
     (define (%maps-event-binding maps event accept-default)
       ;; The binding of EVENT in a *list of keymaps* (Emacs's "KEYMAP can
-      ;; also be a list of keymaps"), in `access_keymap_1''s order: a
-      ;; specific binding in any of the maps wins, and the *earliest*
-      ;; map's `(t . DEF)' default is the fallback - the C's
-      ;; `t_ok = 0' after the first one found, which is why an earlier
-      ;; map's default beats a later one's.
+      ;; also be a list of keymaps"). **This is `access-keymap`'s own
+      ;; list walk** - `access_keymap_1`'s loop over the list - and the
+      ;; reason it must be that one and not a first-match search: when
+      ;; the event is a *prefix* in more than one map the C accumulates
+      ;; them into `(keymap PREFIX...)` and the rest of the sequence is
+      ;; looked up in all of them (`keymap.c:416-420`). A buffer whose
+      ;; mode map adds `[menu-bar MODE]` therefore still finds the
+      ;; global `[menu-bar file]`; the first-match version stopped at
+      ;; the mode's `menu-bar` prefix and answered nil, which is why F10
+      ;; did nothing in a C buffer.
+      ;;
+      ;; The `(t . DEF)' default is the fallback when nothing specific is
+      ;; found, and the *earliest* map's default wins - the C's `t_ok =
+      ;; 0' after the first one found.
       ;;--------------------------------------------------------------
-      (let specific ((rest maps))
-        (cond ((null? rest)
-               (and accept-default
-                    (let default ((rest maps))
-                      (cond ((null? rest) #f)
-                            ((not (keymap-type? (car rest))) (default (cdr rest)))
-                            ((%keymap-t-default-chain (car rest)))
-                            (else (default (cdr rest)))))))
-              ((not (keymap-type? (car rest))) (specific (cdr rest)))
-              ((access-keymap (car rest) event))
-              (else (specific (cdr rest))))))
+      (or (access-keymap maps event)
+          (and accept-default
+               (let default ((rest maps))
+                 (cond ((null? rest) #f)
+                       ((not (keymap-type? (car rest)))
+                        (default (cdr rest)))
+                       ((%keymap-t-default-chain (car rest)))
+                       (else (default (cdr rest))))))))
 
     (define (lookup-key keymap key . rest)
       ;; GNU Emacs's `lookup-key' (`keymap.c:1264'): "Look up key

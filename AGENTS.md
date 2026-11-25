@@ -17781,3 +17781,70 @@ the mode setup earlier in the file.
 3. `c-buffer-is-cc-mode` stays a parameter set by the mode init (the
    documented stand-in); `c-leave-cc-mode-mode` on
    `change-major-mode-hook` is what clears it.
+
+# Handoff — cc-mode menus, implicit int, and the keymap list (2026-11-26)
+
+Three cc-mode gaps closed, plus a shared-primitive bug the first exposed.
+DEPARTURES.md's section of this date has the C and the measured tables;
+the things the next session needs:
+
+* **`c-mode-menu` is carried** (`cc-langs.scm`, replacing the "not
+  carried" note) with the two `easy-menu-define` calls in `cc-mode.scm`
+  (C after its mode definition, C++ before its own, Emacs's order). The
+  menu is less the items whose commands do not exist here:
+  "Macro Expand Region" (`c-macro-expand`, a cpp subprocess), the Style
+  submenu's two guess entries (`cc-guess.el`) and the "Subword mode"
+  toggle (`cc-subword.el`). `:selected` holds the *accessor call*
+  (`(c-syntactic-indentation)`), not the variable symbol, because the
+  variables are accessors here. A command that Emacs writes as a *form*
+  ("Uncomment Region", "Show Current Style Name") is evaluated in
+  cc-mode's module, so its names must be imported there - `message`,
+  `region-beginning`, `region-end` were added. Verified live on a Gtk
+  editor: comment/uncomment on a region, the syntactic-indentation
+  toggle, and the style message.
+* **`c-forward-type`'s C implicit-int branch** (`cc-engine.scm`, the
+  `register count;` case) had a stale signalling stub where Emacs calls
+  `c-forward-declarator`; it is the C's expression now, six rows
+  Emacs-measured in `cc-engine-test.scm`.
+* **`lookup-key` over a keymap *list* was a first-match search.**
+  `key-binding` passes `current-active-maps`, and Emacs's
+  `access_keymap_1` accumulates the *prefixes* found in every map
+  (`keymap.c:416-420`). `%maps-event-binding` did not, so a mode map
+  whose menu bound `[menu-bar MODE]` hid the global `[menu-bar file]` -
+  `(key-binding [menu-bar file])` was nil in a C buffer and **F10 opened
+  no menu**. It now delegates to `access-keymap`'s list walk.
+  `subr-test.scm` pins both measured answers; `tools/pty-check.py`'s
+  `c-menu` is the end-to-end one (bar row has `C`; F10 + three rights
+  drops the C menu down).
+
+A correction worth carrying: **`message` formats with Emacs's `%`
+conversions** (`styled_format`), not Guile's `~a`; a stale note misled
+the first version of the style-name item into printing its format
+literally.
+
+State: cc-mode-test 136, cc-engine-test 635, subr-test 115; all 104
+suites pass and the full pty battery was run on the settled tree. The
+remaining cc-mode list is unchanged: the other five modes (objc, java,
+idl, pike, awk - mechanical, with `c-beginning-of-objc-method-header`
+still a stub and `cc-awk.el` unported), java's modifier-keyword
+fontification bug, the fill differential's known point-handling cases,
+and the small not-carried items named in cc-mode.scm's header.
+
+# A Gtk click's menu/tool-bar rebuild (2026-11-26)
+
+The ~4 s click latency Chris reported was both bars being rebuilt on the
+redisplay that a click triggers, with each guile-gi call costing
+milliseconds (76 % of the profile in GOOPS `class-precedence-list`).
+Measured: the menu array differed in exactly two `enabled` booleans (the
+Replace items, when the window switched to a read-only buffer), and the
+tool bar's did the same. Both bars now patch enable-only changes in
+place (`pgtk-update-menubar-toggles!`, `pgtk-toolbar-enable-slots-only?` +
+`pgtk-update-toolbar-enables!`); anything else rebuilds, as Emacs's
+`set_frame_menubar` always does and as our coarser-than-Emacs tool bar
+does. Click processing measured **2.86 s -> 0.20-0.41 s**. The first,
+faithful per-item tool-bar reuse loop SIGSEGV'd at Guile 3.0.11's
+default optimization level (fine at -O1), so the two-tier shape above is
+what ships; DEPARTURES.md has the numbers and the named departures.
+`pgtk-test.scm` gained `schemacs_pgtk_bar_patch`; the live checks that
+matter (widget `sensitive` flipping 0->1->0, a non-boolean change
+answering "rebuild") were run against a real Gtk display.

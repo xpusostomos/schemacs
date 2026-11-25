@@ -75,7 +75,7 @@
        set!font-lock-defaults! font-lock-ensure
        font-lock-extend-after-change-region-function)
  (only (schemacs font-core) font-lock-mode)
- (only (schemacs keymap) lookup-key)
+ (only (schemacs keymap) lookup-key keymapp)
  (only (schemacs subr) kbd)
  (only (schemacs syntax) char-syntax)
  (only (schemacs progmodes cc-cmds)
@@ -93,7 +93,8 @@
        c++-mode-map c++-mode-syntax-table c-mode-hook c++-mode-hook
        c-extend-after-change-region c-basic-common-init c-common-init
        c-font-lock-init c-initialize-cc-mode c-init-language-vars-for
-       c-before-context-fl-expand-region c-font-lock-fontify-region)
+       c-before-context-fl-expand-region c-font-lock-fontify-region
+       c-c-menu c-c++-menu)
  (only (schemacs progmodes cc-fonts)
        c-force-redisplay *c-font-lock-fontify-region-function*))
 
@@ -1084,3 +1085,47 @@
       (c-before-context-fl-expand-region 20 24))))
 
 (test-end "schemacs_editor_cc_mode_definitions")
+
+;;----------------------------------------------------------------------
+;; The mode menus (`cc-mode.el:2880', `:3007')
+;;----------------------------------------------------------------------
+;; The `c-mode-menu' constant is Emacs's, less the items whose commands
+;; this tree does not have (named in cc-langs' comment): a menu item
+;; naming a missing command signals when it is clicked. These pin the
+;; data and the two bindings, not the drawing; the terminal battery's
+;; `c-menu' check is the end-to-end one.
+(define (menu-labels menu)
+  (let loop ((l menu) (acc '()))
+    (cond ((null? l) (reverse acc))
+          ((string? (car l)) (loop (cdr l) (cons (car l) acc)))
+          ((vector? (car l))
+           (loop (cdr l) (cons (vector-ref (car l) 0) acc)))
+          (else (loop (cdr l) acc)))))
+
+(test-begin "schemacs_editor_cc_mode_menu")
+(let ((menu (c-lang-const c-mode-menu c)))
+  (test-equal "the first item is Comment Out Region"
+              "Comment Out Region" (vector-ref (car menu) 0))
+  (test-assert "the cpp items are present for a language with a preprocessor"
+               (member "Backslashify" (menu-labels menu)))
+  (let* ((toggle (car (reverse menu)))
+         (item (car (cdr toggle))))
+    (test-equal "the Toggle submenu's first item is Syntactic indentation"
+                "Syntactic indentation" (vector-ref item 0))
+    (test-equal "whose :selected is the accessor call, not the variable"
+                '(c-syntactic-indentation) (vector-ref item 5))
+    (test-equal "and whose style is toggle"
+                'toggle (vector-ref item 3))))
+
+(let ((menu (c-lang-const c-mode-menu awk)))
+  (test-assert "awk, with no preprocessor, has no Backslashify item"
+               (not (member "Backslashify" (menu-labels menu)))))
+
+(test-assert "c-c-menu is a keymap" (keymapp c-c-menu))
+(test-assert "the C menu is bound in c-mode-map under [menu-bar c]"
+             (keymapp (lookup-key c-mode-map (vector 'menu-bar 'c))))
+(test-assert "c-c++-menu is a keymap" (keymapp c-c++-menu))
+(test-assert "and bound in c++-mode-map"
+             (keymapp (lookup-key c++-mode-map
+                                  (vector 'menu-bar (string->symbol "c++")))))
+(test-end "schemacs_editor_cc_mode_menu")

@@ -41,7 +41,12 @@
                pgtk-popup-build-tree
                ;; The input queue and its drain: a key that arrives while
                ;; the editor is busy must not be stranded.
-               pgtk-queue pgtk-drain-queue!)
+               pgtk-queue pgtk-drain-queue!
+               ;; The bar-patch rules - see the groups at the end:
+               ;; enabled-only changes are patched, anything else
+               ;; rebuilds.
+               pgtk-menubar-widgets pgtk-menubar-widget-at
+               pgtk-toolbar-enable-slots-only?)
          pt:)
  (prefix (schemacs faces) f:)
  ;; The command this file can test and the terminal suites cannot: it is
@@ -1835,3 +1840,59 @@
                 white
                 (pixel 4 (+ bottom 3)))))
 (test-end "schemacs_pgtk_text_area_clip")
+
+;;------------------------------------------------------------------
+;; The two bar-patch rules
+;;
+;; A click that only changes what is applicable - Save becoming
+;; enabled, Cut when the mark is set, the Replace items in a read-only
+;; buffer - must not rebuild a widget tree: every GObject call crosses
+;; guile-gi at milliseconds, so rebuilding the menu bar and tool bar was
+;; seconds per click. These pin the rules that decide what is patched.
+;;------------------------------------------------------------------
+(test-begin "schemacs_pgtk_bar_patch")
+;; The tool bar's vector is `tool-bar-item-nslots' (12) per item, with
+;; the enabled flag in slot 1 (`TOOL_BAR_ITEM_ENABLED_P', keyboard.c).
+(let* ((n 12)
+       (a (make-vector (* 2 n) #f))
+       (b (vector-copy a)))
+  (vector-set! a 1 #t)                  ; item 0 enabled
+  (vector-set! b 1 #f)                  ; item 0 disabled
+  (vector-set! a (+ n 1) #f)            ; item 1 disabled
+  (vector-set! b (+ n 1) #f)
+  (test-assert "an enabled flag moving is an enabled-only change"
+               (pt:pgtk-toolbar-enable-slots-only? a b))
+  (test-assert "and the other direction is too"
+               (pt:pgtk-toolbar-enable-slots-only? b a))
+  (let ((c (vector-copy b)))
+    (vector-set! c 5 'a-different-command)
+    (test-assert "a command changing is not"
+                 (not (pt:pgtk-toolbar-enable-slots-only? b c))))
+  (let ((c (vector-copy b)))
+    (vector-set! c 2 #t)                ; the selected slot
+    (test-assert "a selected flag changing is not (it chooses an image)"
+                 (not (pt:pgtk-toolbar-enable-slots-only? b c))))
+  (let ((c (vector-copy b)))
+    (vector-set! c 1 'not-a-boolean)
+    (test-assert "a non-boolean where the flag belongs is not"
+                 (not (pt:pgtk-toolbar-enable-slots-only? b c))))
+  (test-assert "the same vector is trivially an enabled-only change"
+               (pt:pgtk-toolbar-enable-slots-only? b b))
+  (test-assert "a different number of items is not"
+               (not (pt:pgtk-toolbar-enable-slots-only? b (vector-copy b 0 n)))))
+
+;; `pgtk-menubar-widget-at` is the map from a `menu_items' index - the
+;; `call_data' a menu item's signal carries - to the widget it was built
+;; as. The enabled flag of the item whose name is at INDEX is at
+;; INDEX+1, selected at INDEX+6 (`MENU_ITEMS_ITEM_ENABLE'/`_SELECTED'),
+;; which is what the patch uses.
+(let ((d (make pt:<pgtk-display>)))
+  (set! (pt:pgtk-menubar-widgets d) (list (cons 239 'the-widget)))
+  (test-equal "the widget built for an item index"
+              'the-widget (pt:pgtk-menubar-widget-at d 239))
+  (test-assert "no widget for an index the bar did not build"
+               (not (pt:pgtk-menubar-widget-at d 240)))
+  (set! (pt:pgtk-menubar-widgets d) '())
+  (test-assert "no widget before the bar is built"
+               (not (pt:pgtk-menubar-widget-at d 239))))
+(test-end "schemacs_pgtk_bar_patch")

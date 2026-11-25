@@ -363,9 +363,64 @@
              ops)
             ':test equal?)))))
 
-;;; `c-mode-menu' is not carried yet: its value is a menu definition that
-;;; `easy-menu-define' (cc-mode.el's 8 uses) turns into a keymap, and
-;;; that primitive is not ported. The constant lands with it.
+;;; The mode menu's items (`cc-langs.el:275'). **Less the items whose
+;;; commands this tree does not have** - "Macro Expand Region"
+;;; (`c-macro-expand' runs cpp as a subprocess), the Style submenu's
+;;; two guess entries (`cc-guess.el') and the "Subword mode" toggle
+;;; (`cc-subword.el'); a menu item naming a missing command signals
+;;; when it is clicked. That is the same accounting `menu-bar.scm'
+;;; keeps for the menu bar. **The `:selected' values are calls, not the
+;;; variable symbols Emacs writes**, because this tree's variables are
+;;; accessor procedures; a bare symbol would evaluate to the procedure
+;;; and the toggle would always look selected.
+(c-lang-defconst c-mode-menu
+  "The definition for the mode menu.  The menu title is prepended to
+this before it's fed to `easy-menu-define'."
+  t
+  (append
+   (list
+    (vector "Comment Out Region" 'comment-region
+            '(c-fn-region-is-active-p))
+    (vector "Uncomment Region"
+            (list 'comment-region '(region-beginning) '(region-end)
+                  '(list 4))
+            '(c-fn-region-is-active-p))
+    (vector "Indent Expression" 'c-indent-exp
+            (list 'memq '(char-after) (list 'list #\( #\[ #\{)))
+    (vector "Indent Line or Region" 'c-indent-line-or-region #t)
+    (vector "Fill Comment Paragraph" 'c-fill-paragraph #t)
+    "----"
+    (vector "Backward Statement" 'c-beginning-of-statement #t)
+    (vector "Forward Statement" 'c-end-of-statement #t))
+   ;; "Only applicable if there's a cpp preprocessor."
+   (if (%c-true (c-lang-const c-opt-cpp-prefix))
+       (list
+        (vector "Up Conditional" 'c-up-conditional #t)
+        (vector "Backward Conditional" 'c-backward-conditional #t)
+        (vector "Forward Conditional" 'c-forward-conditional #t)
+        "----"
+        (vector "Backslashify" 'c-backslash-region
+                '(c-fn-region-is-active-p)))
+       '())
+   (list
+    "----"
+    (list "Style..."
+          (vector "Set Style..." 'c-set-style #t)
+          (vector "Show Current Style Name"
+                  (list 'message
+                        "Style Name: %s"
+                        '(c-indentation-style))
+                  #t))
+    "----"
+    (list "Toggle..."
+          (vector "Syntactic indentation" 'c-toggle-syntactic-indentation
+                  ':style 'toggle ':selected '(c-syntactic-indentation))
+          (vector "Electric mode" 'c-toggle-electric-state
+                  ':style 'toggle ':selected '(c-electric-flag))
+          (vector "Auto newline" 'c-toggle-auto-newline
+                  ':style 'toggle ':selected '(c-auto-newline))
+          (vector "Hungry delete" 'c-toggle-hungry-state
+                  ':style 'toggle ':selected '(c-hungry-delete-key))))))
 
 (c-lang-defconst c-make-no-parens-syntax-table
   ;; "A variant of the standard syntax table which is used to find

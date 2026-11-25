@@ -7835,10 +7835,14 @@
                            (or (not (let ((re (%c-langvar 'c-type-decl-prefix-key)))
                                       (and re (looking-at re))))
                                (and (eq? (char-after (point)) #\()
-                                    (not (save-excursion
-                                           ;; `c-forward-declarator'
-                                           ;; (`:10161') is not ported.
-                                           (error "c-forward-type: the C implicit-int branch waits on `c-forward-declarator', which is not ported"))))))))
+                                    ;; "A C specifier followed by an
+                                    ;; implicit int, e.g. \"register
+                                    ;; count;\"": a `(' that starts a
+                                    ;; declarator is not one
+                                    ;; (`cc-engine.el:9577').
+                                    (%c-false
+                                     (save-excursion
+                                       (c-forward-declarator))))))))
                (goto-char prefix-end-pos)
                (set! pos (point))
                (unless stop-at-end

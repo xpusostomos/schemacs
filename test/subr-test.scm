@@ -352,6 +352,29 @@
            (not (keymap-type? prefix))
            (eq? 'py (lookup-key prefix (kbd "y")))))))
 
+;; A *list* of keymaps - what `key-binding` hands `lookup-key` - resolves
+;; each prefix across the whole list, not map by map. That is
+;; `access_keymap_1`'s accumulation (`keymap.c:416-420`), and the case
+;; that found it: a mode map that adds `[menu-bar c]` must not hide the
+;; global `[menu-bar file]`, or F10 opened no menu in a C buffer. Both
+;; answers are Emacs 31.1's for the same maps.
+(test-assert "a keymap list finds a binding another map's prefix does not hide"
+  (let ((mode (make-sparse-keymap)) (global (make-sparse-keymap))
+        (menu (make-sparse-keymap)) (file-menu (make-sparse-keymap)))
+    (define-key mode (vector 'menu-bar 'c) menu)
+    (define-key global (vector 'menu-bar 'file) file-menu)
+    (eq? file-menu (lookup-key (list mode global) (vector 'menu-bar 'file)))))
+
+(test-assert "and the list's prefix combines both maps"
+  (let ((mode (make-sparse-keymap)) (global (make-sparse-keymap)))
+    (define-key mode (vector 'menu-bar 'c) 'cm)
+    (define-key global (vector 'menu-bar 'file) 'fm)
+    (let ((prefix (lookup-key (list mode global) (vector 'menu-bar))))
+      (and (keymapp prefix)
+           (not (keymap-type? prefix))
+           (eq? 'cm (lookup-key prefix (vector 'c)))
+           (eq? 'fm (lookup-key prefix (vector 'file)))))))
+
 (test-assert "define-key does not inherit: a parent's command is not a prefix"
   (let ((parent (make-sparse-keymap)) (child (make-sparse-keymap)))
     (define-key parent (kbd "C-c") 'parent-command)

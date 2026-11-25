@@ -2113,9 +2113,21 @@
                       ((not keep-pred)
                          ;; a one-shot map: the next command ends it
                          #f)
-                      ((and (not (eq? map
-                                      (car (or *overriding-terminal-local-map*
-                                               '()))))
+                      ((and (not (let ((top *overriding-terminal-local-map*))
+                                   ;; GNU Emacs's `(eq map (car
+                                   ;; overriding-terminal-local-map))':
+                                   ;; **Elisp's `(car nil)' is nil**, so
+                                   ;; with no map pushed the test is
+                                   ;; `(eq map nil)' - false - and this
+                                   ;; clause then falls through on its
+                                   ;; `memq'. A Scheme `(car '())' is an
+                                   ;; error, and it crashed the editor
+                                   ;; the day a stale clearfun met an
+                                   ;; empty map list (the drag's map had
+                                   ;; been cleared under it): "Wrong
+                                   ;; type argument in position 1
+                                   ;; (expecting pair): ()".
+                                   (and (pair? top) (eq? map (car top)))))
                             (memq map (or *overriding-terminal-local-map*
                                           '())))
                        ;; some *other* transient map is on top of this
