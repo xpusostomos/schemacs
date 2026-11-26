@@ -17824,11 +17824,13 @@ literally.
 
 State: cc-mode-test 136, cc-engine-test 635, subr-test 115; all 104
 suites pass and the full pty battery was run on the settled tree. The
-remaining cc-mode list is unchanged: the other five modes (objc, java,
-idl, pike, awk - mechanical, with `c-beginning-of-objc-method-header`
-still a stub and `cc-awk.el` unported), java's modifier-keyword
-fontification bug, the fill differential's known point-handling cases,
-and the small not-carried items named in cc-mode.scm's header.
+remaining cc-mode list: the other two modes (`objc-mode`, which needs
+`c-beginning-of-objc-method-header` - still a signalling stub - and
+`awk-mode`, which needs `cc-awk.el`), the fill differential's known
+point-handling cases, and the small not-carried items named in
+cc-mode.scm's header. (The other three modes, and the Java
+modifier-keyword fontification bug, landed later the same day - see
+"The other language modes" section below.)
 
 # A Gtk click's menu/tool-bar rebuild (2026-11-26)
 
@@ -17848,3 +17850,54 @@ what ships; DEPARTURES.md has the numbers and the named departures.
 `pgtk-test.scm` gained `schemacs_pgtk_bar_patch`; the live checks that
 matter (widget `sensitive` flipping 0->1->0, a non-boolean change
 answering "rebuild") were run against a real Gtk display.
+
+# The other language modes, and the class-bit bug behind the Java faces
+# (2026-11-26)
+
+`java-mode`, `idl-mode` and `pike-mode` are in `cc-mode.scm` (Emacs's
+`cc-mode.el:3099'-`:3300`, clause for clause), with their syntax
+tables, maps, menus (`c-java-menu`, `c-idl-menu`, `c-pike-menu`),
+`c-Java-defun-prompt-regexp` (Emacs's 399 characters exactly; `\^?`,
+`\f` and `\v` are spelled `\x7f`, `\x0c` and `\x0b` in Scheme strings),
+the autoloads in `files.scm`'s `%mode-autoloads`, and bodies holding
+`abbrev-mode`'s `setq` (as the buffer-local slot `abbrev.scm` reads),
+`cc-imenu-init` for Java, and the imenu calls Emacs leaves commented
+out for IDL and Pike. Not carried, and named in the file: the XEmacs
+`easy-menu-add` branch, and Pike's `C-c C-e` (`c-macro-expand` runs cpp
+as a subprocess; the menu's Macro Expand Region is omitted for the same
+reason).
+
+That work closed the long-open Java fontification bug, and it was not
+in cc-mode. `java-mode` on its first real buffer fontified
+`public class C {` with no type face on `C` and no function-name face
+on a method name. Java's `c-known-type-key` ends in
+`[[:upper:]]\sw*[[:lower:]]\sw` and font-lock runs with case folding
+off, and the regexp engine's `[[:upper:]]` matched `p`: the compiler
+laid the charset class bits out by an older Emacs's `BIT_*` table while
+the matcher's class test read the C's current one, so upper and lower
+were transposed. Folding ON hides it (both arms match either case) and
+a *string* search hides it (the fastmap prunes the start candidate
+first, through the member test that had the right correspondence), which
+is why six C/C++ face differentials and every search test passed;
+`looking-at` has no fastmap, and that is the path font-lock's matchers
+take. `regex-emacs.scm` now carries `regex-emacs.c:1387`'s `BIT_*`
+values and the C's class chain in both tests.
+
+The method note is the tree's own: **a port can have Emacs's shape and
+still be wrong.** Each half was internally plausible; only a
+whole-buffer face differential on a *capitalised* name exposed the
+disagreement. The regressions are `search-test.scm`'s class-bit group,
+`cc-fonts-test.scm`'s Java fixture and `cc-mode-test.scm`'s real-mode
+Java faces - the first two seen failing on the old engine.
+
+## State and next
+
+- `cc-mode-test.scm` 145, `cc-fonts-test.scm` 61, `search-test.scm`
+  112; all 104 suites pass, and the full 109-check pty battery passes
+  on the settled tree (`java-mode` is the new end-to-end check: a
+  `.java` file opens and the mode line says `Java//l`).
+- Next in cc-mode: `objc-mode` (it needs
+  `c-beginning-of-objc-method-header`, still a signalling stub in
+  `cc-engine.scm`) and `awk-mode` (it needs `cc-awk.el`); then the fill
+  differential's known point-handling cases and the small not-carried
+  items named in `cc-mode.scm`'s header.

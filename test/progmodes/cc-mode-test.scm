@@ -24,7 +24,7 @@
        erase-buffer major-mode mode-name hook-value)
  (only (schemacs editfns) insert goto-char point point-min point-max widen
        save-restriction save-excursion buffer-substring)
- (only (schemacs search) match-beginning match-end)
+ (only (schemacs search) match-beginning match-end string-match)
  (only (schemacs syntax) set-syntax-table)
  (only (schemacs marker) marker-position)
  (only (schemacs insdel) *before-change-functions* *after-change-functions*)
@@ -94,7 +94,12 @@
        c-extend-after-change-region c-basic-common-init c-common-init
        c-font-lock-init c-initialize-cc-mode c-init-language-vars-for
        c-before-context-fl-expand-region c-font-lock-fontify-region
-       c-c-menu c-c++-menu)
+       c-c-menu c-c++-menu
+       java-mode idl-mode pike-mode
+       java-mode-map idl-mode-map pike-mode-map
+       java-mode-hook idl-mode-hook pike-mode-hook
+       c-java-menu c-idl-menu c-pike-menu
+       c-Java-defun-prompt-regexp)
  (only (schemacs progmodes cc-fonts)
        c-force-redisplay *c-font-lock-fontify-region-function*))
 
@@ -1129,3 +1134,98 @@
              (keymapp (lookup-key c++-mode-map
                                   (vector 'menu-bar (string->symbol "c++")))))
 (test-end "schemacs_editor_cc_mode_menu")
+
+;;----------------------------------------------------------------------
+;; Java, IDL and Pike (`cc-mode.el:3099'-`:3230')
+;;----------------------------------------------------------------------
+;; The three mode definitions, their menus and their autoloads. Every
+;; expectation is GNU Emacs 31.1's own answer, measured on the same
+;; buffers before the port was written.
+(test-begin "schemacs_editor_cc_mode_languages")
+
+(define (language-buffer name mode text)
+  (let ((b (mode-buffer name text)))
+    (with-current-buffer b (mode))
+    b))
+
+(test-equal "java-mode's name, mode line and abbrev mode are Emacs's"
+  (list 'java-mode "Java//l" #t)
+  (let ((b (language-buffer "mode-defs-java.java" java-mode
+                            "public class C { }\n")))
+    (list (with-current-buffer b (major-mode))
+          (with-current-buffer b (mode-name))
+          (buffer-local-value b 'abbrev-mode #f))))
+
+(test-equal "idl-mode's name, mode line and abbrev mode are Emacs's"
+  (list 'idl-mode "IDL//l" #f)
+  (let ((b (language-buffer "mode-defs-idl.idl" idl-mode
+                            "interface I { };\n")))
+    (list (with-current-buffer b (major-mode))
+          (with-current-buffer b (mode-name))
+          (buffer-local-value b 'abbrev-mode #f))))
+
+(test-equal "pike-mode's name, mode line and abbrev mode are Emacs's"
+  (list 'pike-mode "Pike//l" #t)
+  (let ((b (language-buffer "mode-defs-pike.pike" pike-mode
+                            "int main () { return 0; }\n")))
+    (list (with-current-buffer b (major-mode))
+          (with-current-buffer b (mode-name))
+          (buffer-local-value b 'abbrev-mode #f))))
+
+(test-equal "the three syntax tables are the languages', character for character"
+  ;; `/', `*', `@', `#' and `$': Java gives `@' symbol syntax and `$'
+  ;; word syntax; IDL and Pike give `$' word syntax only.
+  '((#\. #\. #\_ #\. #\w)
+    (#\. #\. #\. #\. #\w)
+    (#\. #\. #\. #\. #\w))
+  (map (lambda (pair)
+         (let ((b (language-buffer (car pair) (cadr pair) "class C { }\n")))
+           (with-current-buffer b
+             (list (char-syntax #\/) (char-syntax #\*)
+                   (char-syntax #\@) (char-syntax #\#)
+                   (char-syntax #\$)))))
+       (list (list "mode-defs-java2.java" java-mode)
+             (list "mode-defs-idl2.idl" idl-mode)
+             (list "mode-defs-pike2.pike" pike-mode))))
+
+(test-equal "the three language menus are bound in their maps"
+  (list #t #t #t)
+  (list (keymapp (lookup-key java-mode-map (vector 'menu-bar 'java)))
+        (keymapp (lookup-key idl-mode-map (vector 'menu-bar 'idl)))
+        (keymapp (lookup-key pike-mode-map (vector 'menu-bar 'pike)))))
+
+(test-equal "and the menu variables are keymaps"
+  (list #t #t #t)
+  (list (keymapp c-java-menu) (keymapp c-idl-menu) (keymapp c-pike-menu)))
+
+(test-equal "c-Java-defun-prompt-regexp is Emacs's value"
+  (list 399 0)
+  (list (string-length c-Java-defun-prompt-regexp)
+        (string-match c-Java-defun-prompt-regexp "public class C {")))
+
+(test-equal "a Java buffer fontifies through the real mode"
+  (list 'font-lock-type-face 'font-lock-function-name-face)
+  (let ((b (mode-buffer "mode-defs-java3.java"
+                        "public class C {\n    static void foo () { int x = 1; }\n    // comment\n    String s = \"hi\";\n}\n")))
+    (with-current-buffer b
+      (java-mode)
+      (font-lock-mode 1)
+      (font-lock-ensure)
+      (list (get-text-property 14 'face) (get-text-property 34 'face)))))
+
+(test-equal "a .java, .idl and .pike file open in their modes through the autoloads"
+  '(java-mode idl-mode pike-mode)
+  (let ((fj "/tmp/sc-cc-mode-defs-lang.java")
+        (fi "/tmp/sc-cc-mode-defs-lang.idl")
+        (fp "/tmp/sc-cc-mode-defs-lang.pike"))
+    (with-output-to-file fj
+      (lambda () (display "public class C { }\n")))
+    (with-output-to-file fi
+      (lambda () (display "interface I { };\n")))
+    (with-output-to-file fp
+      (lambda () (display "int main () { return 0; }\n")))
+    (list (with-current-buffer (find-file-noselect fj) (major-mode))
+          (with-current-buffer (find-file-noselect fi) (major-mode))
+          (with-current-buffer (find-file-noselect fp) (major-mode)))))
+
+(test-end "schemacs_editor_cc_mode_languages")

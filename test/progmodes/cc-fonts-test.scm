@@ -483,7 +483,7 @@
 ;; matchers - with `c-common-init''s "Starting a mode is a sort of
 ;; change" block replayed by hand (cc-mode.el is not ported). Every run
 ;; list below is Emacs 31.1's own, measured with `emacs -Q --batch' on
-;; the same text in a real `c-mode'/`c++-mode' buffer after
+;; the same text in a real `c-mode'/`c++-mode'/`java-mode' buffer after
 ;; `(font-lock-ensure)'.
 (define (esp-fontify text mode)
   (parameterize ((*c-buffer-is-cc-mode* mode))
@@ -495,6 +495,9 @@
       (cond ((eq? mode 'c-mode)
              (c-init-language-vars c-mode)
              (set-syntax-table ((c-lang-const c-make-mode-syntax-table c))))
+            ((eq? mode 'java-mode)
+             (c-init-language-vars java-mode)
+             (set-syntax-table ((c-lang-const c-make-mode-syntax-table java))))
             (else
              (c-init-language-vars c++-mode)
              (set-syntax-table ((c-lang-const c-make-mode-syntax-table c++)))))
@@ -504,6 +507,8 @@
       (c-restore-<>-properties (point-min) (point-max) 0)
       (cond ((eq? mode 'c-mode)
              (set!font-lock-keywords! (c-lang-const c-matchers-3 c)))
+            ((eq? mode 'java-mode)
+             (set!font-lock-keywords! (c-lang-const c-matchers-3 java)))
             (else
              (set!font-lock-keywords! (c-lang-const c-matchers-3 c++))))
       (goto-char (point-min))
@@ -577,6 +582,30 @@
   (esp-fontify
    "template <class T> T max (T a, T b) { return a > b ? a : b; }\nclass C : public B { public: C () : x (1) {} int x; };\nvoid f () { static_cast<int> (x); }\n"
    'c++-mode))
+
+;; Java, and the class-bit bug this pins: `public' is a specifier and
+;; `C' the type only if `c-known-type-key''s `[[:upper:]]' means an
+;; upper-case letter - which it does with font-lock's case folding off.
+;; When the class-bit table's upper and lower were transposed,
+;; `public' matched `[[:upper:]]\sw*[[:lower:]]\sw' and the class name
+;; and method name went unfaced. Every run is Emacs 31.1's.
+(test-equal "the Java declaration fixture fontifies exactly as Emacs does"
+  '((1 7 font-lock-keyword-face)
+    (8 13 font-lock-keyword-face)
+    (14 15 font-lock-type-face)
+    (22 28 font-lock-keyword-face)
+    (29 33 font-lock-type-face)
+    (34 37 font-lock-function-name-face)
+    (43 46 font-lock-type-face)
+    (47 48 font-lock-variable-name-face)
+    (60 63 font-lock-comment-delimiter-face)
+    (63 71 font-lock-comment-face)
+    (75 81 font-lock-type-face)
+    (82 83 font-lock-variable-name-face)
+    (86 90 font-lock-string-face))
+  (esp-fontify
+   "public class C {\n    static void foo () { int x = 1; }\n    // comment\n    String s = \"hi\";\n}\n"
+   'java-mode))
 
 (test-equal "enums, using, new and lambda captures fontify as Emacs does"
   '((1 5 font-lock-keyword-face)

@@ -1428,6 +1428,30 @@ def check_c_menu():
     return problems
 
 
+def check_java_mode():
+    """A .java file opens in `java-mode' through the mode autoload.
+
+    `files.scm`'s `%mode-autoloads' is what loads cc-mode for
+    `auto-mode-alist`'s `.java` entry, and the mode line Emacs 31.1
+    draws for it is "Java//l" (`c-update-modeline`, measured in
+    `emacs -Q --batch'). The class name's and method name's faces -
+    the declaration-fontification bug the class-bit fix repaired - are
+    pinned face for face by `cc-fonts-test.scm` and `cc-mode-test.scm`;
+    a terminal screen in text mode cannot show them.
+    """
+    path = "/tmp/pty-check-java.java"
+    open(path, "w").write("public class C {\n    static void foo () { }\n}\n")
+    screen = screen_of(drive([], path))
+    problems = []
+    if "Java//l" not in screen:
+        problems.append("the mode line does not say Java//l (the mode was "
+                        "not chosen): %r" % screen.split("\n")[-3:])
+    if "public class C" not in screen:
+        problems.append("the file's text is not on screen: %r"
+                        % screen[-200:])
+    return problems
+
+
 def check_c_mode_space():
     """Typing a space in a C buffer must not raise.
 
@@ -6281,6 +6305,7 @@ CHECKS = {
     "c-mode-eof-comment": check_c_mode_eof_comment,
     "c-mode-space": check_c_mode_space,
     "c-menu": check_c_menu,
+    "java-mode": check_java_mode,
     "scm-open": check_scm_open,
     "prompt-after-delete-other-windows": check_prompt_after_delete_other_windows,
     "isearch-line-end": check_isearch_line_end,

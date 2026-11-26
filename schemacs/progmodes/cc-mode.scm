@@ -217,7 +217,7 @@
     (only (schemacs core easymenu) easy-menu-define)
     (only (schemacs progmodes cc-menus)
           cc-imenu-init cc-imenu-c-generic-expression
-          cc-imenu-c++-generic-expression)
+          cc-imenu-c++-generic-expression cc-imenu-java-generic-expression)
     )
 
   (export
@@ -272,9 +272,14 @@
    *c-guess-region-max* c-mode-syntax-table c-mode-map c-mode-hook c-mode
    c-or-c++-mode--regexp c-or-c++-mode
    c++-mode-syntax-table c++-mode-map c++-mode-hook c++-mode
-   ;; the menus' variables (Emacs's `c-c-menu'/`c-c++-menu', which
+   ;; the other three languages' modes so far (`cc-mode.el:3099'-`:3300')
+   java-mode-syntax-table java-mode-map java-mode-hook java-mode
+   c-Java-defun-prompt-regexp
+   idl-mode-syntax-table idl-mode-map idl-mode-hook idl-mode
+   pike-mode-syntax-table pike-mode-map pike-mode-hook pike-mode
+   ;; the menus' variables (Emacs's `c-c-menu' and the rest, which
    ;; `easy-menu-define' makes)
-   c-c-menu c-c++-menu
+   c-c-menu c-c++-menu c-java-menu c-idl-menu c-pike-menu
    c-run-mode-hooks)
 
   (begin
@@ -3020,6 +3025,144 @@ Key bindings:
       (c-init-language-vars-for 'c++-mode)
       (c-common-init 'c++-mode)
       (cc-imenu-init cc-imenu-c++-generic-expression)
+      (c-run-mode-hooks (*c-mode-common-hook*)))
+
+    ;;==================================================================
+    ;; Support for Java (`cc-mode.el:3099'-`:3172')
+    ;;==================================================================
+
+    (define java-mode-syntax-table
+      ((c-lang-const c-make-mode-syntax-table java)))
+    ;; ^ "Syntax table used in `java-mode' buffers."
+
+    (define java-mode-map
+      (let ((map (c-make-inherited-keymap)))
+        map))
+    ;; ^ "Keymap used in `java-mode' buffers." Java adds no bindings of
+    ;; its own in `cc-mode.el'.
+
+    (define c-Java-defun-prompt-regexp
+      ;; "Regexp trying to describe the beginning of a Java top-level
+      ;; definition. This is not used by CC Mode, nor is it maintained
+      ;; since it's practically impossible to write a regexp that
+      ;; reliably matches such a construct. Other tools are necessary."
+      ;; The value is Emacs 31.1's, character for character.
+      "^[ \t]*\\(\\(\\(public\\|protected\\|private\\|const\\|abstract\\|synchronized\\|final\\|static\\|threadsafe\\|transient\\|native\\|volatile\\)\\s-+\\)*\\(\\(\\([[a-zA-Z][][_$.a-zA-Z0-9]+\\|[[a-zA-Z]\\)\\s-*\\)\\s-+\\)\\)?\\(\\([[a-zA-Z][][_$.a-zA-Z0-9]*\\s-+\\)\\s-*\\)?\\([_a-zA-Z][^][ \t:;.,{}()\x7f=]*\\|\\([_$a-zA-Z][_$.a-zA-Z0-9]*\\)\\)\\s-*\\(([^);{}]*)\\)?\\([] \t]*\\)\\(\\s-*\\<throws\\>\\s-*\\(\\([_$a-zA-Z][_$.a-zA-Z0-9]*\\)[, \t\n\r\x0c\x0b]*\\)+\\)?\\s-*")
+
+    (easy-menu-define c-java-menu java-mode-map "Java Mode Commands."
+                      (cons "Java" (c-lang-const c-mode-menu java)))
+
+    (define java-mode-hook '())
+    ;; ^ `java-mode-hook', made by `define-derived-mode' in Emacs.
+
+    (define-derived-mode (java-mode prog-mode "Java" java-mode-map
+                                   java-mode-hook java-mode-syntax-table)
+      "Major mode for editing Java code.
+To submit a problem report, enter `\\[c-submit-bug-report]' from a
+`java-mode' buffer.  This automatically sets up a mail buffer with
+version information already added.  You just need to add a description
+of the problem, including a reproducible test case, and send the
+message.
+
+To see what version of CC Mode you are running, enter `\\[c-version]'.
+
+The hook `c-mode-common-hook' is run with no args at mode
+initialization, then `java-mode-hook'.
+
+Key bindings:
+\\{java-mode-map}"
+      :after-hook (c-update-modeline)
+      (c-initialize-cc-mode #t)
+      (set-buffer-local-value! (current-buffer) 'abbrev-mode #t)
+      (c-init-language-vars-for 'java-mode)
+      (c-common-init 'java-mode)
+      (cc-imenu-init cc-imenu-java-generic-expression)
+      (c-run-mode-hooks (*c-mode-common-hook*)))
+
+    ;;==================================================================
+    ;; Support for CORBA's IDL (`cc-mode.el:3174'-`:3230')
+    ;;==================================================================
+
+    (define idl-mode-syntax-table
+      ((c-lang-const c-make-mode-syntax-table idl)))
+    ;; ^ "Syntax table used in `idl-mode' buffers."
+
+    (define idl-mode-map
+      (let ((map (c-make-inherited-keymap)))
+        map))
+    ;; ^ "Keymap used in `idl-mode' buffers." IDL adds no bindings.
+
+    (easy-menu-define c-idl-menu idl-mode-map "IDL Mode Commands."
+                      (cons "IDL" (c-lang-const c-mode-menu idl)))
+
+    (define idl-mode-hook '())
+    ;; ^ `idl-mode-hook', made by `define-derived-mode' in Emacs.
+
+    (define-derived-mode (idl-mode prog-mode "IDL" idl-mode-map
+                                  idl-mode-hook idl-mode-syntax-table)
+      "Major mode for editing CORBA's IDL, PSDL and CIDL code.
+To submit a problem report, enter `\\[c-submit-bug-report]' from an
+`idl-mode' buffer.  This automatically sets up a mail buffer with
+version information already added.  You just need to add a description
+of the problem, including a reproducible test case, and send the
+message.
+
+To see what version of CC Mode you are running, enter `\\[c-version]'.
+
+The hook `c-mode-common-hook' is run with no args at mode
+initialization, then `idl-mode-hook'.
+
+Key bindings:
+\\{idl-mode-map}"
+      :after-hook (c-update-modeline)
+      (c-initialize-cc-mode #t)
+      (c-init-language-vars-for 'idl-mode)
+      (c-common-init 'idl-mode)
+      ;; `;;TODO' in Emacs: no imenu generic expression for IDL.
+      (c-run-mode-hooks (*c-mode-common-hook*)))
+
+    ;;==================================================================
+    ;; Support for Pike (`cc-mode.el:3232'-`:3300')
+    ;;==================================================================
+
+    (define pike-mode-syntax-table
+      ((c-lang-const c-make-mode-syntax-table pike)))
+    ;; ^ "Syntax table used in `pike-mode' buffers."
+
+    (define pike-mode-map
+      (let ((map (c-make-inherited-keymap)))
+        map))
+    ;; ^ "Keymap used in `pike-mode' buffers." Emacs also binds C-c C-e
+    ;; here (`c-macro-expand', a cpp subprocess: not ported).
+
+    (easy-menu-define c-pike-menu pike-mode-map "Pike Mode Commands."
+                      (cons "Pike" (c-lang-const c-mode-menu pike)))
+
+    (define pike-mode-hook '())
+    ;; ^ `pike-mode-hook', made by `define-derived-mode' in Emacs.
+
+    (define-derived-mode (pike-mode prog-mode "Pike" pike-mode-map
+                                   pike-mode-hook pike-mode-syntax-table)
+      "Major mode for editing Pike code.
+To submit a problem report, enter `\\[c-submit-bug-report]' from a
+`pike-mode' buffer.  This automatically sets up a mail buffer with
+version information already added.  You just need to add a description
+of the problem, including a reproducible test case, and send the
+message.
+
+To see what version of CC Mode you are running, enter `\\[c-version]'.
+
+The hook `c-mode-common-hook' is run with no args at mode
+initialization, then `pike-mode-hook'.
+
+Key bindings:
+\\{pike-mode-map}"
+      :after-hook (c-update-modeline)
+      (c-initialize-cc-mode #t)
+      (set-buffer-local-value! (current-buffer) 'abbrev-mode #t)
+      (c-init-language-vars-for 'pike-mode)
+      (c-common-init 'pike-mode)
+      ;; `;;TODO' in Emacs: no imenu generic expression for Pike.
       (c-run-mode-hooks (*c-mode-common-hook*)))
 
     ))

@@ -18332,3 +18332,139 @@ prefix is a keymap list holding both.
 
 `tools/pty-check.py`'s `c-menu` is the regression: on the old code the
 F10 navigation showed no menu at all.
+
+# cc-mode: the Java, IDL and Pike modes, and the regexp class-bit
+# transposition (2026-11-26)
+
+Two things: the last three language modes `cc-mode.el` defines (C and
+C++ landed in the previous pass), and the shared-primitive bug the Java
+one exposed - found the moment a real `java-mode' fontified a file, not
+by any earlier differential, because no earlier fixture used a
+capitalised word.
+
+## The three modes (`cc-mode.el:3099'-`:3230')
+
+`java-mode`, `idl-mode` and `pike-mode` are in `cc-mode.scm` in Emacs's
+order, with their syntax tables (already ported in `cc-langs`), their
+maps, their menus (`c-java-menu`, `c-idl-menu`, `c-pike-menu`, each
+`(cons "Java"/"IDL"/"Pike" (c-lang-const c-mode-menu LANG))`), their
+hooks, their docstrings and their `:after-hook (c-update-modeline)`,
+and bodies that are Emacs's clause for clause:
+
+    java:  (c-initialize-cc-mode #t) (setq abbrev-mode t)
+           (c-init-language-vars-for 'java-mode) (c-common-init 'java-mode)
+           (cc-imenu-init cc-imenu-java-generic-expression)
+           (c-run-mode-hooks 'c-mode-common-hook)
+    idl:   ... no abbrev-mode; the imenu call is commented out in Emacs
+    pike:  ... abbrev-mode; the imenu call is commented out in Emacs
+
+`(setq abbrev-mode t)` is `(set-buffer-local-value! (current-buffer)
+'abbrev-mode #t)`, the tree's spelling of the buffer-local slot
+`abbrev.scm` reads.
+
+`c-Java-defun-prompt-regexp` is Emacs's value character for character
+(399 characters, and `(string-match ... "public class C {")` is 0);
+three of its escapes are spelled differently because this tree's reader
+is Scheme's: Emacs's `\^?` is `\x7f`, `\f` is `\x0c` and `\v` is
+`\x0b`. The bytes are the same, which `string-length` and the match
+pin.
+
+`files.scm`'s `%mode-autoloads` gained the three mode names, so `C-x C-f
+x.java` loads cc-mode on first use and `auto-mode-alist`'s existing
+entries (`.java`, `.idl`, `.uclpc`/`.pike`/`.pmod` ...) reach the
+modes. `interpreter-mode-alist`'s `("pike" . pike-mode)`, which Emacs
+also autoloads, has no reader here (there is no shebang-mode
+machinery); the alist entry is data only.
+
+Named omissions, each matching an earlier menu decision:
+
+* `(when (featurep 'xemacs) (easy-menu-add ...))` is not carried (there
+  is no XEmacs), as in the C/C++ modes.
+* Pike's `(define-key pike-mode-map "\C-c\C-e" 'c-macro-expand)` is not
+  bound: `c-macro-expand` runs cpp as a subprocess, which this tree has
+  no primitive for. The menu's "Macro Expand Region" is omitted for the
+  same reason (the item would signal when clicked).
+* IDL's and Pike's imenu calls are commented out in Emacs and so here.
+
+Tests: `cc-mode-test.scm`'s `schemacs_editor_cc_mode_languages` group
+(9) - the three mode names/mode lines (`"Java//l"`, `"IDL//l"`,
+`"Pike//l"`, which `c-update-modeline` builds from the comment syntax),
+`abbrev-mode` on in java/pike and off in idl, the three syntax tables at
+five characters, the three `[menu-bar LANG]` bindings and menu
+variables, the defun-prompt regexp, a Java buffer fontified through the
+real mode (the class name a type and the method name a function), and
+the three autoloads through `find-file-noselect`. Every expectation
+measured on Emacs 31.1 first.
+
+## The Java class-bit bug (`regex-emacs.scm`)
+
+`java-mode` fontified `public class C {` with no type face on `C` and no
+function-name face on a method's name, where Emacs faces both: the
+declaration decision answered nil for the line. Instrumenting
+`c-forward-decl-or-cast-1` on both sides showed the type loop diverging
+at the first token - Emacs's `c-forward-type` answered nil at
+`public`, the port's answered `known`.
+
+The cause was in the regexp engine, not cc-mode. Java's
+`c-known-type-key` ends in `[[:upper:]]\sw*[[:lower:]]\sw` - "a
+capitalised word" - and font-lock runs its keyword pass with
+`case-fold-search` bound to `font-lock-keywords-case-fold-search` (nil
+by default), exactly as `font-lock.el:1714` does. With folding off,
+`public` must not match a capitalised word. In the port it did: the
+compiler laid the charset's class bits out by an older Emacs's `BIT_*`
+table (multibyte 1, alpha 2, ..., lower 16, upper 32) while the
+matcher's class test ran the upper test on the compiler's lower bit and
+the lower test on its upper bit - so "upper" was read where "lower" was
+written, and the reverse. (The C's current `BIT_*` values are different
+again - `BIT_UPPER` `0x10`, `BIT_LOWER` `0x2`,
+`regex-emacs.c:1391`/`:1388` - which is how the mismatch survived
+review.)
+
+    ;; the compiler wrote, and the class test read, two different tables:
+    the compiler:  lower -> bit 16, upper -> bit 32   (%re-charset-class-bit)
+    the matcher:   lower -> bit 32, upper -> bit 16   (%re-charset-class-member/canon)
+
+With folding on (the editor's default) the two arms are equivalent -
+`ISUPPER (corig) || (canon_table && ISLOWER (corig))` is true for
+either case - which is why six C/C++ face differentials and every
+search test passed. With folding off, `[[:upper:]]` and `[[:lower:]]`
+each matched either case. A *string* search masks it too: the fastmap
+prunes the start candidate through `%re-charset-class-member?`, which
+had the right correspondence, so `(string-match "[[:upper:]]" "p")`
+was nil while `(looking-at "[[:upper:]]")` in a buffer matched.
+`looking-at` has no fastmap, and that is the path font-lock's matchers
+run.
+
+The fix ports `regex-emacs.c:1387'-`:1397`'s `BIT_*` values into
+`%re-charset-class-bit` and writes both class tests in the C's order
+and with the C's bits (`%re-charset-class-member?` and
+`%re-charset-class-member/canon`), so the compiler and the matcher
+cannot disagree again. One structural adaptation is kept, and named in
+the source: `BIT_MULTIBYTE` is `(> c 127)` rather than the C's bare
+test, because this matcher reads the class half for a character below
+256 whose bitmap missed, where the C's unibyte characters never reach
+it.
+
+Measured (Emacs 31.1 for the same buffer):
+
+    folding off:  (looking-at "[[:upper:]]") at "p"  #f   (was #t)
+                  (looking-at "[[:upper:]]") at "P"  #t   (was #t)
+                  (looking-at "[[:lower:]]") at "P"  #f   (was #t)
+    folding on:   both classes match either case           (unchanged)
+
+The Java trace of `c-forward-decl-or-cast-1` now matches Emacs's
+measurement for measurement (`at-type nil`, `maybe-typeless t`,
+`id-start 14`, `type-start 14`, `point 16`, where the port had
+`known`, `#f`, `8`, `1`, `8`), and the whole-buffer face runs of the
+fixture are identical to Emacs's: `14-15 font-lock-type-face` (`C`)
+and `34-37 font-lock-function-name-face` (`foo`) are the two runs that
+were missing.
+
+Tests: `search-test.scm` gained the folded-off/on class-bit group (7) -
+the two classes in both cases, `[[:alpha:]]` as a control, and the
+string search the fastmap masks - and `cc-fonts-test.scm` gained "the
+Java declaration fixture fontifies exactly as Emacs does", the
+whole-buffer runs of Emacs 31.1. Both were seen failing on the old
+engine and passing on the fixed one; `cc-mode-test.scm`'s real-mode
+Java face test pins the same thing through `java-mode` and
+`font-lock-ensure`.

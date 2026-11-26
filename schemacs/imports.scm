@@ -1325,6 +1325,7 @@
     c-<-as-paren-syntax
     c-<>-get-restricted
     c->-as-paren-syntax
+    c-Java-defun-prompt-regexp
     c-add-class-syntax
     c-add-language
     c-add-stmt-syntax
@@ -1674,6 +1675,7 @@
     c-hungry-delete-backwards
     c-hungry-delete-forward
     c-hungry-delete-key
+    c-idl-menu
     c-in-after-change-fontification
     c-in-comment-line-prefix-p
     c-in-function-trailer-p
@@ -1712,6 +1714,7 @@
     c-invalidate-sws-region-after-ins
     c-invalidate-sws-region-before
     c-is-escaped
+    c-java-menu
     c-jump-syntax-balanced
     c-jump-syntax-unbalanced
     c-just-after-func-arglist-p
@@ -1912,6 +1915,7 @@
     c-parse-state-get-strategy
     c-parsing-error
     c-partial-ws-p
+    c-pike-menu
     c-point
     c-point-syntax
     c-position-wrt-ml-delims
@@ -3246,6 +3250,10 @@
     idl-font-lock-keywords-1
     idl-font-lock-keywords-2
     idl-font-lock-keywords-3
+    idl-mode
+    idl-mode-hook
+    idl-mode-map
+    idl-mode-syntax-table
     ignore
     image-mask-p
     image-property
@@ -3458,6 +3466,10 @@
     java-font-lock-keywords-1
     java-font-lock-keywords-2
     java-font-lock-keywords-3
+    java-mode
+    java-mode-hook
+    java-mode-map
+    java-mode-syntax-table
     javadoc-font-lock-doc-comments
     javadoc-font-lock-keywords
     jit-lock-after-change
@@ -4042,6 +4054,10 @@
     pike-font-lock-keywords-1
     pike-font-lock-keywords-2
     pike-font-lock-keywords-3
+    pike-mode
+    pike-mode-hook
+    pike-mode-map
+    pike-mode-syntax-table
     place-undo-boundary!
     plist-get
     plist-member

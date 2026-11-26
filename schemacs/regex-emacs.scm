@@ -441,19 +441,29 @@
     (define (%re-charset-class-bit cc)
       ;; `re_wctype_to_bit` (`regex-emacs.c:1652'): the range-table bit
       ;; for class CC; the classes that fit in the ASCII bitmap answer
-      ;; 0.
+      ;; 0. The values are `regex-emacs.c:1387'-`:1397`'s `BIT_*`.
+      ;;
+      ;; The layout used to be an older Emacs's (multibyte at bit 0,
+      ;; alpha at bit 1, ... lower at bit 4, upper at bit 5), while
+      ;; `%re-charset-class-member/canon` tested the upper and lower
+      ;; arms on the opposite bits - so the compiler wrote "lower"
+      ;; where the class test read "upper". The
+      ;; two disagreeing was invisible while case folding was on (both
+      ;; arms matched either case) and wrong when it was off, which is
+      ;; how c-mode's fontification runs: `[[:upper:]]` matched `p`
+      ;; through `looking-at`, where a search's fastmap had masked it.
       ;;----------------------------------------------------------
-      (cond ((or (= cc recc-multibyte) (= cc recc-nonascii)) 1)
-            ((= cc recc-alpha) 2)
-            ((= cc recc-alnum) 4)
-            ((= cc recc-word) 8)
-            ((= cc recc-lower) 16)
-            ((= cc recc-upper) 32)
-            ((= cc recc-punct) 64)
-            ((= cc recc-space) 128)
-            ((= cc recc-graph) 256)
-            ((= cc recc-print) 512)
-            ((= cc recc-blank) 1024)
+      (cond ((= cc recc-word) #x1)
+            ((= cc recc-lower) #x2)
+            ((= cc recc-punct) #x4)
+            ((= cc recc-space) #x8)
+            ((= cc recc-upper) #x10)
+            ((or (= cc recc-multibyte) (= cc recc-nonascii)) #x20)
+            ((= cc recc-alpha) #x40)
+            ((= cc recc-alnum) #x80)
+            ((= cc recc-graph) #x100)
+            ((= cc recc-print) #x200)
+            ((= cc recc-blank) #x400)
             (else 0)))
 
     (define (re-charset-member? cs ch)
@@ -475,21 +485,28 @@
              (else (loop (+ i 1)))))))))
 
     (define (%re-charset-class-member? cs ch)
+      ;; `execute_charset`'s class half (`regex-emacs.c:3837`) with no
+      ;; canonicalisation table: CORIG is CH and CANON is nil. The
+      ;; tests are the C's, in the C's order. `BIT_MULTIBYTE` is
+      ;; spelled `(> ch 127)` rather than the C's unconditional test,
+      ;; because this matcher reads the class half for a character
+      ;; below 256 whose bitmap missed, where the C's unibyte
+      ;; characters never reach it.
       (let ((bits (re-charset-classes cs)))
-        (or (and (not (zero? (logand bits 1))) (> ch 127))
-            (and (not (zero? (logand bits 2))) (%char-alphabetic? ch))
-            (and (not (zero? (logand bits 4))) (%char-alphanumeric? ch))
-            (and (not (zero? (logand bits 8)))
+        (or (and (not (zero? (logand bits #x20))) (> ch 127))
+            (and (not (zero? (logand bits #x80))) (%char-alphanumeric? ch))
+            (and (not (zero? (logand bits #x40))) (%char-alphabetic? ch))
+            (and (not (zero? (logand bits #x8))) (%char-whitespace? ch))
+            (and (not (zero? (logand bits #x400))) (%char-blank? ch))
+            (and (not (zero? (logand bits #x1)))
                  (char=? (syntax-class-to-char
                           (logand (char-table-ref (syntax-table) ch) #xff))
                          #\w))
-            (and (not (zero? (logand bits 16))) (%char-lower-case? ch))
-            (and (not (zero? (logand bits 32))) (%char-upper-case? ch))
-            (and (not (zero? (logand bits 64))) (%char-punctuation? ch))
-            (and (not (zero? (logand bits 128))) (%char-whitespace? ch))
-            (and (not (zero? (logand bits 256))) (%char-graphic? ch))
-            (and (not (zero? (logand bits 512))) (%char-printable? ch))
-            (and (not (zero? (logand bits 1024))) (%char-blank? ch)))))
+            (and (not (zero? (logand bits #x10))) (%char-upper-case? ch))
+            (and (not (zero? (logand bits #x2))) (%char-lower-case? ch))
+            (and (not (zero? (logand bits #x4))) (%char-punctuation? ch))
+            (and (not (zero? (logand bits #x100))) (%char-graphic? ch))
+            (and (not (zero? (logand bits #x200))) (%char-printable? ch)))))
 
     (define (re-charset-member-full? cs ch)
       (or (re-charset-member? cs ch)
@@ -2282,25 +2299,29 @@
                    (else (loop (+ i 1)))))))))))
 
     (define (%re-charset-class-member/canon bits c corig canon class-at pos)
-      ;; The C's class order (`regex-emacs.c:3837').
+      ;; The C's class tests and their order (`regex-emacs.c:3837'-
+      ;; `:3852'): the case classes read CORIG and consult CANON, every
+      ;; other class reads the translated C. `BIT_MULTIBYTE` is
+      ;; `(> c 127)` here for the reason
+      ;; `%re-charset-class-member?` gives.
       ;;----------------------------------------------------------
-      (or (and (not (zero? (logand bits 1))) (> c 127))
-          (and (not (zero? (logand bits 2))) (%char-alphabetic? c))
-          (and (not (zero? (logand bits 4))) (%char-alphanumeric? c))
-          (and (not (zero? (logand bits 8)))
+      (or (and (not (zero? (logand bits #x20))) (> c 127))
+          (and (not (zero? (logand bits #x80))) (%char-alphanumeric? c))
+          (and (not (zero? (logand bits #x40))) (%char-alphabetic? c))
+          (and (not (zero? (logand bits #x8))) (%char-whitespace? c))
+          (and (not (zero? (logand bits #x400))) (%char-blank? c))
+          (and (not (zero? (logand bits #x1)))
                (char=? (syntax-class-to-char (logand (class-at c pos) #xff))
                        #\w))
-          (and (not (zero? (logand bits 16)))
+          (and (not (zero? (logand bits #x10)))
                (or (%char-upper-case? corig)
                    (and canon (%char-lower-case? corig))))
-          (and (not (zero? (logand bits 32)))
+          (and (not (zero? (logand bits #x2)))
                (or (%char-lower-case? corig)
                    (and canon (%char-upper-case? corig))))
-          (and (not (zero? (logand bits 64))) (%char-punctuation? c))
-          (and (not (zero? (logand bits 128))) (%char-whitespace? c))
-          (and (not (zero? (logand bits 256))) (%char-graphic? c))
-          (and (not (zero? (logand bits 512))) (%char-printable? c))
-          (and (not (zero? (logand bits 1024))) (%char-blank? c))))
+          (and (not (zero? (logand bits #x4))) (%char-punctuation? c))
+          (and (not (zero? (logand bits #x100))) (%char-graphic? c))
+          (and (not (zero? (logand bits #x200))) (%char-printable? c))))
 
     ;;----------------------------------------------------------------
     ;; Mutual exclusion (`regex-emacs.c:3864'-`:4079')

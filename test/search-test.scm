@@ -809,4 +809,44 @@
    (test-equal "search-backward with NOERROR 'limit moves to the bound"
      (list #f 2) (list (search-backward "zzz" 2 'limit) (point)))))
 
+;; ------------------------------------------------------------------
+;; The character-class bits: `[[:upper:]]' and `[[:lower:]]'
+;;
+;; The compiler laid the class bits out by one Emacs version's
+;; `BIT_*' table and the matcher read two of them by another's - upper
+;; and lower were transposed - so with case folding OFF `[[:upper:]]'
+;; and `[[:lower:]]' each matched either case. Folding ON hides it
+;; (both arms match both cases), which is why every earlier test
+;; passed: the class tests only ever ran with the editor's default.
+;; A *string* search hides it too, because the fastmap prunes the
+;; start candidate before the class test; `looking-at' has no
+;; fastmap, and that is how font-lock found it - Java's
+;; `c-known-type-key' is `[[:upper:]]\sw*[[:lower:]]\sw' and font-lock
+;; runs with folding off, so `public' matched as a type name in a
+;; `java-mode' buffer.
+;; Every expectation is Emacs 31.1's.
+(test-equal "folded off: `[[:upper:]]' does not match a lower-case letter"
+  #f (search-in "pP" 1 (lambda () (looking-at "[[:upper:]]"))))
+(test-equal "folded off: ... and matches an upper-case one"
+  #t (search-in "pP" 2 (lambda () (looking-at "[[:upper:]]"))))
+(test-equal "folded off: `[[:lower:]]' does not match an upper-case letter"
+  #f (search-in "pP" 2 (lambda () (looking-at "[[:lower:]]"))))
+(test-equal "folded off: ... and matches a lower-case one"
+  #t (search-in "pP" 1 (lambda () (looking-at "[[:lower:]]"))))
+(test-equal "folded off: `[[:alpha:]]' still matches either case"
+  (list #t #t)
+  (list (search-in "p" 1 (lambda () (looking-at "[[:alpha:]]")))
+        (search-in "P" 1 (lambda () (looking-at "[[:alpha:]]")))))
+(test-equal "folded: `[[:upper:]]' matches either case"
+  (list #t #t)
+  (list (search-in "p" 1 (lambda ()
+                           (parameterize ((*case-fold-search* #t))
+                             (looking-at "[[:upper:]]"))))
+        (search-in "P" 1 (lambda ()
+                           (parameterize ((*case-fold-search* #t))
+                             (looking-at "[[:upper:]]"))))))
+(test-equal "folded off: the string search, which the fastmap masks"
+  #f (parameterize ((*case-fold-search* #f))
+       (string-match "[[:upper:]]" "p")))
+
 (test-end)
