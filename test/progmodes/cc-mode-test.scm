@@ -70,7 +70,9 @@
        c-open-string-opener c-in-after-change-fontification
        c-fl-decl-start c-fl-decl-end
        c-doc-fl-decl-start c-doc-fl-decl-end c-change-expand-fl-region)
- (only (schemacs progmodes cc-engine) c-doc-line-join-re set!c-doc-line-join-re)
+ (only (schemacs progmodes cc-engine)
+       c-doc-line-join-re set!c-doc-line-join-re
+       c-beginning-of-objc-method-header)
  (only (schemacs font-lock) set!font-lock-mode! font-lock-defaults
        set!font-lock-defaults! font-lock-ensure
        font-lock-extend-after-change-region-function)
@@ -95,10 +97,11 @@
        c-font-lock-init c-initialize-cc-mode c-init-language-vars-for
        c-before-context-fl-expand-region c-font-lock-fontify-region
        c-c-menu c-c++-menu
-       java-mode idl-mode pike-mode
-       java-mode-map idl-mode-map pike-mode-map
-       java-mode-hook idl-mode-hook pike-mode-hook
-       c-java-menu c-idl-menu c-pike-menu
+       objc-mode java-mode idl-mode pike-mode
+       objc-mode-map java-mode-map idl-mode-map pike-mode-map
+       objc-mode-hook java-mode-hook idl-mode-hook pike-mode-hook
+       objc-mode-syntax-table
+       c-objc-menu c-java-menu c-idl-menu c-pike-menu
        c-Java-defun-prompt-regexp)
  (only (schemacs progmodes cc-fonts)
        c-force-redisplay *c-font-lock-fontify-region-function*))
@@ -1156,6 +1159,14 @@
           (with-current-buffer b (mode-name))
           (buffer-local-value b 'abbrev-mode #f))))
 
+(test-equal "objc-mode's name, mode line and abbrev mode are Emacs's"
+  (list 'objc-mode "ObjC//l" #t)
+  (let ((b (language-buffer "mode-defs-objc.m" objc-mode
+                            "@interface Foo : NSObject\n@end\n")))
+    (list (with-current-buffer b (major-mode))
+          (with-current-buffer b (mode-name))
+          (buffer-local-value b 'abbrev-mode #f))))
+
 (test-equal "idl-mode's name, mode line and abbrev mode are Emacs's"
   (list 'idl-mode "IDL//l" #f)
   (let ((b (language-buffer "mode-defs-idl.idl" idl-mode
@@ -1172,10 +1183,11 @@
           (with-current-buffer b (mode-name))
           (buffer-local-value b 'abbrev-mode #f))))
 
-(test-equal "the three syntax tables are the languages', character for character"
+(test-equal "the four syntax tables are the languages', character for character"
   ;; `/', `*', `@', `#' and `$': Java gives `@' symbol syntax and `$'
   ;; word syntax; IDL and Pike give `$' word syntax only.
   '((#\. #\. #\_ #\. #\w)
+    (#\. #\. #\_ #\. #\w)
     (#\. #\. #\. #\. #\w)
     (#\. #\. #\. #\. #\w))
   (map (lambda (pair)
@@ -1184,24 +1196,42 @@
              (list (char-syntax #\/) (char-syntax #\*)
                    (char-syntax #\@) (char-syntax #\#)
                    (char-syntax #\$)))))
-       (list (list "mode-defs-java2.java" java-mode)
+       (list (list "mode-defs-objc2.m" objc-mode)
+             (list "mode-defs-java2.java" java-mode)
              (list "mode-defs-idl2.idl" idl-mode)
              (list "mode-defs-pike2.pike" pike-mode))))
 
-(test-equal "the three language menus are bound in their maps"
-  (list #t #t #t)
-  (list (keymapp (lookup-key java-mode-map (vector 'menu-bar 'java)))
+(test-equal "the four language menus are bound in their maps"
+  (list #t #t #t #t)
+  (list (keymapp (lookup-key objc-mode-map (vector 'menu-bar 'objc)))
+        (keymapp (lookup-key java-mode-map (vector 'menu-bar 'java)))
         (keymapp (lookup-key idl-mode-map (vector 'menu-bar 'idl)))
         (keymapp (lookup-key pike-mode-map (vector 'menu-bar 'pike)))))
 
 (test-equal "and the menu variables are keymaps"
-  (list #t #t #t)
-  (list (keymapp c-java-menu) (keymapp c-idl-menu) (keymapp c-pike-menu)))
+  (list #t #t #t #t)
+  (list (keymapp c-objc-menu) (keymapp c-java-menu)
+        (keymapp c-idl-menu) (keymapp c-pike-menu)))
 
 (test-equal "c-Java-defun-prompt-regexp is Emacs's value"
   (list 399 0)
   (list (string-length c-Java-defun-prompt-regexp)
         (string-match c-Java-defun-prompt-regexp "public class C {")))
+
+(test-equal "an Objective-C buffer fontifies through the real mode"
+  ;; Emacs 31.1's runs on this fixture: `interface' keyword, `Foo',
+  ;; `NSObject' and `void' types, `bar' function name, `end' keyword.
+  '(font-lock-keyword-face font-lock-type-face font-lock-type-face
+    font-lock-type-face font-lock-function-name-face
+    font-lock-keyword-face)
+  (let ((b (mode-buffer "mode-defs-objc3.m"
+                        "@interface Foo : NSObject\n- (void)bar;\n@end\n")))
+    (with-current-buffer b
+      (objc-mode)
+      (font-lock-mode 1)
+      (font-lock-ensure)
+      (map (lambda (p) (get-text-property p 'face))
+           '(1 12 18 30 35 40)))))
 
 (test-equal "a Java buffer fontifies through the real mode"
   (list 'font-lock-type-face 'font-lock-function-name-face)
@@ -1213,18 +1243,26 @@
       (font-lock-ensure)
       (list (get-text-property 14 'face) (get-text-property 34 'face)))))
 
-(test-equal "a .java, .idl and .pike file open in their modes through the autoloads"
-  '(java-mode idl-mode pike-mode)
-  (let ((fj "/tmp/sc-cc-mode-defs-lang.java")
+(test-equal "a .m, .java, .idl and .pike file open in their modes through the autoloads"
+  '(objc-mode java-mode idl-mode pike-mode)
+  (let ((fo "/tmp/sc-cc-mode-defs-lang.m")
+        (fj "/tmp/sc-cc-mode-defs-lang.java")
         (fi "/tmp/sc-cc-mode-defs-lang.idl")
         (fp "/tmp/sc-cc-mode-defs-lang.pike"))
+    ;; Emacs 31.1 reaches objc-mode through `octave-maybe-mode', which
+    ;; decides by content; this tree's alist maps `.m' to objc-mode
+    ;; directly (octave is not ported) and answers the same for a
+    ;; non-Octave file.
+    (with-output-to-file fo
+      (lambda () (display "@interface Foo : NSObject\n@end\n")))
     (with-output-to-file fj
       (lambda () (display "public class C { }\n")))
     (with-output-to-file fi
       (lambda () (display "interface I { };\n")))
     (with-output-to-file fp
       (lambda () (display "int main () { return 0; }\n")))
-    (list (with-current-buffer (find-file-noselect fj) (major-mode))
+    (list (with-current-buffer (find-file-noselect fo) (major-mode))
+          (with-current-buffer (find-file-noselect fj) (major-mode))
           (with-current-buffer (find-file-noselect fi) (major-mode))
           (with-current-buffer (find-file-noselect fp) (major-mode)))))
 
@@ -1237,5 +1275,20 @@
     (with-output-to-file f
       (lambda () (display "#!/usr/bin/pike\nint main () { }\n")))
     (with-current-buffer (find-file-noselect f) (major-mode))))
+
+(test-equal "c-beginning-of-objc-method-header finds the +/- of the header"
+  ;; Emacs 31.1 does not have this function (it is GITE's 32.0.50
+  ;; cc-engine.el:12146), so these rows are the C algorithm's on this
+  ;; fixture, not a measurement. Line 2 starts at 27: `-' 27, `(' 29,
+  ;; `void' 30-33, `bar' 35-37, `;' 38.
+  '((#f 1) (#t 27) (#t 27) (#t 27))
+  (let ((b (mode-buffer "mode-defs-objc4.m"
+                        "@interface Foo : NSObject\n- (void)bar;\n@end\n")))
+    (with-current-buffer b
+      (objc-mode)
+      (map (lambda (pos)
+             (goto-char pos)
+             (list (c-beginning-of-objc-method-header) (point)))
+           (list 1 36 38 28)))))
 
 (test-end "schemacs_editor_cc_mode_languages")

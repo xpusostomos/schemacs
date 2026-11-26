@@ -2289,22 +2289,29 @@ casts and declarations are fontified.  Used on level 2 and higher."
                           (c-forward-type))))
                     (if (> (point) limit) (goto-char limit))))))
               ;; "The @interface/@implementation/@protocol directives."
+              ;; The highlight is an anchored highlighter whose slots
+              ;; are procedures (see the header): MATCHER, then PRE.
+              ;; Emacs's forms are
+              ;; `((c-fontify-types-and-refs ...) (goto-char ...))',
+              ;; so the first slot is the matcher and the second is the
+              ;; pre-form; a first version wrapped the matcher in an
+              ;; extra `list', which the matcher then applied as a
+              ;; procedure.
               (c-make-font-lock-search-function
                (regexp-opt (list "@interface" "@implementation" "@protocol")
                            'symbols)
                (list
-                (list
-                 (lambda (limit)
-                   ;; "The font-lock package in Emacs is known to clobber
-                   ;; `parse-sexp-lookup-properties' (when it exists)." The
-                   ;; binding Emacs writes is a dynamic one, which is a
-                   ;; `parameterize' here.
-                   (parameterize ((*parse-sexp-lookup-properties* #t))
-                     (c-fontify-types-and-refs ()
-                       (c-forward-objc-directive)
-                       #f))))
-                (list (lambda (limit)
-                        (goto-char (match-beginning 0)))))))
+                (lambda (limit)
+                  ;; "The font-lock package in Emacs is known to clobber
+                  ;; `parse-sexp-lookup-properties' (when it exists)." The
+                  ;; binding Emacs writes is a dynamic one, which is a
+                  ;; `parameterize' here.
+                  (parameterize ((*parse-sexp-lookup-properties* #t))
+                    (c-fontify-types-and-refs ()
+                      (c-forward-objc-directive)
+                      #f)))
+                (lambda (limit)
+                  (goto-char (match-beginning 0))))))
              '())
 
          ;; `(eval . (list "\\(!\\)[^=]" 1 c-negation-char-face-name))' with
@@ -2448,7 +2455,7 @@ on level 2 only and so aren't combined with `c-complex-decl-matchers'."
                               (or (c-lang-const c-other-decl-kwds) '())
                               '())))
              (list (lambda (limit)
-                     (c-put-char-property (- (match-end 1))
+                     (c-put-char-property (- (match-end 1) 1)
                                           'c-type 'c-decl-end))))
             c-font-lock-objc-methods)
            '())

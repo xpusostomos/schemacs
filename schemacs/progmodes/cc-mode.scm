@@ -25,9 +25,11 @@
   ;;     `editorconfig-indent-size-vars`, `yank-handled-properties`,
   ;;     `post-text-conversion-hook`, and hideshow (its three variables
   ;;     are stored, so a ported hideshow reads them);
-  ;;   * `objc-mode', `java-mode', `idl-mode', `pike-mode' and
-  ;;     `awk-mode' - mechanical once C/C++ work, and the next cc-mode
-  ;;     pass.
+  ;;   * `awk-mode' - it needs `cc-awk.el' (1,239 lines: the awk
+  ;;     syntax table, the `c-awk-*' functions and the NL-property
+  ;;     machinery the language variables already name). The other
+  ;;     language modes (`objc-mode', `java-mode', `idl-mode',
+  ;;     `pike-mode') are in.
   ;;
   ;; **The buffer-local variables** are accessor pairs over the
   ;; buffer's slot, the tree's spelling (`c-current-comment-prefix` in
@@ -217,7 +219,8 @@
     (only (schemacs core easymenu) easy-menu-define)
     (only (schemacs progmodes cc-menus)
           cc-imenu-init cc-imenu-c-generic-expression
-          cc-imenu-c++-generic-expression cc-imenu-java-generic-expression)
+          cc-imenu-c++-generic-expression cc-imenu-java-generic-expression
+          cc-imenu-objc-function)
     )
 
   (export
@@ -272,14 +275,15 @@
    *c-guess-region-max* c-mode-syntax-table c-mode-map c-mode-hook c-mode
    c-or-c++-mode--regexp c-or-c++-mode
    c++-mode-syntax-table c++-mode-map c++-mode-hook c++-mode
-   ;; the other three languages' modes so far (`cc-mode.el:3099'-`:3300')
+   ;; the other language modes (`cc-mode.el:3040'-`:3300')
+   objc-mode-syntax-table objc-mode-map objc-mode-hook objc-mode
    java-mode-syntax-table java-mode-map java-mode-hook java-mode
    c-Java-defun-prompt-regexp
    idl-mode-syntax-table idl-mode-map idl-mode-hook idl-mode
    pike-mode-syntax-table pike-mode-map pike-mode-hook pike-mode
    ;; the menus' variables (Emacs's `c-c-menu' and the rest, which
    ;; `easy-menu-define' makes)
-   c-c-menu c-c++-menu c-java-menu c-idl-menu c-pike-menu
+   c-c-menu c-c++-menu c-objc-menu c-java-menu c-idl-menu c-pike-menu
    c-run-mode-hooks)
 
   (begin
@@ -3025,6 +3029,57 @@ Key bindings:
       (c-init-language-vars-for 'c++-mode)
       (c-common-init 'c++-mode)
       (cc-imenu-init cc-imenu-c++-generic-expression)
+      (c-run-mode-hooks (*c-mode-common-hook*)))
+
+    ;;==================================================================
+    ;; Support for Objective-C (`cc-mode.el:3040'-`:3083')
+    ;;==================================================================
+
+    (define objc-mode-syntax-table
+      ((c-lang-const c-make-mode-syntax-table objc)))
+    ;; ^ "Syntax table used in `objc-mode' buffers."
+
+    (define objc-mode-map
+      (let ((map (c-make-inherited-keymap)))
+        map))
+    ;; ^ "Keymap used in `objc-mode' buffers." Emacs also binds C-c C-e
+    ;; here (`c-macro-expand', a cpp subprocess: not ported), as it
+    ;; does for pike.
+
+    (easy-menu-define c-objc-menu objc-mode-map "ObjC Mode Commands."
+                      (cons "ObjC" (c-lang-const c-mode-menu objc)))
+
+    (define objc-mode-hook '())
+    ;; ^ `objc-mode-hook', made by `define-derived-mode' in Emacs.
+
+    (define-derived-mode (objc-mode prog-mode "ObjC" objc-mode-map
+                                   objc-mode-hook objc-mode-syntax-table)
+      "Major mode for editing Objective C code.
+To submit a problem report, enter `\\[c-submit-bug-report]' from an
+`objc-mode' buffer.  This automatically sets up a mail buffer with
+version information already added.  You just need to add a description
+of the problem, including a reproducible test case, and send the
+message.
+
+To see what version of CC Mode you are running, enter `\\[c-version]'.
+
+The hook `c-mode-common-hook' is run with no args at mode
+initialization, then `objc-mode-hook'.
+
+Key bindings:
+\\{objc-mode-map}"
+      ;; Emacs's `:after-hook' has the two macro-regexp builders that
+      ;; only objc-mode has; the other modes' bodies do not.
+      :after-hook (begin (c-make-noise-macro-regexps)
+                         (c-make-macro-with-semi-re)
+                         (c-update-modeline))
+      (c-initialize-cc-mode #t)
+      (set-buffer-local-value! (current-buffer) 'abbrev-mode #t)
+      (c-init-language-vars-for 'objc-mode)
+      (c-common-init 'objc-mode)
+      ;; Emacs passes nil and the *symbol* `cc-imenu-objc-function';
+      ;; there is no function obarray here, so the procedure.
+      (cc-imenu-init #f cc-imenu-objc-function)
       (c-run-mode-hooks (*c-mode-common-hook*)))
 
     ;;==================================================================

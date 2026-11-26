@@ -18031,3 +18031,52 @@ importing library: a minimal library with only `(scheme char)` warns
 `(only (guile) char-general-category)` is the same procedure and
 works. `character.scm` imports it from `(guile)` for that reason,
 with the measurement in the comment.
+
+# `objc-mode`, and the two Objective-C matcher bugs it found (2026-11-26)
+
+`objc-mode` (`cc-mode.el:3040'-`:3083') is in: syntax table, map, menu,
+hook, the `define-derived-mode` with its docstring and the C's
+`:after-hook` (the two macro-regexp builders that only Objective-C has,
+then `c-update-modeline`), the body, the `%mode-autoloads` entry and the
+`.m` mapping. `c-beginning-of-objc-method-header` (`cc-engine.el:12146`)
+is ported, replacing the signalling stub; **Emacs 31.1 does not have
+that function** (GITE's 32.0.50 source does), so its test rows are the C
+algorithm's and are marked as such.
+
+## The two matcher bugs
+
+Both were in `cc-fonts.scm`'s Objective-C entries and had no caller
+before the mode existed:
+
+* **The `@interface/@implementation/@protocol` anchored highlighter's
+  slots were one list too deep** - `(list (list MATCHER) PRE)` where the
+  representation is `(MATCHER PRE ...)` with procedures of LIMIT. The
+  car was a one-element list holding the procedure, and the search form
+  applied it: `Wrong type to apply: (#<procedure ...>)`.
+* **`(- (match-end 1))` is not `(1- (match-end 1))`.** The
+  `c-decl-end` property highlight negated the match end, so
+  `c-put-char-property` got `-44 -43`: `Args out of range` on the first
+  `@end`.
+
+## The `.m` entry
+
+Emacs's first `.m` match is `octave-maybe-mode` (`octave.el:543`), which
+picks Octave or, for a non-Octave file, removes its entry and re-runs
+`set-auto-mode` to reach `objc-mode`. `octave.el` is not ported, so that
+entry is removed from `files.scm`'s alist (a comment stands in its
+place) and the `objc-mode` entry is first - Emacs's answer for a
+non-Octave `.m` file, measured. A real Octave file opens in `objc-mode`
+here: the named departure.
+
+## Verified
+
+`cc-mode-test.scm` 149 (the mode's name/abbrev row, its syntax-table
+row, menu binding and variable, the Emacs-measured face runs, the `.m`
+autoload and four scanner rows), `cc-fonts-test` 61, `cc-engine-test`
+635; **all 104 suites and the full 110-check pty battery** (the new
+`objc-mode` check: the mode line says `ObjC//l` and the text is on
+screen). `imports.scm` regenerated (132 libraries, 5,473 names).
+
+Remaining in cc-mode: `awk-mode`, which needs `cc-awk.el` (1,239 lines),
+and the fill differential's two known `c-guess-basic-syntax` transient
+states.

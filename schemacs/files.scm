@@ -3554,7 +3554,16 @@ The path separator is colon in GNU and GNU-like systems."
         ("/\\.php_cs\\(?:\\.dist\\)?\\'" . php-ts-mode-maybe)
         ("\\.\\(?:php\\|inc\\|stub\\)\\'" . php-ts-mode-maybe)
         ("\\.\\(?:php[s345]?\\|phtml\\)\\'" . php-ts-mode-maybe)
-        ("\\.m\\'" . octave-maybe-mode)
+        ;; Emacs's entry here is `("\\.m\\'" . octave-maybe-mode)',
+        ;; from octave.el's autoload. octave.el is not ported, and that
+        ;; function is the one that decides Octave against Objective-C
+        ;; (it looks for `function' at the buffer's start, then removes
+        ;; its own entry and re-runs `set-auto-mode'). Without it the
+        ;; `objc-mode' entry below is the first `.m' match, which is
+        ;; what Emacs chooses for every `.m' file that is not Octave
+        ;; code. A real Octave file opening in objc-mode is the
+        ;; departure; measured on Emacs 31.1 for a non-Octave file,
+        ;; `find-file' gives `objc-mode'.
         ("\\.lua\\'" . lua-mode)
         ("\\.less\\'" . less-css-mode)
         ("\\.[hl]?eex\\'" . heex-ts-mode-maybe)
@@ -3963,6 +3972,7 @@ The path separator is colon in GNU and GNU-like systems."
       '((c-mode . (schemacs progmodes cc-mode))
         (c++-mode . (schemacs progmodes cc-mode))
         (c-or-c++-mode . (schemacs progmodes cc-mode))
+        (objc-mode . (schemacs progmodes cc-mode))
         (java-mode . (schemacs progmodes cc-mode))
         (idl-mode . (schemacs progmodes cc-mode))
         (pike-mode . (schemacs progmodes cc-mode))

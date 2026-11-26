@@ -1902,6 +1902,7 @@
     c-no-comment-end-of-macro
     c-noise-macro-name-re
     c-noise-macro-with-parens-name-re
+    c-objc-menu
     c-offsets-alist
     c-old-1-beg-ml
     c-old-END-literality
@@ -3970,6 +3971,10 @@
     objc-font-lock-keywords-1
     objc-font-lock-keywords-2
     objc-font-lock-keywords-3
+    objc-mode
+    objc-mode-hook
+    objc-mode-map
+    objc-mode-syntax-table
     object-beg-position
     object-end-position
     object-intervals

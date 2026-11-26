@@ -18677,3 +18677,82 @@ buffer's table; `*scratch*`'s lisp-interaction-mode makes newline a
 comment ender). Zero differences. The suite pins representative rows
 and the syntax-table, case-table and fastmap dependencies; the full
 suite and pty batteries were run (see AGENTS.md).
+
+# `objc-mode`, and the two Objective-C matcher bugs it found (2026-11-26)
+
+## What landed
+
+`cc-mode.el:3040`-`:3083`'s Objective-C support: `objc-mode-syntax-table`
+(the `c-lang-const c-make-mode-syntax-table objc` constant),
+`objc-mode-map` (`c-make-inherited-keymap`), `c-objc-menu`
+(`easy-menu-define`, from the language's `c-mode-menu`), `objc-mode-hook`,
+the `define-derived-mode` with its docstring and the C's `:after-hook`
+(which, unlike the other languages', builds the noise-macro and
+macro-with-semi regexps before `c-update-modeline`), the body's
+`c-initialize-cc-mode`, abbrev slot, `c-init-language-vars-for`,
+`c-common-init`, `cc-imenu-init`, `c-run-mode-hooks`, the
+`%mode-autoloads` entry and the `.m` mapping.
+
+`c-beginning-of-objc-method-header` (`cc-engine.el:12146`) is ported in
+`cc-engine.scm`, replacing the signalling stub. **Emacs 31.1 does not
+have this function** - it is in GITE's 32.0.50 source, which is the
+port's reference - so the test rows are the C algorithm's on a fixture,
+not a 31.1 measurement; they are marked as such in
+`cc-mode-test.scm`. Its dependencies (`c-syntactic-skip-backward`,
+`c-bs-at-toplevel-p`, `char-before`, `backward-char`) were already
+ported.
+
+## Two bugs the mode exposed in the Objective-C matcher data
+
+Both were in `cc-fonts.scm`'s port of `cc-fonts.el`'s Objective-C
+entries, and neither had a caller before `objc-mode` existed:
+
+1. **The `@interface`/`@implementation`/`@protocol` anchored
+   highlighter's slots were wrapped one level too deep.** The data was
+   `(list (list MATCHER) PRE)` where the representation (this file's
+   header) is `(MATCHER PRE POST ...)` with each slot a procedure of
+   LIMIT. The matcher's car was therefore a one-element *list*
+   containing the procedure, and `c-make-font-lock-search-form` applied
+   that list: `Wrong type to apply: (#<procedure ...>)`. It is
+   `(list MATCHER PRE)` now.
+2. **`(- (match-end 1))` is not `(1- (match-end 1))`.** The
+   "@-directives get the `c-decl-end` `c-type` property" highlight
+   wrote the C's `(1- (match-end 1))` as a unary minus, so
+   `c-put-char-property` received the *negative* of the match end:
+   `Args out of range: -44 -43` on the first `@end`. It is
+   `(- (match-end 1) 1)`.
+
+Both were invisible while no Objective-C buffer was ever fontified;
+they are now covered by the real-mode fontification test, whose face
+runs are Emacs 31.1's.
+
+## The `.m` auto-mode entry: a named departure
+
+Emacs's first `.m` entry in `auto-mode-alist` is
+`("\\.m\\'" . octave-maybe-mode)` (`octave.el:543`), which chooses
+`octave-mode` or, for a non-Octave file, removes its own entry and
+re-runs `set-auto-mode`, reaching `objc-mode`'s entry. `octave.el` is
+not ported, so that entry is removed from `files.scm`'s alist (with a
+comment at its place) and the existing `objc-mode` entry is the first
+match. That is Emacs's answer for every `.m` file that is not Octave
+code (measured on 31.1); a real Octave file opens in `objc-mode` here
+where Emacs opens `octave-mode` - the departure.
+
+## Not carried, each named in the file
+
+`C-c C-e` in `objc-mode-map` is `c-macro-expand`, which runs cpp as a
+subprocess (not ported), exactly as pike's binding is omitted.
+`cc-imenu-init` is called with the ported `cc-imenu-objc-function`;
+imenu itself is not ported, so the stored slot is inert, as Java's
+generic expression is. The XEmacs `easy-menu-add` arm is dead in GNU
+Emacs 31/32 and is not carried.
+
+# `awk-mode` is the remaining language mode (2026-11-26)
+
+The cc-mode mode list is now `c-mode`, `c++-mode`, `objc-mode`,
+`java-mode`, `idl-mode` and `pike-mode`. `awk-mode` waits on
+`cc-awk.el` (1,239 lines): the awk syntax table, the `c-awk-*`
+functions (including the two the language variables already name,
+which resolve to #f now), `c-awk-unstick-NL-prop`, and the NL-property
+change functions. After that it is the mode definition, map, menu and
+autoloads, in the pattern the other five modes take.

@@ -6034,13 +6034,17 @@
           (and re (looking-at re) (point)))))
 
     (define (c-beginning-of-objc-method-header)
-      ;; `cc-engine.el:12146': the Objective-C method-header scanner.
-      ;; Not ported - there is no `objc-mode' in this tree, so the one
-      ;; caller, `c-fl-decl-start''s objc arm, never reaches it (the arm
-      ;; is guarded by `(c-major-mode-is 'objc-mode)'). The definition is
-      ;; here so that arm is not an unbound variable, and it says what it
-      ;; is if it is ever reached.
-      (error "c-beginning-of-objc-method-header: objc-mode is not ported"))
+      ;; `cc-engine.el:12146': "Move to the - or + character which
+      ;; begins the objc method header we're in or just after, and
+      ;; return t. If we're not in such a construct, leave point
+      ;; unchanged and return nil."
+      ;;----------------------------------------------------------
+      (let ((here (point)))
+        (c-syntactic-skip-backward "^-+;{}" #f #t)
+        (if (and (memv (char-before) (list #\- #\+))
+                 (c-bs-at-toplevel-p (point)))
+            (begin (backward-char) #t)
+            (begin (goto-char here) #f))))
 
     ;;------------------------------------------------------------------
     ;; `c-looking-at-special-brace-list' (`cc-engine.el:13584'-`:13645')
