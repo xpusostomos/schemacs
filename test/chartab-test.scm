@@ -5,7 +5,7 @@
         make-char-table char-table-p char-table-subtype
         char-table-parent set-char-table-parent
         char-table-extra-slot set-char-table-extra-slot
-        char-table-range set-char-table-range)
+        char-table-range set-char-table-range map-char-table)
   (only (schemacs intervals) put))
 
 ;; Regression tests for `(schemacs chartab)', which mirrors GNU
@@ -105,5 +105,41 @@
   (char-table-p (make-char-table 'foo)))
 (test-assert "... and is false for anything else"
   (not (char-table-p 5)))
+
+;; ------------------------------------------------------------------
+;; `map-char-table' (`chartab.c:903')
+;; ------------------------------------------------------------------
+;; Emacs 31.1's answers for the same tables. KEY is a character or a
+;; cons of two; the walker hands out its own cons and mutates it as it
+;; goes - the C's `range' object - so a caller that keeps the key must
+;; copy it, and MAP-RUNS does.
+(define (map-runs table)
+  (let ((acc '()))
+    (map-char-table
+     (lambda (k v)
+       (set! acc (cons (list (if (pair? k) (cons (car k) (cdr k)) k) v)
+                       acc)))
+     table)
+    (reverse acc)))
+
+(test-equal "map-char-table reports runs, single characters, and a parent's values"
+  '(((65 . 67) x) (100 y) ((200 . 210) p))
+  (let ((parent (make-char-table 'mct #f)))
+    (set-char-table-range parent (cons 200 210) 'p)
+    (let ((table (make-char-table 'mct #f)))
+      (set-char-table-parent table parent)
+      (set-char-table-range table (cons 65 67) 'x)
+      (set-char-table-range table 100 'y)
+      (map-runs table))))
+
+(test-equal "map-char-table walks the default too"
+  '(((0 . 64) 7) ((65 . 67) x) ((68 . 4194303) 7))
+  (let ((table (make-char-table 'mct 7)))
+    (set-char-table-range table (cons 65 67) 'x)
+    (map-runs table)))
+
+(test-equal "map-char-table answers nil"
+  #f
+  (map-char-table (lambda (k v) v) (make-char-table 'mct #f)))
 
 (test-end "schemacs_editor_chartab")

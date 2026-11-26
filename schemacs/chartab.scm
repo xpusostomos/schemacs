@@ -34,11 +34,12 @@
   ;;     decoder/encoder tables. They are how `char-code-property-table'
   ;;     and the `unicore' data are loaded, and nothing here reads a
   ;;     Unicode property yet.
-  ;;   * **`map-char-table'** - it needs `map_char_table''s recursion
-  ;;     plus the charset-valued callback half, and its callers are the
-  ;;     `describe-*' commands and the uniprop loader.
-  ;;   * **`optimize-char-table'** is here, because it is small and is
-  ;;     the one remaining DEFUN that only walks the tree.
+  ;;   * **the charset-valued callback half of `map_char_table'**
+  ;;     (`map_char_table_for_charset', `map-charset-chars') - the
+  ;;     plain `map-char-table' walk itself IS carried (see the
+  ;;     definition); the `charset' half is not.
+  ;;   * **`optimize-char-table'** is here too, because it is small and
+  ;;     only walks the tree.
   ;;--------------------------------------------------------------
 
   (import
@@ -58,6 +59,7 @@
    char-table-extra-slot set-char-table-extra-slot
    char-table-range set-char-table-range
    optimize-char-table
+   map-char-table
    ;; the C's internal functions, which `syntax.sld' is the caller of
    char-table-ref char-table-set
    char-table-ref-and-range char-table-set-range
@@ -563,5 +565,143 @@
               (loop (+ i 1)))))
         (set!%char-table-ascii! char-table (char-table-ascii char-table))
         #f))
+
+    ;;------------------------------------------------------------------
+    ;; `map_char_table' (`chartab.c:716'-`:916')
+    ;;------------------------------------------------------------------
+    ;; The C has two entry points: `map_sub_char_table' recurses over
+    ;; slots, and `map_char_table' seeds it, follows a parent table when
+    ;; the table's own value is nil, and calls the function for the last
+    ;; run. `map-char-table' is the Lisp DEFUN over the two.
+    ;;
+    ;; **The C's `c_function'/`arg' pair is a Scheme procedure and its
+    ;; closure here.** The C callers (`copy_category_entry',
+    ;; `set_identity', `shuffle', `set_canon') receive the table they
+    ;; write as ARG; here the lambda captures it, so only the
+    ;; Lisp-visible shape is ported: FUNCTION is called with (KEY
+    ;; VALUE), KEY a character or a cons. The Unicode-property decoder
+    ;; is not carried (see the header), so its branches are absent.
+    ;;
+    ;; **KEY is the walker's own cons**, mutated as the walk goes,
+    ;; exactly as the C passes its `range' object; a caller that keeps
+    ;; it must copy it.
+    ;;--------------------------------------------------------------
+    (define (%map-char-table-call function range val)
+      ;; The C's `EQ (XCAR (range), XCDR (range))' choice
+      ;; (`chartab.c:803'): a single character is passed as itself, a
+      ;; run as the cons.
+      ;;--------------------------------------------------------------
+      (if (= (car range) (cdr range))
+          (function (car range) val)
+          (function range val)))
+
+    (define (%map-sub-char-table function table val range top)
+      ;; `map_sub_char_table' (`chartab.c:716'): "Map C_FUNCTION or
+      ;; FUNCTION over TABLE (top or sub char-table), calling it for
+      ;; each character or group of characters that share a value."
+      ;; RANGE is a cons (FROM . TO); VAL is the value of FROM in
+      ;; TABLE. Answers the value of the last character covered by
+      ;; TABLE, and narrows RANGE's car to the first character of the
+      ;; trailing run.
+      ;;--------------------------------------------------------------
+      (let* ((sub? (sub-char-table? table))
+             (depth (if sub? (sub-char-table-depth table) 0))
+             (minc (if sub? (sub-char-table-min-char table) 0))
+             (chars-in-block (vector-ref %chartab-chars depth))
+             (tmax (if sub?
+                       (+ minc (- (vector-ref %chartab-chars (- depth 1)) 1))
+                       max-char))
+             (to (cdr range))
+             (tmax (if (< to tmax) to tmax))
+             (start-from (car range))
+             (i0 (if (<= start-from minc)
+                     0
+                     (quotient (- start-from minc) chars-in-block)))
+             (contents (if sub?
+                           (sub-char-table-contents table)
+                           (%char-table-contents table))))
+        (let loop ((i i0) (c (+ minc (* chars-in-block i0)))
+                   (val val) (from start-from))
+          (if (> c tmax)
+              (begin (set-cdr! range to) val)
+              (let* ((this0 (vector-ref contents i))
+                     (nextc (+ c chars-in-block)))
+                (if (sub-char-table? this0)
+                    (begin
+                      ;; "If TO is in this sub-table, bring RANGE down
+                      ;; to it" - the C's `if (to >= nextc)
+                      ;; XSETCDR (range, nextc - 1)'.
+                      (if (>= to nextc) (set-cdr! range (- nextc 1)))
+                      (loop (+ i 1) (+ c chars-in-block)
+                            (%map-sub-char-table function this0 val range top)
+                            from))
+                    (let ((this (if (%nil? this0)
+                                    (%char-table-default top)
+                                    this0)))
+                      (if (eq? val this)
+                          (loop (+ i 1) (+ c chars-in-block) val from)
+                          (let ((val (let ((val val) (different? #t))
+                                       (if (%nil? val)
+                                           (let ((parent (%char-table-parent top)))
+                                             (when parent
+                                               ;; "This is to get a value
+                                               ;; of FROM in PARENT
+                                               ;; without checking the
+                                               ;; parent of PARENT."
+                                               (let ((temp (%char-table-parent parent)))
+                                                 (set-char-table-parent parent #f)
+                                                 (set! val (char-table-ref parent from))
+                                                 (set-char-table-parent parent temp)
+                                                 (set-cdr! range (- c 1))
+                                                 (set! val (%map-sub-char-table
+                                                            function parent val range parent))
+                                                 (when (eq? val this)
+                                                   (set! different? #f))))))
+                                       (if (and (not (%nil? val)) different?)
+                                           (begin
+                                             (set-cdr! range (- c 1))
+                                             (%map-char-table-call function range val)
+                                             val)
+                                           val))))
+                            ;; The C's `XSETCAR (range, c)' with
+                            ;; `from = c`: the run that starts here.
+                            (set-car! range c)
+                            (loop (+ i 1) (+ c chars-in-block) this c))))))))))
+
+    (define (map-char-table function char-table)
+      ;; GNU Emacs's `map-char-table' (`chartab.c:903'): "Call FUNCTION
+      ;; for each character in CHAR-TABLE that has non-nil value.
+      ;; FUNCTION is called with two arguments, KEY and VALUE. KEY is a
+      ;; character code or a cons of character codes specifying a range
+      ;; of characters that have the same value. VALUE is what
+      ;; (char-table-range CHAR-TABLE KEY) returns."
+      ;;--------------------------------------------------------------
+      (when (not (char-table? char-table))
+        (error "Wrong type argument: char-table-p" char-table))
+      (let ((range (cons 0 max-char))
+            (ascii (char-table-ascii char-table)))
+        ;; The C takes `contents[0]' when the cached ASCII value is
+        ;; itself a sub-char-table (`chartab.c:851'): `char_table_ascii'
+        ;; stops at the depth-2 table when the ASCII block is fully
+        ;; split, and this is the step that reaches character 0's value.
+        (let loop ((table char-table)
+                   (val (if (sub-char-table? ascii)
+                            (vector-ref (sub-char-table-contents ascii) 0)
+                            ascii)))
+          (let ((val (%map-sub-char-table function table val range table)))
+            (if (and (%nil? val) (%char-table-parent table))
+                ;; "If VAL is nil and TABLE has a parent, we must
+                ;; consult the parent recursively."
+                (let* ((from (car range))
+                       (parent (%char-table-parent table))
+                       (temp (%char-table-parent parent)))
+                  (set-char-table-parent parent #f)
+                  (let ((v (char-table-ref parent from)))
+                    (set-char-table-parent parent temp)
+                    (loop parent v)))
+                (begin
+                  (when (not (%nil? val))
+                    (%map-char-table-call function range val))
+                  #f))))))
 
     ))

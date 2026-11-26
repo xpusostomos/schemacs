@@ -3703,6 +3703,7 @@
     make<marker>
     make<minibuffer>
     make<window>
+    map-char-table
     map-keymap
     map-keymap-internal
     map-tty-color

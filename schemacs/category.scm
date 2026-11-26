@@ -22,9 +22,10 @@
   ;; carried, but the C also makes the sets structurally shared so that
   ;; `eq` comparisons are cheap; this tree's interning does the same job
   ;; for the one thing the C uses it for - `modify-category-entry`
-  ;; stores equal sets as one object. `map_char_table`'s recursion is
-  ;; not ported; `copy-category-table` walks the table's runs with
-  ;; `char-table-ref-and-range` instead, which is the same set of runs.
+  ;; stores equal sets as one object. `copy-category-table` uses
+  ;; `map-char-table`, as the C uses `map_char_table`
+  ;; (`category.c:227`); `modify-category-entry`'s own loop is the
+  ;; C's `char_table_ref_and_range` loop (`category.c:356-368`).
   ;;--------------------------------------------------------------
 
   (import
@@ -37,6 +38,7 @@
           make-char-table char-table-p char-table-subtype
           char-table-ref char-table-set
           char-table-ref-and-range char-table-set-range set-char-table-range
+          map-char-table
           char-table-default char-table-extra-slot
           set-char-table-extra-slot copy-char-table max-char)
     ;; The category set - `data.sld''s bool vectors.
@@ -252,9 +254,9 @@
       ;; category table." No contents are shared: every category set is
       ;; copied.
       ;;
-      ;; The C walks the table with `map_char_table`; this walks its
-      ;; runs with `char-table-ref-and-range`, which visits the same
-      ;; runs in the same order.
+      ;; The C walks the table with `map_char_table (copy_category_entry,
+      ;; Qnil, table, table)` (`category.c:227`); `map-char-table` is that
+      ;; walk, and the callback is `copy-category-entry` below.
       ;;--------------------------------------------------------------
       (let* ((table (if (pair? rest)
                         (check-category-table (car rest))
@@ -266,16 +268,10 @@
         (when (vector? (char-table-extra-slot table 0))
           (set-char-table-extra-slot
            new 0 (copy-sequence (char-table-extra-slot table 0))))
-        (let loop ((c 0))
-          (if (> c max-char)
-              new
-              (let* ((from (list c))
-                     (to (list c))
-                     (val (char-table-ref-and-range new c from to)))
-                (when (bool-vector? val)
-                  (char-table-set-range new (car from) (car to)
-                                        (%bool-vector-copy val)))
-                (loop (+ (car to) 1)))))))
+        (map-char-table
+         (lambda (c val) (copy-category-entry new c val))
+         new)
+        new))
 
     (define (make-category-table)
       ;; GNU Emacs's `make-category-table` (`category.c:246`):

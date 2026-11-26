@@ -11100,9 +11100,14 @@ the two objects that did not exist here: Emacs's **bool vector** and its
    sets are immutable in use - `modify-category-entry` copies before
    changing - so no caller can observe it; only `eq` on two never-written
    sets could.
-2. **`map-char-table` is not ported**, so `copy-category-table` walks the
-   table's runs with `char-table-ref-and-range` instead of
-   `map_char_table`'s recursion. Same runs, same order.
+2. ~~**`map-char-table` is not ported**, so `copy-category-table` walks
+   the table's runs with `char-table-ref-and-range` instead of
+   `map_char_table`'s recursion. Same runs, same order.~~
+   **Superseded 2026-11-27**: the `map_char_table` recursion and
+   `map-char-table` are ported (`chartab.scm`), and
+   `copy-category-table`/`casetab` call them as the C does. It also
+   turned out the stand-in did not walk runs at all: it visited every
+   character, which made one copy take 1m52s.
 3. **`char-script-table` is empty** - `characters.el` fills it and that
    file is not ported yet. With the default nil every character has the
    same script, which is Emacs's answer for the ASCII repertoire; the
@@ -18496,33 +18501,47 @@ engine and passing on the fixed one; `cc-mode-test.scm`'s real-mode
 Java face test pins the same thing through `java-mode` and
 `font-lock-ensure`.
 
-# `map-char-table` is not ported, and `copy-category-table` pays for it
+# `map-char-table` is ported, and `copy-category-table` stopped paying
 # (2026-11-27)
 
-`map_char_table` (`chartab.c:842`) is named as not carried in
-`chartab.scm`'s header, and `casetab.scm` records the same gap. The
-consequence surfaced while asking what Emacs does with raw byte
-characters: `category.scm`'s `copy-category-table` stands in for the
-C's `map_char_table (copy_category_entry, ...)` (`category.c:227`)
-with a walk of `char-table-ref-and-range`, and that walk **never
-narrows to a run**: it passes `from` and `to` as `(list c)`, so the
-C's run-extension loop (`chartab.c`, "while (*to >= (chartab_idx + 1) *
-chartab_chars[0])") never fires and every character is visited on its
-own. Measured on this tree, a `--no-auto-compile` source run of one
-`copy-category-table` of a table holding one category entry:
+`map_char_table` (`chartab.c:716`-`:916`) is now in `chartab.scm` as
+`%map-sub-char-table` (the recursion) and `map-char-table` (the DEFUN,
+`chartab.c:903`), and `category.scm` and `casetab.scm` call it where
+the C does (`category.c:227`; `casetab.c:127`-`:143`), with the C's own
+callbacks (`copy-category-entry`, `set-identity!`, `shuffle!`,
+`set-canon!`).
 
-    real 1m52s   user 5m5s   sys 3.4s
+It had been missing since the chartab port, whose header listed
+`map-char-table` as not carried. The later category/casetab passes
+worked around it with a per-character walk of
+`char-table-ref-and-range` and recorded that as a departure - the
+"improvise around the missing primitive" pattern. The workaround
+**never narrowed to a run**: it passed `from` and `to` as `(list c)`,
+so the C's run-extension loop ("while (*to >= (chartab_idx + 1) *
+chartab_chars[0])") never fired. Measured on this tree, a
+`--no-auto-compile` source run of one `copy-category-table` of a table
+holding one category entry:
 
-That is the real reason `category-test` is the slowest suite and a
-suite battery takes minutes, and it cost a session a killed battery
-run: the suite was working, not hung (the runner's own per-suite
-timeout is 900 s).
+    before:  real 1m52s   user 5m5s
+    after:   the whole category-test suite in 0.95s
 
-The fix is to port `map_char_table` - the C's recursion over slots,
-sub-tables and runs, with its `map_char_table`/`map-char-table` pair -
-and call it from `copy_category_table` and from `casetab.scm`'s
-`set_canon`/`shuffle`/`set_identity` uses, which is exactly what the C
-does. It is a shared primitive (`chartab.scm`), so it wants the full
-suite and pty batteries when it lands. Not done here because it was
-found while answering a question about something else, and the tree
-was already committed and settled.
+That was the real reason `category-test` was the slowest suite and a
+suite battery took minutes, and it cost a session a killed battery run
+(the suite was working, not hung; the runner's per-suite timeout is
+900 s).
+
+Two details of the port worth keeping:
+
+* **The initial value needs the C's extra step.** `char-table-ascii`
+  stops at the depth-2 table when the ASCII block is fully split, and
+  the C's `map_char_table` takes `contents[0]` of it
+  (`chartab.c:851`) to reach character 0's value. Without that step
+  the walk reported the sub-table itself as a value.
+* **`range.car` is updated on every value change** (`XSETCAR (range,
+  c)`), and the key the function receives is the walker's own cons -
+  a caller that keeps it must copy it, exactly as with Emacs.
+
+Tests: `chartab-test.scm`'s map-char-table group (3) pins Emacs
+31.1's measured runs for a parented table and a defaulted one; the
+category and casetab suites pin the callers. Shared primitive, so the
+full suite and pty batteries were run (see AGENTS.md).

@@ -18,10 +18,7 @@
   ;; the EQV table because `set_image_of_range` reads it from there
   ;; (`regex-emacs.c`).
   ;;
-  ;; **Departures, both named**: `map_char_table` is not ported, so the
-  ;; three builders walk the table's runs with
-  ;; `char-table-ref-and-range` instead of `map_char_table` (the same
-  ;; runs, the same order - `category.sld` does the same); and a
+  ;; **One departure**: a
   ;; buffer's four slots are buffer-local values here, where Emacs has
   ;; four real `struct buffer` fields. `characters.el`'s extension of
   ;; the standard table beyond ASCII is not ported yet, so the table is
@@ -34,7 +31,7 @@
     (only (schemacs chartab)
           make-char-table char-table-p char-table-subtype
           char-table-ref char-table-set char-table-set-range
-          char-table-ref-and-range
+          map-char-table
           char-table-extra-slot set-char-table-extra-slot
           copy-char-table max-char)
     (only (schemacs buffer)
@@ -115,24 +112,6 @@
       (buffer-local-value (current-buffer) 'upcase-table
                           *ascii-upcase-table*))
 
-    (define (walk-table table proc)
-      ;; Call PROC with (C . ELT) for every run of TABLE, C being a
-      ;; character code or a cons of two - the arguments
-      ;; `map_char_table` gives its function. The C's `map_char_table`
-      ;; also consults the parent; a case table has none, so the runs
-      ;; are the table's own.
-      ;;--------------------------------------------------------------
-      (let loop ((c 0))
-        (when (<= c max-char)
-          (let* ((from (list c))
-                 (to (list c))
-                 (val (char-table-ref-and-range table c from to)))
-            (proc (if (= (car from) (car to))
-                      (car from)
-                      (cons (car from) (car to)))
-                  val)
-            (loop (+ (car to) 1))))))
-
     (define (range-bounds c)
       ;; C is a character code or a cons of two; answer the two.
       ;;--------------------------------------------------------------
@@ -188,17 +167,17 @@
              (eqv (char-table-extra-slot table 2)))
         (when (%nil? up)
           (set! up (make-char-table 'case-table #f))
-          (walk-table table (lambda (c elt) (set-identity! up c elt)))
-          (walk-table table (lambda (c elt) (shuffle! up c elt)))
+          (map-char-table (lambda (c elt) (set-identity! up c elt)) table)
+          (map-char-table (lambda (c elt) (shuffle! up c elt)) table)
           (set-char-table-extra-slot table 0 up))
         (when (%nil? canon)
           (set! canon (make-char-table 'case-table #f))
           (set-char-table-extra-slot table 1 canon)
-          (walk-table table (lambda (c elt) (set-canon! table c elt))))
+          (map-char-table (lambda (c elt) (set-canon! table c elt)) table))
         (when (%nil? eqv)
           (set! eqv (make-char-table 'case-table #f))
-          (walk-table canon (lambda (c elt) (set-identity! eqv c elt)))
-          (walk-table canon (lambda (c elt) (shuffle! eqv c elt)))
+          (map-char-table (lambda (c elt) (set-identity! eqv c elt)) canon)
+          (map-char-table (lambda (c elt) (shuffle! eqv c elt)) canon)
           (set-char-table-extra-slot table 2 eqv))
         ;; "This is so set_image_of_range_1 in regex-emacs.c can find
         ;; the EQV table." (`casetab.c:147')

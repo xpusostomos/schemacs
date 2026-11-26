@@ -81,6 +81,11 @@ Don't try and paper over it by getting around it. It's your job to find that
 primitive, port that primitve and make sure our entire code base uses that
 primitive the same way emacs does.
 
+If you are porting a package, port ALL the package, not just the bits you
+need right now. The only reason to leave bits out is if you've done
+a global sweep and established that the code is dead code in emacs
+and nothing anywhere needs it.
+
 I don't even want to see an emacs function refactored without a good reason.
 I want to see every function with the exact same shape as emacs, same
 args, same structure, same loops, same variables, same recursion, same
@@ -17906,13 +17911,41 @@ Java faces - the first two seen failing on the old engine.
   114; all 104 suites pass, and the full 109-check pty battery passes
   on the settled tree (`java-mode` is the new end-to-end check: a
   `.java` file opens and the mode line says `Java//l`).
-- Found while answering a question and recorded but not fixed:
-  `map-char-table` is unported, so `copy-category-table` walks every
-  character instead of every run - measured 1m52s for one copy, which
-  is why `category-test` is the slowest suite. Porting
-  `map_char_table` is the fix (DEPARTURES.md, 2026-11-27).
+- `map-char-table` was found missing while answering a question about
+  the class-bit fix, and is now ported - see the section below.
 - Next in cc-mode: `objc-mode` (it needs
   `c-beginning-of-objc-method-header`, still a signalling stub in
   `cc-engine.scm`) and `awk-mode` (it needs `cc-awk.el`); then the fill
   differential's known point-handling cases and the small not-carried
   items named in `cc-mode.scm`'s header.
+
+# `map-char-table` ported, and why it had been missing (2026-11-27)
+
+`map_char_table` (`chartab.c:716`-`:916`) and the `map-char-table`
+DEFUN are in `chartab.scm`; `category.scm`'s `copy-category-table` and
+`casetab.scm`'s three builders call them where the C does
+(`category.c:227`, `casetab.c:127`-`:143`), with the C's callbacks
+(`copy-category-entry`, `set-identity!`, `shuffle!`, `set-canon!`).
+
+It was missing because the chartab port listed `map-char-table` as
+"not carried" when nothing called it, and the later category/casetab
+passes worked around it instead of porting it: they walked
+`char-table-ref-and-range` per character and recorded that as a
+departure - the "improvise around the missing primitive" pattern. The
+walk never narrowed to a run (its `from`/`to` started at `c`, so the
+C's run-extension loop never fired), and one `copy-category-table`
+took **1m52s**. With the port, `category-test` runs in **0.95s** -
+the earlier suite batteries were slow for this one reason.
+
+Two porting details that cost a round each: `map_char_table` must take
+`contents[0]` of the ascii cache when that is a sub-char-table
+(`chartab.c:851`) - our `char-table-ascii` stops one level short of
+character 0's value - and `range.car` must be updated on every value
+change; skipping that made every run start at 0. The key handed to the
+function is the walker's own cons, as in Emacs, so a caller that keeps
+it must copy it.
+
+Tests: `chartab-test.scm` 27 (the map-char-table group pins Emacs
+31.1's measured runs for a parented and a defaulted table),
+category-test 20, casetab-test 13; all 104 suites and the 109-check
+pty battery pass on the settled tree.
