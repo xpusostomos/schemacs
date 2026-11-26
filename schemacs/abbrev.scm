@@ -55,6 +55,11 @@
    abbrev-table-p make-abbrev-table define-abbrev-table define-abbrev
    clear-abbrev-table copy-abbrev-table
    abbrev-table-get abbrev-table-put
+   ;; The table's own abbrev hash. Emacs's tables are obarrays, so
+   ;; `(intern-soft NAME TABLE)' is a member test; this hash is that
+   ;; obarray, and the accessor is exported for the one caller that
+   ;; needs the same test (`c-populate-abbrev-table').
+   abbrev-table-abbrevs
    abbrev--symbol abbrev-symbol abbrev-expansion abbrev-get abbrev-put
    abbrev-table-named abbrev-table-name-list
    global-abbrev-table fundamental-mode-abbrev-table

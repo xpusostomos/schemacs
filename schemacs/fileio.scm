@@ -34,13 +34,14 @@
   (import
     (scheme base)
     (scheme char)
+    (only (scheme write) display)
     ;; `locate-file-internal' takes optional arguments, which is a
     ;; `case-lambda'
     (scheme case-lambda)
     ;; `logand' is Guile's, not R7RS's, and `file-modes' masks with it;
     ;; `string-rindex' is what the two name helpers find their slash
     ;; with.
-    (only (guile) logand string-rindex)
+    (only (guile) logand logior string-rindex)
     ;; `statvfs' is reached through Guile's FFI - `(system foreign)'
     ;; dlopens libc and calls the function through its pointer, so there
     ;; is no C to write. `(rnrs bytevectors)' is here for the struct: the
@@ -64,7 +65,12 @@
     (only (guile)
           R_OK W_OK X_OK
           access? chmod delete-file getenv getpwnam lstat mkdir readlink rmdir
-          stat stat:mode stat:type stat:mtime stat:mtimensec stat:size)
+          stat stat:mode stat:type stat:mtime stat:mtimensec stat:size
+          ;; `make-temp-file-internal` (`fileio.c:771`): the fd and
+          ;; random-name primitives the C reaches through `gen_tempname`.
+          open-fdes close-fdes seed->random-state random getpid
+          get-internal-real-time system-error-errno O_WRONLY O_CREAT O_EXCL
+          logxor call-with-output-file)
     ;; `substitute-env-vars' is `env.el''s, and is what
     ;; `substitute-in-file-name' below substitutes the variables with.
     (only (schemacs env) substitute-env-vars)
@@ -92,6 +98,7 @@
 
   (export
    file-system-info
+   make-temp-file-internal make-temp-name
    *file-name-handler-alist*
    *inhibit-file-name-handlers*
    *inhibit-file-name-operation*
@@ -943,6 +950,93 @@
       ;; `delete-directory' (`files.el') is the recursive one.
       ;;--------------------------------------------------------------
       (rmdir (expand-file-name directory)))
+
+    ;; ---------------------------------------------------------------
+    ;; `make-temp-file-internal' (`fileio.c:771') and `make-temp-name'
+    ;; (`:838')
+    ;; ---------------------------------------------------------------
+    (define %temp-random-state
+      ;; A random state seeded per process - `gen_tempname`'s names are
+      ;; unguessable, and Guile's default state is fixed.
+      (seed->random-state (logxor (getpid) (get-internal-real-time))))
+
+    (define (%temp-name prefix suffix)
+      ;; Emacs's `gen_tempname' template: PREFIX, six random
+      ;; alphanumerics, SUFFIX. The C mutates six Xs in a copy of the
+      ;; name; the characters are from `letters', the same alphabet.
+      (let ((letter (lambda ()
+                      (string-ref "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                                  (random 62 %temp-random-state)))))
+        (string-append prefix
+                       (list->string (list (letter) (letter) (letter)
+                                           (letter) (letter) (letter)))
+                       suffix)))
+
+    (define (make-temp-file-internal prefix dir-flag suffix text)
+      ;; GNU Emacs's `make-temp-file-internal' (`fileio.c:771'):
+      ;; "Generate a new file whose name starts with PREFIX ... If
+      ;; DIR-FLAG is zero, do not create the file, just its name.
+      ;; Otherwise, if DIR-FLAG is non-nil, create an empty directory."
+      ;;
+      ;; The name is not expanded; a relative PREFIX is relative to the
+      ;; process's directory, as the C's is. The file is created
+      ;; exclusively (O_EXCL) with mode 0600, the C's `gen_tempname';
+      ;; EEXIST means another process won the race, so try again.
+      ;;
+      ;; DEPARTURE: the C loops on EEXIST only; this retries a few
+      ;; system errors before reporting, and its report has this tree's
+      ;; `error' text rather than `report_file_error`'s "FILE: STRERROR".
+      ;;--------------------------------------------------------------
+      (let* ((kind (cond ((not dir-flag) 'file)
+                         ((and (number? dir-flag) (= dir-flag 0)) 'nocreate)
+                         (else 'dir)))
+             (message (cond ((eq? kind 'file) "Creating file with prefix")
+                            ((eq? kind 'dir) "Creating directory with prefix")
+                            (else "Creating file name with prefix"))))
+        (let loop ((tries 0))
+          (if (>= tries 1000)
+              (error "~a: ~a" message prefix)
+              (let ((name (%temp-name prefix suffix)))
+                (cond
+                 ((eq? kind 'nocreate)
+                  (if (file-exists-p name) (loop (+ tries 1)) name))
+                 ((eq? kind 'dir)
+                  (let ((ok? (guard (e (#t #f)) (mkdir name #o700) #t)))
+                    (if ok?
+                        name
+                        ;; A directory already there is another try; any
+                        ;; other reason is reported as the C reports it.
+                        (if (file-exists-p name)
+                            (loop (+ tries 1))
+                            (error "~a: ~a" message prefix)))))
+                 (else
+                  (let ((fd (guard (e (#t #f))
+                              (open-fdes name (logior O_WRONLY O_CREAT O_EXCL)
+                                         #o600))))
+                    (cond
+                     ((not fd)
+                      ;; `gen_tempname' retries only when the name is
+                      ;; taken (EEXIST); a name that exists after a
+                      ;; failed exclusive create is that case, and
+                      ;; anything else is the C's report.
+                      (if (file-exists-p name)
+                          (loop (+ tries 1))
+                          (error "~a: ~a" message prefix)))
+                     (else
+                      (close-fdes fd)
+                      (when (and (string? text) (> (string-length text) 0))
+                        (call-with-output-file name
+                          (lambda (out) (display text out))
+                          #:encoding "UTF-8"))
+                      name))))))))))
+
+    (define (make-temp-name prefix)
+      ;; GNU Emacs's `make-temp-name' (`fileio.c:838'): "Generate
+      ;; temporary file name (string) starting with PREFIX ... There is
+      ;; a race condition between calling `make-temp-name' and later
+      ;; creating the file".
+      ;;--------------------------------------------------------------
+      (make-temp-file-internal prefix 0 "" #f))
 
     (define (delete-file-internal filename)
       ;; GNU Emacs's `delete-file-internal' (fileio.c:2602): "Delete file

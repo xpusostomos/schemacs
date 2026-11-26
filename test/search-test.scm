@@ -21,6 +21,7 @@
  ;; `primitive-undo` is `undo.c`'s and reaches this tree through the
  ;; library that holds undo.c until `undo.scm` exists.
  (only (schemacs simple) primitive-undo)
+ (only (schemacs subr) error-message-string)
  (only (srfi 64) test-assert test-equal test-begin test-end test-error)
  (only (schemacs syntax) with-syntax-table set-syntax-table copy-syntax-table standard-syntax-table modify-syntax-entry)
  )
@@ -1045,5 +1046,39 @@
         (graphicp 65535) (printablep 65535) (blankp 160)
         (unicode-category 160) (unicode-category 1114112)
         (unicode-category 55296)))
+
+(test-begin "search_failed")
+;; `search_command' ends `xsignal1 (Qsearch_failed, string)'
+;; (`search.c:1140'), so a failed search is catchable by name and
+;; `error-message-string' renders it `Search failed: "zz"' - Emacs
+;; 31.1's own text, measured for a literal and a regexp alike. An
+;; invalid regexp is a *different* condition, which is what
+;; `subword-capitalize`'s `(condition-case nil ... (search-failed
+;; nil))` relies on.
+(test-equal "a failed search signals search-failed, not a plain error"
+  '(#t "zz" "Search failed: \"zz\"")
+  (with-buffer
+   (lambda ()
+     (erase-buffer) (insert "abc\n") (goto-char 1)
+     (guard (e ((search-failed? e)
+                (list #t (search-failed-string e) (error-message-string e)))
+               (#t (list 'other)))
+       (search-forward "zz")))))
+(test-equal "a failed regexp search names the pattern"
+  "Search failed: \"z+\""
+  (with-buffer
+   (lambda ()
+     (erase-buffer) (insert "abc\n") (goto-char 1)
+     (guard (e ((search-failed? e) (error-message-string e)))
+       (re-search-forward "z+")))))
+(test-equal "an invalid regexp is not a search-failed"
+  #f
+  (with-buffer
+   (lambda ()
+     (erase-buffer) (insert "abc\n") (goto-char 1)
+     (guard (e (#t (search-failed? e)))
+       (re-search-forward "z\\(")
+       #f))))
+(test-end "search_failed")
 
 (test-end)

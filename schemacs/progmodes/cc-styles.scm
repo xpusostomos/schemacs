@@ -16,8 +16,9 @@
 ;;   * `c-read-offset' and `c-set-offset' complete against no obarray - a
 ;;     Scheme name is not enumerable - so the offset is typed out;
 ;;   * `c-set-offset''s interactive initial contents need
-;;     `c-guess-basic-syntax' (cc-engine's, not ported) and arrive through
-;;     a seam that is #f until it is;
+;;     `c-guess-basic-syntax' (cc-engine's) and arrive through the seam
+;;     `*c-guess-basic-syntax-function*', which `cc-mode.scm' installs
+;;     at load - the library that imports both;
 ;;   * `ding' is not ported, so a rejected input reports by message alone;
 ;;   * `c-indentation-style' is the buffer-local slot cc-vars keeps, so
 ;;     `c-make-styles-buffer-local' has no per-variable work to do;
@@ -363,9 +364,10 @@ and exists only for compatibility reasons."
                     #f (not (current-prefix-arg))
                     ;; "initial contents tries to be the last element on
                     ;; the syntactic analysis list for the current line".
-                    ;; **`c-guess-basic-syntax' is cc-engine's and is not
-                    ;; ported**, so the seam answers #f and the prompt has
-                    ;; no initial contents until it is.
+                    ;; **`c-guess-basic-syntax' is cc-engine's**; it
+                    ;; arrives through the seam `cc-mode.scm' installs.
+                    ;; Until something installs it the prompt has no
+                    ;; initial contents.
                     (and (*c-buffer-is-cc-mode*)
                          (*c-guess-basic-syntax-function*)
                          (let ((syntax (*c-guess-basic-syntax-function*)))

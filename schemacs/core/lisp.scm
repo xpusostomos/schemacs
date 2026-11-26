@@ -29,9 +29,12 @@
     (prefix (schemacs keymap) km:)
     (only (schemacs keymap) define-key)
     (only (schemacs command)
-          define-command current-prefix-arg uarg->integer *last-command-event*)
+          define-command current-prefix-arg uarg->integer *last-command-event*
+          command-record-named command-api)
     (only (schemacs subr) kbd user-error)
-    (only (schemacs buffer) transient-mark-mode mark-active)
+    (only (schemacs buffer) transient-mark-mode mark-active
+          current-buffer local-variable-p buffer-local-value
+          call-with-buffer-local)
     (only (schemacs editfns)
           narrow-to-region point-max save-restriction)
     (only (schemacs character) event-basic-type)
@@ -76,7 +79,8 @@
    *down-list-function* down-list-default-function down-list
    *up-list-function* up-list up-list-default-function backward-up-list
    kill-sexp backward-kill-sexp
-   *beginning-of-defun-function* beginning-of-defun beginning-of-defun-raw
+   *beginning-of-defun-function* with-defun-functions-nil
+   beginning-of-defun beginning-of-defun-raw
    beginning-of-defun--in-emptyish-line-p beginning-of-defun-comments
    *end-of-defun-function* *end-of-defun-moves-to-eol* end-of-defun
    mark-defun narrow-to-defun narrow-to-defun-include-comments
@@ -401,6 +405,55 @@ With ARG, kill that many sexps before point."
     ;; ---------------------------------------------------------------
     (define *beginning-of-defun-function* (make-parameter #f))
 
+    (define (%defun-function-value key parameter)
+      ;; Emacs's `beginning-of-defun-function'/`end-of-defun-function'
+      ;; are ordinary variables that modes make buffer-local
+      ;; (`cc-langs.el' does it with `c-lang-setvar', and the value there
+      ;; is a *symbol* - `c-beginning-of-defun'). A buffer-local variable
+      ;; here is a slot keyed by the symbol, so the local wins when the
+      ;; buffer has one and the parameter is the global otherwise.
+      (let ((buffer (current-buffer)))
+        (if (and buffer (local-variable-p key buffer))
+            (buffer-local-value buffer key)
+            (parameter))))
+
+    (define-syntax with-defun-functions-nil
+      ;; Emacs's `(let ((beginning-of-defun-function nil)
+      ;;               (end-of-defun-function nil)) BODY...)' - the shape
+      ;; `cc-engine.el`'s `c-beginning-of-defun-1` and `cc-cmds.el`'s
+      ;; three sites write, so that `beginning-of-defun` uses its
+      ;; default mover.
+      ;;
+      ;; **The binding must shadow a *buffer-local* value**, which the
+      ;; mode set (`c-lang-setvar`); Emacs's `specbind` puts the dynamic
+      ;; binding above the buffer's own. A `parameterize` here would be
+      ;; invisible to `%defun-function-value`, so this is
+      ;; `call-with-buffer-local` - the tree's spelling for that
+      ;; binding, as `forward-word-strictly` uses it for
+      ;; `find-word-boundary-function-table`.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ body ...)
+         (call-with-buffer-local
+          'beginning-of-defun-function #f
+          (lambda ()
+            (call-with-buffer-local
+             'end-of-defun-function #f
+             (lambda () body ...)))))))
+
+    (define (%defun-function-procedure value)
+      ;; Emacs `funcall's the variable's value, resolving a symbol in the
+      ;; obarray. There is no function obarray here; a language function
+      ;; is a `define-command', so the command table is where its symbol
+      ;; resolves. A symbol that names nothing is Emacs's void-function.
+      (cond ((procedure? value) value)
+            ((symbol? value)
+             (let ((record (command-record-named value)))
+               (if (and record (command-api record))
+                   (command-api record)
+                   (error "Symbol's function definition is void: ~a" value))))
+            (else #f)))
+
     (define-command (beginning-of-defun . rest)
       "Move backward to the beginning of a defun.
 With ARG, do it that many times.  Negative ARG means move forward
@@ -426,17 +479,28 @@ to the ARGth following beginning of defun."
       (let ((arg (if (pair? rest) (car rest) #f)))
         (if (not arg) (set! arg 1))
         (cond
-         ((*beginning-of-defun-function*)
+         ((%defun-function-value 'beginning-of-defun-function
+                                 *beginning-of-defun-function*)
           (guard (e (#t
+                     ;; "In case the beginning-of-defun-function uses
+                     ;; the old calling convention, fallback on the old
+                     ;; implementation." (`lisp.el:444'): no argument,
+                     ;; ARG times, and `end-of-defun' for a negative one.
                      (if (> arg 0)
                          (let loop ((i 0))
                            (if (< i arg)
-                               (begin ((*beginning-of-defun-function*))
+                               (begin ((%defun-function-procedure
+                                        (%defun-function-value
+                                         'beginning-of-defun-function
+                                         *beginning-of-defun-function*)))
                                       (loop (+ i 1)))))
                          (let loop ((i 0))
                            (if (< i (- arg))
                                (begin (end-of-defun) (loop (+ i 1))))))))
-            ((*beginning-of-defun-function*) arg)))
+            ((%defun-function-procedure
+              (%defun-function-value 'beginning-of-defun-function
+                                     *beginning-of-defun-function*))
+             arg)))
          ((or (*defun-prompt-regexp*)
               (*open-paren-in-column-0-is-defun-start*))
           (when (and (< arg 0) (not (eobp))) (forward-char 1))
@@ -536,6 +600,14 @@ to the ARGth following beginning of defun."
         (forward-line (if first-line-p 0 1))))
 
     (define *end-of-defun-function* (make-parameter (lambda () (forward-sexp 1))))
+
+    (define (%call-end-of-defun-function)
+      ;; `(funcall end-of-defun-function)' - Emacs calls it with no
+      ;; argument, right after `beginning-of-defun-raw', and resolves a
+      ;; symbol through the obarray.
+      ((%defun-function-procedure
+        (%defun-function-value 'end-of-defun-function
+                               *end-of-defun-function*))))
     (define *end-of-defun-moves-to-eol* (make-parameter #t))
 
     (define-command (end-of-defun . rest)
@@ -569,7 +641,7 @@ Negative argument -N means move back to Nth preceding end of defun."
                     (skip-chars-forward " \t")
                     (if (looking-at "\\s<\\|\n")
                         (forward-line 1))))
-                ((*end-of-defun-function*))
+                (%call-end-of-defun-function)
                 (when (<= arg 1) (skip))
                 (cond
                  ((> arg 0)
@@ -578,7 +650,7 @@ Negative argument -N means move back to Nth preceding end of defun."
                       (goto-char pos))
                   (unless (= arg 0)
                     (set! success (beginning-of-defun-raw (- arg)))
-                    (when success ((*end-of-defun-function*)))))
+                    (when success (%call-end-of-defun-function))))
                  ((< arg 0)
                   (when (< (point) pos) (set! arg (+ arg 1)))
                   (unless (= arg 0)
@@ -586,7 +658,7 @@ Negative argument -N means move back to Nth preceding end of defun."
                     (set! success (beginning-of-defun-raw (- arg)))
                     (when success
                       (set! beg (point))
-                      ((*end-of-defun-function*))))))
+                      (%call-end-of-defun-function)))))
                 (skip)
                 (let loop ()
                   (when (and (< arg 0) (>= (point) pos) success)
@@ -598,9 +670,13 @@ Negative argument -N means move back to Nth preceding end of defun."
                         (set! arg 0)
                         (begin
                           (set! beg (point))
-                          ((*end-of-defun-function*))
+                          (%call-end-of-defun-function)
                           (skip)
-                          (loop))))))))))
+                          (loop)))))
+                ;; Emacs's `while' answers nil, and that is the
+                ;; command's return value; Scheme's answers the
+                ;; unspecified value, which the REPL would echo.
+                #f)))))
 
     (define-command (mark-defun . rest)
       "Put mark at end of this defun, point at beginning.

@@ -13,13 +13,13 @@
     ;; copy, which `,describe' shows: `procedure-name' and
     ;; `procedure-documentation' read them back for the obarray record.
     (only (guile) current-module procedure-name procedure-documentation
-          logand)
+          logand resolve-module)
     ;; the `disabled' property `command-execute` reads (`simple.el:2811`)
     (only (schemacs intervals) get put))
 
   (export
    command-type? make<command> new-command new-count-command
-   command-name command-procedure command-doc-string
+   command-name command-procedure command-api command-doc-string
    command-interactive-spec
    *mark-even-if-inactive*
    *last-command-event*
@@ -54,6 +54,7 @@
    define-command define-alias *command-table* command? command-record-of
    command-value-of
    command-record-named
+   command-autoload-names
    register-command!
    ;; The quit condition and the flag the SIGINT handler sets. They are
    ;; here, not in `keyboard.c`'s library, because `keyboard-quit`
@@ -1071,6 +1072,69 @@
                    ((eq? (command-api (cdar rest)) thing) (cdar rest))
                    (else (loop (cdr rest)))))))
 
+    (define %command-autoloads
+      ;; **This tree's stand-in for what an `;;;###autoload' cookie does.**
+      ;; In Emacs the cookie becomes an `autoload' object in the
+      ;; function cell, so a keymap can name the command as a symbol
+      ;; before the defining file is loaded, and `command-execute'
+      ;; loads the file when the command is first run - which is how
+      ;; `cc-mode.el' binds `c-macro-expand' (`cc-mode.el:2877') even
+      ;; though `cmacexp.el' *requires* `cc-mode'. A library here is
+      ;; only reachable by importing it, so that same dependency can
+      ;; not be spelled as an import at all; a command whose library
+      ;; its keymap's library cannot import is named here with the
+      ;; library, and `%autoload-command' loads it on the first lookup
+      ;; - the moment Emacs's autoload fires.
+      ;;--------------------------------------------------------------
+      '(("c-macro-expand" . (schemacs progmodes cmacexp))
+        ;; `subword.el`'s five `;;;###autoload` cookies: the two modes,
+        ;; the two globalized modes, and `capitalized-words-mode`
+        ;; (`subword.el:88`-`:121`, `:261`, `:275`). Emacs's `M-x` finds
+        ;; them in any buffer from startup; here their library is loaded
+        ;; the first time one is asked for, which is what Emacs's
+        ;; autoload does when the command is first run.
+        ("subword-mode" . (schemacs progmodes subword))
+        ("superword-mode" . (schemacs progmodes subword))
+        ("global-subword-mode" . (schemacs progmodes subword))
+        ("global-superword-mode" . (schemacs progmodes subword))
+        ("capitalized-words-mode" . (schemacs progmodes subword))))
+
+    (define %autoloading-command #f)
+    ;; ^ A re-entrancy guard: loading a command's library resolves that
+    ;; library's imports, and one of them may ask for a command name on
+    ;; the way in. A plain variable (nothing `let'-binds it).
+
+    (define (command-autoload-names)
+      ;; The names `%command-autoloads' holds. `M-x' completes them
+      ;; before their libraries are loaded, as Emacs's obarray already
+      ;; holds the autoload objects.
+      ;;--------------------------------------------------------------
+      (map car %command-autoloads))
+
+    (define (%autoload-command name)
+      ;; Load the library NAME's autoload entry names, if there is
+      ;; one. Answer #t when a library was loaded, so the caller knows
+      ;; to look again.
+      ;;--------------------------------------------------------------
+      (let ((entry (assoc name %command-autoloads)))
+        (cond
+         ((not entry) #f)
+         (%autoloading-command #f)
+         (else
+          (set! %autoloading-command #t)
+          (dynamic-wind (lambda () #f)
+                        (lambda () (resolve-module (cdr entry)))
+                        (lambda () (set! %autoloading-command #f)))
+          #t))))
+
+    (define (%command-table-entry key)
+      ;; The command record KEY names in `*command-table*', or #f.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (*command-table*)))
+        (cond ((null? rest) #f)
+              ((equal? (caar rest) key) (cdar rest))
+              (else (loop (cdr rest))))))
+
     (define (command-record-named name)
       ;; The command record NAME names, or #f.
       ;;
@@ -1087,12 +1151,16 @@
       ;; the name from `procedure-name` and keeps it as a string, so a
       ;; symbol - which is how Elisp spells a command - is compared as
       ;; its string.
+      ;;
+      ;; **A miss consults `%command-autoloads'** and loads the
+      ;; library it names before looking once more - Emacs's
+      ;; `Fautoload_do_load'. A name that is not an autoload entry, or
+      ;; whose library does not define it, still answers #f.
       ;;--------------------------------------------------------------
       (let ((key (if (symbol? name) (symbol->string name) name)))
-        (let loop ((rest (*command-table*)))
-          (cond ((null? rest) #f)
-                ((equal? (caar rest) key) (cdar rest))
-                (else (loop (cdr rest)))))))
+        (or (%command-table-entry key)
+            (and (%autoload-command key)
+                 (%command-table-entry key)))))
 
     (define (command? thing)
       ;; Whether THING is a command: GNU Emacs's `commandp'.

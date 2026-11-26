@@ -186,7 +186,7 @@
           file-name-as-directory
           file-name-case-insensitive-p
           file-name-directory-part file-name-nondirectory-part
-          make-directory-internal
+          make-directory-internal make-temp-file-internal
           file-executable-p file-symlink-p file-system-info file-writable-p
           find-file-name-handler
           ;; `read-file-name' runs the typed name through it before
@@ -393,6 +393,8 @@
    *major-mode-remap-alist* *major-mode-remap-defaults* major-mode-remap
    %mode-function
    *initial-major-mode*
+   make-temp-file temporary-file-directory
+   *temporary-file-directory* *small-temporary-file-directory*
    expand-file-name
 directory-name-p
    file-exists-p
@@ -3976,6 +3978,7 @@ The path separator is colon in GNU and GNU-like systems."
         (java-mode . (schemacs progmodes cc-mode))
         (idl-mode . (schemacs progmodes cc-mode))
         (pike-mode . (schemacs progmodes cc-mode))
+        (awk-mode . (schemacs progmodes cc-mode))
         (scheme-mode . (schemacs progmodes scheme))
         (emacs-lisp-mode . (schemacs progmodes elisp-mode))
         (lisp-interaction-mode . (schemacs progmodes elisp-mode))
@@ -5005,5 +5008,79 @@ or multiple mail buffers, etc."
        ;; a file chooser when it comes from a menu.
        (read-file-name prompt #f (default-directory) 'lambda #f
                        file-directory-p)))
+
+    ;; ---------------------------------------------------------------
+    ;; `small-temporary-file-directory' (`files.el:223'),
+    ;; `temporary-file-directory' (`:1821') and `make-temp-file'
+    ;; (`:1838').
+    ;; ---------------------------------------------------------------
+    (define-custom *small-temporary-file-directory* #f
+      "The directory for writing small temporary files.
+If non-nil, this directory is used instead of `temporary-file-directory'
+by programs that create small temporary files.  This is for systems that
+have fast storage with limited space, such as a RAM disk."
+      :type '(choice (const nil) directory)
+      :group 'files)
+
+    (define-custom *temporary-file-directory*
+      ;; The standard value `cus-start.el:283' computes. Its C variable
+      ;; is `filelock.c`'s (`DEFVAR_LISP`, initialised nil); filelock
+      ;; is not ported, so the variable lives here beside its Lisp
+      ;; function and `make-temp-file'. The ms-dos arm needs
+      ;; `system-type`, which this tree has not got.
+      (let ((tmp (getenv "TMPDIR")))
+        (file-name-as-directory
+         (if (and tmp (not (string=? tmp ""))) tmp "/tmp")))
+      "The directory for writing temporary files."
+      :type 'directory
+      :group 'files)
+
+    (define (temporary-file-directory)
+      ;; GNU Emacs's `temporary-file-directory' (`files.el:1821'): "The
+      ;; directory for writing temporary files. ... For a non-remote and
+      ;; non-mounted `default-directory', the value of the variable
+      ;; `temporary-file-directory' is returned."
+      ;;
+      ;; There are no file name handlers here, so the handler arm is
+      ;; Emacs's and unreachable (`find-file-name-handler` answers nil).
+      ;; `mounted-file-systems` is not ported - no `system-type` - so
+      ;; the answer is the variable, Emacs's for a normal directory.
+      (let ((handler (find-file-name-handler (default-directory)
+                                             'temporary-file-directory)))
+        (if handler
+            (handler 'temporary-file-directory)
+            (*temporary-file-directory*))))
+
+    (define (make-temp-file prefix . rest)
+      ;; GNU Emacs's `make-temp-file' (`files.el:1838'): "Create a
+      ;; temporary file. ... If DIR-FLAG is non-nil, create a new empty
+      ;; directory instead of a file. If SUFFIX is non-nil, add that at
+      ;; the end of the file name. If TEXT is a string, insert it into
+      ;; the new file."
+      ;;
+      ;; Not carried: the `files--make-magic-temp-file` arm for file
+      ;; name handlers, which this tree does not have (see fileio's
+      ;; header), and the `find-file-name-handler` test is answered nil
+      ;; for every name.
+      (let ((dir-flag (if (pair? rest) (car rest) #f))
+            (suffix (if (and (pair? rest) (pair? (cdr rest)))
+                        (cadr rest) #f))
+            (text (if (and (pair? rest) (pair? (cdr rest))
+                           (pair? (cddr rest)))
+                      (caddr rest) #f)))
+        (let ((absolute-prefix
+               (if (or (= (string-length prefix) 0)
+                       (member prefix '("." "..")))
+                   (string-append (file-name-as-directory
+                                   (*temporary-file-directory*))
+                                  prefix)
+                   (expand-file-name prefix (*temporary-file-directory*)))))
+          (if (find-file-name-handler absolute-prefix 'write-region)
+              ;; No handler can answer non-nil here; see the comment.
+              (error "Magic file names are not supported: ~a" absolute-prefix)
+              (make-temp-file-internal absolute-prefix
+                                       (if dir-flag #t #f)
+                                       (or suffix "")
+                                       text)))))
 
     ))

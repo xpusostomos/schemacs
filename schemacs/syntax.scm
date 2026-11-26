@@ -75,7 +75,8 @@
           *inhibit-read-only*
           buffer-modified-p restore-buffer-modified-p
           text-editor-undo-list set!text-editor-undo-list
-          buffer-local-value set-buffer-local-value!)
+          buffer-local-value set-buffer-local-value!
+          local-variable-p call-with-buffer-local)
     (only (schemacs chartab)
           make-char-table char-table? char-table-p char-table-ref char-table-set
           char-table-set-range char-table-range set-char-table-range
@@ -881,10 +882,32 @@
     ;; `let'-binds it, and the convention says a Elisp `let' target is a
     ;; parameter - the stars are this tree's, not Emacs's.
 
+    (define (%find-word-boundary-table)
+      ;; `Vfind_word_boundary_function_table` as Emacs looks it up: the
+      ;; *buffer's own* value when the buffer has one, else the global
+      ;; - `find-word-boundary-function-table` is a plain variable that
+      ;; `subword-mode` `setq-local`s (`subword.el:333`), so a buffer
+      ;; that has run the mode has a binding of its own and every other
+      ;; buffer has not.
+      ;;
+      ;; Emacs's `specbind` puts a dynamic `let` *above* the buffer-local
+      ;; value, and this tree's dynamic binding of a buffer-local is
+      ;; `buffer.scm`'s `call-with-buffer-local` (the rule
+      ;; `paragraph-start` and the style variables follow), so the
+      ;; parameter is the *global* value and `forward-word-strictly`
+      ;; binds the slot. A `parameterize` alone would be invisible to a
+      ;; buffer that has run `subword-mode`.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        (if (and buffer
+                 (local-variable-p 'find-word-boundary-function-table buffer))
+            (buffer-local-value buffer 'find-word-boundary-function-table #f)
+            (*find-word-boundary-function-table*))))
+
     (define (%word-boundary-function ch)
       ;; `CHAR_TABLE_REF (Vfind_word_boundary_function_table, CH)'
       ;; followed by the C's `Ffboundp' test.
-      (let ((f (char-table-ref (*find-word-boundary-function-table*) ch)))
+      (let ((f (char-table-ref (%find-word-boundary-table) ch)))
         (and (procedure? f) f)))
 
     (define (%scan-words ed from count)
@@ -1030,6 +1053,15 @@ instead.  See Info node `(elisp) Word Motion' for details."
     ;; ^ `subr.el''s `(defvar word-move-empty-char-table nil)': made on
     ;; first use. A plain variable (nothing `let'-binds it).
 
+    (define (%word-move-empty-table)
+      ;; `subr.el`'s `word-move-empty-char-table`, made on first use.
+      ;;--------------------------------------------------------------
+      (if (char-table-p word-move-empty-char-table)
+          word-move-empty-char-table
+          (begin
+            (set! word-move-empty-char-table (make-char-table #f))
+            word-move-empty-char-table)))
+
     (define (forward-word-strictly . rest)
       "Move point forward ARG words (backward if ARG is negative).
 If ARG is omitted or nil, move point forward one word.
@@ -1040,14 +1072,16 @@ noticed if `inhibit-field-text-motion' is non-nil.
 
 This function is like `forward-word', but it is not affected
 by `find-word-boundary-function-table'.  It is also not interactive."
-      (parameterize ((*find-word-boundary-function-table*
-                      (if (char-table-p word-move-empty-char-table)
-                          word-move-empty-char-table
-                          (begin
-                            (set! word-move-empty-char-table (make-char-table #f))
-                            word-move-empty-char-table))))
-        (forward-word (let ((arg (if (pair? rest) (car rest) #f)))
-                        (if arg arg 1)))))
+      ;; Emacs `let'-binds `find-word-boundary-function-table', which
+      ;; `specbind' puts above a buffer-local value - `subword-mode`
+      ;; sets one, so a `parameterize` here would be invisible to a
+      ;; buffer that has run the mode. The tree's spelling is the
+      ;; buffer-local binding (`buffer.scm`'s `call-with-buffer-local`).
+      (call-with-buffer-local 'find-word-boundary-function-table
+                              (%word-move-empty-table)
+        (lambda ()
+          (forward-word (let ((arg (if (pair? rest) (car rest) #f)))
+                          (if arg arg 1))))))
 
     (define (backward-word-strictly . rest)
       "Move backward until encountering the beginning of a word.
@@ -1056,14 +1090,11 @@ If ARG is omitted or nil, move point backward one word.
 
 This function is like `backward-word', but it is not affected
 by `find-word-boundary-function-table'.  It is also not interactive."
-      (parameterize ((*find-word-boundary-function-table*
-                      (if (char-table-p word-move-empty-char-table)
-                          word-move-empty-char-table
-                          (begin
-                            (set! word-move-empty-char-table (make-char-table #f))
-                            word-move-empty-char-table))))
-        (forward-word (- (let ((arg (if (pair? rest) (car rest) #f)))
-                           (if arg arg 1))))))
+      (call-with-buffer-local 'find-word-boundary-function-table
+                              (%word-move-empty-table)
+        (lambda ()
+          (forward-word (- (let ((arg (if (pair? rest) (car rest) #f)))
+                             (if arg arg 1)))))))
 
     (define (forward-word-position ed)
       ;; The answer as a position: `0' is `scan_words''s failure, and

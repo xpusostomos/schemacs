@@ -37,6 +37,7 @@ Here's what works already:
 * Tab bar and tab line modes
 * Narrowing
 * Language coloring, formatting
+* scheme/lisp/elisp modes, c, c++, awk, java, objective-c modes
 * visual line mode, fill mode
 * And many more...
 

@@ -67,7 +67,7 @@
           set!%window-hscroll %window-min-hscroll set!%window-min-hscroll
           %window-suspend-auto-hscroll? set!%window-suspend-auto-hscroll?
           *current-frame* frame-height frame-width frame-top-margin
-          frame-minibuffer-window
+          frame-minibuffer-window minibuffer-window
           ;; `FRAME_WINDOW_CHANGE`, which the window-tree functions set
           ;; (`window.c:3715`, `:4427`, `:4896`, `:5681`, `:5828'), and
           ;; the stamp and live-window count the change functions read
@@ -174,6 +174,11 @@
     ;; `assq-delete-all` and `delq` are `subr.el`'s - `record-window-buffer`
     ;; drops an older entry with the first, and the history lists with the
     ;; second.
+    ;; `enlarge-window` reads `this-command` (`window.el:3751`) through
+    ;; the seam `indent.scm` defines for the same variable - a thunk,
+    ;; installed by `simple.scm`. The import is acyclic: indent does not
+    ;; reach window.scm.
+    (only (schemacs indent) *this-command-function*)
     (only (schemacs subr) assq-delete-all delq kbd run-hooks user-error nth
           with-temp-buffer)
     ;; `temp-buffer-window-show' puts point at the beginning of the
@@ -244,7 +249,9 @@
    window-safe-min-size window-min-size window--min-size-ignore-p
    window-normal-size window-size
    window--min-size-1 window-sizable window-sizable-p
-   window-preserved-size window--preserve-size window-body-size
+   window-preserve-size window-preserved-size window--preserve-size
+   window-body-size
+   enlarge-window shrink-window shrink-window-horizontally
    window--size-fixed-1 window-size-fixed-p
    window--min-delta-1 window-min-delta window--max-delta-1 window-max-delta
    window--resizable window--resizable-p window-resizable window-resizable-p
@@ -286,6 +293,7 @@
     ;; The prompt it is given is Emacs's own, "Switch to buffer: ".
 
     (define *set-buffer-major-mode-function* (make-parameter #f))
+
     ;; ^ How a buffer created by `window-normalize-buffer-to-switch-to'
     ;; gets its major mode. `set-buffer-major-mode' is `buffer.c''s
     ;; function (`:2283') and its port lives in `(schemacs files)',
@@ -910,7 +918,12 @@
       ;; `inhibit-same-window' entry, which is how Emacs's
       ;; `Buffer-menu-other-window' binds `display-buffer-overriding-action'.
       ;;--------------------------------------------------------------
+      ;; **`'()` is true in Scheme where Elisp's nil is false**, so the
+      ;; empty action list needs its own arm: `(list? '())` is #t and
+      ;; `(cdr '())` raises. Emacs's `(and action (not (listp action)))`
+      ;; answers nil for it.
       (cond ((not action) #f)
+            ((null? action) #f)
             ((not (list? action)) #t)
             (else
              (let ((entry (assq 'inhibit-same-window (cdr action))))
@@ -931,7 +944,10 @@
       ;; carries. Named rather than faked: no other action function is
       ;; ported, and one that is would have to be dispatched on here.
       ;;--------------------------------------------------------------
-      (and (list? action) (eq? (car action) 'display-buffer-same-window)))
+      ;; `pair?`, not `list?`: `(car '())` raises where Elisp's answers
+      ;; nil.
+      (and (pair? action)
+           (eq? (car action) 'display-buffer-same-window)))
 
     (define (display-buffer buffer . args)
       ;; Show BUFFER in some window without selecting it, and answer with
@@ -968,7 +984,22 @@
       ;; the titles.
       ;;--------------------------------------------------------------
       (let* ((action (if (pair? args) (car args) #f))
-             (refuse-selected (display-buffer--inhibit-same-window? action))
+             ;; "Handle the old form of the first argument:"
+             ;; `(inhibit-same-window (and action (not (listp action))))'
+             ;; - a non-list ACTION means "not this window", and is not
+             ;; an action list (`window.el:8405').
+             ;;
+             ;; **`'()` is true here where Elisp's nil is false**, so the
+             ;; empty list needs its own test: `(and action (not (pair?
+             ;; action)))` answers #t for it, and a `display-buffer` call
+             ;; with a nil ACTION then refused the selected window and
+             ;; crashed the help window's split ("cdr: Wrong type
+             ;; argument ... ()").
+             (action-alist (if (pair? action) action '()))
+             (refuse-selected (or (and action (not (null? action))
+                                       (not (pair? action)))
+                                  (display-buffer--inhibit-same-window?
+                                   action-alist)))
              ;; GNU Emacs's `display-buffer-same-window' (window.el:8500):
              ;; "Display BUFFER in the selected window. ... fails if ALIST
              ;; has an `inhibit-same-window' element whose value is
@@ -983,7 +1014,7 @@
              ;; the old one: every `find-file' from a minibuffer left two
              ;; windows and the old buffer above, which is not what
              ;; "preferably the same one" means.
-             (same-window? (and (display-buffer--same-window-action? action)
+             (same-window? (and (display-buffer--same-window-action? action-alist)
                                 (not refuse-selected))))
         (let ((showing
                ;; 1. a window that shows BUFFER already
@@ -2841,11 +2872,12 @@ by this function.  This happens in an interactive call."
 
     (define window-safe-min-height 1)
     (define window-safe-min-width 2)
-    (define window-resize-pixelwise #f)
     ;; ^ Emacs 31's `defcustom`s and their defaults: the absolute minimum
-    ;; a window may be in any circumstances (`window.el:437`), and whether
-    ;; a resize is rounded to whole characters (`:490`). Plain variables,
-    ;; as the tree spells a `defcustom` the editor never `let`-binds.
+    ;; a window may be in any circumstances (`window.el:437').
+    ;;
+    ;; `window-resize-pixelwise' is `window.c`'s own DEFVAR_BOOL
+    ;; (`:9575') and lives with the other window variables below, not
+    ;; as a second binding here.
     ;;
     ;; `window-combination-resize` (`:245`) *is* `let`-bound - by
     ;; `delete-window` (`:4372`), around the resize engine - so it is a
@@ -3105,6 +3137,40 @@ by this function.  This happens in an interactive call."
           (<= (window-sizable window delta (window--opt args 0)
                               (window--opt args 1) (window--opt args 2))
               delta)))
+
+    (define (%window-parameter-ref parameter n)
+      ;; `(nth N PARAMETER)' for a window parameter that may be absent -
+      ;; Emacs's `(nth 1 parameter)' on nil answers nil.
+      ;;--------------------------------------------------------------
+      (let loop ((p parameter) (k n))
+        (cond ((not (pair? p)) #f)
+              ((= k 0) (car p))
+              (else (loop (cdr p) (- k 1))))))
+
+    (define (window-preserve-size . args)
+      ;; GNU Emacs's `window-preserve-size' (`window.el:1538'):
+      ;; "Preserve height of specified WINDOW's body. ... PRESERVE t
+      ;; means to preserve the current height/width ... PRESERVE nil
+      ;; means to stop preserving ..."
+      ;;
+      ;; The restraint is the `window-preserved-size' window parameter,
+      ;; a list of the buffer it was taken in and the two sizes.
+      ;;--------------------------------------------------------------
+      (let* ((window (window-normalize-window (window--opt args 0) #t))
+             (horizontal (window--opt args 1))
+             (preserve (window--opt args 2))
+             (parameter (window-parameter window 'window-preserved-size))
+             (get (lambda (n) (%window-parameter-ref parameter n)))
+             ;; `(window-body-width window t)' is `window-body-size'
+             ;; asked pixelwise - the same relation Emacs's two
+             ;; definitions have, and this tree's pixel is a cell times
+             ;; the frame's character size.
+             (size (and preserve (window-body-size window horizontal #t)))
+             (width (if horizontal size (get 1)))
+             (height (if horizontal (get 2) size)))
+        (set-window-parameter
+         window 'window-preserved-size
+         (list (window-buffer window) width height))))
 
     (define (window-preserved-size . args)
       ;; GNU Emacs's `window-preserved-size` (`window.el:1545`).
@@ -3919,6 +3985,80 @@ by this function.  This happens in an interactive call."
         (if (window--resizable-p window delta horizontal ignore #f #f #f pixelwise)
             (window-resize window delta horizontal ignore pixelwise)
             #f)))
+
+    (define (%window-this-command)
+      ;; `this-command' as `enlarge-window' reads it, through
+      ;; `indent.scm`'s seam (a thunk; `simple.scm` installs it, and its
+      ;; default answers nil).
+      ((*this-command-function*)))
+
+    (define-command (enlarge-window delta . rest)
+      "Make the selected window DELTA lines taller.
+Interactively, if no argument is given, make the selected window
+one line taller.  If optional argument HORIZONTAL is non-nil,
+make selected window wider by DELTA columns.  If DELTA is
+negative, shrink selected window by -DELTA lines or columns."
+      (interactive "p")
+      (let ((horizontal (if (pair? rest) (car rest) #f))
+            (minibuffer-window (minibuffer-window)))
+        (when (window-preserved-size #f horizontal)
+          (window-preserve-size #f horizontal))
+        (cond
+         ((= delta 0) #f)
+         ((window-size-fixed-p #f horizontal)
+          (user-error "Selected window has fixed size"))
+         ((window-minibuffer-p)
+          (if horizontal
+              (user-error "Cannot resize minibuffer window horizontally")
+              (window--resize-mini-window
+               (selected-window)
+               (* delta (frame-char-height (selected-frame))))))
+         ((and (not horizontal)
+               (window-full-height-p)
+               (eq? (window-frame minibuffer-window) (selected-frame))
+               (not *resize-mini-windows*))
+          ;; "If the selected window is full height and
+          ;; `resize-mini-windows' is nil, resize the minibuffer window."
+          (window--resize-mini-window
+           minibuffer-window (* (- delta) (frame-char-height (selected-frame)))))
+         ((window--resizable-p #f delta horizontal)
+          (window-resize #f delta horizontal))
+         ((window--resizable-p #f delta horizontal 'preserved)
+          (window-resize #f delta horizontal 'preserved))
+         ((eq? (%window-this-command) enlarge-window)
+          ;; "For backward compatibility don't signal an error unless
+          ;; this command is `enlarge-window(-horizontally)'."
+          (if horizontal
+              (user-error "Cannot enlarge selected window horizontally")
+              (user-error "Cannot enlarge selected window vertically")))
+         (else
+          (window-resize
+           #f (if (> delta 0)
+                  (window-max-delta #f horizontal)
+                  (- (window-min-delta #f horizontal)))
+           horizontal)))))
+
+    (define-command (shrink-window delta . rest)
+      "Make the selected window DELTA lines smaller.
+Interactively, if no argument is given, make the selected window
+one line smaller.  If optional argument HORIZONTAL is non-nil,
+make selected window narrower by DELTA columns.  If DELTA is
+negative, enlarge selected window by -DELTA lines or columns."
+      (interactive "p")
+      (let ((horizontal (if (pair? rest) (car rest) #f)))
+        (when (window-preserved-size #f horizontal)
+          (window-preserve-size #f horizontal))
+        (if (= delta 0)
+            #f
+            (enlarge-window (- delta) horizontal))))
+
+    (define-command (shrink-window-horizontally delta)
+      "Make selected window DELTA columns narrower.
+Interactively, if no argument is given, make selected window one
+column narrower."
+      (interactive "p")
+      (shrink-window delta #t))
+
 
     (define (adjust-window-trailing-edge window delta . args)
       ;; GNU Emacs's `adjust-window-trailing-edge` (`window.el:3528`):

@@ -54,6 +54,7 @@
     (only (schemacs command)
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec
+          command-record-named command-autoload-names
           *read-string-function* *read-number-function*
           *read-command-function* *read-minibuffer-function*
           *eval-minibuffer-function* *read-variable-function*
@@ -1361,6 +1362,18 @@ previous element of the minibuffer history in the minibuffer."
     ;; ^ GNU Emacs's `extended-command-history': the names `M-x' has
     ;; read, which `completing-read' offers as its history.
 
+    (define (%command-candidate-names)
+      ;; Every command name the table has, plus the autoload entries
+      ;; `command.scm''s `%command-autoloads' names - Emacs's obarray
+      ;; holds the autoload objects already, so `M-x' completes a
+      ;; command before its file is loaded. A name in both lists is
+      ;; offered once.
+      ;;--------------------------------------------------------------
+      (let loop ((rest (command-autoload-names)) (acc (map car (*command-table*))))
+        (cond ((null? rest) acc)
+              ((assoc (car rest) (*command-table*)) (loop (cdr rest) acc))
+              (else (loop (cdr rest) (cons (car rest) acc))))))
+
     (define (command-completion-table string predicate action)
       ;; The command names STRING could complete to, asked the way the
       ;; table protocol asks: ACTION #f for the completion of STRING,
@@ -1376,9 +1389,14 @@ previous element of the minibuffer history in the minibuffer."
         (and (< 0 (string-length string))
              (if predicate
                  (predicate string)
-                 (and (assoc string (*command-table*)) #t))))
+                 ;; `test-completion' does not load a library whose
+                 ;; command is merely autoloadable, so the test reads
+                 ;; the entry names and not `command-record-named'.
+                 (and (or (assoc string (*command-table*))
+                          (member string (command-autoload-names)))
+                      #t))))
        (else
-        (let ((names (map car (*command-table*))))
+        (let ((names (%command-candidate-names)))
           (if (eq? action #f)
               (try-completion string names predicate)
               (all-completions string names predicate))))))
@@ -1395,10 +1413,14 @@ previous element of the minibuffer history in the minibuffer."
       (interactive "P")
       (let* ((name (completing-read "M-x " command-completion-table
                                     #f #f #f *extended-command-history* #f))
-             (entry (assoc name (*command-table*))))
-        (if (not entry)
+             ;; The lookup is `command-record-named', not a raw table
+             ;; read: an autoloadable command's library is loaded here,
+             ;; as Emacs's `command-execute' loads it for the symbol
+             ;; `M-x' was given.
+             (record (command-record-named name)))
+        (if (not record)
             (error "No match")
-            (let ((record (cdr entry)))
+            (begin
               (*this-command* (command-value-of record))
               (if (command-interactive-spec record)
                   (run-command record uarg)

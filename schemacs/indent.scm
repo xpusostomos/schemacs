@@ -49,7 +49,7 @@
     (only (schemacs editfns)
           bobp bolp delete-region eobp eolp forward-line goto-char
           insert insert-char preceding-char
-          point point-marker
+          point point-marker point-max
           region-beginning region-end line-end-position save-excursion
           ;; `indent-according-to-mode` widens first, so that indenting a
           ;; line in a narrowed buffer sees the text outside it.
@@ -58,7 +58,7 @@
     (only (schemacs indentc)
           *indent-tabs-mode*
           current-column current-indentation indent-to move-to-column)
-    (only (schemacs search) looking-at regexp-quote
+    (only (schemacs search) looking-at regexp-quote match-end
           re-search-backward)
     (prefix (schemacs keymap) km:)
     (only (schemacs keymap) define-key)

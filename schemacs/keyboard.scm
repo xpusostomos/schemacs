@@ -60,6 +60,7 @@
     ;; motions signal, which the reporter below names rather than
     ;; printing "error".
     (only (schemacs syntax) scan-error? scan-error-string)
+    (only (schemacs search) search-failed? search-failed-error)
     
     (only (schemacs command)
           ;; The quit condition and its flag, which `keyboard-quit`
@@ -754,6 +755,7 @@
        (cond
         ((quit-condition? ex) "Quit")
         ((scan-error? ex) (scan-error-string ex))
+        ((search-failed? ex) (search-failed-error ex))
         ((error-object? ex)
          (let ((message (error-object-message ex))
                (irritants (error-object-irritants ex)))

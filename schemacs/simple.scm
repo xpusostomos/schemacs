@@ -256,7 +256,7 @@
    *kill-ring* *kill-ring-max* *kill-ring-yank-pointer*
    *interprogram-cut-function* *interprogram-paste-function*
    *select-active-regions* *yank-pop-change-selection*
-   *pending-undo-list* undo-more
+   *pending-undo-list* undo-more buffer-disable-undo buffer-enable-undo
    prepare-change-group activate-change-group accept-change-group
    cancel-change-group atomic-change-group
    *prefix-cu* *prefix-digits* *prefix-negative*
@@ -1149,7 +1149,7 @@ just inserts a newline without doing any indentation."
       ;;--------------------------------------------------------------
       (make-parameter #t))
 
-    (define-command (exchange-point-and-mark arg)
+    (define-command (exchange-point-and-mark . rest)
       ;; GNU Emacs's `exchange-point-and-mark' (C-x C-x): put the mark
       ;; where point is now, and point where the mark was - which is how
       ;; you return to where a search started. It works even when the
@@ -1161,9 +1161,15 @@ just inserts a newline without doing any indentation."
       ;; off, in which case a prefix argument is what activates it -
       ;; Emacs's `(xor arg ...)' below, which is the whole of that
       ;; variable's meaning.
+      ;;
+      ;; **ARG is optional**, as `(exchange-point-and-mark &optional arg)'
+      ;; makes it (`simple.el:7577'): `cmacexp.el:182' calls it with no
+      ;; argument, and a required parameter made that a wrong-number
+      ;; error.
       "Put the mark where point is now, and point where the mark is now."
       (interactive "P")
-      (let ((omark (mark #t))
+      (let ((arg (if (pair? rest) (car rest) #f))
+            (omark (mark #t))
             (region-was-active (region-active-p)))
         (if (not omark)
             (error "No mark set in this buffer")
@@ -1758,7 +1764,13 @@ node `(elisp) Word Motion' for details."
             (unless (*kill-read-only-ok*)
               (error "Buffer is read-only"))
             ;; the C's `(filter-buffer-substring beg end 'delete)'
-            (filter-buffer-substring beg end #t))))
+            (filter-buffer-substring beg end #t))
+        ;; **The answer is nil**, as every arm of Emacs's
+        ;; `condition-case' answers nil (`simple.el:5993' ends `nil',
+        ;; the read-only arm `(progn (message ...) nil)') - measured:
+        ;; `(kill-region 1 4)' is nil in Emacs 31.1. The deleted
+        ;; substring was this port's answer before.
+        #f))
 
     (define (copy-region-as-kill beg end)
       ;; GNU Emacs's `copy-region-as-kill': put the text in the kill ring
@@ -2309,6 +2321,41 @@ node `(elisp) Word Motion' for details."
               ;; position of their own. See the function.
               (undo-drop-recorded-positions! ed)
               (set!frame-message frame "Undo")))))
+
+    (define-command (buffer-disable-undo . rest)
+      ;; GNU Emacs's `buffer-disable-undo' (`simple.el:3596'): "Make
+      ;; BUFFER stop keeping undo information. No argument or nil as
+      ;; argument means do this for the current buffer." Its whole body
+      ;; is `(setq buffer-undo-list t)'.
+      ;;
+      ;; `buffer-undo-list' is the editor's (`undo.scm`'s
+      ;; `text-editor-undo-list'), whose `t' is "recording off".
+      "Make BUFFER stop keeping undo information.
+No argument or nil as argument means do this for the current buffer."
+      (interactive)
+      (let ((buffer (if (pair? rest) (car rest) #f)))
+        (with-current-buffer (if buffer (get-buffer buffer) (current-buffer))
+          (set!text-editor-undo-list (current-buffer) #t))))
+
+    (define-command (buffer-enable-undo . rest)
+      ;; GNU Emacs's `buffer-enable-undo' (`buffer.c:1843'): "Start
+      ;; keeping undo information for buffer BUFFER. No argument or nil
+      ;; as argument means do this for the current buffer."
+      ;;
+      ;; **A placement departure**: the function is `buffer.c`'s, but
+      ;; this tree's commands need `define-command`, and `buffer.scm` is
+      ;; below `command.scm`. It lives beside `buffer-disable-undo`, the
+      ;; same move `%kill-buffer`'s command half made.
+      "Start keeping undo information for buffer BUFFER.
+No argument or nil as argument means do this for the current buffer."
+      (interactive "bEnable undo in buffer: ")
+      (let ((buffer (if (pair? rest) (car rest) #f)))
+        (let ((real (if buffer (get-buffer buffer) (current-buffer))))
+          (unless real
+            (error "No buffer named ~a" buffer))
+          (with-current-buffer real
+            (when (eq? (text-editor-undo-list (current-buffer)) #t)
+              (set!text-editor-undo-list (current-buffer) '()))))))
 
     (define-command (undo-redo count)
       ;; GNU Emacs's `undo-redo': undo the undos. The records an undo
@@ -4494,5 +4541,6 @@ from which `next-error' navigated, and a target buffer TO-BUFFER."
     ;; The seam `indent.scm` reaches `delete-horizontal-space` through -
     ;; see the note at the top of this file's imports.
     (*delete-horizontal-space-function* delete-horizontal-space)
+
 
     ))

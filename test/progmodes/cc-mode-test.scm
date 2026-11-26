@@ -29,14 +29,16 @@
  (only (schemacs marker) marker-position)
  (only (schemacs insdel) *before-change-functions* *after-change-functions*)
  (only (schemacs textprop) get-text-property put-text-property
-       remove-text-properties)
+       remove-text-properties next-single-property-change)
  (only (schemacs cmds) delete-char)
  (only (schemacs progmodes cc-defs) c-lang-const *c-buffer-is-cc-mode*
        c-clear-char-property c-get-char-property
        c-mark-<-as-paren c-mark->-as-paren
        c-clear-char-property-with-value-on-char)
  (schemacs progmodes cc-langs)
- (only (schemacs progmodes cc-styles) c-set-style)
+ (only (schemacs progmodes cc-styles) c-set-style
+       *c-guess-basic-syntax-function*)
+ (only (schemacs progmodes cc-engine) c-guess-basic-syntax)
  (only (schemacs progmodes cc-engine) c-found-types set!c-found-types
        c-add-type-1 c-clear-found-types
        c-new-id-start c-new-id-end c-new-id-is-type
@@ -83,12 +85,19 @@
  (only (schemacs progmodes cc-cmds)
        c-indent-line c-indent-region c-do-auto-fill c-fill-paragraph
        c-mark-function c-electric-brace c-forward-conditional
-       c-beginning-of-defun c-hungry-delete-forward)
+       c-beginning-of-defun c-hungry-delete-forward
+       c-beginning-of-statement c-end-of-statement)
  (only (schemacs progmodes cc-styles) c-set-style)
  (only (schemacs textmodes fill) fill-paragraph-function
        fill-paragraph-handle-comment normal-auto-fill-function-value)
  (only (schemacs newcomment) comment-start comment-end comment-start-skip
        comment-multi-line)
+ (only (schemacs cmds) self-insert-command)
+ (only (schemacs core lisp) beginning-of-defun end-of-defun
+       *beginning-of-defun-function*)
+ (only (schemacs abbrev) local-abbrev-table abbrev-table-named
+       abbrev-table-abbrevs abbrev-expansion abbrev-get abbrev-put)
+ (only (schemacs keyboard) undefined)
  (only (schemacs files) find-file-noselect)
  (only (schemacs progmodes cc-mode)
        c-mode c++-mode c-or-c++-mode c-mode-map c-mode-syntax-table
@@ -102,7 +111,15 @@
        objc-mode-hook java-mode-hook idl-mode-hook pike-mode-hook
        objc-mode-syntax-table
        c-objc-menu c-java-menu c-idl-menu c-pike-menu
-       c-Java-defun-prompt-regexp)
+       awk-mode awk-mode-map awk-mode-syntax-table awk-mode-hook
+       c-awk-menu
+       c-Java-defun-prompt-regexp
+       c-define-abbrev-table c-populate-abbrev-table)
+ (only (schemacs progmodes cc-awk)
+       c-awk-get-NL-prop-cur-line c-awk-get-NL-prop-prev-line
+       c-awk-at-vsemi-p c-awk-beginning-of-logical-line
+       c-awk-beyond-logical-line c-awk-beginning-of-defun
+       c-awk-end-of-defun c-awk-at-statement-end-p)
  (only (schemacs progmodes cc-fonts)
        c-force-redisplay *c-font-lock-fontify-region-function*))
 
@@ -1116,6 +1133,8 @@
               "Comment Out Region" (vector-ref (car menu) 0))
   (test-assert "the cpp items are present for a language with a preprocessor"
                (member "Backslashify" (menu-labels menu)))
+  (test-assert "and the Macro Expand Region item, which c-macro-expand backs"
+               (member "Macro Expand Region" (menu-labels menu)))
   (let* ((toggle (car (reverse menu)))
          (item (car (cdr toggle))))
     (test-equal "the Toggle submenu's first item is Syntactic indentation"
@@ -1123,11 +1142,45 @@
     (test-equal "whose :selected is the accessor call, not the variable"
                 '(c-syntactic-indentation) (vector-ref item 5))
     (test-equal "and whose style is toggle"
-                'toggle (vector-ref item 3))))
+                'toggle (vector-ref item 3))
+    ;; "Subword mode" is the Toggle submenu's last item
+    ;; (`cc-langs.el:324'), and its `:selected` reads the variable
+    ;; `subword-mode` through the accessor.
+    (let ((subword (car (reverse toggle))))
+      (test-equal "the Toggle submenu ends with Subword mode"
+                  "Subword mode" (vector-ref subword 0))
+      (test-equal "whose :selected reads subword-mode's variable"
+                  '(subword-mode-variable) (vector-ref subword 5))
+      (test-equal "and toggles c-subword-mode"
+                  'c-subword-mode (vector-ref subword 1)))))
 
 (let ((menu (c-lang-const c-mode-menu awk)))
   (test-assert "awk, with no preprocessor, has no Backslashify item"
-               (not (member "Backslashify" (menu-labels menu)))))
+               (not (member "Backslashify" (menu-labels menu))))
+  (test-assert "and no Macro Expand Region item either"
+               (not (member "Macro Expand Region" (menu-labels menu)))))
+
+;; `C-c C-e' is `c-macro-expand' in the four modes that have a cpp
+;; (`cc-mode.el:2877', `:3002', `:3051', `:3192'). The binding is the
+;; *symbol*, as Emacs writes it: `cmacexp.el' requires `cc-mode', so the
+;; command's library cannot be imported here, and `command.scm`'s
+;; autoload table resolves the name when the key is pressed.
+(test-equal "C-c C-e is c-macro-expand in c-mode"
+            'c-macro-expand (lookup-key c-mode-map (kbd "C-c C-e")))
+(test-equal "and in c++-mode"
+            'c-macro-expand (lookup-key c++-mode-map (kbd "C-c C-e")))
+(test-equal "and in objc-mode"
+            'c-macro-expand (lookup-key objc-mode-map (kbd "C-c C-e")))
+(test-equal "and in pike-mode"
+            'c-macro-expand (lookup-key pike-mode-map (kbd "C-c C-e")))
+(test-equal "but awk, which has no cpp, leaves it unbound"
+            #f (lookup-key awk-mode-map (kbd "C-c C-e")))
+
+;; `C-c C-w' is `c-subword-mode' in the base map (`cc-mode.el:467'),
+;; which subword.scm has as its obsolete alias of `subword-mode'.
+(test-equal "C-c C-w is c-subword-mode"
+            'c-subword-mode
+            (lookup-key (lookup-key c-mode-map (kbd "C-c")) (kbd "C-w")))
 
 (test-assert "c-c-menu is a keymap" (keymapp c-c-menu))
 (test-assert "the C menu is bound in c-mode-map under [menu-bar c]"
@@ -1292,3 +1345,281 @@
            (list 1 36 38 28)))))
 
 (test-end "schemacs_editor_cc_mode_languages")
+
+;;------------------------------------------------------------------
+;; AWK Mode (`cc-awk.scm' + `cc-mode.el''s awk section)
+;;------------------------------------------------------------------
+;; Every expectation is Emacs 31.1's own: the mode, syntax and map
+;; rows were measured with `emacs -Q --batch' on the same text, the
+;; face runs by `font-lock-ensure' over it, and the probe rows by a
+;; whole-buffer differential (every position of the fixture, a fresh
+;; buffer each) that agrees at all 120 positions.
+;;--------------------------------------------------------------
+
+(define awk-fixture
+  "function f(a) {
+    return a + 1
+}
+
+BEGIN {
+    x = 1
+    y = 2
+}
+
+/a b/ { print $0 }
+
+$1 ~ /x/ &&
+    $2 {
+    print
+}
+")
+
+(define awk-probe-count 0)
+
+(define (awk-probe p)
+  (set! awk-probe-count (+ awk-probe-count 1))
+  (let ((b (mode-buffer (string-append "mode-defs-awk-"
+                                       (number->string awk-probe-count)
+                                       ".awk")
+                        awk-fixture)))
+    (with-current-buffer b
+      (awk-mode)
+      (goto-char p)
+      (let ((nl-cur (c-awk-get-NL-prop-cur-line))
+            (nl-prev (c-awk-get-NL-prop-prev-line))
+            (vsemi (c-awk-at-vsemi-p p))
+            (bll (c-awk-beginning-of-logical-line p))
+            (beyond (c-awk-beyond-logical-line p))
+            (bos (begin (goto-char p)
+                        (let ((r (c-awk-beginning-of-defun 1)))
+                          (list r (point))))))
+        (goto-char p)
+        (let ((er (c-awk-end-of-defun 1))
+              (ep (point)))
+          (goto-char p)
+          (list nl-cur nl-prev vsemi bll beyond bos (list er ep)
+                (c-awk-at-statement-end-p)))))))
+
+(define (awk-face-runs)
+  (let ((p (point-min)) (out '()))
+    (while (< p (point-max))
+      (let ((f (get-text-property p 'face))
+            (n (next-single-property-change p 'face #f (point-max))))
+        (unless (eq? f (and (pair? out) (car (car out))))
+          (set! out (cons (cons f p) out)))
+        (set! p n)))
+    (reverse out)))
+
+(test-begin "schemacs_editor_cc_mode_awk")
+
+(test-equal "awk-mode's name and mode line are Emacs's"
+  (list 'awk-mode "AWK//l" #t)
+  (let ((b (mode-buffer "mode-defs-awk-1.awk" "BEGIN { print 1 }\n")))
+    (with-current-buffer b
+      (awk-mode)
+      (list (major-mode) (mode-name)
+            (buffer-local-value b 'abbrev-mode #f)))))
+
+(test-equal "the syntax table is awk's, character for character"
+  (list #\< #\_ #\. #\. #\. #\>)
+  (let ((b (mode-buffer "mode-defs-awk-2.awk" "BEGIN {}\n")))
+    (with-current-buffer b
+      (awk-mode)
+      (list (char-syntax #\#) (char-syntax #\_) (char-syntax #\/)
+            (char-syntax #\*) (char-syntax #\') (char-syntax #\newline)))))
+
+(test-equal "the comment syntax is the language's"
+  (list "# " "\\(?:#+\\)\\s *" "")
+  (let ((b (mode-buffer "mode-defs-awk-3.awk" "BEGIN {}\n")))
+    (with-current-buffer b
+      (awk-mode)
+      (list (comment-start) (comment-start-skip) (comment-end)))))
+
+(test-equal "the mode's keymap binds the awk keys"
+  ;; Emacs 31.1's `(lookup-key awk-mode-map (kbd KEY))' answers; `#',
+  ;; `/` and `*` override the electric parent binding, and the three
+  ;; `C-c C-*' conditionals do not exist in awk.
+  (list self-insert-command self-insert-command self-insert-command
+        undefined c-beginning-of-statement c-end-of-statement
+        c-awk-beginning-of-defun c-awk-end-of-defun)
+  (let ((b (mode-buffer "mode-defs-awk-4.awk" "BEGIN {}\n")))
+    (with-current-buffer b
+      (awk-mode)
+      (list (lookup-key awk-mode-map (kbd "#"))
+            (lookup-key awk-mode-map (kbd "/"))
+            (lookup-key awk-mode-map (kbd "*"))
+            (lookup-key awk-mode-map (kbd "C-c C-n"))
+            (lookup-key awk-mode-map (kbd "M-a"))
+            (lookup-key awk-mode-map (kbd "M-e"))
+            (lookup-key awk-mode-map (kbd "C-M-a"))
+            (lookup-key awk-mode-map (kbd "C-M-e"))))))
+
+(test-equal "the AWK menu is bound in awk-mode-map"
+  (list #t #t)
+  (list (keymapp c-awk-menu)
+        (keymapp (lookup-key awk-mode-map (vector 'menu-bar 'awk)))))
+
+(test-equal "an AWK buffer fontifies through the real mode"
+  ;; Emacs 31.1's whole-buffer runs on this fixture: `function' and
+  ;; `BEGIN' keywords, `f' as a function name, the first string, `print'
+  ;; as a builtin (preprocessor face), second string, `/x/' as a
+  ;; regexp (the string face), and `print' again.
+  '((font-lock-keyword-face . 1) (#f . 9)
+    (font-lock-function-name-face . 10) (#f . 11)
+    (font-lock-keyword-face . 21) (#f . 27)
+    (font-lock-keyword-face . 37) (#f . 42)
+    (font-lock-string-face . 68) (#f . 73)
+    (font-lock-preprocessor-face . 76) (#f . 81)
+    (font-lock-string-face . 93) (#f . 96)
+    (font-lock-preprocessor-face . 113) (#f . 118))
+  (let ((b (mode-buffer "mode-defs-awk-5.awk" awk-fixture)))
+    (with-current-buffer b
+      (awk-mode)
+      (font-lock-mode 1)
+      (font-lock-ensure)
+      (awk-face-runs))))
+
+(test-equal "the NL-prop analysis, the logical lines and the defun moves"
+  ;; Four rows of the whole-buffer differential, at every one of the
+  ;; fixture's 120 positions, against Emacs 31.1: (nl-cur nl-prev
+  ;; vsemi beginning-of-logical-line beyond-logical-line
+  ;; (beginning-of-defun point) (end-of-defun point) at-statement-end).
+  (list (list #\$ #\{ #f 17 34 (list #t 1) (list #f 35) #f)
+        (list #\$ #\$ #f 55 65 (list #t 37) (list #f 66) #f)
+        (list #\$ #\{ #f 109 119 (list #t 88) (list #f 120) #f)
+        (list #\} #\$ #f 119 121 (list #t 88) (list #f 107) #t))
+  (list (awk-probe 17) (awk-probe 60) (awk-probe 110) (awk-probe 120)))
+
+(test-equal "a .awk file and an awk shebang open in awk-mode through the autoloads"
+  '(awk-mode awk-mode)
+  (let ((fa "/tmp/sc-cc-mode-defs-lang.awk")
+        (fs "/tmp/sc-cc-mode-defs-lang-awk-shebang"))
+    (with-output-to-file fa
+      (lambda () (display "BEGIN { print 1 }\n")))
+    (with-output-to-file fs
+      (lambda () (display "#!/usr/bin/awk -f\nBEGIN { print 1 }\n")))
+    (list (with-current-buffer (find-file-noselect fa) (major-mode))
+          (with-current-buffer (find-file-noselect fs) (major-mode)))))
+
+(test-end "schemacs_editor_cc_mode_awk")
+
+(test-begin "schemacs_editor_cc_mode_seams")
+
+(test-assert "the c-guess-basic-syntax seam is installed"
+  ;; `cc-styles.scm' cannot import `cc-engine.scm'; `cc-mode.scm' imports
+  ;; both and installs the seam at load.
+  (eq? (*c-guess-basic-syntax-function*) c-guess-basic-syntax))
+
+(test-equal "the seam's function answers the syntax list c-set-offset reads"
+  '(#t #t)
+  (let ((b (mode-buffer "mode-defs-seam.c" "int x;
+")))
+    (with-current-buffer b
+      (c-mode)
+      (goto-char 5)
+      (let ((s (c-guess-basic-syntax)))
+        (list (pair? s)
+              (pair? (car (reverse s))))))))
+
+(test-end "schemacs_editor_cc_mode_seams")
+
+(test-begin "schemacs_editor_cc_mode_defun_bridge")
+
+;; `cc-langs.el' sets both defun functions with `c-lang-setvar', and its
+;; value is a *symbol* naming the language's command (`c-beginning-of-defun',
+;; or `c-awk-beginning-of-defun'). Emacs `funcall's it through the
+;; obarray; `lisp.scm' resolves it through the command table, and the
+;; buffer-local slot must win over the global parameter. Every expected
+;; answer was measured on Emacs 31.1 in a real c-mode buffer.
+(test-equal "c-init-language-vars makes the defun functions buffer-local"
+  '(c-beginning-of-defun c-end-of-defun)
+  (let ((b (fresh "static void foo (void)\n{\n  int x;\n}\n\nint y;\n")))
+    (list (buffer-local-value b 'beginning-of-defun-function #f)
+          (buffer-local-value b 'end-of-defun-function #f))))
+
+(test-equal "beginning-of-defun resolves the buffer-local symbol and moves"
+  '(#t 1)
+  (let ((b (fresh "static void foo (void)\n{\n  int x;\n}\n\nint y;\n")))
+    (with-current-buffer b
+      (goto-char 25)
+      (list (beginning-of-defun) (point)))))
+
+(test-equal "end-of-defun calls the buffer-local function and answers nil"
+  '(#f 37)
+  (let ((b (fresh "static void foo (void)\n{\n  int x;\n}\n\nint y;\n")))
+    (with-current-buffer b
+      (goto-char 25)
+      (beginning-of-defun)
+      (list (end-of-defun) (point)))))
+
+(test-equal "the parameter is the global fallback when no local exists"
+  '(#t 1)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "anything here")
+    (parameterize ((*beginning-of-defun-function*
+                    (lambda (arg) (goto-char (point-min)) #t)))
+      (goto-char 5)
+      (list (beginning-of-defun) (point)))))
+
+(test-equal "a buffer-local naming no command is Emacs's void-function"
+  '(no-such-defun-command)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    (insert "x")
+    (set-buffer-local-value! b 'beginning-of-defun-function
+                             'no-such-defun-command)
+    (guard (e (#t (error-object-irritants e)))
+      (beginning-of-defun)
+      #f)))
+
+(test-end "schemacs_editor_cc_mode_defun_bridge")
+
+(test-begin "schemacs_editor_cc_mode_abbrevs")
+
+;; `c-populate-abbrev-table' runs from `c-basic-common-init', names the
+;; table after the mode, and installs `c-std-abbrev-keywords' with the
+;; electric hook, system flag and count. Emacs 31.1's own answers:
+;; c-mode has "else"; c++-mode adds "catch"; java-mode adds both; the
+;; count is 0 and the system flag t; and an existing use count is not
+;; overwritten (that is why the membership test is there).
+(test-equal "c-mode's abbrev table is named and populated as Emacs's"
+  '(#t "else" #f #f 0 #t)
+  (let ((b (language-buffer "mode-defs-abbrev.c" c-mode "int x;\n")))
+    (with-current-buffer b
+      (let ((tbl (local-abbrev-table)))
+        (list (eq? tbl (abbrev-table-named 'c-mode-abbrev-table))
+              (abbrev-expansion "else" tbl)
+              (abbrev-expansion "catch" tbl)
+              (abbrev-expansion "finally" tbl)
+              (abbrev-get (hash-ref (abbrev-table-abbrevs tbl) "else" #f)
+                          ':count)
+              (abbrev-get (hash-ref (abbrev-table-abbrevs tbl) "else" #f)
+                          ':system))))))
+
+(test-equal "c++-mode adds catch; java-mode adds catch and finally"
+  '("catch" #f "catch" "finally" #t)
+  (let* ((cpp (language-buffer "mode-defs-abbrev.cpp" c++-mode "int x;\n"))
+         (java (language-buffer "mode-defs-abbrev.java" java-mode
+                                "class C { }\n"))
+         (cpp-tbl (with-current-buffer cpp (local-abbrev-table)))
+         (java-tbl (with-current-buffer java (local-abbrev-table))))
+    (list (abbrev-expansion "catch" cpp-tbl)
+          (abbrev-expansion "finally" cpp-tbl)
+          (abbrev-expansion "catch" java-tbl)
+          (abbrev-expansion "finally" java-tbl)
+          (eq? (abbrev-table-named 'java-mode-abbrev-table) java-tbl))))
+
+(test-equal "c-populate-abbrev-table does not reset an existing use count"
+  '(5 "else")
+  (let ((b (language-buffer "mode-defs-abbrev2.c" c-mode "int x;\n")))
+    (with-current-buffer b
+      (let* ((tbl (local-abbrev-table))
+             (cell (hash-ref (abbrev-table-abbrevs tbl) "else" #f)))
+        (abbrev-put cell ':count 5)
+        (c-populate-abbrev-table)
+        (list (abbrev-get (hash-ref (abbrev-table-abbrevs tbl) "else" #f)
+                          ':count)
+              (abbrev-expansion "else" tbl))))))
+
+(test-end "schemacs_editor_cc_mode_abbrevs")

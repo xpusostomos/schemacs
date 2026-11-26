@@ -437,6 +437,7 @@
     )
 
   (export
+   current-bidi-paragraph-direction
    *messages-buffer-name* *message-log-max*
    ;; The two hooks a menu bar is refreshed through (`xdisp.c`'s
    ;; DEFVARs, run by the front end's `set_frame_menubar`).
@@ -6399,6 +6400,31 @@ buffer size, the line number and the column number."
                    (seg-start (max 0 (- start 1))))
               (cons (%substring line seg-start end)
                     (- pos seg-start))))))
+
+    (define (current-bidi-paragraph-direction . args)
+      ;; GNU Emacs's `current-bidi-paragraph-direction'
+      ;; (`xdisp.c:26952'): "Return paragraph direction at point in
+      ;; BUFFER. Value is either `left-to-right' or `right-to-left'."
+      ;;
+      ;; **This redisplay has no bidi iterator**, so the C's three-way
+      ;; gate - `bidi-display-reordering', multibyte-ness and
+      ;; `redisplay__inhibit_bidi' (`:26975'-`:26980') - is not carried,
+      ;; and a paragraph whose direction the bidi algorithm would have
+      ;; to determine is laid out left to right, which is what the
+      ;; renderer does. What *is* honoured is the buffer-local
+      ;; `bidi-paragraph-direction' (`:26981'): a caller that sets it
+      ;; gets the answer Emacs would give. Its global default is not
+      ;; carried - there is no `setq-default' for it here - which is
+      ;; the named departure.
+      ;;--------------------------------------------------------------
+      (let* ((buffer (if (and (pair? args) (car args))
+                         (car args)
+                         (current-buffer)))
+             (explicit (and buffer
+                            (buffer-local-value buffer
+                                                'bidi-paragraph-direction
+                                                #f))))
+        (or explicit 'left-to-right)))
 
     (define (posn-at-x-y x y frame)
       ;; GNU Emacs's `posn-at-x-y' (`keyboard.c:13009'), which is

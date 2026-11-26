@@ -55,6 +55,7 @@
    ;; four beside it. See the note where they are defined.
    *max-5-byte-char*
    *max-char*
+   char-to-string
    char-byte8? byte8-to-char char-to-byte8 char-to-byte-safe unibyte-to-char
    ;; `character.h''s `CHARACTERP' and `CHAR_VALID_P', in the same file
    ;; and for the same reason: it is about character codes and nothing
@@ -139,6 +140,22 @@
       ;; holds its bytes, which is the same trick.
       ;;--------------------------------------------------------------
       (if (< byte #x80) byte (byte8-to-char byte)))
+
+    (define (char-to-string character)
+      ;; GNU Emacs's `char-to-string' (`character.c`): "Convert a
+      ;; character to a string." In Emacs a character IS an integer;
+      ;; here `parse-partial-sexp`'s string delimiters arrive as
+      ;; characters and language data may hold code points, so both are
+      ;; accepted.
+      ;;--------------------------------------------------------------
+      (cond ((char? character) (string character))
+            ((integer? character)
+             (if (char-byte8? character)
+                 ;; A byte character has no `char` to be; see
+                 ;; `buffer-text`'s U+FFFD rule.
+                 (string (integer->char #xFFFD))
+                 (string (integer->char character))))
+            (else (error "Wrong type argument: characterp, ~a" character))))
 
     (define (char-to-byte8 c)
       ;; `CHAR_TO_BYTE8' (`character.h:125'): "Return the raw 8-bit byte

@@ -607,6 +607,36 @@
    "public class C {\n    static void foo () { int x = 1; }\n    // comment\n    String s = \"hi\";\n}\n"
    'java-mode))
 
+;; A dotted name with a capitalised component is what crashes the Java
+;; qualified-name matcher when its anchored highlighter is one list too
+;; deep (`Wrong type to apply: (#<procedure> #f #<procedure>)`), and a
+;; qualified generic parameter is what loses its identifier when the
+;; matcher's `while' answers the unspecified value or when
+;; `c-maybe-decl-faces' is not evaluated. Every run is Emacs 31.1's.
+(test-equal "the Java qualified-name fixture fontifies exactly as Emacs does"
+  '((1 7 font-lock-keyword-face)
+    (8 12 font-lock-constant-face)
+    (13 17 font-lock-constant-face)
+    (18 21 font-lock-type-face)
+    (23 29 font-lock-keyword-face)
+    (30 35 font-lock-keyword-face)
+    (36 37 font-lock-type-face)
+    (44 48 font-lock-type-face)
+    (49 50 font-lock-function-name-face)
+    (52 56 font-lock-constant-face)
+    (57 61 font-lock-constant-face)
+    (62 65 font-lock-type-face)
+    (66 72 font-lock-type-face)
+    (74 80 font-lock-type-face)
+    (84 94 font-lock-variable-name-face)
+    (104 108 font-lock-type-face)
+    (109 110 font-lock-function-name-face)
+    (112 120 font-lock-type-face)
+    (121 129 font-lock-variable-name-face))
+  (esp-fontify
+   "import java.util.Map;\npublic class C {\n    void f (java.util.Map<String, String[]> parameters) { }\n    void g (Response response) { }\n}\n"
+   'java-mode))
+
 (test-equal "enums, using, new and lambda captures fontify as Emacs does"
   '((1 5 font-lock-keyword-face)
     (6 7 font-lock-type-face)

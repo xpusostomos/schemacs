@@ -40,6 +40,7 @@
     (schemacs cmds)
     (schemacs coding)
     (schemacs command)
+    (schemacs core byte-run)
     (schemacs core cl-indent)
     (schemacs core cl-seq)
     (schemacs core derived)
@@ -115,18 +116,21 @@
     (schemacs pages)
     (schemacs paren)
     (schemacs progmodes cc-align)
+    (schemacs progmodes cc-awk)
     (schemacs progmodes cc-cmds)
     (schemacs progmodes cc-defs)
     (except (schemacs progmodes cc-engine)  c-benign-error)
     (schemacs progmodes cc-fonts)
     (schemacs progmodes cc-langs)
     (schemacs progmodes cc-menus)
-    (schemacs progmodes cc-mode)
+    (except (schemacs progmodes cc-mode)  c-open-string-opener set!c-open-string-opener awk-mode-syntax-table)
     (schemacs progmodes cc-styles)
     (schemacs progmodes cc-vars)
+    (schemacs progmodes cmacexp)
     (schemacs progmodes elisp-mode)
     (schemacs progmodes prog-mode)
     (schemacs progmodes scheme)
+    (schemacs progmodes subword)
     (schemacs regex-emacs)
     (schemacs region-cache)
     (schemacs repl)
@@ -350,6 +354,10 @@
     *c-last-identifier-range*
     *c-lit-limits*
     *c-lit-type*
+    *c-macro-cppflags*
+    *c-macro-preprocessor*
+    *c-macro-prompt-flag*
+    *c-macro-shrink-window-flag*
     *c-macro-start*
     *c-mark-wrong-style-of-comment*
     *c-max-one-liner-length*
@@ -924,6 +932,7 @@
     *show-paren-when-point-inside-paren*
     *show-trailing-whitespace*
     *signal-wake-function*
+    *small-temporary-file-directory*
     *special-event-map*
     *split-string-default-separators*
     *standard-display-table*
@@ -992,6 +1001,7 @@
     *tab-width*
     *tabulated-list-entries*
     *tabulated-list-format*
+    *temporary-file-directory*
     *temporary-goal-column*
     *text-property-append*
     *text-property-default-nonsticky*
@@ -1075,6 +1085,7 @@
     <quit-condition>
     <re-charset>
     <scan-error>
+    <search-failed>
     <test-display>
     <widget-value>
     Buffer-menu-beginning
@@ -1107,6 +1118,7 @@
     abbrev-start-location
     abbrev-start-location-buffer
     abbrev-symbol
+    abbrev-table-abbrevs
     abbrev-table-get
     abbrev-table-name-list
     abbrev-table-named
@@ -1174,6 +1186,11 @@
     autodoc-font-lock-line-markup
     autodoc-line-join-end-ch
     autodoc-line-join-re
+    awk-font-lock-keywords
+    awk-mode
+    awk-mode-hook
+    awk-mode-map
+    awk-mode-syntax-table
     back-to-indentation
     backward-char
     backward-delete-char
@@ -1248,6 +1265,8 @@
     buffer-cursor-in-non-selected-windows
     buffer-cursor-type
     buffer-default-directory
+    buffer-disable-undo
+    buffer-enable-undo
     buffer-end
     buffer-ends-with-newline?
     buffer-file-coding-system
@@ -1316,6 +1335,7 @@
     build-marker
     bury-buffer
     butlast
+    byte-run--constant-obsolete-warning
     byte8-to-char
     bytes-have-null?
     c++-font-lock-keywords
@@ -1370,6 +1390,39 @@
     c-at-toplevel-p
     c-at-vsemi-p
     c-auto-newline
+    c-awk-after-continue-token
+    c-awk-after-function-decl-param-list
+    c-awk-after-if-for-while-condition-p
+    c-awk-after-rbrace-or-statement-semicolon
+    c-awk-at-statement-end-p
+    c-awk-at-vsemi-p
+    c-awk-back-to-contentful-text-or-NL-prop
+    c-awk-beginning-of-defun
+    c-awk-beginning-of-defun-p
+    c-awk-beginning-of-logical-line
+    c-awk-beyond-logical-line
+    c-awk-calculate-NL-prop-prev-line
+    c-awk-clear-NL-props
+    c-awk-context-expand-fl-region
+    c-awk-cur-line-incomplete-p
+    c-awk-end-of-change-region
+    c-awk-end-of-defun
+    c-awk-end-of-defun1
+    c-awk-extend-and-syntax-tablify-region
+    c-awk-font-lock-invalid-namespace-separators
+    c-awk-forward-awk-pattern
+    c-awk-get-NL-prop-cur-line
+    c-awk-get-NL-prop-prev-line
+    c-awk-menu
+    c-awk-old-ByLL
+    c-awk-prev-line-incomplete-p
+    c-awk-record-region-clear-NL
+    c-awk-set-string-regexp-syntax-table-properties
+    c-awk-set-syntax-table-properties
+    c-awk-syntax-tablify-/
+    c-awk-syntax-tablify-string
+    c-awk-unstick-NL-prop
+    c-awk-vsemi-status-unknown-p
     c-back-over-compound-identifier
     c-back-over-illiterals
     c-back-over-member-initializer-braces
@@ -1489,6 +1542,7 @@
     c-declaration-limits
     c-declaration-limits-1
     c-default-value-sentence-end
+    c-define-abbrev-table
     c-define-lang-constant
     c-define-lang-constant-here
     c-defun-name
@@ -1826,10 +1880,14 @@
     c-looking-at-statement-block-1
     c-lookup-lists
     c-lower
+    c-macro-buffer-name
     c-macro-cache
     c-macro-cache-no-comment
     c-macro-cache-start-pos
     c-macro-cache-syntactic
+    c-macro-display-buffer
+    c-macro-expand
+    c-macro-expansion
     c-macro-is-genuine-p
     c-macro-names-with-semicolon
     c-macro-vsemi-status-unknown-p
@@ -1927,6 +1985,7 @@
     c-pike-menu
     c-point
     c-point-syntax
+    c-populate-abbrev-table
     c-position-wrt-ml-delims
     c-post-command
     c-post-text-conversion
@@ -2080,6 +2139,7 @@
     c-style-variable-value
     c-style-variables
     c-stylevar-fallback
+    c-subword-mode
     c-suppress-<->-as-parens
     c-sws-lit-limits
     c-sws-lit-type
@@ -2133,6 +2193,7 @@
     calculate-lisp-indent
     call-interactively
     call-process
+    call-process-region
     call-with-buffer-local
     called-interactively?
     cancel-change-group
@@ -2140,6 +2201,7 @@
     canonically-space-region
     capitalize
     capitalize-word
+    capitalized-words-mode
     car-safe
     case-canon-table
     case-eqv-table
@@ -2205,6 +2267,7 @@
     char-table?
     char-to-byte-safe
     char-to-byte8
+    char-to-string
     char-width
     char-width-default
     char-width-ranges
@@ -2276,6 +2339,8 @@
     column-number-mode-variable
     column-width
     combine-windows
+    command-api
+    command-autoload-names
     command-doc-string
     command-interactive-spec
     command-line-1
@@ -2396,6 +2461,7 @@
     create-image
     create-root-interval
     ctl-x-4-map
+    current-bidi-paragraph-direction
     current-buffer
     current-case-table
     current-column
@@ -2489,6 +2555,7 @@
     define-key
     define-key-after
     define-minor-mode
+    define-obsolete-function-alias
     define-theme
     del-range
     del-range-1
@@ -2799,6 +2866,7 @@
     end-of-line
     end-of-paragraph-text
     end-of-visual-line
+    enlarge-window
     ensure-empty-lines
     ensure-final-newline-on-save!
     ensure-final-newline-on-visit
@@ -3054,6 +3122,7 @@
     forward-sentence-function
     forward-sexp
     forward-sexp-default-function
+    forward-symbol
     forward-word
     forward-word-position
     forward-word-strictly
@@ -3130,6 +3199,8 @@
     global-abbrev-table
     global-buffers-menu-map
     global-font-lock-mode
+    global-subword-mode
+    global-superword-mode
     global-tab-line-mode
     global-tab-line-mode-variable
     global-text-scale-adjust
@@ -3691,6 +3762,7 @@
     make-marker
     make-menu-state
     make-mode-line-mouse-map
+    make-obsolete
     make-overlay
     make-re-charset
     make-re-context
@@ -3699,9 +3771,13 @@
     make-re-registers
     make-re-text
     make-scan-error
+    make-search-failed
     make-separator-line
     make-sparse-keymap
     make-syntax-table
+    make-temp-file
+    make-temp-file-internal
+    make-temp-name
     make-widget-value
     make<command>
     make<frame>
@@ -3838,6 +3914,7 @@
     minor-mode-lighter
     minor-mode-menu-from-indicator
     minor-mode-variable-true?
+    minusp
     modal-lookup-state-key-index
     modal-lookup-state-keymaps
     modal-lookup-state-step!
@@ -3927,6 +4004,7 @@
     narrow-to-defun-include-comments
     narrow-to-page
     narrow-to-region
+    natnump
     nconc
     negative-argument
     new-buffer-text
@@ -4405,6 +4483,9 @@
     scroll-up
     scroll-up-command
     search-backward
+    search-failed-error
+    search-failed-string
+    search-failed?
     search-forward
     search-ring
     search-ring-yank-pointer
@@ -4491,6 +4572,7 @@
     set!buffer-word-wrap
     set!buffer-zv
     set!c-auto-newline
+    set!c-awk-old-ByLL
     set!c-backslash-column
     set!c-backslash-max-column
     set!c-basic-offset
@@ -4648,6 +4730,8 @@
     set!paragraph-start
     set!show-paren-data-function
     set!string-intervals
+    set!subword-mode-variable!
+    set!superword-mode-variable!
     set!test-display-color-cells
     set!test-display-column-width
     set!test-display-columns
@@ -4820,6 +4904,7 @@
     set-window-vscroll
     set-windows-or-buffers-changed!
     setq
+    shell-file-name
     shell-quote-argument
     show-command
     show-help-echo
@@ -4849,6 +4934,8 @@
     show-prefix-echo!
     show-text-editor
     shrink-mini-window
+    shrink-window
+    shrink-window-horizontally
     signal-after-change
     signal-before-change
     signal-quit
@@ -4927,6 +5014,35 @@
     substitute-key-definition
     substitute-key-definition-key
     substitute-quotes
+    subword-backward
+    subword-backward-function
+    subword-backward-internal
+    subword-backward-kill
+    subword-backward-regexp
+    subword-capitalize
+    subword-downcase
+    subword-empty-char-table
+    subword-find-word-boundary
+    subword-find-word-boundary-function-table
+    subword-forward
+    subword-forward-function
+    subword-forward-internal
+    subword-forward-regexp
+    subword-kill
+    subword-left
+    subword-mark
+    subword-mode
+    subword-mode-hook
+    subword-mode-map
+    subword-mode-variable
+    subword-right
+    subword-setup-buffer
+    subword-transpose
+    subword-upcase
+    superword-mode
+    superword-mode-hook
+    superword-mode-map
+    superword-mode-variable
     suppress-keymap
     suspend-display!
     suspend-frame
@@ -5158,6 +5274,7 @@
     tabulated-list-set-col
     temp-buffer-window-setup
     temp-buffer-window-show
+    temporary-file-directory
     terminal-coding-system
     test-completion
     test-display-color-cells
@@ -5531,6 +5648,7 @@
     window-pixel-width
     window-point
     window-position
+    window-preserve-size
     window-preserved-size
     window-prev-buffers
     window-prev-sibling
@@ -5589,6 +5707,7 @@
     with-buffer-unmodified-if-unchanged
     with-current-buffer
     with-current-buffer-window
+    with-defun-functions-nil
     with-help-window
     with-restriction
     with-selected-frame

@@ -15,9 +15,13 @@
               c-make-macro-with-semi-re c-make-noise-macro-regexps)
         (only (schemacs progmodes cc-styles)
               c-set-style c-setup-paragraph-variables cc-choose-style-for-mode)
+        (only (schemacs insdel) *before-change-functions*
+              *after-change-functions*)
+        (only (schemacs progmodes cc-mode) c-before-change c-after-change)
         (only (schemacs progmodes cc-engine)
               c-clear-found-types c-literal-limits c-literal-type
-              c-collect-line-comments)
+              c-collect-line-comments c-restore-<>-properties
+              set!c-new-BEG set!c-new-END)
         (only (schemacs newcomment) *comment-multi-line*)
         (only (schemacs textmodes fill) *fill-paragraph-function*)
         (only (schemacs progmodes cc-cmds)
@@ -90,16 +94,28 @@
       (c-setup-paragraph-variables)
       (c-clear-found-types)
       (c-make-noise-macro-regexps)
-      (c-make-macro-with-semi-re))
+      (c-make-macro-with-semi-re)
+      (when cpp?
+        (set!c-new-BEG (point-min))
+        (set!c-new-END (point-max))
+        (c-restore-<>-properties (point-min) (point-max) 0)))
     (set-buffer-local-value! b 'indent-line-function c-indent-line)
     (set-buffer-local-value! b 'c-block-comment-flag #t)
     b))
 
 (define (run pos thunk)
   (fresh-buffer)
+  ;; `(funcall mode)' on the Emacs side runs `c-common-init', which
+  ;; installs the two change hooks and (for C++) the `<>' properties;
+  ;; without them a command that edits twice sees stale caches and the
+  ;; multi-line `#define' transient comes out differently.
   (parameterize ((*c-buffer-is-cc-mode* mode)
                  (*comment-multi-line* #t)
-                 (*fill-paragraph-function* c-fill-paragraph))
+                 (*fill-paragraph-function* c-fill-paragraph)
+                 (*before-change-functions*
+                  (cons c-before-change (*before-change-functions*)))
+                 (*after-change-functions*
+                  (cons c-after-change (*after-change-functions*))))
     (goto-char pos)
     (let ((ret (probe thunk)))
       (list (point) ret (oneline (buffer-substring-no-properties

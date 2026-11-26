@@ -19,7 +19,8 @@
        *eval-minibuffer-function* *read-variable-function*
        *read-char-event-function* *message-clear-function*
        *read-key-sequence-function* *read-key-sequence-vector-function*
-       *interactive-read-function-name-function*)
+       *interactive-read-function-name-function*
+       command-autoload-names command-name)
  (only (schemacs buffer)
        allocate-buffer with-current-buffer current-buffer
        set!buffer-read-only)
@@ -667,3 +668,31 @@ read-only check."
         (eq? (command-record-named "aliased-name")
              (command-record-named "aliased-command"))))
 (test-end "define-alias")
+
+(test-begin "autoload")
+;;--------------------------------------------------------------
+;; `%command-autoloads' is this tree's `loaddefs.el': a keymap can name
+;; a command whose library its own library cannot import, and the first
+;; lookup loads that library - Emacs's `Fautoload_do_load'. The entry
+;; is `c-macro-expand', bound in the CC modes' maps while
+;; `cmacexp.el` *requires* `cc-mode' (`cc-mode.el:2877').
+;;
+;; Nothing else in this process imports `cmacexp', so the lookup below
+;; is the lazy path. Emacs 31.1, measured: `(commandp 'c-macro-expand)'
+;; is t in a fresh `emacs -Q --batch' before anything loads cmacexp,
+;; because the function cell holds an autoload object.
+(test-equal "an autoloadable command's name is offered to M-x"
+            #t (and (member "c-macro-expand" (command-autoload-names)) #t))
+(test-equal "subword.el's autoloaded commands are listed too"
+            #t (and (member "subword-mode" (command-autoload-names)) #t))
+(test-equal "a lookup loads the library and finds the command"
+            "c-macro-expand"
+            (let ((record (command-record-named 'c-macro-expand)))
+              (and record (command-name record))))
+(test-equal "and the string spelling finds it too"
+            "c-macro-expand"
+            (let ((record (command-record-named "c-macro-expand")))
+              (and record (command-name record))))
+(test-equal "a name that is not autoloadable still answers #f"
+            #f (command-record-named 'no-such-command-anywhere))
+(test-end "autoload")

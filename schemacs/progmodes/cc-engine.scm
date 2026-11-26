@@ -209,9 +209,12 @@
     (only (schemacs core lisp) beginning-of-defun forward-sexp
           backward-up-list
           *defun-prompt-regexp* *beginning-of-defun-function*
-          *end-of-defun-function*)
+          *end-of-defun-function* with-defun-functions-nil)
     (only (schemacs intervals) get)
     (only (schemacs progmodes cc-vars) *c-report-syntactic-errors*
+          *c-asymmetry-fontification-flag*
+          *c-syntactic-indentation-in-macros*
+          c-noise-macro-name-re c-noise-macro-with-parens-name-re
           c-macro-with-semi-re *c-syntactic-context* *c-syntactic-element*
           *c-strict-syntax-p* c-style-variable-bound? c-style-variable-value
           c-basic-offset c-offsets-alist
@@ -291,6 +294,7 @@
    c-hungry-delete-key set!c-hungry-delete-key
    c-electric-flag set!c-electric-flag
    c-auto-newline set!c-auto-newline
+   c-open-string-opener set!c-open-string-opener
    c-calculate-state
    ;; the preprocessor-directive machinery
    *c-macro-start* c-query-and-set-macro-start c-query-macro-start
@@ -470,6 +474,17 @@
       (buffer-local-value (current-buffer) 'c-auto-newline #f))
     (define (set!c-auto-newline value)
       (set-buffer-local-value! (current-buffer) 'c-auto-newline value))
+
+    ;; `c-open-string-opener' is `cc-mode.el:1466''s `defvar-local',
+    ;; moved down here (a named placement departure): `cc-awk.scm'
+    ;; records the opener from its own change functions and sits below
+    ;; `cc-mode', so the slot has to be reachable from here. `cc-mode'
+    ;; imports and re-exports both names; every existing user is
+    ;; unchanged.
+    (define (c-open-string-opener)
+      (buffer-local-value (current-buffer) 'c-open-string-opener #f))
+    (define (set!c-open-string-opener value)
+      (set-buffer-local-value! (current-buffer) 'c-open-string-opener value))
 
     (define (%c-langvar symbol)
       ;; A language variable's value in the current buffer: the
@@ -1957,8 +1972,7 @@
     ;; GNU Emacs's branch).
     (define (c-beginning-of-defun-1)
       (let loop ()
-        (parameterize ((*beginning-of-defun-function* #f)
-                       (*end-of-defun-function* #f))
+        (with-defun-functions-nil
           (beginning-of-defun))
         (when (and (not (bobp))
                    (*defun-prompt-regexp*)
@@ -6485,8 +6499,8 @@
     ;; here holds the *symbol* (the data was generated from Emacs), and
     ;; there is no function obarray, so the symbol is resolved through a
     ;; registry filled as each function is defined - the tree's stand-in.
-    ;; A name whose function is not ported (awk's two) answers #f where
-    ;; Emacs would signal a void function; awk has no mode here.
+    ;; A name whose function is not ported answers #f where Emacs would
+    ;; signal a void function. `cc-awk.scm' registers awk's two at load.
     (define %c-lang-functions (make-hash-table))
 
     (define (c-register-lang-function! sym proc)
@@ -10038,8 +10052,7 @@
                              ;; declaration."
                              (set! maybe-expression #t)
                              (when (or (not (%c-true
-                                             (%c-langvar
-                                              'c-asymmetry-fontification-flag)))
+                                             (*c-asymmetry-fontification-flag*)))
                                        (looking-at "=\\([^=]\\|$\\)\\|;")
                                        (c-fdoc-assymetric-space-about-asterisk?))
                                (when (eq? at-type 'maybe)
@@ -10062,8 +10075,7 @@
 
                            ;; CASE 17.5
                            (when (and (%c-true
-                                       (%c-langvar
-                                        'c-asymmetry-fontification-flag))
+                                       (*c-asymmetry-fontification-flag*))
                                       got-prefix-before-parens
                                       at-type
                                       (or (not got-suffix)
@@ -13024,7 +13036,7 @@
                    ;; construct, and is relying on
                    ;; `c-font-lock-declarations' to add them again."
                    (cond
-                    ((let ((re (%c-langvar 'c-noise-macro-name-re)))
+                    ((let ((re (c-noise-macro-name-re)))
                        (and re (looking-at re)))
                      (c-forward-noise-clause-not-macro-decl #f)) ; "Returns t."
                     ((let ((re (c-noise-macro-with-parens-name-re)))
@@ -15604,7 +15616,7 @@
                  (/= macro-start (c-point 'boi))
                  (begin
                    (set! tmpsymbol 'cpp-macro-cont)
-                   (or (not (%c-langvar 'c-syntactic-indentation-in-macros))
+                   (or (not (*c-syntactic-indentation-in-macros*))
                        (save-excursion
                          (goto-char macro-start)
                          ;; "If at the beginning of the body of a #define
@@ -15922,7 +15934,7 @@
                       (c-forward-keyword-clause 1)
                       (loop))
                      ((and (%c-langvar 'c-opt-cpp-prefix)
-                           (looking-at (%c-langvar 'c-noise-macro-with-parens-name-re)))
+                           (looking-at (c-noise-macro-with-parens-name-re)))
                       (c-forward-noise-clause)
                       (loop))
                      (else #f)))
@@ -16383,7 +16395,7 @@
                                           containing-decl-open
                                           containing-decl-start
                                           containing-decl-kwd)))
-              (when (and (%c-langvar 'c-syntactic-indentation-in-macros)
+              (when (and (*c-syntactic-indentation-in-macros*)
                          macro-start
                          (/= macro-start (c-point 'boi indent-point)))
                 (c-add-syntax 'cpp-define-intro)
@@ -16711,7 +16723,7 @@
                         (c-forward-keyword-clause 1)
                         (loop))
                        ((and (%c-langvar 'c-opt-cpp-prefix)
-                             (looking-at (%c-langvar 'c-noise-macro-with-parens-name-re)))
+                             (looking-at (c-noise-macro-with-parens-name-re)))
                         (c-forward-noise-clause)
                         (loop))
                        (else #f)))
@@ -17124,7 +17136,7 @@
                    (not (and (c-major-mode-is 'pike-mode)
                              (eqv? (char-after (+ 1 macro-start)) #\"))))
               (c-append-syntax 'cpp-macro)
-              (when (and (%c-langvar 'c-syntactic-indentation-in-macros)
+              (when (and (*c-syntactic-indentation-in-macros*)
                          macro-start)
                 (if in-macro-expr
                     (when (or

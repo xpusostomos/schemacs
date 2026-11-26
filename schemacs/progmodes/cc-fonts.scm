@@ -1341,7 +1341,12 @@ stuff.  Used on level 1 and higher."
                        ;; inside an arglist, but the first argument in the ';'
                        ;; separated list of a \"for\" statement is an
                        ;; exception."
-                       (when (eqv? (char-before match-pos) #\()
+                       ;; `when-e`: Emacs's nil answer is what makes
+                       ;; this declarator a single one; a plain `when'
+                       ;; answers the unspecified value, which is true,
+                       ;; and then a repeated parameter type is eaten as
+                       ;; a declarator (`Date c' fontified as an id).
+                       (when-e (eqv? (char-before match-pos) #\()
                          (save-excursion
                            (goto-char (- match-pos 1))
                            (c-backward-syntactic-ws)
@@ -1377,6 +1382,22 @@ stuff.  Used on level 1 and higher."
               ;; the fontification of types and refs that've been recorded."
               (c-fontify-recorded-types-and-refs)
               #f))))
+
+    (define (%c-eval-maybe-decl-faces)
+      ;; Emacs's `(eval c-maybe-decl-faces)' (`cc-fonts.el:1582'): the
+      ;; language constant's value is a `list' *form*, and it is eval'd at
+      ;; fontification time so that face-name aliases resolve -
+      ;; `c-reference-face-name' is a variable in Emacs. Here the only
+      ;; element that is not a literal face name is that one, so the form
+      ;; is rebuilt with its value. Passing the form itself made every
+      ;; face that is only reachable through the variable - Java's
+      ;; `font-lock-constant-face' reference face among them - fail the
+      ;; `c-maybe-decl-faces' membership test in `c-find-decl-spots', so
+      ;; the spot was skipped and a parameter after a qualified generic
+      ;; type was never fontified.
+      (map (lambda (x)
+             (if (eq? x 'c-reference-face-name) c-reference-face-name x))
+           (cdr (c-lang-const c-maybe-decl-faces))))
 
     (define (c-font-lock-declarations limit)
       ;; "Fontify all the declarations, casts and labels from the point to
@@ -1427,7 +1448,7 @@ stuff.  Used on level 1 and higher."
               (c-find-decl-spots
                limit
                (%c-langvar 'c-decl-start-re)
-               (c-lang-const c-maybe-decl-faces)
+               (%c-eval-maybe-decl-faces)
 
                (lambda (match-pos inside-macro . toplev-args)
                  ;; "Note to maintainers: don't use `limit' inside this
@@ -2209,9 +2230,13 @@ casts and declarations are fontified.  Used on level 2 and higher."
                                    "\\|"
                                    "\\*"
                                    "\\)"))
+                   ;; Emacs's `((FORM nil (goto-char ...)))' is one
+                   ;; highlight: the anchored highlighter itself. The
+                   ;; extra `list' here made `(car highlight)' the whole
+                   ;; `(MATCHER #f POST)' list, which was then applied -
+                   ;; a Java-only crash on any `.'-then-capital name.
                    (list
-                    (list
-                     (lambda (limit)
+                    (lambda (limit)
                        (let ((id-end #f))
                          (goto-char (1+ (match-beginning 0)))
                          (while (and (eqv? (char-before) #\.)
@@ -2226,9 +2251,9 @@ casts and declarations are fontified.  Used on level 2 and higher."
                            (c-put-font-lock-face (point) id-end
                                                  c-reference-face-name)
                            (c-backward-syntactic-ws))))
-                     #f
-                     (lambda (limit)
-                       (goto-char (match-end 0)))))))
+                    #f
+                    (lambda (limit)
+                      (goto-char (match-end 0))))))
                  (list
                   (lambda (limit)
                      ;; "Must use a function here since we match longer than we
@@ -2251,7 +2276,13 @@ casts and declarations are fontified.  Used on level 2 and higher."
                              (c-put-font-lock-face (match-beginning 2)
                                                    (match-end 2)
                                                    c-reference-face-name))
-                         (goto-char (match-end 1)))))))
+                         (goto-char (match-end 1))))
+                     ;; "Emacs's `while' answers nil; a matcher's
+                     ;; true answer means \"matched\", and Scheme's
+                     ;; `while' answers the unspecified value, which is
+                     ;; true. Font-lock read it as a match and skipped
+                     ;; the next declarator spot."
+                     #f)))
              '())
 
          ;; "Module declarations (e.g. in C++20)."

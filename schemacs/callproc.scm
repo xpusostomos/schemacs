@@ -27,17 +27,20 @@
 
   (import (scheme base)
           (scheme file)
-          (only (scheme cxr) cdddr)
+          (only (scheme cxr) caddr cdddr)
           (ice-9 popen)
           (ice-9 textual-ports)
           (only (guile) status:exit-val status:term-sig)
           (only (schemacs subr) shell-quote-argument)
+          (only (guile) delete-file)
           (only (schemacs buffer)
                 current-buffer default-directory buffer-name bufferp
                 get-buffer with-current-buffer)
-          (only (schemacs editfns) insert))
+          (only (schemacs editfns) insert buffer-substring point-min
+                point-max delete-region widen)
+          (only (schemacs fileio) make-temp-file-internal))
 
-  (export call-process)
+  (export call-process call-process-region shell-file-name)
 
   (begin
 
@@ -75,34 +78,101 @@
              (destination (%callproc-opt args 1 #f))
              (display (%callproc-opt args 2 #f))
              (program-args (if (>= (length args) 3) (cdddr args) '()))
+             ;; "(REAL-BUFFER STDERR-FILE)": "REAL-BUFFER says what to do
+             ;; with standard output ... STDERR-FILE says what to do with
+             ;; standard error in the child. STDERR-FILE may be nil
+             ;; (discard), t (mix it with ordinary output), or a file
+             ;; name string" (`callproc.c:1081`).
+             (dest-pair (and (pair? destination)
+                             (not (eq? (car destination) ':file))))
+             (real-destination (if dest-pair (car destination) destination))
+             (stderr-file (if dest-pair (cadr destination) #t))
+             (error-redirect
+              (cond ((eq? stderr-file #t) " 2>&1")
+                    ((string? stderr-file)
+                     (string-append " 2> " (shell-quote-argument stderr-file)))
+                    (else " 2>/dev/null")))
              (cmd (string-append
                    "cd " (shell-quote-argument (default-directory)) " && "
                    (%join-quoted (cons program program-args))
                    " < " (if infile
                               (shell-quote-argument infile)
                               "/dev/null")
-                   ;; standard error into the destination, as the C does
-                   " 2>&1"))
+                   error-redirect))
              (port (open-input-pipe cmd))
              (output (or (get-string-all port) ""))
              (status (close-pipe port))
              (exit (status:exit-val status))
              (signal (status:term-sig status)))
-        ;; Where the output goes: the C's DESTINATION cases.
+        ;; Where the output goes: the C's DESTINATION cases, after a
+        ;; `(REAL-BUFFER STDERR-FILE)' pair has been taken apart.
         (cond
-         ((eq? destination #t)
+         ((eq? real-destination #t)
           (insert output))
-         ((and (pair? destination) (eq? (car destination) ':file))
+         ((and (pair? real-destination) (eq? (car real-destination) ':file))
           ;; `(:file FILE)': written over, as the C writes it.
-          (call-with-output-file (cadr destination)
+          (call-with-output-file (cadr real-destination)
             (lambda (out) (put-string out output))
             #:encoding "UTF-8"))
-         ((bufferp destination)
-          (with-current-buffer destination (insert output)))
-         ((and (string? destination) (get-buffer destination))
-          (with-current-buffer (get-buffer destination) (insert output)))
+         ((bufferp real-destination)
+          (with-current-buffer real-destination (insert output)))
+         ((and (string? real-destination) (get-buffer real-destination))
+          (with-current-buffer (get-buffer real-destination) (insert output)))
          (else #t))
         ;; The answer: the exit status, or the signal that ended it.
         (cond (signal (string-append "signal " (number->string signal)))
               ((integer? exit) exit)
               (else #f))))))
+
+    (define shell-file-name
+      ;; GNU Emacs's `shell-file-name' (`callproc.c`'s DEFVAR_LISP):
+      ;; "File name to load inferior shells from. Initialized from the
+      ;; SHELL environment variable, or to a system-dependent default."
+      ;; Configured here as the C's default.
+      "/bin/sh")
+
+    (define (call-process-region start end program . args)
+      ;; GNU Emacs's `call-process-region' (`callproc.c:1063'): "Send
+      ;; text from START to END to a synchronous process running
+      ;; PROGRAM. ... If START is nil, that means to use the entire
+      ;; buffer contents ... If START is a string, then send that string
+      ;; ... Delete the text if fourth arg DELETE is non-nil."
+      ;;
+      ;; The region is written to a temporary file and the child's
+      ;; standard input redirected from it - the C's `create_temp_file'
+      ;; path; the deletion is done after writing it, before the child
+      ;; runs, which is the C's order. DEPARTURE: the file is created
+      ;; by `make-temp-file-internal' in `temporary-file-directory',
+      ;; where the C uses `small-temporary-file-directory' and falls
+      ;; back to a pipe for large regions; the visible behaviour is the
+      ;; same.
+      ;;--------------------------------------------------------------
+      (let* ((delete (if (pair? args) (car args) #f))
+             (destination (if (and (pair? args) (pair? (cdr args)))
+                              (cadr args) #f))
+             (display (if (and (pair? args) (pair? (cdr args))
+                               (pair? (cddr args)))
+                          (caddr args) #f))
+             (program-args (if (and (pair? args) (pair? (cdr args))
+                                    (pair? (cddr args)))
+                               (cdddr args) '()))
+             (text (cond ((string? start) start)
+                         ((not start) (buffer-substring (point-min) (point-max)))
+                         (else (buffer-substring start end))))
+             (infile (if (= (string-length text) 0)
+                         #f
+                         (make-temp-file-internal "call-process-region"
+                                                  #f "" text))))
+        (guard (e (#t (when infile (delete-file infile)) (raise e)))
+          (when delete
+            ;; "No need to save restrictions since we delete everything
+            ;; anyway": START nil widens first; otherwise the C's
+            ;; `Fdelete_region' is called and a string START is its
+            ;; wrong-type error.
+            (if (not start)
+                (begin (widen) (delete-region (point-min) (point-max)))
+                (delete-region start end)))
+          (let ((status (apply call-process program infile destination display
+                               program-args)))
+            (when infile (delete-file infile))
+            status))))

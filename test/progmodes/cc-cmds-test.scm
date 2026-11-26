@@ -47,7 +47,9 @@
  ;; The line-up registry `c-run-special-indent-hook' resolves the
  ;; style's `c-gnu-impose-minimum' through is filled when this loads.
  (schemacs progmodes cc-align)
+ (only (schemacs progmodes subword) subword-mode)
  (only (schemacs progmodes cc-cmds)
+       c-backward-into-nomenclature
        c-indent-line c-newline-and-indent c-indent-command c-indent-exp
        c-backslash-region c-update-modeline
        c-toggle-auto-newline c-toggle-hungry-state c-toggle-electric-state
@@ -926,3 +928,24 @@
 (electric-pair-mode -1)
 
 (test-end "schemacs_editor_cc_cmds_electric_pair")
+
+;;--------------------------------------------------------------
+;; `c-backward-into-nomenclature' (`cc-cmds.el:1569') and the `w'
+;; flag `c-update-modeline` reads from `subword-mode`'s variable.
+;;--------------------------------------------------------------
+;; Emacs 31.1, measured in a real `c-mode' buffer: the base mode line
+;; is "C/*l", `subword-mode` adds "w" ("C/*lw"), and
+;; `c-backward-into-nomenclature` from 7 on "fooBarBaz" lands at 4.
+(let ((b (fresh "fooBarBaz")))
+  (set-buffer-local-value! b 'mode-name "C")
+  (c-update-modeline)
+  (test-equal "the mode line before subword-mode" "C/*l"
+              (buffer-local-value b 'mode-name))
+  (subword-mode 1)
+  (c-update-modeline)
+  (test-equal "and after it, with the w flag" "C/*lw"
+              (buffer-local-value b 'mode-name))
+  (goto-char 7)
+  (test-equal "c-backward-into-nomenclature moves back one subword"
+              '(4 4)
+              (list (c-backward-into-nomenclature 1) (point))))

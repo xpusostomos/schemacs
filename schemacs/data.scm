@@ -25,6 +25,7 @@
     )
 
   (export
+   natnump
    make-local-variable
    default-value set-default default-boundp
    keywordp
@@ -41,6 +42,14 @@
    )
 
   (begin
+
+    (define (natnump object)
+      ;; GNU Emacs's `natnump' (`data.c:588'): "Return t if OBJECT is a
+      ;; nonnegative integer." The C takes FIXNUM or BIGNUM and rejects
+      ;; everything else, a float included; Guile's `integer?' is the
+      ;; same test over the same domain.
+      ;;--------------------------------------------------------------
+      (and (integer? object) (<= 0 object)))
 
     (define (/= num1 num2)
       ;; GNU Emacs's `/= ` (`data.c:2919'): "Return t if first arg is not

@@ -27,8 +27,8 @@
   ;; toggles, `c-indent-command', `c-indent-exp', `c-indent-region',
   ;; `c-fn-region-is-active-p', `c-indent-line-or-region', the
   ;; progress-reporting helpers, the `c-backslash-region' family, and -
-  ;; the 2026-11-24 pass - `c-backward-into-nomenclature' (a stub; see
-  ;; below), `c-scope-operator', `c-in-function-trailer-p',
+  ;; the 2026-11-24 pass - `c-backward-into-nomenclature',
+  ;; `c-scope-operator', `c-in-function-trailer-p',
   ;; `c-where-wrt-brace-construct', `c-backward-to-nth-BOF-{',
   ;; `c-narrow-to-most-enclosing-decl-block',
   ;; `c-widen-to-enclosing-decl-scope', `c-beginning-of-defun',
@@ -52,10 +52,6 @@
   ;;
   ;; **Not carried yet**, each with what it waits for:
   ;;
-  ;;   * `c-backward-into-nomenclature' forwards to `subword.el''s
-  ;;     `subword-backward' or `cc-subword.el''s `c-backward-subword',
-  ;;     and neither library is ported; the command is a stub that
-  ;;     names the gap (`c-beginning-of-objc-method-header''s shape);
   ;;   * `post-text-conversion-hook' (`keyboard.c''s
   ;;     `Vpost_text_conversion_hook'): `c-post-text-conversion' is
   ;;     carried, but the input machinery that would call it is not;
@@ -64,9 +60,13 @@
   ;;     'electric-indent-local-mode) ...)' sync and
   ;;     `c-basic-common-init''s `electric-indent-inhibit' have nothing
   ;;     to call; Emacs older than 24.4 behaves the same way;
-  ;;   * `c-subword-mode' is not ported, so `c-update-modeline''s `w'
-  ;;     flag is never set (`(boundp 'c-subword-mode)' is nil in Emacs
-  ;;     until that minor mode loads).
+  ;;   * Emacs's `(define-obsolete-variable-alias 'c-subword-mode
+  ;;     'subword-mode "24.3")' (`cc-cmds.el:1559') has nothing to alias
+  ;;     here: this tree has no variable aliases, and the variable is a
+  ;;     buffer slot (`subword.scm`'s `subword-mode-variable`), which
+  ;;     `subword.el:119`'s function alias is what `c-subword-mode`
+  ;;     names. The cond it lives in is dead in Emacs 31 too once
+  ;;     subword is loaded.
   ;;
   ;; **Representation departures**, all this tree's usual ones:
   ;;
@@ -201,6 +201,18 @@
     ;; `elec-pair.el`'s pairing, which the electric commands emulate
     ;; around the self-insert (`cc-cmds.el:911`, `:1288`, `:1373`,
     ;; `:1420`).
+    ;; `c-backward-into-nomenclature' forwards to `subword.el`'s
+    ;; `subword-backward' (`cc-cmds.el:1569'), and `c-update-modeline`'s
+    ;; `w' flag reads the `c-subword-mode' *variable*, which is
+    ;; `subword-mode`'s - the alias `c-subword-mode` is `subword.el`'s
+    ;; (`:119') and this library's cond below only carries Emacs's
+    ;; fallback as a comment. Emacs autoloads subword; a library here is
+    ;; reachable only by importing it.
+    (only (schemacs progmodes subword)
+          subword-backward subword-mode-variable)
+    ;; `make-obsolete` marks `c-backward-into-nomenclature`, as
+    ;; `cc-cmds.el:1580` does.
+    (only (schemacs core byte-run) make-obsolete)
     (only (schemacs paren) *blink-paren-function*)
     (only (schemacs elec-pair)
           electric-pair-mode-value electric-pair-post-self-insert-function)
@@ -228,7 +240,7 @@
     (only (schemacs core lisp-mode) indent-code-rigidly)
     (only (schemacs core lisp) forward-sexp backward-sexp down-list
           forward-list up-list *beginning-of-defun-function*
-          *end-of-defun-function*)
+          *end-of-defun-function* with-defun-functions-nil)
     (only (schemacs textmodes paragraphs)
           forward-paragraph backward-paragraph paragraph-start paragraph-separate
           *sentence-end-double-space*)
@@ -572,10 +584,12 @@ With universal argument, inserts the analysis as a comment on that line."
                           (if (and (c-electric-flag) (c-auto-newline))
                               "a" "")
                           (if (c-hungry-delete-key) "h" "")
-                          ;; `(cc-)subword' might not be loaded.
-                          ;; `c-subword-mode' is not ported, so the `w'
-                          ;; flag never appears - see the file header.
-                          ""))
+                          ;; `(cc-)subword` might not be loaded -
+                          ;; here `subword.scm` always is (this library
+                          ;; imports it), and `c-subword-mode` is its
+                          ;; alias, so the variable is `subword-mode`'s
+                          ;; slot (`cc-cmds.el:271`).
+                          (if (subword-mode-variable) "w" "")))
              ;; FIXME: Derived modes might want to use something else
              ;; than a string for `mode-name'.
              (bare-mode-name (if (string-match "\\(^[^/]*\\)/" (mode-name))
@@ -1830,16 +1844,24 @@ keyword on the line, the keyword is not inserted inside a literal, and
 
 
     ;;--------------------------------------------------------------
-    ;; `c-backward-into-nomenclature' (`cc-cmds.el:1569') needs one of
-    ;; the two implementations it forwards to - `subword.el''s
-    ;; `subword-backward' or `cc-subword.el''s `c-backward-subword' -
-    ;; and neither library is ported. It is obsolete in Emacs 31 as
-    ;; well; the stub names the gap rather than pretending the
-    ;; feature is there.
-    (define-command (c-backward-into-nomenclature . arg-args)
+    ;; `c-backward-into-nomenclature' (`cc-cmds.el:1569')
+    ;;--------------------------------------------------------------
+    ;; "Compatibility alias for `c-backward-subword'." ARG is optional
+    ;; (`&optional arg'), which the tree spells as a rest parameter,
+    ;; and the `(if (fboundp 'subword-mode) ...)` is always the first
+    ;; arm here: `subword.scm` is imported, so there is no
+    ;; `cc-subword.el` to fall back to (Emacs 31 has no such file
+    ;; either).
+    (define-command (c-backward-into-nomenclature . rest)
       "Compatibility alias for `c-backward-subword'."
       (interactive "p")
-      (error "c-backward-into-nomenclature: neither `subword' nor `cc-subword' is ported"))
+      (subword-backward (if (pair? rest) (car rest) #f)))
+
+    ;; `(make-obsolete 'c-backward-into-nomenclature (if (fboundp
+    ;; 'subword-mode) 'subword-backward 'c-backward-subword) "23.2")'
+    ;; (`cc-cmds.el:1580') - the `if` is always `subword-backward` here
+    ;; for the reason above.
+    (make-obsolete 'c-backward-into-nomenclature 'subword-backward "23.2")
 
     ;; `c-scope-operator' (`cc-cmds.el:1582')
     ;;--------------------------------------------------------------
@@ -2142,9 +2164,8 @@ defun."
             (push-mark))
 
         (c-with-string-fences
-         (parameterize ((*beginning-of-defun-function* #f)
-                        (*end-of-defun-function* #f)
-                        (*case-fold-search* #f))
+         (with-defun-functions-nil
+          (parameterize ((*case-fold-search* #f))
            (c-save-buffer-state ((paren-state (c-parse-state))
                                  (orig-point-min (point-min))
                                  (orig-point-max (point-max))
@@ -2248,7 +2269,7 @@ defun."
                              (goto-char pos)))
 
                        (c-keep-region-active)
-                       (= arg 0))))))))))
+                       (= arg 0)))))))))))
 
     (define (#{c-forward-to-nth-EOF-;-or-\x7d;}# n where)
       ;; "Skip to the closing brace or semicolon of the Nth function
@@ -2319,9 +2340,8 @@ the open-parenthesis that starts a defun; see `beginning-of-defun'."
             (push-mark))
 
         (c-with-string-fences
-         (parameterize ((*beginning-of-defun-function* #f)
-                        (*end-of-defun-function* #f)
-                        (*case-fold-search* #f))
+         (with-defun-functions-nil
+          (parameterize ((*case-fold-search* #f))
            (c-save-buffer-state ((paren-state (c-parse-state))
                                  (orig-point-min (point-min))
                                  (orig-point-max (point-max))
@@ -2409,15 +2429,14 @@ the open-parenthesis that starts a defun; see `beginning-of-defun'."
                           (goto-char pos))))
 
                  (c-keep-region-active)
-                 (= arg 0))))))))
+                 (= arg 0)))))))))
 
     (define (c-defun-name-1)
       "Return name of current defun, at current narrowing, or nil if there isn't one.
 \"Defun\" here means a function, or other top level construct
 with a brace block."
-      (parameterize ((*beginning-of-defun-function* #f)
-                     (*end-of-defun-function* #f)
-                     (*case-fold-search* #f))
+      (with-defun-functions-nil
+       (parameterize ((*case-fold-search* #f))
         (c-save-buffer-state ((where #f) (pos #f) (decl0 #f) (decl #f)
                               (type-pos #f) (tag-pos #f))
           (save-excursion
@@ -2502,7 +2521,7 @@ with a brace block."
                           (if (eq? (car decl) tag-pos)
                               type-pos
                               (car decl))
-                          (cadr decl)))))))))))
+                          (cadr decl))))))))))))
 
     (define (c-defun-name)
       "Return the name of the current defun, or NIL if there isn't one.
@@ -4405,8 +4424,12 @@ Otherwise reindent just the current line."
                   (set-marker endmark to))
                 (c-delete-backslashes-forward endmark point-pos))))))))
         (set-marker endmark #f)
+        ;; Emacs's `if' without an else answers nil; Scheme's answers the
+        ;; unspecified value, which `c-indent-new-comment-line' returns
+        ;; to its caller in the macro branch.
         (if (markerp point-pos)
-            (set-marker point-pos #f)))))
+            (set-marker point-pos #f)
+            #f))))
 
     (define (c-append-backslashes-forward to-mark column point-pos)
       ;; The tree's markers do no arithmetic; `%pos' is Emacs's coercion

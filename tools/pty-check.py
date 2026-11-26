@@ -1473,6 +1473,28 @@ def check_objc_mode():
     return problems
 
 
+def check_awk_mode():
+    """A .awk file opens in `awk-mode' through the mode autoload.
+
+    `files.scm`'s `%mode-autoloads` loads cc-mode for `auto-mode-alist`'s
+    `.awk` entry, whose mode body uses `cc-awk.scm`'s syntax table; the
+    mode line it draws is "AWK//l" and the keyword face comes from
+    `awk-font-lock-keywords`. The face runs are pinned by
+    `cc-mode-test.scm`.
+    """
+    path = "/tmp/pty-check-awk.awk"
+    open(path, "w").write("BEGIN { print \"hi\" }\n")
+    screen = screen_of(drive([], path))
+    problems = []
+    if "AWK//l" not in screen:
+        problems.append("the mode line does not say AWK//l (the mode was "
+                        "not chosen): %r" % screen.split("\n")[-3:])
+    if "BEGIN { print" not in screen:
+        problems.append("the file's text is not on screen: %r"
+                        % screen[-200:])
+    return problems
+
+
 def check_c_mode_space():
     """Typing a space in a C buffer must not raise.
 
@@ -6327,6 +6349,7 @@ CHECKS = {
     "c-mode-space": check_c_mode_space,
     "c-menu": check_c_menu,
     "objc-mode": check_objc_mode,
+    "awk-mode": check_awk_mode,
     "java-mode": check_java_mode,
     "scm-open": check_scm_open,
     "prompt-after-delete-other-windows": check_prompt_after_delete_other_windows,

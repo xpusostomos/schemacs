@@ -364,15 +364,15 @@
             ':test equal?)))))
 
 ;;; The mode menu's items (`cc-langs.el:275'). **Less the items whose
-;;; commands this tree does not have** - "Macro Expand Region"
-;;; (`c-macro-expand' runs cpp as a subprocess), the Style submenu's
-;;; two guess entries (`cc-guess.el') and the "Subword mode" toggle
-;;; (`cc-subword.el'); a menu item naming a missing command signals
-;;; when it is clicked. That is the same accounting `menu-bar.scm'
-;;; keeps for the menu bar. **The `:selected' values are calls, not the
-;;; variable symbols Emacs writes**, because this tree's variables are
-;;; accessor procedures; a bare symbol would evaluate to the procedure
-;;; and the toggle would always look selected.
+;;; commands this tree does not have** - the Style submenu's two guess
+;;; entries (`cc-guess.el') and the "Subword mode" toggle
+;;; (`subword.el', which cc-mode binds as `c-subword-mode'); a menu item
+;;; naming a missing command signals when it is clicked. That is the
+;;; same accounting `menu-bar.scm' keeps for the menu bar. **The
+;;; `:selected' values are calls, not the variable symbols Emacs
+;;; writes**, because this tree's variables are accessor procedures; a
+;;; bare symbol would evaluate to the procedure and the toggle would
+;;; always look selected.
 (c-lang-defconst c-mode-menu
   "The definition for the mode menu.  The menu title is prepended to
 this before it's fed to `easy-menu-define'."
@@ -399,6 +399,8 @@ this before it's fed to `easy-menu-define'."
         (vector "Backward Conditional" 'c-backward-conditional #t)
         (vector "Forward Conditional" 'c-forward-conditional #t)
         "----"
+        (vector "Macro Expand Region" 'c-macro-expand
+                '(c-fn-region-is-active-p))
         (vector "Backslashify" 'c-backslash-region
                 '(c-fn-region-is-active-p)))
        '())
@@ -420,7 +422,12 @@ this before it's fed to `easy-menu-define'."
           (vector "Auto newline" 'c-toggle-auto-newline
                   ':style 'toggle ':selected '(c-auto-newline))
           (vector "Hungry delete" 'c-toggle-hungry-state
-                  ':style 'toggle ':selected '(c-hungry-delete-key))))))
+                  ':style 'toggle ':selected '(c-hungry-delete-key))
+          ;; `:selected` reads the `c-subword-mode` *variable*, which is
+          ;; `subword-mode`'s; the accessor call is this tree's spelling
+          ;; of the bare variable other items here use.
+          (vector "Subword mode" 'c-subword-mode
+                  ':style 'toggle ':selected '(subword-mode-variable))))))
 
 (c-lang-defconst c-make-no-parens-syntax-table
   ;; "A variant of the standard syntax table which is used to find

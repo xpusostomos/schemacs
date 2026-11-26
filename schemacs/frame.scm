@@ -721,14 +721,18 @@
            ;; any other value: never include it
            (else all)))))
 
-    (define (window-minibuffer-p window)
-      ;; GNU Emacs's `window-minibuffer-p' (`window.c`): "Return t if
-      ;; WINDOW is a minibuffer window." The frame has exactly one, and it
+    (define (window-minibuffer-p . args)
+      ;; GNU Emacs's `window-minibuffer-p' (`window.c:8083'): "Return t
+      ;; if WINDOW is a minibuffer window." WINDOW is optional and
+      ;; defaults to the selected one, as the C's `decode_live_window'
+      ;; makes it - `enlarge-window' (`window.el:3723') calls it with no
+      ;; argument. The frame has exactly one minibuffer window, and it
       ;; is `FRAME_MINIBUF_WINDOW`.
       ;;--------------------------------------------------------------
-      (and (window-type? window)
-           (let ((frame (window-frame window)))
-             (and frame (eq? window (frame-minibuffer-window frame))))))
+      (let ((window (if (pair? args) (car args) (selected-window))))
+        (and (window-type? window)
+             (let ((frame (window-frame window)))
+               (and frame (eq? window (frame-minibuffer-window frame)))))))
 
     (define (minibuffer-window-active-p window)
       ;; GNU Emacs's `minibuffer-window-active-p' (`window.c:...`): whether

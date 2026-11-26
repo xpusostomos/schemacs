@@ -40,7 +40,7 @@
     ;; import of them is. `string-index' is for `replace-match''s
     ;; `\\' scan. The regexp substrate's `make-regexp'/`regexp-exec'
     ;; and `(ice-9 regex)''s accessors left with the ERE translator.
-    (only (guile) cadr caddr cddr cdddr cadddr string-index)
+    (only (guile) cadr caddr cddr cdddr cadddr string-index format)
     (only (schemacs marker)
           make-marker marker-buffer marker-position markerp set-marker)
     ;; `make-buffer-string` is `editfns.c:1561`'s and is
@@ -155,6 +155,8 @@
    save-match-data
    search-backward
    search-forward
+   <search-failed> make-search-failed search-failed? search-failed-string
+   search-failed-error
    set-match-data
    string-match
    ;; `search.c`'s innermost literal walk and the two buffer searches it
@@ -1303,6 +1305,32 @@
         (lambda (pos found)
           (if (= found cnt) (- pos 1) pos))))
 
+    ;; **`search-failed' is a condition of its own**, as Emacs's is:
+    ;; `search_command' ends `xsignal1 (Qsearch_failed, string)'
+    ;; (`search.c:1140'), and `error-message-string' renders it
+    ;; `Search failed: "STRING"' - measured on Emacs 31.1 for both a
+    ;; literal and a regexp search. This tree's conditions are Guile
+    ;; error objects with a message template, so the condition is a
+    ;; record of its own - the same shape `syntax.scm`'s `<scan-error>'
+    ;; took - and the command loop's reporter and `error-message-string'
+    ;; know it. Without it a caller like `subword-capitalize''s
+    ;; `(condition-case nil ... (search-failed nil))' cannot distinguish
+    ;; a failed search from an invalid regexp.
+    (define-record-type <search-failed>
+      (make-search-failed string) search-failed?
+      (string search-failed-string))
+
+    (define (%search-failed! string)
+      ;; What the C's `xsignal1 (Qsearch_failed, STRING)' signals.
+      ;;--------------------------------------------------------------
+      (raise (make-search-failed string)))
+
+    (define (search-failed-error err)
+      ;; What `error-message-string' renders for a failed search -
+      ;; Emacs's `%S' of the string, which quotes and escapes it.
+      ;;--------------------------------------------------------------
+      (string-append "Search failed: " (format #f "~s" (search-failed-string err))))
+
     (define (search-forward string . args)
       ;; GNU Emacs's `search-forward' (search.c:2218): "Search forward
       ;; from point for STRING. Set point to the end of the occurrence
@@ -1339,11 +1367,11 @@
               ;; before answering nil; `t' leaves point alone.
               (if (and noerror (not (eq? noerror #t)))
                   (begin (set-point ed limit) #f)
-                  (if noerror #f (error "Search failed" string))))
+                  (if noerror #f (%search-failed! string))))
              ((> found limit)
               (if (and noerror (not (eq? noerror #t)))
                   (begin (set-point ed limit) #f)
-                  (if noerror #f (error "Search failed" string))))
+                  (if noerror #f (%search-failed! string))))
              ((> left 1) (loop (- left 1) found))
              (else
               (set-point ed found)
@@ -1382,11 +1410,11 @@
               ;; The C's NOERROR rule, as in `search-forward'.
               (if (and noerror (not (eq? noerror #t)))
                   (begin (set-point ed limit) #f)
-                  (if noerror #f (error "Search failed" string))))
+                  (if noerror #f (%search-failed! string))))
              ((< found limit)
               (if (and noerror (not (eq? noerror #t)))
                   (begin (set-point ed limit) #f)
-                  (if noerror #f (error "Search failed" string))))
+                  (if noerror #f (%search-failed! string))))
              ((> left 1) (loop (- left 1) found))
              (else
               ;; `found' is the match's start, where the backward
@@ -1509,7 +1537,7 @@
               ;; nil nor t ... just move point to the limit" - the
               ;; `move' sentinel, which `beginning-of-defun-raw' passes.
               (if (not noerror)
-                  (error "Search failed" pattern)
+                  (%search-failed! pattern)
                   (begin
                     (when (not (eq? noerror #t))
                       ;; "just move point to the limit" - the *clipped*

@@ -68,11 +68,22 @@
     (only (schemacs chartab)
           make-char-table set-char-table-parent)
     (only (schemacs syntax)
-          standard-syntax-table scan-error? scan-error-string)
+          standard-syntax-table scan-error? scan-error-string
+          skip-syntax-backward)
     (only (schemacs search)
           string-match string-match-p match-beginning match-end match-string
-          replace-match match-data--translate save-match-data)
+          replace-match match-data--translate save-match-data
+          search-failed? search-failed-error
+          re-search-forward re-search-backward)
     (only (schemacs insdel) *inhibit-modification-hooks*)
+    ;; `natnump` is `data.c`'s and `forward-symbol` takes it from there.
+    (only (schemacs data) natnump)
+    ;; `forward-symbol` is an *interactive* command in Emacs (a defun
+    ;; with `(interactive "^p")'), and a command here is a
+    ;; `define-command`. `command.scm` reaches this library through no
+    ;; path - its own import is `intervals.scm` - so the edge is not a
+    ;; cycle.
+    (only (schemacs command) define-command)
     (only (schemacs buffer)
           *run-hooks-function*
           ;; `with-temp-buffer` makes and kills one; `kill-buffer` is
@@ -88,6 +99,10 @@
           *inhibit-read-only* buffer-modified-p current-buffer
           restore-buffer-modified-p set!text-editor-undo-list
           text-editor-undo-list
+          ;; `forward-symbol` reads the character at the match's start
+          ;; with the raw read the C uses (`FETCH_CHAR`): `char-after`
+          ;; is `editfns.scm`'s, above this library.
+          fetch-char
           ;; `add-hook`'s LOCAL arm writes a hook's buffer-local value,
           ;; which is a buffer slot; and `hook-value` is its read side,
           ;; used by the runners (`run_hooks` here takes the merged
@@ -130,6 +145,7 @@
    string-prefix-p
    make-syntax-table
    string-to-list
+   minusp forward-symbol
    string-suffix-p string-equal-ignore-case member-ignore-case
    menu-bar-separator
    assoc-default
@@ -675,6 +691,8 @@
          ;; `xsignal3 (Qscan_error, ...)' - `syntax.scm''s record; its
          ;; message is already the rendered text.
          ((scan-error? err) (scan-error-string err))
+         ;; `xsignal1 (Qsearch_failed, ...)' - `search.scm`'s record.
+         ((search-failed? err) (search-failed-error err))
          ((not (string? message)) (format #f "~a" err))
          ((and (pair? irritants) (string-index message #\~))
           (catch #t
@@ -1585,6 +1603,13 @@
       ;;--------------------------------------------------------------
       (assoc-delete-all key alist eq?))
 
+    (define (minusp number)
+      ;; GNU Emacs's `minusp' (`subr.el:643'): "Return t if NUMBER is
+      ;; negative." The C's `(< NUMBER 0)' test, which a non-number
+      ;; fails with a wrong-type error as it does there.
+      ;;--------------------------------------------------------------
+      (< number 0))
+
     (define (last list . n-args)
       ;; GNU Emacs's `last' (`subr.el:886'): "Return the last link of
       ;; LIST. Its car is the last element. If LIST is nil, return nil.
@@ -1912,6 +1937,42 @@
       ;; with `memq' against `char-after' compares like with like.
       ;;--------------------------------------------------------------
       (string->list string))
+
+
+    (define-command (forward-symbol arg)
+      ;; GNU Emacs's `forward-symbol' (`subr.el:6641'): "Move point to
+      ;; the next position that is the end of a symbol. A symbol is any
+      ;; sequence of characters that are in either the word constituent
+      ;; or symbol constituent syntax class."
+      ;;
+      ;; ARG is *required*, as the C's `(defun forward-symbol (arg)'
+      ;; makes it - a plain `(forward-symbol)' call is Emacs's
+      ;; wrong-number-of-arguments - and the interactive form supplies
+      ;; 1 when there is no prefix (`callint.c''s `"p"').
+      ;;
+      ;; `(char-after (match-beginning 0))' is `fetch-char': `char-after`
+      ;; is `editfns.c`'s and that library is above this one, and the
+      ;; raw read is the same character the C's own scan uses.
+      "Move point to the next position that is the end of a symbol.
+A symbol is any sequence of characters that are in either the
+word constituent or symbol constituent syntax class.
+With prefix argument ARG, do it ARG times if positive, or move
+backwards ARG times if negative."
+      (interactive "^p")
+      (if (natnump arg)
+          (re-search-forward "\\(\\sw\\|\\s_\\)+" #f 'move arg)
+          ;; "while (minusp arg)" - and Elisp's `while` answers nil, so
+          ;; the answer here is an explicit #f rather than the
+          ;; unspecified value.
+          (let loop ((arg arg))
+            (if (< arg 0)
+                (begin
+                  (if (re-search-backward "\\(\\sw\\|\\s_\\)+" #f 'move)
+                      (or (char=? (fetch-char (current-buffer) (match-beginning 0))
+                                  #\newline)
+                          (skip-syntax-backward "w_")))
+                  (loop (+ arg 1)))
+                #f))))
 
     ;;----------------------------------------------------------------
     ;; The hook runner, into the library that needs it

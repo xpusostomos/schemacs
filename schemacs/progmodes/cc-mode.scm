@@ -16,20 +16,14 @@
   ;;
   ;; **Not carried yet**:
   ;;
-  ;;   * the abbrev tables (`abbrev.el` is not ported),
-  ;;     `c-bind-special-erase-keys' (`normal-erase-is-backspace` is
+  ;;   * `c-bind-special-erase-keys' (`normal-erase-is-backspace` is
   ;;     not ported), `c-submit-bug-report' (reporter.el),
-  ;;     `c-macro-expand' (a cpp subprocess), `c-subword-mode'
-  ;;     (cc-subword.el), `cc-guess.el' (its `c-guess-region-max` is
-  ;;     carried for `c-or-c++-mode`), `flymake-cc`,
-  ;;     `editorconfig-indent-size-vars`, `yank-handled-properties`,
-  ;;     `post-text-conversion-hook`, and hideshow (its three variables
-  ;;     are stored, so a ported hideshow reads them);
-  ;;   * `awk-mode' - it needs `cc-awk.el' (1,239 lines: the awk
-  ;;     syntax table, the `c-awk-*' functions and the NL-property
-  ;;     machinery the language variables already name). The other
-  ;;     language modes (`objc-mode', `java-mode', `idl-mode',
-  ;;     `pike-mode') are in.
+  ;;     `c-subword-mode' (subword.el), `cc-guess.el' (its
+  ;;     `c-guess-region-max` is carried for `c-or-c++-mode`),
+  ;;     `flymake-cc`, `editorconfig-indent-size-vars`,
+  ;;     `yank-handled-properties`, `post-text-conversion-hook`, and
+  ;;     hideshow (its three variables are stored, so a ported hideshow
+  ;;     reads them).
   ;;
   ;; **The buffer-local variables** are accessor pairs over the
   ;; buffer's slot, the tree's spelling (`c-current-comment-prefix` in
@@ -37,10 +31,13 @@
   ;; `set!`-prefixed setter.
   (import
     (scheme base)
-    (only (guile) logand caddr while most-positive-fixnum)
+    (only (guile) logand caddr while most-positive-fixnum hash-ref)
     (only (schemacs core syntax-macros) when-e unless-e while-e setq prog1)
-    (only (schemacs buffer) current-buffer buffer-local-value
+    (only (schemacs buffer) current-buffer buffer-local-value major-mode
           set-buffer-local-value! *case-fold-search*)
+    (only (schemacs abbrev) define-abbrev define-abbrev-table
+          abbrev-table-named abbrev-table-p abbrev-table-abbrevs
+          set!local-abbrev-table)
     (only (schemacs marker) copy-marker set-marker marker-position)
     (only (schemacs data) /=)
     (only (schemacs subr) regexp-unmatchable)
@@ -60,7 +57,10 @@
           re-search-forward re-search-backward search-forward save-match-data)
     (only (schemacs syntax) skip-syntax-backward skip-chars-backward skip-chars-forward
           parse-partial-sexp syntax-ppss-flush-cache)
-    (only (schemacs cmds) backward-char forward-char end-of-line beginning-of-line)
+    (only (schemacs cmds) backward-char forward-char end-of-line beginning-of-line
+          self-insert-command)
+    (only (schemacs syntax) set-syntax-table)
+    (only (schemacs keyboard) undefined)
     (only (schemacs textprop) *in-property-change-p* get-text-property)
     (only (schemacs progmodes cc-defs)
           c-search-forward-non-nil-char-property
@@ -119,9 +119,11 @@
           c-no-bracelist-cache set!c-no-bracelist-cache
           c-register-lang-function! %c-lang-function
           c-clear-found-types c-invalidate-state-cache
+          c-guess-basic-syntax
           *c-clear-syn-tab-properties-function*
           *c-remove-string-fences-function*
           c-truncate-lit-pos/state-cache
+          c-open-string-opener set!c-open-string-opener
           c-put-syntax-table-trim-caches c-clear-syntax-table-trim-caches
           c-clear-syntax-table-with-value-trim-caches
           c-clear-syntax-table-with-value-on-char-trim-caches
@@ -190,7 +192,8 @@
           c-make-noise-macro-regexps c-make-macro-with-semi-re)
     (only (schemacs progmodes cc-styles)
           c-initialize-builtin-style c-set-style cc-choose-style-for-mode
-          c-setup-paragraph-variables c-set-offset)
+          c-setup-paragraph-variables c-set-offset
+          *c-guess-basic-syntax-function*)
     (only (schemacs progmodes cc-cmds)
           c-indent-line c-indent-region c-do-auto-fill
           c-indent-new-comment-line c-fill-paragraph c-update-modeline
@@ -204,6 +207,7 @@
           c-hungry-delete-backwards c-electric-pound c-electric-brace
           c-electric-slash c-electric-star c-electric-semi&comma
           c-electric-colon c-electric-lt-gt c-electric-paren
+          c-electric-continued-statement
           c-scope-operator c-toggle-comment-style c-display-defun-name
           c-defun-name-and-limits c-cpp-define-name c-comment-indent
           c-outline-level)
@@ -221,6 +225,9 @@
           cc-imenu-init cc-imenu-c-generic-expression
           cc-imenu-c++-generic-expression cc-imenu-java-generic-expression
           cc-imenu-objc-function)
+    (only (schemacs progmodes cc-awk)
+          awk-mode-syntax-table c-awk-unstick-NL-prop
+          c-awk-beginning-of-defun c-awk-end-of-defun)
     )
 
   (export
@@ -265,6 +272,7 @@
    ;; the mode setup (`cc-mode.el:170'-`:930', `:2211', `:2752')
    c-leave-cc-mode-mode c-init-language-vars-for c-initialize-cc-mode
    c-mode-base-map c-make-inherited-keymap
+   c-define-abbrev-table c-populate-abbrev-table
    c-basic-common-init c-setup-doc-comment-style c-common-init
    c-font-lock-init c-after-font-lock-init c-extend-after-change-region
    c-context-expand-fl-region c-before-context-fl-expand-region
@@ -281,9 +289,11 @@
    c-Java-defun-prompt-regexp
    idl-mode-syntax-table idl-mode-map idl-mode-hook idl-mode
    pike-mode-syntax-table pike-mode-map pike-mode-hook pike-mode
+   awk-mode-syntax-table awk-mode-map awk-mode-hook awk-mode
    ;; the menus' variables (Emacs's `c-c-menu' and the rest, which
    ;; `easy-menu-define' makes)
    c-c-menu c-c++-menu c-objc-menu c-java-menu c-idl-menu c-pike-menu
+   c-awk-menu
    c-run-mode-hooks)
 
   (begin
@@ -439,9 +449,10 @@
     ;; ---------------------------------------------------------------
     ;; `c-min-syn-tab-mkr' and `c-max-syn-tab-mkr' (`cc-mode.el:586',
     ;; `:592'): the range of the buffer that carries a `c-fl-syn-tab'
-    ;; property, as markers. They live beside their only readers below
-    ;; rather than at their Emacs position (before
-    ;; `c-basic-common-init'), which is not ported yet.
+    ;; property, as markers. They live beside their only readers here,
+    ;; in the change-machinery half, rather than at their Emacs
+    ;; position before `c-basic-common-init' - that half is later in
+    ;; this file (the two passes are noted in the header).
     ;;--------------------------------------------------------------
     (define (c-min-syn-tab-mkr)
       (buffer-local-value (current-buffer) 'c-min-syn-tab-mkr #f))
@@ -760,11 +771,10 @@
     (define c-bc-changed-stringiness #f)
     (define (set!c-bc-changed-stringiness value)
       (set! c-bc-changed-stringiness value))
-    ;; The second is buffer-local.
-    (define (c-open-string-opener)
-      (buffer-local-value (current-buffer) 'c-open-string-opener #f))
-    (define (set!c-open-string-opener value)
-      (set-buffer-local-value! (current-buffer) 'c-open-string-opener value))
+    ;; `c-open-string-opener' is buffer-local, and its accessor pair has
+    ;; moved down to `cc-engine.scm' so `cc-awk.scm' can reach it; it is
+    ;; imported from there and re-exported here, as it was defined here
+    ;; before.
 
     ;; ---------------------------------------------------------------
     ;; `c-before-change-check-unbalanced-strings' (`cc-mode.el:1472')
@@ -2193,14 +2203,16 @@
     ;; are `cc-mode.el:503' onwards); the setup half is here, at the
     ;; end, in Emacs's own order among itself. The pieces Emacs's
     ;; `c-initialize-cc-mode' and `c-basic-common-init' name but this
-    ;; tree has not got are called out at their sites: abbrevs
-    ;; (`c-populate-abbrev-table' needs `abbrev.el''s tables),
+    ;; tree has not got are called out at their sites:
     ;; `normal-erase-is-backspace' (no such variable here),
     ;; `editorconfig-indent-size-vars', `yank-handled-properties',
     ;; hideshow's three regexp variables (set anyway - they are data a
-    ;; ported hideshow can read), `cc-subword.el''s `c-subword-mode',
-    ;; `reporter.el''s `c-submit-bug-report' and the cpp subprocess
-    ;; behind `c-macro-expand'.
+    ;; ported hideshow can read), `cc-subword.el''s `c-subword-mode'
+    ;; (subword.el here; its `c-subword-mode' is that file's obsolete
+    ;; alias, so nothing in cc-mode calls it) and `reporter.el''s
+    ;; `c-submit-bug-report'. `c-macro-expand' IS carried now - the
+    ;; bindings name it as a symbol and `command.scm`'s autoload table
+    ;; loads `cmacexp' at the first lookup.
     ;;==================================================================
 
     ;;------------------------------------------------------------------
@@ -2231,8 +2243,9 @@
            (if (%c-true (%c-langvar 'c-has-quoted-numbers))
                (c-clear-char-properties (point-min) (point-max)
                                         'c-digit-separator))
-           ;; awk-mode's `c-awk-NL-prop': cc-awk.el is not ported.
-           ))
+           (if (c-major-mode-is 'awk-mode)
+               (c-clear-char-properties (point-min) (point-max)
+                                        'c-awk-NL-prop))))
         (*c-buffer-is-cc-mode* #f)))
 
     ;;------------------------------------------------------------------
@@ -2321,11 +2334,59 @@ control).  See \"cc-mode.el\" for more info."
         (c-set-keymap-parent map c-mode-base-map)
         map))
 
-    ;; `c-define-abbrev-table' and `c-populate-abbrev-table'
-    ;; (`cc-mode.el:284', `:303') are not carried: both are built on
-    ;; `abbrev.el''s tables (`define-abbrev-table', `define-abbrev',
-    ;; `intern-soft', `local-abbrev-table'), which this tree has not got.
-    ;; `c-basic-common-init' calls nothing in their place.
+    ;; ---------------------------------------------------------------
+    ;; `c-define-abbrev-table' (`cc-mode.el:284') and
+    ;; `c-populate-abbrev-table' (`:303')
+    ;; ---------------------------------------------------------------
+    (define (c-define-abbrev-table name defs . doc)
+      ;; "Compatibility wrapper for `define-abbrev' which passes a
+      ;; non-nil sixth argument for SYSTEM-FLAG in emacsen that support
+      ;; it (currently only Emacs >= 21.2)."
+      ;;
+      ;; NAME is the table's symbol and DEFS a list of
+      ;; `(ABBREV EXPANSION HOOK COUNT)' lists; the T appended to each is
+      ;; SYSTEM-FLAG, which our `define-abbrev' takes as the old-style
+      ;; second property (`0 T' = `:count 0 :system t').
+      (let ((table (or (abbrev-table-named name)
+                       (begin
+                         (define-abbrev-table name '())
+                         (abbrev-table-named name)))))
+        (for-each
+         (lambda (definition)
+           (apply define-abbrev table (append definition (list #t))))
+         defs)
+        table))
+
+    (define (c-populate-abbrev-table)
+      ;; "Insert the standard keywords which may need electric
+      ;; indentation into the current mode's abbreviation table."
+      ;;
+      ;; Emacs names the table `(intern (concat (symbol-name major-mode)
+      ;; "-abbrev-table"))'; `abbrev-table-named' is `(symbol-value
+      ;; TABLE)' here. `(intern-soft ABBREV TABLE)' is the table's
+      ;; abbrev hash - Emacs's obarray - and the membership test is what
+      ;; keeps the lookup from resetting an abbrev's use count every
+      ;; time a mode starts.
+      (let ((name (string->symbol
+                   (string-append (symbol->string (major-mode))
+                                  "-abbrev-table")))
+            (defs (%c-langvar 'c-std-abbrev-keywords)))
+        (unless (and (abbrev-table-named name)
+                     (abbrev-table-p (abbrev-table-named name)))
+          (define-abbrev-table name '()))
+        (set!local-abbrev-table (abbrev-table-named name))
+        (for-each
+         (lambda (abbrev)
+           ;; "Don't overwrite the abbrev's use count."
+           (unless (hash-ref (abbrev-table-abbrevs (abbrev-table-named name))
+                             abbrev #f)
+             (define-abbrev (abbrev-table-named name)
+                            abbrev abbrev 'c-electric-continued-statement
+                            0 #t)))
+         ;; IDL is the language Emacs gives no keywords (`cc-langs.el`'s
+         ;; `idl nil'), and the C's `while defs' walks nil - `#f' here -
+         ;; without complaint; a `for-each' over it would raise.
+         (or defs '()))))
 
     ;; `c-bind-special-erase-keys' (`cc-mode.el:319') waits on
     ;; `normal-erase-is-backspace', which is not ported; the two
@@ -2408,7 +2469,13 @@ control).  See \"cc-mode.el\" for more info."
           (define-key c-mode-base-map (kbd "C-c C-s")
                       c-show-syntactic-information)
           (define-key c-mode-base-map (kbd "C-c .") c-set-style)
-          ;; C-c C-w: `c-subword-mode' (cc-subword.el) is not ported.
+          ;; `C-c C-w' is `c-subword-mode' (`cc-mode.el:467'), which is
+          ;; `subword.el`'s obsolete alias of `subword-mode'. The
+          ;; binding is the *symbol*, as Emacs writes it: `subword.scm`
+          ;; reaches this library through `cc-cmds.scm`, and
+          ;; `dispatch-action` resolves the name in the command table
+          ;; when the key is pressed.
+          (define-key c-mode-base-map (kbd "C-c C-w") 'c-subword-mode)
           (define-key c-mode-base-map (kbd "C-c C-k") c-toggle-comment-style)
           (define-key c-mode-base-map (kbd "C-c C-z") c-display-defun-name)))
 
@@ -2428,7 +2495,7 @@ This function cannot do that since `c-init-language-vars' is a macro
 that requires a literal mode spec at compile time."
       (*c-buffer-is-cc-mode* mode)
 
-      ;; (c-populate-abbrev-table) - abbrev.el is not ported.
+      (c-populate-abbrev-table)
 
       ;; "these variables should always be buffer local; they do not
       ;; affect indentation style." The four comment variables are the
@@ -2892,8 +2959,12 @@ this option helps you limit that time.  nil means no limit."
       (let ((map (c-make-inherited-keymap)))
         map))
     ;; ^ "Keymap used in `c-mode' buffers."
-    ;; "Add bindings which are only useful for C." C-c C-e is
-    ;; `c-macro-expand', which needs a cpp subprocess: not ported.
+    ;; "Add bindings which are only useful for C." The command is named
+    ;; as Emacs names it - a *symbol*, not the procedure - because
+    ;; `cmacexp.el' requires `cc-mode' and so cannot be imported here;
+    ;; `command.scm`'s autoload table loads it at the first lookup, as
+    ;; Emacs's `;;;###autoload' does.
+    (define-key c-mode-map (kbd "C-c C-e") 'c-macro-expand)
 
     (define c-mode-hook '())
     ;; ^ `c-mode-hook', made by `define-derived-mode' in Emacs.
@@ -2994,7 +3065,7 @@ the code is C or C++ and based on that chooses whether to enable
       (let ((map (c-make-inherited-keymap)))
         map))
     ;; ^ "Keymap used in c++-mode buffers."
-    ;; C-c C-e (`c-macro-expand') is not ported.
+    (define-key c++-mode-map (kbd "C-c C-e") 'c-macro-expand)
     (define-key c++-mode-map (kbd "C-c :") c-scope-operator)
     (define-key c++-mode-map "<" c-electric-lt-gt)
     (define-key c++-mode-map ">" c-electric-lt-gt)
@@ -3043,8 +3114,8 @@ Key bindings:
       (let ((map (c-make-inherited-keymap)))
         map))
     ;; ^ "Keymap used in `objc-mode' buffers." Emacs also binds C-c C-e
-    ;; here (`c-macro-expand', a cpp subprocess: not ported), as it
-    ;; does for pike.
+    ;; here (`c-macro-expand'), as it does for pike.
+    (define-key objc-mode-map (kbd "C-c C-e") 'c-macro-expand)
 
     (easy-menu-define c-objc-menu objc-mode-map "ObjC Mode Commands."
                       (cons "ObjC" (c-lang-const c-mode-menu objc)))
@@ -3188,7 +3259,8 @@ Key bindings:
       (let ((map (c-make-inherited-keymap)))
         map))
     ;; ^ "Keymap used in `pike-mode' buffers." Emacs also binds C-c C-e
-    ;; here (`c-macro-expand', a cpp subprocess: not ported).
+    ;; here (`c-macro-expand').
+    (define-key pike-mode-map (kbd "C-c C-e") 'c-macro-expand)
 
     (easy-menu-define c-pike-menu pike-mode-map "Pike Mode Commands."
                       (cons "Pike" (c-lang-const c-mode-menu pike)))
@@ -3219,5 +3291,73 @@ Key bindings:
       (c-common-init 'pike-mode)
       ;; `;;TODO' in Emacs: no imenu generic expression for Pike.
       (c-run-mode-hooks (*c-mode-common-hook*)))
+
+
+    ;;==================================================================
+    ;; Support for AWK (`cc-mode.el:3226'-`:3300')
+    ;;==================================================================
+
+    (define awk-mode-map
+      (c-make-inherited-keymap))
+    ;; ^ "Keymap used in `awk-mode' buffers." The syntax table is
+    ;; `cc-awk.scm''s, and `define-derived-mode' takes it as its sixth
+    ;; element here, so the mode does not define one of its own - the
+    ;; reason Emacs's definition passes `:syntax-table nil'.
+    ;; "Add bindings which are only useful for awk."
+    (define-key awk-mode-map (kbd "#") self-insert-command) ; "Overrides electric parent binding."
+    (define-key awk-mode-map (kbd "/") self-insert-command)
+    (define-key awk-mode-map (kbd "*") self-insert-command)
+    (define-key awk-mode-map (kbd "C-c C-n") undefined) ; "#if doesn't exist in awk."
+    (define-key awk-mode-map (kbd "C-c C-p") undefined)
+    (define-key awk-mode-map (kbd "C-c C-u") undefined)
+    (define-key awk-mode-map (kbd "M-a") c-beginning-of-statement) ; 2003/10/7
+    (define-key awk-mode-map (kbd "M-e") c-end-of-statement)       ; 2003/10/7
+    (define-key awk-mode-map (kbd "C-M-a") c-awk-beginning-of-defun)
+    (define-key awk-mode-map (kbd "C-M-e") c-awk-end-of-defun)
+
+    (easy-menu-define c-awk-menu awk-mode-map "AWK Mode Commands."
+                      (cons "AWK" (c-lang-const c-mode-menu awk)))
+
+    (define awk-mode-hook '())
+    ;; ^ `awk-mode-hook', made by `define-derived-mode' in Emacs.
+
+    (define-derived-mode (awk-mode prog-mode "AWK" awk-mode-map
+                                   awk-mode-hook awk-mode-syntax-table)
+      "Major mode for editing AWK code.
+To submit a problem report, enter `\\[c-submit-bug-report]' from an
+`awk-mode' buffer.  This automatically sets up a mail buffer with version
+information already added.  You just need to add a description of the
+problem, including a reproducible test case, and send the message.
+
+To see what version of CC Mode you are running, enter `\\[c-version]'.
+
+The hook `c-mode-common-hook' is run with no args at mode
+initialization, then `awk-mode-hook'.
+
+Key bindings:
+\\{awk-mode-map}"
+      :after-hook (c-update-modeline)
+      ;; "We need the next line to stop the macro defining
+      ;; `awk-mode-syntax-table'. This would mask the real table which
+      ;; is declared in cc-awk.el and hasn't yet been loaded." - the
+      ;; macro here takes the table as its sixth element instead.
+      (c-initialize-cc-mode #t)
+      (set-syntax-table awk-mode-syntax-table)
+      (set-buffer-local-value! (current-buffer) 'abbrev-mode #t)
+      (c-init-language-vars-for 'awk-mode)
+      (c-common-init 'awk-mode)
+      (c-awk-unstick-NL-prop)
+      (c-run-mode-hooks (*c-mode-common-hook*)))
+
+    ;;------------------------------------------------------------------
+    ;; The `c-guess-basic-syntax' seam (`cc-styles.el' reaches it)
+    ;;------------------------------------------------------------------
+    ;; `cc-styles.scm's `c-set-offset' builds its prompt's initial
+    ;; contents from `c-guess-basic-syntax', which is `cc-engine'`s and
+    ;; not importable from below. The seam answered #f while the engine
+    ;; was unported; this is where the two libraries meet, so it is
+    ;; installed here, at load. A consumer assembling its own libraries
+    ;; without cc-mode must do the same.
+    (*c-guess-basic-syntax-function* c-guess-basic-syntax)
 
     ))

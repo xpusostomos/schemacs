@@ -12703,6 +12703,13 @@ regexp))` in the C; this tree has one condition type, so it is
 DEFUNs use. A caller that wants to catch a search failure catches any
 error, as `c-safe` already does.
 
+*(Superseded 2026-11-26: `search.scm` signals a `<search-failed>`
+record now - `search-failed?`, `search-failed-string` - and
+`error-message-string` renders Emacs's `Search failed: "REGEXP"`;
+`c-syntactic-re-search-forward`'s own `signal` was already the C's
+message. See "`search-failed` is a condition" at the end of this
+file.)*
+
 ### `c-at-expression-start-p`'s obsolescence
 
 `(make-obsolete 'c-at-expression-start-p nil "CC mode 5.35")` is not
@@ -15070,6 +15077,11 @@ file's own order with its docstrings.
   `let`-binds it. An entry is a *procedure* here (no symbol-to-function
   indirection for `fboundp` to ask); the tree has no `subword-mode`, so
   the table is empty and the hook is exercised only by its own tests.
+
+  *(Superseded 2026-11-26: `subword-mode` is ported, the table is read
+  buffer-locally (`%find-word-boundary-table`), and
+  `forward-word-strictly` binds the *slot* - see "subword.el and
+  superword.el" at the end of this file.)*
 * **`forward-word-strictly`/`backward-word-strictly`** (`subr.el:6593`,
   `:6609`) are **placed in `syntax.scm`**: `subr.scm` is below it and
   cannot call `forward-word`. They bind the table to
@@ -16202,7 +16214,11 @@ new value, which is what the C reads.
 `subword.el''s `subword-backward' or `cc-subword.el''s
 `c-backward-subword', neither of which is ported; it is an obsolete
 alias in Emacs 31 too, and the command is a stub that names the gap
-(the `c-beginning-of-objc-method-header' shape). `c-indent-defun' was
+(the `c-beginning-of-objc-method-header' shape).
+
+*(Superseded 2026-11-26: `subword.scm` is ported and the command is
+Emacs's own - see "subword.el and superword.el" at the end of this
+file.)* `c-indent-defun' was
 listed as pending in the last handoff and is not: it only wanted
 `c-declaration-limits', which is in this tranche.
 
@@ -17744,6 +17760,9 @@ the callee reads the parameter itself. It is `parameterize` now
   `c-macro-expand`, `c-guess-*` and `c-subword-mode`) and the two
   `easy-menu-define` calls: the menu is the next piece; every command it
   names that is ported exists.
+
+  *(Superseded: the menu landed 2026-11-26 - see "cc-mode menus,
+  implicit int, and the keymap list".)*
 - `c-populate-abbrev-table` / `c-define-abbrev-table`: `abbrev.el`'s
   tables (`define-abbrev-table`, `define-abbrev`, `intern-soft`,
   `local-abbrev-table`) are not ported.
@@ -18259,6 +18278,10 @@ runs cpp as a subprocess), the Style submenu's two guess entries
 (`cc-guess.el`) and the "Subword mode" toggle (`cc-subword.el`). A menu
 item naming a missing command signals when it is clicked.
 
+*(Superseded 2026-11-26: "Macro Expand Region" and "Subword mode" are
+in the menu now - `cmacexp.scm` and `subword.scm` are ported. Only the
+Style submenu's two guess entries remain omitted.)*
+
 Two model departures, both forced by this tree's shape:
 
 * **`:selected` holds a call, not the variable symbol.** Emacs writes
@@ -18398,6 +18421,12 @@ which `callproc.scm` explicitly does not port (only the synchronous
 `call-process-region` and `cmacexp.el`; until then the binding is
 absent and the menu's "Macro Expand Region" is omitted for the same
 reason (an item naming a missing command signals when clicked).
+
+*(Superseded 2026-11-26: `call-process-region`, `make-temp-file` and
+`cmacexp.scm` are ported, and all four modes bind `C-c C-e` to the
+symbol `c-macro-expand`, which `command.scm`'s autoload table loads on
+first use - see "`cmacexp.el` and the command autoload" at the end of
+this file.)*
 
 Tests: `cc-mode-test.scm`'s `schemacs_editor_cc_mode_languages` group
 (10) - the three mode names/mode lines (`"Java//l"`, `"IDL//l"`,
@@ -18756,3 +18785,602 @@ functions (including the two the language variables already name,
 which resolve to #f now), `c-awk-unstick-NL-prop`, and the NL-property
 change functions. After that it is the mode definition, map, menu and
 autoloads, in the pattern the other five modes take.
+
+# `cc-awk.el` is ported, and `awk-mode` closes the language list
+# (2026-11-26)
+
+`schemacs/progmodes/cc-awk.scm` is `lisp/progmodes/cc-awk.el` whole -
+the awk syntax table, the 42 regexps, the `c-awk-NL-prop` virtual-
+semicolon analysis, the syntax-table-property and font-lock machinery,
+the before/after-change functions and the movement commands - and
+`cc-mode.scm` has `cc-mode.el`'s awk section (`:3226`-`:3300`): the
+map, the menu and `awk-mode`. With it every language mode cc-mode has
+is ported.
+
+## Where the pieces are
+
+| Emacs | here |
+|---|---|
+| `cc-awk.el` | `schemacs/progmodes/cc-awk.scm` |
+| `cc-mode.el`'s `awk-mode-map`, `c-awk-menu`, `awk-mode` | `cc-mode.scm`, after pike |
+| the `.awk` entry and the four interpreters | already in `files.scm`; the mode is in `%mode-autoloads` |
+
+## Representation departures, each named in the source
+
+1. **The 42 `defconst` regexps are Emacs 31.1's *values*.** The source
+   builds several with `concat` over line continuations and doubled
+   escapes; what the engine is given is the string the running Emacs
+   holds, dumped with `print-escape-newlines` on (the charset maps'
+   and xterm's decode map's method). The comments are the source's.
+2. **`defsubst`s are procedures**, and every `&optional` argument is a
+   rest parameter read with the tree's `(if (pair? args) ...)` shape.
+3. **`(c-save-buffer-state nil ...)` is `(c-save-buffer-state () ...)`.**
+   Emacs's macro splices the bindings list into a `let*`; Guile's `let`
+   takes no bare bindings or symbol there.
+4. **Value-position `when`s and `cond`s answer `#f` explicitly.** Three
+   places read the value (`c-awk-forward-awk-pattern`'s `cond`,
+   `c-awk-syntax-tablify-string`'s arms, `c-awk-at-vsemi-p`'s final
+   `and`), and Scheme's answers are the unspecified value where Elisp's
+   are nil.
+5. **`c-awk-end-of-defun` ends with an explicit `#f`.** Every path of
+   Emacs's body answers nil (`goto-char`, `while` and `when` all do);
+   Scheme's `while` answers the unspecified value, which M-x would echo.
+6. **`c-awk-beginning-of-defun` and `c-awk-end-of-defun` are
+   `define-command`s**, so M-x finds them and the map's bindings
+   resolve; `c-awk-forward-awk-pattern`, `c-awk-end-of-defun1` and
+   `c-awk-beginning-of-defun-p` are plain procedures, as in Emacs.
+7. **`c-awk-unstick-NL-prop` models `setq` on a buffer-local-or-global
+   variable.** Emacs's `setq` writes the current buffer's local binding
+   when it has one - `c-basic-common-init` makes one in every CC Mode
+   buffer - and the global otherwise; here `local-variable-p` chooses
+   between the buffer slot and the `*text-property-default-nonsticky*`
+   parameter. Emacs's `(boundp 'text-property-default-nonsticky)` is
+   the XEmacs guard and is the always-true arm here.
+8. **`c-open-string-opener`'s accessor pair moved down to
+   `cc-engine.scm`** (a named placement departure): `cc-awk` records the
+   opener and sits below `cc-mode`, so the slot has to be reachable from
+   below. `cc-mode` imports and re-exports both names; every existing
+   caller is unchanged. The precedent is `*current-buffer*`'s move.
+9. **`awk-mode`'s syntax table is `define-derived-mode`'s sixth
+   element** - `cc-awk`'s table, imported - where Emacs passes
+   `:syntax-table nil` and calls `(set-syntax-table
+   awk-mode-syntax-table)` in the body after `(require 'cc-awk)`. The
+   body's `set-syntax-table` line is kept (idempotent).
+10. **The `cc-bytecomp-*` declarations and `(cc-provide 'cc-awk)` are
+    compile/self-load framing** and are not carried: the library system
+    is the dependency mechanism, and there is no `featurep`.
+
+## A pre-existing language-variable gap this pass found
+
+**Closed on 2026-11-26** - see "The defun variables are buffer-local"
+at the end of this file. `cc-langs.el`'s `(c-lang-setvar
+beginning-of-defun-function ...)` and its `end-of-defun` twin make
+Emacs's `beginning-of-defun-function`/`end-of-defun-function`
+buffer-local and set them to the language's function. Here
+`c-lang-setvar` writes a *buffer-local slot* keyed by the symbol, and
+`lisp.scm`'s `beginning-of-defun`/`end-of-defun` used to read only the
+`*beginning-of-defun-function*`/`*end-of-defun-function*` parameters -
+so a command that goes through them (`mark-defun`, `narrow-to-defun`)
+used the default sexp motion in every CC Mode buffer where Emacs uses
+`c-beginning-of-defun`/`c-awk-beginning-of-defun`. The modes' own maps
+bind C-M-a/C-M-e to the commands directly, so the keys were right; the
+gap was the variable.
+
+## Verification
+
+- **A whole-input differential against Emacs 31.1**: every one of the
+  fixture's 120 positions, a fresh buffer each, recording
+  `c-awk-get-NL-prop-cur-line`, `c-awk-get-NL-prop-prev-line`,
+  `c-awk-at-vsemi-p`, `c-awk-beginning-of-logical-line`,
+  `c-awk-beyond-logical-line`, `c-awk-beginning-of-defun`/point,
+  `c-awk-end-of-defun`/point and `c-awk-at-statement-end-p` -
+  **0 differences**.
+- **A five-edit differential through the mode's real change hooks**:
+  typing in the body, a quote at a string position, a line start, the
+  buffer start and the last line records `c-new-BEG`, `c-new-END` and
+  every `syntax-table` and `c-awk-NL-prop` property run - **identical**.
+- **Font locking**: the whole-buffer face runs are identical, including
+  `print` as a builtin (the preprocessor face) and `/x/` as a regexp
+  string.
+- **A four-edit differential with fontification on both sides** (the
+  edit, a re-fontify, then `c-new-BEG`/`c-new-END`, every
+  `syntax-table` run and the new face runs): typing a letter, a `"`
+  (the warning faces on both halves of the unterminated string), a
+  letter on a regexp line, and a `/` in the body - identical. This is
+  the path that runs `c-awk-extend-and-syntax-tablify-region`.
+- The syntax table, the comment syntax, the map's eight bindings and
+  the menu are Emacs's own answers.
+- `cc-mode-test.scm` gained the `schemacs_editor_cc_mode_awk` group (8
+  tests, every expectation measured first); the suite is 157 passes.
+- `imports.scm` regenerated (133 libraries, 5,512 names), the library
+  is in `loadup.scm`, and `tools/pty-check.py` gained `awk-mode`:
+  **111/111 checks passed** on the settled tree (the battery ran
+  alone).
+
+# The Java mode's crash, and three data-shape bugs (2026-11-26)
+
+Found by Chris opening a real 32 KB Java file
+(`expanded-log-valve/.../ExpandedAccessLogValve.java`) in the Gtk
+editor:
+
+    Wrong type to apply:
+      (#<procedure ... (a)> #f #<procedure ... (a)>)
+
+raised inside `dynamic-wind`, under `c-make-font-lock-search-form`'s
+highlight loop. Three separate bugs came out of it; all are in
+`cc-fonts.scm`, all Java-only, and all were invisible to the suite
+fixtures because they need a `.`-then-capitalized name (any
+`import org.apache...Upper` line) or a qualified generic parameter
+type.
+
+## 1. The crash: an anchored highlighter one list too deep
+
+Emacs's Java qualified-name data (`cc-fonts.el:845`) passes
+`c-make-font-lock-search-function` one highlight:
+
+    `((FORM nil (goto-char (match-end 0))))
+
+which is a list whose one element is the anchored highlighter
+`(ANCHORED-MATCHER PRE-FORM POST-FORM)`. The consumer takes
+`(car highlight)` as the matcher. Our data had
+
+    (list (list (lambda (limit) ...) #f (lambda (limit) ...)))
+
+- one extra `list` - so the highlight was `((MATCHER #f POST))` and
+  `(car highlight)` was the whole `(MATCHER #f POST)` list, which the
+  port then applied as a procedure. The same shape bug was fixed in
+  the Objective-C `@interface` entry in the previous pass; this is the
+  Java entry.
+
+Fixed: the argument is `(list MATCHER #f POST)` (the anchored
+highlighter itself), matching our consumer's representation (the three
+code slots are procedures of LIMIT; see the cc-fonts header).
+
+## 2. The matcher's `while` answered the unspecified value
+
+The second Java fully-qualified-name matcher (`cc-fonts.el:870`) is a
+lambda whose body is a `while`. Elisp's `while` answers nil; Guile's
+answers the unspecified value, which is **true**. Font-lock reads a
+matcher's true answer as "there was a match", so it treated the
+matcher as having matched and skipped the next declarator spot -
+`void loop(java.util.Map<String, String[]> parameters)` never had
+`parameters` examined at all.
+
+Fixed with an explicit `#f` after the `while`, which is the same rule
+the tree has recorded for `when`/`cond`/`set!` in value position.
+
+## 3. `c-maybe-decl-faces` was never `eval`ed
+
+`cc-fonts.el:1582` passes `(eval c-maybe-decl-faces)` to
+`c-find-decl-spots`; the constant's value is a `list` *form* whose
+elements are face names, and the `eval` is what resolves
+`c-reference-face-name` (a variable) to the actual face. Our port
+passed the form itself, so the face checklist contained the *symbol*
+`c-reference-face-name` and the membership test in
+`c-find-decl-spots` failed for any text painted with the face it names
+- Java's reference face is `font-lock-constant-face`, which is exactly
+what a qualified name's package part gets. The spot was filtered and
+the declaration skipped.
+
+This is a new class for the tree's `(eval . FORM)` convention: the
+handoff rule says such entries are written as the values they evaluate
+to, and that is right for a form that is pure data. This one is a form
+*by design* - Emacs's docstring says so: "This must be evaluated (with
+`eval`) at runtime to get the actual list of faces. This ensures that
+face name aliases in Emacs are resolved." It needs a run-time rebuild,
+which is `%c-eval-maybe-decl-faces` in `cc-fonts.scm` (map the form's
+elements, replacing `c-reference-face-name` with its value).
+
+## Verification
+
+A face-run differential against Emacs 31.1 (whole buffer, `face`
+property runs, `font-lock-ensure` on a real `java-mode` buffer both
+sides):
+
+- five small Java fixtures (`j1`-`j5`), exercising an import-style
+  dotted name, repeated parameter types, several generic parameter
+  types, and `Map.Entry` in a for-each header: **0 differing runs**;
+- Chris's 32 KB `ExpandedAccessLogValve.java` (1,300 face runs):
+  **0 differing runs**.
+
+Before the three fixes the same file crashed at the first
+`.`-then-capital name; with only the crash fixed, 36 runs differed;
+with the crash and the matcher `#f`, 2 differed; all three fixes give
+0.
+
+A regression fixture belongs in `cc-fonts-test.scm`'s `end_to_end`
+group (a Java buffer with a dotted import and a qualified generic
+parameter, whose face runs are Emacs's), so the crash cannot come back
+unnoticed; it is added with this section's pass.
+
+
+# The defun variables are buffer-local (2026-11-26)
+
+Closes the gap the `awk-mode` pass recorded (its paragraph above now
+points here). Emacs's `beginning-of-defun-function` and
+`end-of-defun-function` are ordinary variables (`lisp.el:383`, `:561`)
+that modes make buffer-local; `cc-langs.el` does it with
+`c-lang-setvar`, whose value is a **symbol** naming the language's
+command - `c-beginning-of-defun`, or `c-awk-beginning-of-defun`.
+`beginning-of-defun-raw` `funcall`s it with ARG (`lisp.el:441`) and
+`end-of-defun` `funcall`s its own with no argument (`:620`), both
+resolving the symbol in the obarray.
+
+Here the globals were parameters and nothing read the buffer-local
+slots, so `mark-defun` and `narrow-to-defun` used the default sexp
+motion in every CC Mode buffer. Fixed in `lisp.scm`:
+
+- **`%defun-function-value`** reads the buffer's slot when it has one
+  (`local-variable-p`, then `buffer-local-value`) and falls back to the
+  parameter otherwise - Emacs's buffer-local-means-it-wins rule, the
+  same shape `%parse-sexp-ignore-comments?` already uses for a
+  variable with a global parameter here.
+- **`%defun-function-procedure`** resolves a symbol through the
+  command table (this tree's obarray stand-in) and answers the
+  command's **API procedure**, not `command-procedure`: the latter is
+  the interactive wrapper that takes the raw `uarg`, so calling it
+  with no argument raised "Wrong number of arguments to ... (uarg)".
+  The API is the Emacs-named procedure, which is what `funcall` in
+  Emacs reaches. A symbol that names no command, or a command with no
+  API, signals Emacs's `Symbol's function definition is void: NAME`.
+- `command-api` is exported from `command.scm` for that resolver.
+- `end-of-defun` now ends with an explicit `#f`: Emacs's `while` there
+  answers nil, Scheme's answers the unspecified value, which the REPL
+  would echo. Its point behaviour was already right.
+
+Verification: `cc-mode-test.scm`'s `schemacs_editor_cc_mode_defun_bridge`
+group (5 tests) - in a real c-mode replay, `c-init-language-vars`
+makes both slots buffer-local with the two symbols, `beginning-of-defun`
+from position 25 goes to 1 and answers t, `end-of-defun` goes to 37
+and answers nil, a parameter is used when no local exists, and a
+buffer-local naming nothing signals void-function. Every expected
+answer was measured on Emacs 31.1 first.
+
+# The fill differential's harness, and the one open transient (2026-11-26)
+
+`tools/cc-fill-diff/ours-fill.scm` now installs the mode's
+`c-before-change`/`c-after-change` hooks and (for C++)
+`c-restore-<>-properties`, which is what `(funcall mode)` does on the
+Emacs side through `c-common-init`. Without them the differential was
+comparing against a mode our side had not really started: commands
+that edit twice saw stale caches.
+
+What that removed, and what is left:
+
+- `fixture-fill.cpp` is now **identical at every position**; the two
+  `c-context-open-line` differences (the transient at 108 and its
+  sibling at 158) are gone, and `fixture-transient108.cpp`'s
+  indentation difference with them - the position is green in
+  `tools/cc-indent-diff/` after the `c-asymmetry-fontification-flag`
+  fix.
+- `fixture-fill.c` is identical except:
+  - **positions 794-796**, where only `c-fill-paragraph`'s *point*
+    differs (Emacs 797, ours unchanged). Plain `fill-paragraph` on the
+    same buffer shows it too (Emacs at 787), so it is `fill.scm`'s
+    point handling, not cc-mode's - a separate, still-open item.
+  - **positions 955, 956 and 968**, inside the multi-line `#define`'s
+    braced body: `c-indent-new-comment-line`'s "temporarily insert
+    another line break" state leaves the continuation line at column 2
+    where Emacs puts it at 6. This is the last `c-guess-basic-syntax`
+    transient. The two runs are identical in everything that can be
+    dumped at the guess - full buffer text (byte for byte), point,
+    narrowing, text properties (none), `c-parse-state` (nil),
+    `c-macro-start`/`c-macro-cache` (934 . 979), the literal cache,
+    `case-fold-search` - and clearing `c-macro-cache`, `c-state-cache`
+    and the `syntax-ppss` cache changes neither side's answer. Yet
+    Emacs answers `((statement 955))` and ours
+    `((topmost-intro-cont 951))`, while a *fresh* buffer holding the
+    same text answers `((statement-block-intro 951))` in **both**
+    editors. So each implementation's answer depends on state built up
+    before the guess that has not been identified; the honest state is
+    "open", with the reproduction in the README.
+
+# `cmacexp.el`, the command autoload table, `search-failed`, and
+# subword/superword (2026-11-26)
+
+One session's worth of gaps closed, in dependency order: the last two
+items of the cc-mode "not carried" list (`c-macro-expand`,
+`c-subword-mode`) and the primitives they stood on. Everything below was
+measured against `emacs -Q --batch` (31.1) before it was ported.
+
+## `cmacexp.el`
+
+`schemacs/progmodes/cmacexp.scm` mirrors `lisp/progmodes/cmacexp.el`
+whole: `c-macro-expand` (the command), `c-macro-display-buffer` and
+`c-macro-expansion`, with the four `defcustom`s and the work-buffer name.
+`c-macro-expansion` is verified cell for cell against Emacs on 21 cases -
+five fixtures at their own ENDs plus the `cat`/`false`/failing-stderr
+machinery cases (`test/progmodes/cmacexp-test.scm`, 8 tests; the
+differential's outputs are the expectations, and the strings it pins
+include the `#line` directives and the error comment).
+
+Named in the file's header, not carried:
+
+* the Solaris arm of `c-macro-preprocessor`'s standard value - it tests
+  `system-configuration`, which this tree has no variable for; the other
+  three probes are carried;
+* `msdos-shells` in the error-status test (there is no MS-DOS here, so
+  the C's "and not an MS-DOS shell" arm is the always-true arm);
+* `with-file-modes` and `files--make-magic-temp-file`: no file-name
+  handlers, and `make-temp-file-internal` creates 0600 files itself.
+
+`c-macro-expansion`'s "insert `#line` after every `#endif`/`#else`" loop
+compares `(nthcdr 3 (parse-partial-sexp ...))` with a five-element
+literal; Emacs 31's parse state is longer than five elements, so the
+comparison is nil in Emacs too and no such `#line` is ever inserted. The
+literal comparison is ported as it stands so that a future parse-state
+shape change behaves the same on both sides.
+
+**`~d` is spelled `~a`** in the two `format` calls that build the
+`#line` directives: `(guile)`'s `format` does not implement `~d` (the
+compiler warns), and an exact integer prints identically under `~a`.
+
+### The primitives it needed, and their departures
+
+* **`call-process-region`** (`callproc.c`), with Emacs's
+  `(REAL-BUFFER STDERR-FILE)` destination form: the region is written to
+  a temp file that becomes the child's stdin, `2>FILE`/`2>&1` carry
+  stderr, and DELETE removes the region before the call. The child runs
+  through `shell-file-name -c`, as the C's does.
+* **`make-temp-file`** (`files.el:1173`), `make-temp-name`
+  (`fileio.c:1243`) and `make-temp-file-internal` (`:1148`), with
+  `temporary-file-directory` and its two variables. Emacs's six random
+  alphanumerics from `gen_tempname` are a pid/time-seeded generator here,
+  and the file is created `O_EXCL` 0600, the directory 0700. The
+  magic-name arm (`files--make-magic-temp-file`) needs file-name
+  handlers and refuses with a message naming it.
+* **`char-to-string`** (`character.c`), **`buffer-disable-undo`**
+  (`simple.el`) / **`buffer-enable-undo`** (`buffer.c` - placed in
+  `simple.scm`, a named placement departure: the C function's body is
+  simple.el's neighbour and `buffer.scm` is below the undo list).
+* **`enlarge-window`**/`shrink-window`/`shrink-window-horizontally`
+  (`window.el:3714`), `window-preserve-size`/`window-preserved-size`
+  (`window.el:1538`, `:1565`) and `window-body-size` (`:2120`), with
+  `*this-command-function*` read from `indent.scm` (the seam that
+  already existed). The preserved size is recorded in the
+  `window-preserved-size` window parameter as `(BUFFER WIDTH HEIGHT)`,
+  pixels being cells times `frame-char-size` as everywhere here.
+  `display-buffer` grew Emacs's rule that a non-list ACTION is
+  `(inhibit-same-window . ACTION)`.
+* **`exchange-point-and-mark`'s ARG is optional now** (`simple.el:7577`):
+  it was a required parameter, and `cmacexp.el:182` calls it with none
+  (measured: Emacs's `(exchange-point-and-mark)` is legal).
+* **`window-minibuffer-p` gained its optional WINDOW**
+  (`window.c:8083`), for the same reason the compiler flagged it:
+  `enlarge-window` calls `(window-minibuffer-p)`.
+
+## `%command-autoloads` - the loaddefs stand-in
+
+`cc-mode.el:2877` binds `c-macro-expand` as a *symbol* in the four C
+modes' maps, and `cmacexp.el` **requires `cc-mode`** - so the defining
+library cannot be imported by the library that binds the key. In Emacs
+the name is in the obarray as an autoload object and `command-execute`
+loads the file on first use.
+
+This tree's stand-in is `command.scm`'s `%command-autoloads`: a list of
+`(NAME . LIBRARY)`, consulted by `command-record-named` when the command
+table misses. The library is `resolve-module`d - the same call
+`files.scm`'s `%mode-function` uses - and the lookup retried once. The
+entries are `c-macro-expand` and `subword.el`'s five `;;;###autoload`
+commands (`subword-mode`, `superword-mode`, the two globalized modes,
+`capitalized-words-mode`).
+
+Consequences worth knowing:
+
+* **M-x completes an autoloadable command before its library is
+  loaded** (`command-autoload-names`, added to
+  `command-completion-table`'s candidates), and `test-completion` on
+  such a name answers t *without* loading - Emacs's obarray holds the
+  autoload object already.
+* **M-x runs it by name**: `execute-extended-command` resolves through
+  `command-record-named`, so a typed name autoloads. It used to read
+  `*command-table*` directly.
+* **A lookup has a side effect where Emacs's `commandp` does not.** In
+  Emacs `(commandp 'c-macro-expand)` is t without loading; here
+  `command-record-named` loads the library. Same for `describe-function`
+  on an autoloadable name. Named, not hidden; the alternative is an
+  autoload *object* in the command table, which is a larger change to
+  every consumer of the table.
+* A name that is not in the table, or whose library does not define it,
+  still answers `#f`; a missing library raises the loader's error, as
+  Emacs's autoload of a missing file does.
+
+The four mode bindings and the "Macro Expand Region" menu item hold the
+symbol; `dispatch-action` resolves it through the command table at
+keypress, which is the moment Emacs runs the autoload.
+
+## `search-failed` is a condition
+
+`search_command` ends `xsignal1 (Qsearch_failed, string)`
+(`search.c:1140`), and Emacs renders it `Search failed: "zz"` -
+measured for a literal and a regexp. The tree's search failures were
+`(error "Search failed" X)`, one opaque error.
+
+`search.scm` now has a `<search-failed>` record (the `<scan-error>`
+shape), `%search-failed!` at the five signal sites, and
+`search-failed-error`, which renders Emacs's text (`%S` of the string).
+`error-message-string` (`subr.scm`) and the command loop's reporter
+(`keyboard.scm`) know it, as they know `<scan-error>`.
+
+Why it mattered: `subword-capitalize` catches `search-failed` by name
+and **must not** catch an invalid regexp - `(condition-case nil ...
+(search-failed nil))`. Before the record, a `guard` had no way to ask.
+
+Departure: Emacs's condition is a symbol plus data, catchable with
+`(condition-case e (search-failed ...))`; this tree's is a record and a
+predicate (`search-failed?`), like every other structured condition in
+it.
+
+## subword.el and superword.el
+
+`schemacs/progmodes/subword.scm` mirrors `lisp/progmodes/subword.el`
+whole - and since Emacs 29 that one file *is* both packages:
+`superword-mode` lives in it (`:258`-`:278`) and shares
+`subword-mode-map`. There is no `cc-subword.el` in Emacs 31 at all;
+`c-subword-mode` is `subword.el:119`'s obsolete alias of `subword-mode`,
+which `cc-cmds.el:1551` re-defines only when subword has not been loaded.
+
+`test/progmodes/subword-test.scm` (25) pins the mode variables, the
+lighters, both buffer-locals, the motions (`fooBarBaz` stops at 4/7/10
+with the mode on and 10 with it off), the strict-motion shadowing, every
+compatibility command, and the two aliases with their
+`byte-obsolete-info`.
+
+### `find-word-boundary-function-table` is read buffer-locally
+
+Emacs's variable is a plain `defvar` in `syntax.c` that `subword-mode`
+`setq-local`s; `forward-word-strictly` `let`-binds it, and `specbind`
+puts the dynamic binding *above* the buffer-local value.
+
+The tree had one parameter. Now `syntax.scm`'s
+`%find-word-boundary-table` reads the buffer's own slot first and falls
+back to the parameter (the *global* value), and
+`forward-word-strictly`/`backward-word-strictly` bind **the slot** with
+`buffer.scm`'s `call-with-buffer-local` - the tree's spelling of
+`specbind` on a buffer-local. A `parameterize` would have been invisible
+to a buffer that runs the mode, which is exactly the regression test:
+`forward-word-strictly` on "fooBarBaz" with the mode on must still stop
+at 10.
+
+### The primitives under it
+
+* **`forward-symbol`** (`subr.el:6641`) is in `subr.scm`. **Placement
+  note**: it is an interactive command, so it is a `define-command`, and
+  `subr.scm` now imports `define-command` from `command.scm` - whose
+  only import is `intervals.scm`, so there is no cycle. It reads the
+  character at the match start with `fetch-char`, the C's own read,
+  because `char-after` is `editfns.c`'s and above this library.
+* **`minusp`** (`subr.el:643`) in `subr.scm`, **`natnump`**
+  (`data.c:588`) in `data.scm`.
+* **`current-bidi-paragraph-direction`** (`xdisp.c:26952`) in
+  `xdisp.scm`. This redisplay has no bidi iterator, so the answer is the
+  buffer-local `bidi-paragraph-direction` when set and `left-to-right`
+  otherwise; the global default of that variable is not carried (no
+  `setq-default` for it here), and the C's
+  `bidi-display-reordering`/multibyte gates are not either - the
+  renderer lays text out left to right regardless. `subword.scm` imports
+  `xdisp.scm` for it, the first `progmodes` library to reach the
+  renderer; `simple.scm`'s `right-char` went the other way with the fact
+  written down and does not call it.
+
+### `core/byte-run.scm`: the obsoletion machinery
+
+`make-obsolete`, `byte-run--constant-obsolete-warning` and
+`define-obsolete-function-alias` are `byte-run.el:557`-`:608`'s, in a new
+`(schemacs core byte-run)`. `make-obsolete` writes the
+`byte-obsolete-info` property `(CURRENT nil WHEN)` that
+`help-fns--obsolete` reads - that section of `help-fns.scm` had no
+writer until now.
+
+Not carried from `byte-run.el`, named in the file: `def-edebug-spec`
+(no edebug), `make-obsolete-variable`/`define-obsolete-variable-alias`
+(no variable aliases - see below), the byte-compiler warning and the
+`M-x` version filtering of obsolete commands (no compiler, no Emacs
+version), and the `with-suppressed-warnings` family and the rest of the
+compiler infrastructure.
+
+`define-obsolete-function-alias` expands to `define-alias` +
+`make-obsolete`, Emacs's two lines; the DOCSTRING arm is accepted and
+dropped because `define-alias` drops one (an alias's documentation is
+its target's here).
+
+### Order departures forced by the host language
+
+Three definitions in `subword.scm` cannot sit where Emacs's file puts
+them, because Emacs quotes a symbol where this tree evaluates a value:
+
+* `capitalized-words-mode`'s alias (`subword.el:89`) follows the
+  `subword-mode` definition instead of preceding it - `define-alias`
+  evaluates its target;
+* `subword-find-word-boundary-function-table` and
+  `subword-empty-char-table` (`:320`, `:328`) follow
+  `subword-find-word-boundary` instead of preceding
+  `subword-setup-buffer` - `set-char-table-range` with the function in
+  it is a forward reference at load (the interpreter raises "Unbound
+  variable"; the compiler resolves it, which is why it looked fine until
+  a fresh-cache run);
+* `subword-forward-function`/`subword-backward-function` (`:68`,
+  `:71`) are `#f` where Emacs declares them and are `set!` after the
+  internal functions - the `normal-auto-fill-function` shape, and for
+  the same reason.
+
+**The two function variables hold procedures**, not the symbols Emacs
+holds (`'subword-forward-internal`): a Lisp-1 has no
+symbol-to-function indirection, so a user who sets one sets a procedure.
+
+### cc-cmds and the modes
+
+* `c-backward-into-nomenclature` is Emacs's command (`cc-cmds.el:1569`)
+  over `subword-backward`, with `(make-obsolete ...
+  'subword-backward "23.2")` at load. Emacs's
+  `(if (fboundp 'subword-mode) ...)` is always the first arm here -
+  `subword.scm` is imported - and there is no `cc-subword.el` to fall
+  back to (Emacs 31 has none either).
+* The `cond` at `cc-cmds.el:1551` is not carried as code: its first
+  branch defines the `c-subword-mode` alias `subword.el:119` already
+  defines when subword loads, and its second would autoload a file that
+  no longer exists. What the tree ends with is Emacs's end state once
+  subword has loaded - `(subword-mode nil "23.2")`, measured.
+* `(define-obsolete-variable-alias 'c-subword-mode 'subword-mode
+  "24.3")` is **not carried**: this tree has no variable aliases, and
+  the variable is a buffer slot read through
+  `subword-mode-variable`. The `w` flag `c-update-modeline` builds
+  (`cc-cmds.el:271`) reads that slot.
+* `C-c C-w` is bound in `c-mode-base-map` to the symbol
+  `c-subword-mode` (`cc-mode.el:467`), and the Toggle submenu's
+  "Subword mode" item (`cc-langs.el:324`) has
+  `:selected '(subword-mode-variable)` - the accessor call, the same
+  spelling the other toggles use for their variables.
+
+### Two `'()`-truthiness bugs found by the batteries
+
+Both are the tree's oldest class (`'()` is true where Elisp's nil is
+false), and both were found by the full suite run rather than by the
+tests that "covered" the code:
+
+* **`display-buffer` passed the empty list into
+  `display-buffer--inhibit-same-window?`**, whose `(not action)` test
+  then fell through to `(cdr action)` and raised. The helper now has an
+  explicit `(null? action)` arm, and `display-buffer`'s non-list ACTION
+  test carries `(not (null? action))` too. `display-buffer--same-window-
+  action?` had the matching `(car '())` and tests with `pair?` now.
+* **The batch batteries' help path** (`describe-bindings`,
+  `describe-coding-system`) is what reached it; the same run also
+  showed that `window-minibuffer-p`'s new default and
+  `enlarge-window`'s call agreed once the compiler warning was heeded.
+
+### The defun-function bridge and the four `let` sites
+
+The "defun variables are buffer-local" work (earlier today) made
+`beginning-of-defun` read the buffer's slot first. That silently
+defeated the four Emacs sites that `let`-bind the two variables to nil
+- `cc-engine.el`'s `c-beginning-of-defun-1` and three in `cc-cmds.el` -
+because a `parameterize` cannot shadow a buffer-local. In a CC language
+the buffer-local holds the *symbol* `c-beginning-of-defun`, so
+`c-point 'bod`'s `c-beginning-of-defun-1` - which `let`-binds the
+variables to nil precisely so that `beginning-of-defun` uses its
+*default* mover - resolved the symbol instead: a void-function in a
+test where `cc-cmds.scm` is not loaded, and the mode's own command where
+it is, which is not the mover the helper asked for.
+
+`(schemacs core lisp)` now exports `with-defun-functions-nil`, which
+binds the two **slots** through `call-with-buffer-local` - the
+`specbind` semantics, the same spelling `forward-word-strictly` uses
+for `find-word-boundary-function-table` - and the four sites use it.
+The lesson is the tree's recurring one: **when a variable gains a
+buffer-local half, every `let` of it has to be converted with it**, and
+a `parameterize` will look right and do nothing.
+
+### `kill-region` answers nil
+
+Found on the way: `kill-word` inherited `kill-region`'s answer, and the
+tree's `kill-region` returned the deleted substring where **every arm of
+Emacs's `condition-case` answers nil** (`simple.el:5993`, measured:
+`(kill-region 1 4)` is nil in Emacs 31.1). Fixed at the primitive. What
+is still not carried there is the *shape* of Emacs's body: its
+`condition-case` around the deletion (which is how `text-read-only`
+properties are caught and copied to the ring), its `(beg end &optional
+region)` third argument, the `unix-word`/`emacs-word` region values, and
+the "Read only text copied to kill ring" message. Named for a future
+pass; the read-only branch's observable behaviour (text in the ring,
+then the error) already matches.
