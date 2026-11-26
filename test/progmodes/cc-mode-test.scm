@@ -1228,4 +1228,14 @@
           (with-current-buffer (find-file-noselect fi) (major-mode))
           (with-current-buffer (find-file-noselect fp) (major-mode)))))
 
+(test-equal "a pike shebang opens pike-mode through interpreter-mode-alist"
+  'pike-mode
+  ;; No extension, so `auto-mode-alist' has no entry and
+  ;; `set-auto-mode`'s interpreter branch (files.scm) is what decides.
+  ;; Measured on Emacs 31.1.
+  (let ((f "/tmp/sc-cc-mode-defs-shebang"))
+    (with-output-to-file f
+      (lambda () (display "#!/usr/bin/pike\nint main () { }\n")))
+    (with-current-buffer (find-file-noselect f) (major-mode))))
+
 (test-end "schemacs_editor_cc_mode_languages")

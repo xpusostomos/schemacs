@@ -18372,28 +18372,37 @@ pin.
 `files.scm`'s `%mode-autoloads` gained the three mode names, so `C-x C-f
 x.java` loads cc-mode on first use and `auto-mode-alist`'s existing
 entries (`.java`, `.idl`, `.uclpc`/`.pike`/`.pmod` ...) reach the
-modes. `interpreter-mode-alist`'s `("pike" . pike-mode)`, which Emacs
-also autoloads, has no reader here (there is no shebang-mode
-machinery); the alist entry is data only.
+modes. `interpreter-mode-alist`'s `("pike" . pike-mode)` is read too:
+`set-auto-mode`'s interpreter branch (files.scm, `auto-mode-
+interpreter-regexp`) is ported, so a file with `#!/usr/bin/pike` and no
+extension opens pike-mode - measured on Emacs 31.1, and pinned by the
+test below. (An earlier note here said the alist had no reader; that
+was wrong.)
 
-Named omissions, each matching an earlier menu decision:
+Not departures, and worth saying so: `(when (featurep 'xemacs)
+(easy-menu-add ...))` and IDL's and Pike's `cc-imenu-init` calls are
+*dead code in GNU Emacs itself* - the first is guarded on XEmacs and
+the other two are commented out in `cc-mode.el` - so carrying them
+would add only code nothing runs. Omitting them changes no behaviour.
 
-* `(when (featurep 'xemacs) (easy-menu-add ...))` is not carried (there
-  is no XEmacs), as in the C/C++ modes.
-* Pike's `(define-key pike-mode-map "\C-c\C-e" 'c-macro-expand)` is not
-  bound: `c-macro-expand` runs cpp as a subprocess, which this tree has
-  no primitive for. The menu's "Macro Expand Region" is omitted for the
-  same reason (the item would signal when clicked).
-* IDL's and Pike's imenu calls are commented out in Emacs and so here.
+The one real omission is Pike's `(define-key pike-mode-map "\C-c\C-e"
+'c-macro-expand)`: `c-macro-expand` is `cmacexp.el`'s, and
+`c-macro-expansion` feeds the region to cpp with `call-process-region`,
+which `callproc.scm` explicitly does not port (only the synchronous
+`call-process`). So carrying the binding means porting
+`call-process-region` and `cmacexp.el`; until then the binding is
+absent and the menu's "Macro Expand Region" is omitted for the same
+reason (an item naming a missing command signals when clicked).
 
 Tests: `cc-mode-test.scm`'s `schemacs_editor_cc_mode_languages` group
-(9) - the three mode names/mode lines (`"Java//l"`, `"IDL//l"`,
+(10) - the three mode names/mode lines (`"Java//l"`, `"IDL//l"`,
 `"Pike//l"`, which `c-update-modeline` builds from the comment syntax),
 `abbrev-mode` on in java/pike and off in idl, the three syntax tables at
 five characters, the three `[menu-bar LANG]` bindings and menu
 variables, the defun-prompt regexp, a Java buffer fontified through the
-real mode (the class name a type and the method name a function), and
-the three autoloads through `find-file-noselect`. Every expectation
+real mode (the class name a type and the method name a function), the
+three autoloads through `find-file-noselect`, and the pike shebang.
+Every expectation
 measured on Emacs 31.1 first.
 
 ## The Java class-bit bug (`regex-emacs.scm`)
@@ -18445,6 +18454,24 @@ test, because this matcher reads the class half for a character below
 256 whose bitmap missed, where the C's unibyte characters never reach
 it.
 
+That adaptation had one more hole, found by asking what Emacs does
+with a **raw eight-bit byte character** (code point `0x3FFF00 + byte`,
+which is what an undecodable file's bytes become). Emacs's
+`execute_charset` sends every character that has a byte representation
+- ASCII, and those byte characters - to the bitmap branch whatever its
+code point is, and the bitmap cannot hold `0x3FFF80`, so the class
+bits and the ranges are never consulted: a raw byte is in no charset
+at all, and a negated one matches it. Measured on Emacs 31.1 for byte
+128: every `[[:class:]]`, `[#x100-#xFFFF]` and `[#x80-#xFF]` are nil;
+every negated form is t. The port reached the class and range halves
+for any code point at or above 256, so it answered `[[:multibyte:]]`
+and `[[:nonascii:]]` true for the byte, and `[[:alpha:]]` raised
+`integer->char` on its code. `%execute-charset` now answers `not` for a
+`char-byte8?` character before the bitmap - the C's byte-representable
+branch, with a bitmap that cannot contain it. Regression:
+`search-test.scm`'s raw-byte group (2), seen failing on the old
+engine.
+
 Measured (Emacs 31.1 for the same buffer):
 
     folding off:  (looking-at "[[:upper:]]") at "p"  #f   (was #t)
@@ -18468,3 +18495,34 @@ whole-buffer runs of Emacs 31.1. Both were seen failing on the old
 engine and passing on the fixed one; `cc-mode-test.scm`'s real-mode
 Java face test pins the same thing through `java-mode` and
 `font-lock-ensure`.
+
+# `map-char-table` is not ported, and `copy-category-table` pays for it
+# (2026-11-27)
+
+`map_char_table` (`chartab.c:842`) is named as not carried in
+`chartab.scm`'s header, and `casetab.scm` records the same gap. The
+consequence surfaced while asking what Emacs does with raw byte
+characters: `category.scm`'s `copy-category-table` stands in for the
+C's `map_char_table (copy_category_entry, ...)` (`category.c:227`)
+with a walk of `char-table-ref-and-range`, and that walk **never
+narrows to a run**: it passes `from` and `to` as `(list c)`, so the
+C's run-extension loop (`chartab.c`, "while (*to >= (chartab_idx + 1) *
+chartab_chars[0])") never fires and every character is visited on its
+own. Measured on this tree, a `--no-auto-compile` source run of one
+`copy-category-table` of a table holding one category entry:
+
+    real 1m52s   user 5m5s   sys 3.4s
+
+That is the real reason `category-test` is the slowest suite and a
+suite battery takes minutes, and it cost a session a killed battery
+run: the suite was working, not hung (the runner's own per-suite
+timeout is 900 s).
+
+The fix is to port `map_char_table` - the C's recursion over slots,
+sub-tables and runs, with its `map_char_table`/`map-char-table` pair -
+and call it from `copy_category_table` and from `casetab.scm`'s
+`set_canon`/`shuffle`/`set_identity` uses, which is exactly what the C
+does. It is a shared primitive (`chartab.scm`), so it wants the full
+suite and pty batteries when it lands. Not done here because it was
+found while answering a question about something else, and the tree
+was already committed and settled.

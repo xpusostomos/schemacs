@@ -17883,6 +17883,16 @@ is why six C/C++ face differentials and every search test passed;
 take. `regex-emacs.scm` now carries `regex-emacs.c:1387`'s `BIT_*`
 values and the C's class chain in both tests.
 
+Asking what Emacs does with a **raw eight-bit byte character** (code
+point `0x3FFF00 + byte`) then found one more hole: in Emacs such a
+character is in no charset at all - it takes the bitmap branch, and the
+bitmap cannot hold a code that large - while the port reached the class
+and range halves, answered `[[:multibyte:]]` and `[[:nonascii:]]` true,
+and raised `integer->char` for `[[:alpha:]]`. `%execute-charset` now
+answers `not` for a `char-byte8?` character before the bitmap, and
+`search-test.scm`'s raw-byte group pins the measured answers (every
+class and positive range nil, every negated form t).
+
 The method note is the tree's own: **a port can have Emacs's shape and
 still be wrong.** Each half was internally plausible; only a
 whole-buffer face differential on a *capitalised* name exposed the
@@ -17892,10 +17902,15 @@ Java faces - the first two seen failing on the old engine.
 
 ## State and next
 
-- `cc-mode-test.scm` 145, `cc-fonts-test.scm` 61, `search-test.scm`
-  112; all 104 suites pass, and the full 109-check pty battery passes
+- `cc-mode-test.scm` 146, `cc-fonts-test.scm` 61, `search-test.scm`
+  114; all 104 suites pass, and the full 109-check pty battery passes
   on the settled tree (`java-mode` is the new end-to-end check: a
   `.java` file opens and the mode line says `Java//l`).
+- Found while answering a question and recorded but not fixed:
+  `map-char-table` is unported, so `copy-category-table` walks every
+  character instead of every run - measured 1m52s for one copy, which
+  is why `category-test` is the slowest suite. Porting
+  `map_char_table` is the fix (DEPARTURES.md, 2026-11-27).
 - Next in cc-mode: `objc-mode` (it needs
   `c-beginning-of-objc-method-header`, still a signalling stub in
   `cc-engine.scm`) and `awk-mode` (it needs `cc-awk.el`); then the fill

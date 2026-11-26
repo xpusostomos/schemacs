@@ -71,6 +71,7 @@
     (scheme base)
     (scheme char)
     (only (guile) ash logand logior lognot logxor logcount logbit? u32vector-ref caddr cadddr)
+    (only (schemacs character) char-byte8?)
     (only (schemacs category) char-category-set category-table
           word-boundary-p)
     (only (schemacs data) bool-vector-p bool-vector-ref)
@@ -2270,6 +2271,23 @@
       ;; syntax table at text position POS for the WORD class.
       ;;----------------------------------------------------------
       (cond
+       ;; **A raw eight-bit byte matches no charset.** In the C a
+       ;; character that has a byte representation - ASCII, or one of
+       ;; the byte characters `CHAR_BYTE8_P` describes - takes the
+       ;; bitmap branch (`execute_charset`, `regex-emacs.c:3817':
+       ;; `if (unibyte && c < (1 << BYTEWIDTH))') whatever its code
+       ;; point is, and a byte character's code (`0x3FFF00 + byte`) is
+       ;; far above the bitmap, so the bitmap cannot hold it and the
+       ;; class bits and ranges are never consulted: the answer is
+       ;; `not`. Measured on Emacs 31.1, `[[:alpha:]]` and every other
+       ;; class, an explicit `[#x100-#xFFFF]` range, and
+       ;; `[#x80-#xFF]` are all nil on a raw byte, while their negated
+       ;; forms are t. This port reaches the class and range halves
+       ;; for any character at or above 256 (its text is code points,
+       ;; not Emacs's encoded bytes), so the guard has to be explicit;
+       ;; without it a class test called `integer->char` on the byte
+       ;; character's code and raised.
+       ((char-byte8? c) not?)
        ;; **`logbit?' and not `(logand MAP (ash 1 C))`.** The bitmap
        ;; is a 256-bit integer and `ash' allocates a bignum for every
        ;; character tested; `execute_charset' runs once per character

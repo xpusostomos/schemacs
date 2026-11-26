@@ -1,7 +1,8 @@
 (import
  (only (schemacs buffer) allocate-buffer bufferp buffer-pt buffer-beg buffer-z text-editor-buffer-name set!text-editor-buffer-name text-editor-file-name set!text-editor-file-name buffer-modified-p set-buffer-modified-p buffer-read-only? set!buffer-read-only text-editor-text-props set!text-editor-text-props *inhibit-read-only* *buffer-visited-file-modtime-function* buffer-modified-tick buffer-chars-modified-tick text-editor-cache-long-scans set!text-editor-cache-long-scans show-text-editor text-editor-undo-list set!text-editor-undo-list)
  (only (schemacs undo) record-insert record-delete text-editor-undo-boundary! text-editor-undo-disable! text-editor-undo-enable! text-editor-undo-recording? *undo-limit* undo-insertion-entry? undo-deletion-entry? undo-modified-entry? *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
- (only (schemacs insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches)
+ (only (schemacs insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches insert-from-string)
+ (only (schemacs character) byte8-to-char)
  (only (schemacs fns) %count-lines)
  (scheme base)
  (scheme char)
@@ -848,5 +849,48 @@
 (test-equal "folded off: the string search, which the fastmap masks"
   #f (parameterize ((*case-fold-search* #f))
        (string-match "[[:upper:]]" "p")))
+
+;; ------------------------------------------------------------------
+;; Raw eight-bit byte characters, and the character classes
+;;
+;; A byte character (`char-byte8?`, character.h) has the code point
+;; `0x3FFF00 + byte`, far above any bitmap. Emacs's `execute_charset`
+;; tests a character that has a byte representation - ASCII, or one of
+;; these byte characters - against the bitmap only, so a raw byte is in
+;; no charset at all and a negated one matches it. Measured on Emacs
+;; 31.1: every `[[:class:]]`, an explicit `[#x100-#xFFFF]` range and
+;; `[#x80-#xFF]` are nil on byte 128, and every negated form is t.
+;; This port reaches the class and range halves for any code point at
+;; or above 256 (its text is code points, not encoded bytes), so it
+;; answered `[[:multibyte:]]` and `[[:nonascii:]]` true there, and
+;; `[[:alpha:]]` raised in `integer->char` on the byte's code.
+(define (byte8-class-buffer thunk)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*byte8-class*")))
+       (set-buffer b)
+       (erase-buffer)
+       (insert-from-string (list (byte8-to-char 128)))
+       (goto-char 1)
+       (thunk)))))
+
+(test-equal "a raw byte character is in no class, and a negated one matches"
+  (list #f #f #f #t #t)
+  (byte8-class-buffer
+   (lambda ()
+     (list (looking-at "[[:alpha:]]")
+           (looking-at "[[:multibyte:]]")
+           (looking-at "[[:nonascii:]]")
+           (looking-at "[^[:alpha:]]")
+           (looking-at "[^[:multibyte:]]")))))
+
+(test-equal "and an explicit range above 255 does not match it either"
+  (list #f #t)
+  (byte8-class-buffer
+   (lambda ()
+     (let ((range (string-append "[" (string (integer->char #x100)) "-"
+                                 (string (integer->char #xffff)) "]")))
+       (list (looking-at range)
+             (looking-at (string-append "[^" (substring range 1))))))))
 
 (test-end)
