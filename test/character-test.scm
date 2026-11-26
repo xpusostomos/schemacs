@@ -155,4 +155,30 @@
          (click mouse-1) (up click mouse-1) (double click mouse-1)
          (drag mouse-3))))
 
+
+;; ------------------------------------------------------------------
+;; The Unicode general categories and the five predicates
+;; (`character.c:959-1069'). Every value is Emacs 31.1's; the whole
+;; table was compared at every code point against Emacs's in
+;; `tools/class-diff/'.
+;; ------------------------------------------------------------------
+(test-equal "the category numbers are the C's UNICODE_CATEGORY_*"
+  '(1 2 6 9 23 30 28 30)
+  (map c:unicode-category '(65 233 769 1632 160 65535 55296 1114112)))
+(test-equal "alphabeticp is UTS #18's set"
+  '(#t #t #t #f #f)
+  (map c:alphabeticp '(65 233 769 178 65535)))
+(test-equal "alphanumericp adds Nd"
+  '(#t #t #f)
+  (map c:alphanumericp '(1632 65 8364)))
+(test-equal "graphicp excludes separators, controls, surrogates and unassigned"
+  '(#t #f #f #f #f)
+  (map c:graphicp '(65 160 8232 65535 55296)))
+(test-equal "printablep excludes controls, surrogates and unassigned"
+  '(#t #f #f)
+  (map c:printablep '(160 65535 55296)))
+(test-equal "blankp is Zs"
+  '(#t #t #f)
+  (map c:blankp '(160 12288 9)))
+
 (test-end "schemacs_editor_character")

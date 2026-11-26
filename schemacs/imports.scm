@@ -184,6 +184,7 @@
     %comstart-first?
     %comstart-second?
     %count-lines
+    %downcase
     %extract-dimension
     %filevercmp
     %for-each-marker
@@ -201,6 +202,7 @@
     %kill-buffer
     %length
     %lisp-el-special-forms-and-macros
+    %lowercasep
     %mark-marker
     %marker-charpos
     %mode-function
@@ -221,6 +223,8 @@
     %text-editor-newline-cache
     %transpose-subr
     %unknown-modtime-nsecs
+    %upcase
+    %uppercasep
     %window-base-line-number
     %window-base-line-pos
     %window-end-pos
@@ -1142,6 +1146,8 @@
     adjust-window-trailing-edge
     all-completions
     allocate-buffer
+    alphabeticp
+    alphanumericp
     amalgamating-command?
     append-key
     apply-command
@@ -1202,6 +1208,7 @@
     binary-overwrite-mode
     binary-overwrite-mode-hook
     bindings--sort-menu-keymap
+    blankp
     blink-cursor--rescan-frames
     blink-cursor--should-blink
     blink-cursor-check
@@ -1277,6 +1284,7 @@
     buffer-string
     buffer-substring
     buffer-substring-no-properties
+    buffer-syntax-code
     buffer-tab-width
     buffer-text-allocation
     buffer-text-base
@@ -3170,6 +3178,7 @@
     goto-line-read-args
     goto-line-relative
     graft-intervals-into-buffer
+    graphicp
     grow-mini-window
     gtkdoc-font-lock-doc-comments
     gtkdoc-font-lock-doc-protection
@@ -4114,6 +4123,7 @@
     previous-single-property-change
     primitive-undo
     print-coding-system-briefly
+    printablep
     prog--text-at-point-or-region-p
     prog--text-at-point-p
     prog-fill-reindent-defun
@@ -5324,6 +5334,7 @@
     unexpand-abbrev
     unfill-paragraph
     unibyte-to-char
+    unicode-category
     unify-charset
     universal-coding-system-argument
     unjustify-current-line

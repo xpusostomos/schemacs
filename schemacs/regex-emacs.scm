@@ -46,7 +46,7 @@
   ;; byte layout.** A `<re-charset>` keeps a 256-bit ASCII map, a
   ;; vector of inclusive code-point ranges, and the `RECC_*` class
   ;; bits. `execute_charset` is a membership test over those three, in
-  ;; the same order the C uses (bitmap, ranges, classes). The compiler
+  ;; the same order the C uses (bitmap, classes, ranges). The compiler
   ;; still performs every test the C performs, including case folding
   ;; through `set_image_of_range`; only the storage differs.
   ;;
@@ -71,12 +71,22 @@
     (scheme base)
     (scheme char)
     (only (guile) ash logand logior lognot logxor logcount logbit? u32vector-ref caddr cadddr)
-    (only (schemacs character) char-byte8?)
+    ;; The class macros' dependencies: the C's `CHAR_TO_BYTE_SAFE'
+    ;; and the category predicates `regex-emacs.c:107-153' call.
+    (only (schemacs character)
+          char-to-byte-safe
+          alphabeticp alphanumericp graphicp printablep blankp)
+    ;; `ISLOWER' and `ISUPPER' read the buffer's case tables
+    ;; (`buffer.h:1665-1676').
+    (only (schemacs casetab) %uppercasep %lowercasep)
     (only (schemacs category) char-category-set category-table
           word-boundary-p)
     (only (schemacs data) bool-vector-p bool-vector-ref)
-    (only (schemacs syntax) syntax-table syntax-class-to-char
-          sword ssymbol %spec-code %class-in %setup-syntax-table)
+    ;; `BUFFER_SYNTAX' (`regex-emacs.c:51') is `syntax_property (c,
+    ;; 0)'; `buffer-syntax-code' is that read with the table passed in.
+    (only (schemacs syntax) syntax-table
+          sword swhitespace ssymbol %spec-code %class-in %setup-syntax-table
+          buffer-syntax-code)
     (only (schemacs buffer) current-buffer)
     (only (schemacs chartab)
           char-table? char-table-ref char-table-extra-slot))
@@ -349,58 +359,92 @@
                           (+ i 2))))
                (else (loop (+ i 1))))))))
 
-    (define (%char-alphabetic? ch) (char-alphabetic? (integer->char ch)))
-    (define (%char-numeric? ch) (char-numeric? (integer->char ch)))
-    (define (%char-lower-case? ch) (char-lower-case? (integer->char ch)))
-    (define (%char-upper-case? ch) (char-upper-case? (integer->char ch)))
-    (define (%char-whitespace? ch) (char-whitespace? (integer->char ch)))
-    (define (%char-alphanumeric? ch)
-      (or (%char-alphabetic? ch) (%char-numeric? ch)))
-    (define (%char-graphic? ch)
-      (and (> ch 32) (not (%char-control? ch))))
-    (define (%char-printable? ch)
-      (or (= ch 32) (%char-graphic? ch)))
-    (define (%char-punctuation? ch)
-      (and (%char-graphic? ch) (not (%char-alphanumeric? ch))))
-    (define (%char-control? ch)
-      (or (< ch 32) (= ch 127) (and (>= ch 128) (< ch 160))))
-    (define (%char-xdigit? ch)
-      (or (%char-numeric? ch)
-          (and (>= ch (char->integer #\a)) (<= ch (char->integer #\f)))
-          (and (>= ch (char->integer #\A)) (<= ch (char->integer #\F)))))
-    (define (%char-blank? ch)
-      (or (= ch 32) (= ch 9)))
+    ;; ---------------------------------------------------------------
+    ;; The character-class macros (`regex-emacs.c:107-153').
+    ;;
+    ;; `re_iswctype' and `execute_charset' call these, so they are
+    ;; procedures rather than the C's macros; each is the macro's
+    ;; body, and the code points are the C's.
+    ;;
+    ;; **Several read the current buffer**, which is why no Scheme
+    ;; predicate over a character alone can stand in for them:
+    ;; `ISLOWER' and `ISUPPER' read its case tables and `ISPUNCT',
+    ;; `ISSPACE' and `ISWORD' read its syntax table (ignoring
+    ;; syntax-table text properties). A first version of this file
+    ;; used Guile's `char-alphabetic?' and friends, and measured
+    ;; against Emacs 31.1 it got DEL's `[[:cntrl:]]', NBSP's
+    ;; `[[:blank:]]', combining marks' `[[:alpha:]]', noncharacters'
+    ;; `[[:graph:]]' and emoji's `[[:punct:]]' wrong. See
+    ;; `search-tests' class group for the pinned answers.
+    ;;--------------------------------------------------------------
+    (define (%isrealascii c) (< c #x80))              ; IS_REAL_ASCII
+    (define (%isunibyte c) (and (>= c 0) (< c 256)))  ; ISUNIBYTE
+    (define (%isdigit c) (and (>= c #x30) (<= c #x39)))
+    (define (%iscntrl c) (< c 32))
+    (define (%isxdigit c)
+      (or (%isdigit c)
+          (and (>= c #x41) (<= c #x46))
+          (and (>= c #x61) (<= c #x66))))
+    (define (%isblank c)
+      (if (%isrealascii c)
+          (or (= c 32) (= c 9))
+          (blankp c)))
+    (define (%isgraph c)
+      (if (%isunibyte c)
+          (and (> c 32) (not (and (>= c #x7F) (<= c #xA0))))
+          (graphicp c)))
+    (define (%isprint c)
+      (if (%isunibyte c)
+          (and (>= c 32) (not (and (>= c #x7F) (<= c #x9F))))
+          (printablep c)))
+    (define (%isalnum c)
+      (if (%isrealascii c)
+          (or (and (>= c #x61) (<= c #x7A))
+              (and (>= c #x41) (<= c #x5A))
+              (and (>= c #x30) (<= c #x39)))
+          (alphanumericp c)))
+    (define (%isalpha c)
+      (if (%isrealascii c)
+          (or (and (>= c #x61) (<= c #x7A))
+              (and (>= c #x41) (<= c #x5A)))
+          (alphabeticp c)))
+    (define (%islower c) (%lowercasep c))
+    (define (%isupper c) (%uppercasep c))
+    (define (%ispunct c syntax-table)
+      (if (%isrealascii c)
+          (and (> c 32) (< c #x7F) (not (%isalnum c)))
+          (not (= (buffer-syntax-code syntax-table c) sword))))
+    (define (%isspace c syntax-table)
+      (= (buffer-syntax-code syntax-table c) swhitespace))
+    (define (%isword c syntax-table)
+      (= (buffer-syntax-code syntax-table c) sword))
 
     (define (re-iswctype ch cc)
       ;; `re_iswctype` (`regex-emacs.c:1622'): "True if CH is in the
-      ;; char class CC." The classes are Unicode's, which is what the
-      ;; code-point store makes natural; `word` is the *standard*
-      ;; syntax table's word class here (the C's `ISWORD` is the
-      ;; current buffer's syntax table, supplied by the caller when it
-      ;; matters).
+      ;; char class CC." The syntax-table classes read the current
+      ;; buffer's table through `syntax-table', which is `BUFFER_SYNTAX'
+      ;; (`regex-emacs.c:51').
       ;;----------------------------------------------------------
-      (cond
-       ((= cc recc-alnum) (%char-alphanumeric? ch))
-       ((= cc recc-alpha) (%char-alphabetic? ch))
-       ((= cc recc-word) (char=? (syntax-class-to-char
-                                  (logand (char-table-ref (syntax-table) ch)
-                                          #xff))
-                                 #\w))
-       ((= cc recc-graph) (%char-graphic? ch))
-       ((= cc recc-print) (%char-printable? ch))
-       ((= cc recc-lower) (%char-lower-case? ch))
-       ((= cc recc-upper) (%char-upper-case? ch))
-       ((= cc recc-punct) (%char-punctuation? ch))
-       ((= cc recc-cntrl) (%char-control? ch))
-       ((= cc recc-digit) (%char-numeric? ch))
-       ((= cc recc-xdigit) (%char-xdigit? ch))
-       ((= cc recc-blank) (%char-blank? ch))
-       ((= cc recc-space) (%char-whitespace? ch))
-       ((= cc recc-multibyte) (> ch 255))
-       ((= cc recc-nonascii) (> ch 127))
-       ((= cc recc-ascii) (<= ch 127))
-       ((= cc recc-unibyte) (<= ch 255))
-       (else #f)))
+      (let ((table (syntax-table)))
+        (cond
+         ((= cc recc-alnum) (%isalnum ch))
+         ((= cc recc-alpha) (%isalpha ch))
+         ((= cc recc-blank) (%isblank ch))
+         ((= cc recc-cntrl) (%iscntrl ch))
+         ((= cc recc-digit) (%isdigit ch))
+         ((= cc recc-graph) (%isgraph ch))
+         ((= cc recc-lower) (%islower ch))
+         ((= cc recc-print) (%isprint ch))
+         ((= cc recc-punct) (%ispunct ch table))
+         ((= cc recc-space) (%isspace ch table))
+         ((= cc recc-upper) (%isupper ch))
+         ((= cc recc-xdigit) (%isxdigit ch))
+         ((= cc recc-ascii) (%isrealascii ch))
+         ((= cc recc-nonascii) (not (%isrealascii ch)))
+         ((= cc recc-unibyte) (%isunibyte ch))
+         ((= cc recc-multibyte) (not (%isunibyte ch)))
+         ((= cc recc-word) (%isword ch table))
+         (else #f))))
 
     ;;----------------------------------------------------------------
     ;; The charset object
@@ -446,9 +490,9 @@
       ;;
       ;; The layout used to be an older Emacs's (multibyte at bit 0,
       ;; alpha at bit 1, ... lower at bit 4, upper at bit 5), while
-      ;; `%re-charset-class-member/canon` tested the upper and lower
-      ;; arms on the opposite bits - so the compiler wrote "lower"
-      ;; where the class test read "upper". The
+      ;; the class chain tested the upper and lower arms on the
+      ;; opposite bits - so the compiler wrote "lower" where the class
+      ;; test read "upper". The
       ;; two disagreeing was invisible while case folding was on (both
       ;; arms matched either case) and wrong when it was off, which is
       ;; how c-mode's fontification runs: `[[:upper:]]` matched `p`
@@ -485,29 +529,34 @@
               #t)
              (else (loop (+ i 1)))))))))
 
+    (define (%re-charset-class-member bits c corig canon syntax-table)
+      ;; `execute_charset`'s class chain (`regex-emacs.c:3837'-`:3852'),
+      ;; in the C's order. C is the translated character and CORIG the
+      ;; original; the case arms read CORIG and consult CANON, every
+      ;; other arm reads C. A character reaches this chain only when it
+      ;; has no byte representation, so the C's `BIT_MULTIBYTE' arm is
+      ;; unconditional - that is what "multibyte" means here.
+      ;;----------------------------------------------------------
+      (or (not (zero? (logand bits #x20)))                     ; BIT_MULTIBYTE
+          (and (not (zero? (logand bits #x80))) (%isalnum c))
+          (and (not (zero? (logand bits #x40))) (%isalpha c))
+          (and (not (zero? (logand bits #x8))) (%isspace c syntax-table))
+          (and (not (zero? (logand bits #x400))) (%isblank c))
+          (and (not (zero? (logand bits #x1))) (%isword c syntax-table))
+          (and (not (zero? (logand bits #x10)))
+               (or (%isupper corig) (and canon (%islower corig))))
+          (and (not (zero? (logand bits #x2)))
+               (or (%islower corig) (and canon (%isupper corig))))
+          (and (not (zero? (logand bits #x4))) (%ispunct c syntax-table))
+          (and (not (zero? (logand bits #x100))) (%isgraph c))
+          (and (not (zero? (logand bits #x200))) (%isprint c))))
+
     (define (%re-charset-class-member? cs ch)
-      ;; `execute_charset`'s class half (`regex-emacs.c:3837`) with no
-      ;; canonicalisation table: CORIG is CH and CANON is nil. The
-      ;; tests are the C's, in the C's order. `BIT_MULTIBYTE` is
-      ;; spelled `(> ch 127)` rather than the C's unconditional test,
-      ;; because this matcher reads the class half for a character
-      ;; below 256 whose bitmap missed, where the C's unibyte
-      ;; characters never reach it.
-      (let ((bits (re-charset-classes cs)))
-        (or (and (not (zero? (logand bits #x20))) (> ch 127))
-            (and (not (zero? (logand bits #x80))) (%char-alphanumeric? ch))
-            (and (not (zero? (logand bits #x40))) (%char-alphabetic? ch))
-            (and (not (zero? (logand bits #x8))) (%char-whitespace? ch))
-            (and (not (zero? (logand bits #x400))) (%char-blank? ch))
-            (and (not (zero? (logand bits #x1)))
-                 (char=? (syntax-class-to-char
-                          (logand (char-table-ref (syntax-table) ch) #xff))
-                         #\w))
-            (and (not (zero? (logand bits #x10))) (%char-upper-case? ch))
-            (and (not (zero? (logand bits #x2))) (%char-lower-case? ch))
-            (and (not (zero? (logand bits #x4))) (%char-punctuation? ch))
-            (and (not (zero? (logand bits #x100))) (%char-graphic? ch))
-            (and (not (zero? (logand bits #x200))) (%char-printable? ch)))))
+      ;; The class half with no canonicalisation table (CORIG is CH and
+      ;; CANON is nil), for the membership query `re-charset-member-full?'.
+      ;;----------------------------------------------------------
+      (%re-charset-class-member (re-charset-classes cs) ch ch #f
+                                (syntax-table)))
 
     (define (re-charset-member-full? cs ch)
       (or (re-charset-member? cs ch)
@@ -904,7 +953,13 @@
       (set-re-fastmap-table! fm #f))
 
     (define (%fastmap-set! fm ch)
-      (if (< ch 256)
+      ;; The C's fastmap is indexed by byte, and a multibyte character
+      ;; is recorded by its leading byte; this map is indexed by code
+      ;; point, so everything at or above 128 sets the one non-ASCII
+      ;; flag. That is wider than the C's leading-byte set and never
+      ;; narrower, and the fastmap may only skip a start that cannot
+      ;; match.
+      (if (< ch 128)
           (set-re-fastmap-bits! fm (logior (re-fastmap-bits fm) (ash 1 ch)))
           (set-re-fastmap-any-nonascii! fm #t)))
 
@@ -918,7 +973,7 @@
       ;; The C's fastmap is a byte array; this is the nearest Scheme
       ;; spelling with the same cost.
       ;;----------------------------------------------------------
-      (if (< ch 256)
+      (if (< ch 128)
           (logbit? ch (re-fastmap-bits fm))
           (re-fastmap-any-nonascii? fm)))
 
@@ -958,20 +1013,30 @@
           #f)
 
          ((or (= op op-charset) (= op op-charset-not))
-          (let ((cs (vector-ref ins 1))
-                (not? (= op op-charset-not)))
+          (let* ((cs (vector-ref ins 1))
+                 (not? (= op op-charset-not))
+                 (map (re-charset-map cs)))
+            ;; The C reads its compiled bitmap here - not the class
+            ;; tests - so the ASCII answers include the compiler's
+            ;; class fill and its translated variants.
             (let loop ((j 0))
-              (when (< j 256)
-                (let ((member? (re-charset-member-full? cs j)))
-                  (if (if not? (not member?) member?)
-                      (%fastmap-set! fm j)))
+              (when (< j 128)
+                (when (if not? (not (logbit? j map)) (logbit? j map))
+                  (%fastmap-set! fm j))
                 (loop (+ j 1))))
-            ;; Every code point above 255 is possible: for
-            ;; `charset_not' because the set is finite, for `charset'
-            ;; when it has ranges or classes.
+            ;; Every non-ASCII code point may start a match when the
+            ;; set can match one: `charset_not' matches all of them, a
+            ;; class bit or a range can, and a bitmap bit at or above
+            ;; 128 is a raw byte the set holds. The C works on bytes
+            ;; and marks every multibyte leading code; this marks
+            ;; every non-ASCII code point - wider on purpose.
             (when (or not?
+                      (not (zero? (re-charset-classes cs)))
                       (> (vector-length (re-charset-ranges cs)) 0)
-                      (not (zero? (re-charset-classes cs))))
+                      (let loop ((j 128))
+                        (cond ((>= j 256) #f)
+                              ((logbit? j map) #t)
+                              (else (loop (+ j 1))))))
               (set-re-fastmap-any-nonascii! fm #t))
             #t))
 
@@ -1442,9 +1507,12 @@
                                        (compile-state-translate st) ch)))
                               (unless (= c1 ch)
                                 ;; `ASCII_CHAR_P' then
-                                ;; `RE_CHAR_TO_UNIBYTE'.
-                                (when (<= c1 255)
-                                  (%work-set-bit! w c1)))))
+                                ;; `RE_CHAR_TO_UNIBYTE' (`CHAR_TO_BYTE_SAFE'),
+                                ;; which is ASCII or a raw byte - not
+                                ;; every code below 256.
+                                (let ((byte (char-to-byte-safe c1)))
+                                  (when (>= byte 0)
+                                    (%work-set-bit! w byte))))))
                           (loop (+ ch 1))))
                       (set-charset-work-bits!
                        w (logior (charset-work-bits w)
@@ -2265,86 +2333,43 @@
     ;;----------------------------------------------------------------
     ;; `execute_charset' (`regex-emacs.c:3802')
     ;;----------------------------------------------------------------
-    (define (%execute-charset cs c corig canon not? class-at pos)
-      ;; The bitmap first for a character it can hold, then the class
-      ;; bits, then the ranges - the C's order. CLASS-AT reads the
-      ;; syntax table at text position POS for the WORD class.
+    (define (%execute-charset cs c corig canon not? syntax-table)
+      ;; `execute_charset' (`regex-emacs.c:3802'). C is the translated
+      ;; character and CORIG the original; the bitmap branch is taken
+      ;; when C has a byte representation (`CHAR_TO_BYTE_SAFE',
+      ;; `character.h:133': ASCII, or a raw eight-bit byte), and a miss
+      ;; there is decisive - the class and range halves are not
+      ;; consulted. **Latin-1 characters have no byte representation**
+      ;; here (`CHAR_TO_BYTE_SAFE (0xE9)' is -1), so they take the
+      ;; class and range halves, which is what Emacs measures: a
+      ;; Latin-1 e-acute is `[[:multibyte:]]' and takes `[[:alpha:]]'
+      ;; by category.
+      ;;
+      ;; The bitmap test reads the 256-entry boolean vector rather than
+      ;; a bit of the integer: 11 ns against `logbit?''s 20 ns
+      ;; compiled, and this runs once per character per attempt.
       ;;----------------------------------------------------------
-      (cond
-       ;; **A raw eight-bit byte matches no charset.** In the C a
-       ;; character that has a byte representation - ASCII, or one of
-       ;; the byte characters `CHAR_BYTE8_P` describes - takes the
-       ;; bitmap branch (`execute_charset`, `regex-emacs.c:3817':
-       ;; `if (unibyte && c < (1 << BYTEWIDTH))') whatever its code
-       ;; point is, and a byte character's code (`0x3FFF00 + byte`) is
-       ;; far above the bitmap, so the bitmap cannot hold it and the
-       ;; class bits and ranges are never consulted: the answer is
-       ;; `not`. Measured on Emacs 31.1, `[[:alpha:]]` and every other
-       ;; class, an explicit `[#x100-#xFFFF]` range, and
-       ;; `[#x80-#xFF]` are all nil on a raw byte, while their negated
-       ;; forms are t. This port reaches the class and range halves
-       ;; for any character at or above 256 (its text is code points,
-       ;; not Emacs's encoded bytes), so the guard has to be explicit;
-       ;; without it a class test called `integer->char` on the byte
-       ;; character's code and raised.
-       ((char-byte8? c) not?)
-       ;; **`logbit?' and not `(logand MAP (ash 1 C))`.** The bitmap
-       ;; is a 256-bit integer and `ash' allocates a bignum for every
-       ;; character tested; `execute_charset' runs once per character
-       ;; per attempt, so that allocation was the dominant cost of a
-       ;; failing scan. `logbit?' reads the limb in place. The C tests
-       ;; a word of its bitmap; this is the same test at the same
-       ;; cost.
-       ;;
-       ;; The bitmap is tested before the class bits are even read:
-       ;; a hit is decisive, and most characters of most patterns are
-       ;; ASCII hits.
-       ((and (< c 256) (vector-ref (re-charset-table cs) c))
-        (not not?))
-       (else
-        (let ((classes (re-charset-classes cs)))
-          (if (and (not (zero? classes))
-                   (%re-charset-class-member/canon classes c corig canon
-                                                    class-at pos))
-              (not not?)
-              (let ((ranges (re-charset-ranges cs)))
-                (let loop ((i 0))
-                  (cond
-                   ((>= i (vector-length ranges)) not?)
-                   ((and (>= c (car (vector-ref ranges i)))
-                         (<= c (cdr (vector-ref ranges i))))
-                    (not not?))
-                   (else (loop (+ i 1)))))))))))
-
-    (define (%re-charset-class-member/canon bits c corig canon class-at pos)
-      ;; The C's class tests and their order (`regex-emacs.c:3837'-
-      ;; `:3852'): the case classes read CORIG and consult CANON, every
-      ;; other class reads the translated C. `BIT_MULTIBYTE` is
-      ;; `(> c 127)` here for the reason
-      ;; `%re-charset-class-member?` gives.
-      ;;----------------------------------------------------------
-      (or (and (not (zero? (logand bits #x20))) (> c 127))
-          (and (not (zero? (logand bits #x80))) (%char-alphanumeric? c))
-          (and (not (zero? (logand bits #x40))) (%char-alphabetic? c))
-          (and (not (zero? (logand bits #x8))) (%char-whitespace? c))
-          (and (not (zero? (logand bits #x400))) (%char-blank? c))
-          (and (not (zero? (logand bits #x1)))
-               (char=? (syntax-class-to-char (logand (class-at c pos) #xff))
-                       #\w))
-          (and (not (zero? (logand bits #x10)))
-               (or (%char-upper-case? corig)
-                   (and canon (%char-lower-case? corig))))
-          (and (not (zero? (logand bits #x2)))
-               (or (%char-lower-case? corig)
-                   (and canon (%char-upper-case? corig))))
-          (and (not (zero? (logand bits #x4))) (%char-punctuation? c))
-          (and (not (zero? (logand bits #x100))) (%char-graphic? c))
-          (and (not (zero? (logand bits #x200))) (%char-printable? c))))
+      (let ((byte (char-to-byte-safe c)))
+        (if (>= byte 0)
+            (if (vector-ref (re-charset-table cs) byte) (not not?) not?)
+            (if (re-charset-simple? cs)
+                not?
+                (if (%re-charset-class-member (re-charset-classes cs)
+                                              c corig canon syntax-table)
+                    (not not?)
+                    (let ((ranges (re-charset-ranges cs)))
+                      (let loop ((i 0))
+                        (cond
+                         ((>= i (vector-length ranges)) not?)
+                         ((and (>= c (car (vector-ref ranges i)))
+                               (<= c (cdr (vector-ref ranges i))))
+                          (not not?))
+                         (else (loop (+ i 1)))))))))))
 
     ;;----------------------------------------------------------------
     ;; Mutual exclusion (`regex-emacs.c:3864'-`:4079')
     ;;----------------------------------------------------------------
-    (define (%mutually-exclusive-exactn pat p1 p2 class-at)
+    (define (%mutually-exclusive-exactn pat p1 p2 syntax-table)
       (let* ((op1 (vector-ref (vector-ref pat p1) 0))
              (ins2 (vector-ref pat p2))
              (c (if (= (vector-ref ins2 0) op-endline)
@@ -2356,7 +2381,7 @@
          ((or (= op1 op-charset) (= op1 op-charset-not))
           (not (%execute-charset (vector-ref (vector-ref pat p1) 1)
                                  c c #f (= op1 op-charset-not)
-                                 class-at 0)))
+                                 syntax-table)))
          ((and (= op1 op-anychar) (= c 10)) #t)
          (else #f))))
 
@@ -2376,7 +2401,7 @@
                                        (lognot (re-charset-map cs1))))))
                (else #f))))))
 
-    (define (%mutually-exclusive-one pat p1 p2 class-at pair)
+    (define (%mutually-exclusive-one pat p1 p2 syntax-table pair)
       ;; `mutually_exclusive_one'. PAIR is (P1 . UNCONSTRAINED), the
       ;; C's `mutexcl_data'.
       ;;----------------------------------------------------------
@@ -2391,16 +2416,16 @@
         (cond
          ((= op2 op-succeed) unconstrained)
          ((= op2 op-endline)
-          (constrain (%mutually-exclusive-exactn pat p1 p2 class-at)))
+          (constrain (%mutually-exclusive-exactn pat p1 p2 syntax-table)))
          ((= op2 op-exactn)
-          (%mutually-exclusive-exactn pat p1 p2 class-at))
+          (%mutually-exclusive-exactn pat p1 p2 syntax-table))
          ((= op2 op-charset)
           (if (= op1 op-exactn)
-              (%mutually-exclusive-exactn pat p2 p1 class-at)
+              (%mutually-exclusive-exactn pat p2 p1 syntax-table)
               (%mutually-exclusive-charset pat p1 p2)))
          ((= op2 op-charset-not)
           (cond ((= op1 op-exactn)
-                 (%mutually-exclusive-exactn pat p2 p1 class-at))
+                 (%mutually-exclusive-exactn pat p2 p1 syntax-table))
                 ((= op1 op-charset)
                  (%mutually-exclusive-charset pat p2 p1))
                 (else #f)))
@@ -2436,7 +2461,7 @@
          ((= op2 op-duplicate) #f)
          (else #f))))
 
-    (define (%mutually-exclusive? bufp p1 p2 class-at)
+    (define (%mutually-exclusive? bufp p1 p2 syntax-table)
       ;; `mutually_exclusive_p' (`regex-emacs.c:4071'): "True if 'p1
       ;; matches something' implies 'p2 fails'."
       ;;----------------------------------------------------------
@@ -2446,7 +2471,7 @@
         (if (%forall-firstchar-all
              pat n p2
              (lambda (pos arg)
-               (%mutually-exclusive-one pat p1 pos class-at pair))
+               (%mutually-exclusive-one pat p1 pos syntax-table pair))
              #f)
             (cdr pair)
             #f)))
@@ -2759,24 +2784,25 @@
                                                (%translate-code translate corig))
                                            corig))
                                     (not? (= op op-charset-not))
-                                    (hit? (and (< c 256)
-                                               (vector-ref (re-charset-table cs)
-                                                           c))))
+                                    (byte (char-to-byte-safe c)))
                                ;; The C calls `execute_charset' per
-                               ;; character; its first test is the
-                               ;; bitmap, and a hit is decisive. Doing
-                               ;; that test here keeps the common case
-                               ;; - an ASCII character the set holds -
-                               ;; out of a procedure call, and a
-                               ;; bitmap-only set does not need the
-                               ;; call on a miss either.
-                               (if (if hit?
-                                       (not not?)
+                               ;; character; its first test is whether
+                               ;; C has a byte representation, and a
+                               ;; bitmap answer is decisive either
+                               ;; way. Doing that test here keeps the
+                               ;; common case - an ASCII character -
+                               ;; out of a procedure call.
+                               (if (if (>= byte 0)
+                                       (if (vector-ref (re-charset-table cs)
+                                                       byte)
+                                           (not not?)
+                                           not?)
                                        (if (re-charset-simple? cs)
                                            not?
                                            (%execute-charset cs c corig
                                                              translate not?
-                                                             class-at d)))
+                                                             (re-context-syntax-table
+                                                              ctx))))
                                    (begin (set! d (+ d 1)) #t)
                                    #f))))
 
@@ -2864,7 +2890,8 @@
                          ;; does, then re-execute the instruction.
                          (let* ((pat-index (- p 1))
                                 (target (vector-ref ins 1)))
-                           (if (%mutually-exclusive? bufp p target class-at)
+                           (if (%mutually-exclusive? bufp p target
+                                                     (re-context-syntax-table ctx))
                                (begin
                                  (vector-set! ins 0 op-on-failure-keep-string-jump)
                                  ;; The trailing `jump' is at TARGET-1
@@ -3147,7 +3174,7 @@
                                        (c (if translate
                                               (%translate-code translate c0)
                                               c0))
-                                       (hit? (if (< c 256)
+                                       (hit? (if (< c 128)
                                                  (vector-ref tbl c)
                                                  any)))
                                   (unless hit?
@@ -3161,7 +3188,7 @@
                                                  (c (if translate
                                                         (%translate-code translate c0)
                                                         c0))
-                                                 (hit? (if (< c 256)
+                                                 (hit? (if (< c 128)
                                                            (vector-ref tbl c)
                                                            any)))
                                             (if hit?
@@ -3186,7 +3213,7 @@
                                                          (c (if translate
                                                                 (%translate-code translate c0)
                                                                 c0))
-                                                         (hit? (if (< c 256)
+                                                         (hit? (if (< c 128)
                                                                    (vector-ref tbl c)
                                                                    any)))
                                                     (if hit?
@@ -3201,7 +3228,7 @@
                                                        (c (if translate
                                                               (%translate-code translate c0)
                                                               c0))
-                                                       (hit? (if (< c 256)
+                                                       (hit? (if (< c 128)
                                                                  (vector-ref tbl c)
                                                                  any)))
                                                   (if hit?

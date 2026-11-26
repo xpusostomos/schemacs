@@ -104,6 +104,9 @@
    ;; syntax.c's DEFUNs
    syntax-table-p syntax-table standard-syntax-table copy-syntax-table
    set-syntax-table char-syntax char-syntax-in syntax-class-to-char
+   ;; `BUFFER_SYNTAX' (`regex-emacs.c:51') / `syntax_property (c, 0)'
+   ;; (`syntax.h:134'), with the table given explicitly.
+   buffer-syntax-code
    matching-paren
    ;; the flag readers `internal-describe-syntax-value` (help-fns.scm)
    ;; prints - `SYNTAX_FLAGS_*` (`syntax.c:61`)
@@ -836,6 +839,23 @@
 
     (define (%class-in ed pos c)
       (logand (%code-in ed pos c) #xff))
+
+    (define (buffer-syntax-code table c)
+      ;; `BUFFER_SYNTAX' (`regex-emacs.c:51') is `syntax_property (c,
+      ;; 0)' (`syntax.h:134'): the low byte of C's entry in the
+      ;; *current buffer's* syntax table, with syntax-table text
+      ;; properties ignored on purpose - regex-emacs.c's comment says
+      ;; "for consistency with the up-front assumptions made at
+      ;; compile time". `syntax_property_with_flags' (`syntax.h:100')
+      ;; answers `Swhitespace' for an entry that is not a cons.
+      ;;
+      ;; The C reads the buffer's table itself; TABLE is passed
+      ;; because the regexp engine matches in a context whose syntax
+      ;; table was captured when the search began, and that object *is*
+      ;; the buffer's table.
+      ;;----------------------------------------------------------
+      (let ((ent (char-table-ref table c)))
+        (if (pair? ent) (logand (car ent) #xff) swhitespace)))
 
     (define (%word-boundary? c1 c2)
       ;; `word_boundary_p' (`syntax.c:1425'): "Return true if there is a

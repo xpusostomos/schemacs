@@ -23,9 +23,14 @@
     (scheme base)
     (scheme char)
     ;; the bit arithmetic of the event model, and `filter' for a symbol
-    ;; event's modifiers
-    (only (guile) filter logand logior lognot)
-    (scheme char)
+    ;; event's modifiers.
+    ;;
+    ;; `char-general-category' is `(guile)''s here even though it looks
+    ;; like `(scheme char)''s: Guile's `(scheme char)' does not deliver
+    ;; it to an importing library (measured - a minimal library with
+    ;; only `(scheme char)' warns "possibly unbound" and raises at run
+    ;; time), while `(guile)''s binding is the same procedure.
+    (only (guile) filter logand logior lognot char-general-category)
     (only (schemacs international characters) char-width-ranges))
 
   (export
@@ -54,7 +59,11 @@
    ;; `character.h''s `CHARACTERP' and `CHAR_VALID_P', in the same file
    ;; and for the same reason: it is about character codes and nothing
    ;; above this library has to ask it of anything else.
-   characterp)
+   characterp
+   ;; The Unicode general categories and the five predicates
+   ;; `regex-emacs.c''s class macros call for characters outside ASCII.
+   unicode-category
+   alphabeticp alphanumericp graphicp printablep blankp)
 
   (begin
 
@@ -976,5 +985,137 @@
                    (evs (parse-key word)))
               (loop (substring rest (min word-end (string-length rest)))
                     (append (reverse evs) keys)))))))
+
+    ;; ---------------------------------------------------------------
+    ;; The Unicode general categories (`character.h:530-560'), and the
+    ;; five predicates `regex-emacs.c''s class macros call for
+    ;; characters outside ASCII (`character.c:959-1069').
+    ;;
+    ;; Emacs reads these from `Vunicode_category_table', a char-table
+    ;; `characters.el:1789' fills from the generated Unicode property
+    ;; data. The data here is Guile's `char-general-category', which
+    ;; was compared against Emacs 31.1's table at every code point
+    ;; 0..10FFFF and agrees exactly; see `character-test.scm''s
+    ;; category group, which pins the same comparison on the boundary
+    ;; characters. Two code points cannot be asked of Guile and are
+    ;; answered from Emacs's own table: a surrogate is `Cs' (Guile's
+    ;; `integer->char' refuses the range), and anything above 10FFFF
+    ;; is `Cn' (Emacs's table says `Cn' from 10FFFE to MAX_CHAR).
+    ;;
+    ;; The category value is the C's `UNICODE_CATEGORY_*' integer, and
+    ;; a value that is not one of them is `#f', which is the C's nil -
+    ;; `alphabeticp' and the rest test `FIXNUMP' and answer false.
+    ;;--------------------------------------------------------------
+    (define unicode-category-unknown 0)
+    (define unicode-category-lu 1)
+    (define unicode-category-ll 2)
+    (define unicode-category-lt 3)
+    (define unicode-category-lm 4)
+    (define unicode-category-lo 5)
+    (define unicode-category-mn 6)
+    (define unicode-category-mc 7)
+    (define unicode-category-me 8)
+    (define unicode-category-nd 9)
+    (define unicode-category-nl 10)
+    (define unicode-category-no 11)
+    (define unicode-category-pc 12)
+    (define unicode-category-pd 13)
+    (define unicode-category-ps 14)
+    (define unicode-category-pe 15)
+    (define unicode-category-pi 16)
+    (define unicode-category-pf 17)
+    (define unicode-category-po 18)
+    (define unicode-category-sm 19)
+    (define unicode-category-sc 20)
+    (define unicode-category-sk 21)
+    (define unicode-category-so 22)
+    (define unicode-category-zs 23)
+    (define unicode-category-zl 24)
+    (define unicode-category-zp 25)
+    (define unicode-category-cc 26)
+    (define unicode-category-cf 27)
+    (define unicode-category-cs 28)
+    (define unicode-category-co 29)
+    (define unicode-category-cn 30)
+
+    ;; The two-letter names `char-general-category' answers, in the
+    ;; C's enum order.
+    (define %unicode-category-alist
+      '((Lu . 1) (Ll . 2) (Lt . 3) (Lm . 4) (Lo . 5)
+        (Mn . 6) (Mc . 7) (Me . 8) (Nd . 9) (Nl . 10) (No . 11)
+        (Pc . 12) (Pd . 13) (Ps . 14) (Pe . 15) (Pi . 16) (Pf . 17)
+        (Po . 18)
+        (Sm . 19) (Sc . 20) (Sk . 21) (So . 22)
+        (Zs . 23) (Zl . 24) (Zp . 25)
+        (Cc . 26) (Cf . 27) (Cs . 28) (Co . 29) (Cn . 30)))
+
+    (define (unicode-category c)
+      ;; The C's `CHAR_TABLE_REF (Vunicode_category_table, C)' with
+      ;; the not-a-fixnum answer as `#f'.
+      ;;----------------------------------------------------------
+      (cond
+       ((or (not (integer? c)) (< c 0)) #f)
+       ((and (>= c #xD800) (<= c #xDFFF)) unicode-category-cs)
+       ((> c #x10FFFF) unicode-category-cn)
+       (else
+        (let ((cell (assq (char-general-category (integer->char c))
+                          %unicode-category-alist)))
+          (and cell (cdr cell))))))
+
+    (define (alphabeticp c)
+      ;; `alphabeticp' (`character.c:959'): "Return true if C is an
+      ;; alphabetic character."  The set is UTS #18's, the categories
+      ;; Emacs lists.
+      ;;----------------------------------------------------------
+      (let ((cat (unicode-category c)))
+        (and cat
+             (or (= cat unicode-category-lu) (= cat unicode-category-ll)
+                 (= cat unicode-category-lt) (= cat unicode-category-lm)
+                 (= cat unicode-category-lo) (= cat unicode-category-mn)
+                 (= cat unicode-category-mc) (= cat unicode-category-me)
+                 (= cat unicode-category-nl)))))
+
+    (define (alphanumericp c)
+      ;; `alphanumericp' (`character.c:982'): alphabetic, or a decimal
+      ;; number.
+      ;;----------------------------------------------------------
+      (let ((cat (unicode-category c)))
+        (and cat
+             (or (= cat unicode-category-lu) (= cat unicode-category-ll)
+                 (= cat unicode-category-lt) (= cat unicode-category-lm)
+                 (= cat unicode-category-lo) (= cat unicode-category-mn)
+                 (= cat unicode-category-mc) (= cat unicode-category-me)
+                 (= cat unicode-category-nl) (= cat unicode-category-nd)))))
+
+    (define (graphicp c)
+      ;; `graphicp' (`character.c:1004'): not a space, line or
+      ;; paragraph separator, a control, a surrogate or unassigned.
+      ;;----------------------------------------------------------
+      (let ((cat (unicode-category c)))
+        (and cat
+             (not (or (= cat unicode-category-zs)
+                      (= cat unicode-category-zl)
+                      (= cat unicode-category-zp)
+                      (= cat unicode-category-cc)
+                      (= cat unicode-category-cs)
+                      (= cat unicode-category-cn))))))
+
+    (define (printablep c)
+      ;; `printablep' (`character.c:1022'): not a control, a surrogate
+      ;; or unassigned.
+      ;;----------------------------------------------------------
+      (let ((cat (unicode-category c)))
+        (and cat
+             (not (or (= cat unicode-category-cc)
+                      (= cat unicode-category-cs)
+                      (= cat unicode-category-cn))))))
+
+    (define (blankp c)
+      ;; `blankp' (`character.c:1059'): a space separator. UTS #18's
+      ;; blank is not `char-whitespace?''s set: it excludes the line
+      ;; and paragraph separators, and includes every Zs character.
+      ;;----------------------------------------------------------
+      (let ((cat (unicode-category c)))
+        (and cat (= cat unicode-category-zs))))
 
     ))

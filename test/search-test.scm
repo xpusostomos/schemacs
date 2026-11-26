@@ -2,7 +2,11 @@
  (only (schemacs buffer) allocate-buffer bufferp buffer-pt buffer-beg buffer-z text-editor-buffer-name set!text-editor-buffer-name text-editor-file-name set!text-editor-file-name buffer-modified-p set-buffer-modified-p buffer-read-only? set!buffer-read-only text-editor-text-props set!text-editor-text-props *inhibit-read-only* *buffer-visited-file-modtime-function* buffer-modified-tick buffer-chars-modified-tick text-editor-cache-long-scans set!text-editor-cache-long-scans show-text-editor text-editor-undo-list set!text-editor-undo-list)
  (only (schemacs undo) record-insert record-delete text-editor-undo-boundary! text-editor-undo-disable! text-editor-undo-enable! text-editor-undo-recording? *undo-limit* undo-insertion-entry? undo-deletion-entry? undo-modified-entry? *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
  (only (schemacs insdel) *after-change-functions* signal-after-change *text-property-offset-function* invalidate-buffer-caches insert-from-string)
- (only (schemacs character) byte8-to-char)
+ (only (schemacs character)
+       byte8-to-char unicode-category alphabeticp alphanumericp
+       graphicp printablep blankp)
+ (only (schemacs casetab) current-case-table set-case-table)
+ (only (schemacs chartab) copy-char-table set-char-table-range)
  (only (schemacs fns) %count-lines)
  (scheme base)
  (scheme char)
@@ -18,7 +22,7 @@
  ;; library that holds undo.c until `undo.scm` exists.
  (only (schemacs simple) primitive-undo)
  (only (srfi 64) test-assert test-equal test-begin test-end test-error)
- (only (schemacs syntax) with-syntax-table copy-syntax-table standard-syntax-table modify-syntax-entry)
+ (only (schemacs syntax) with-syntax-table set-syntax-table copy-syntax-table standard-syntax-table modify-syntax-entry)
  )
 
 ;; The search.c layer's tests: the match data's conventions (one-based
@@ -892,5 +896,154 @@
                                  (string (integer->char #xffff)) "]")))
        (list (looking-at range)
              (looking-at (string-append "[^" (substring range 1))))))))
+
+
+;; ------------------------------------------------------------------
+;; the character classes (`regex-emacs.c:107-153')
+;;
+;; Every expectation below is Emacs 31.1's answer for the same
+;; character in a fundamental-mode buffer, measured before the port.
+;; `tools/class-diff/' is the whole-matrix differential these rows are
+;; taken from - 43 characters x 17 classes x case folding on and off,
+;; zero differences.
+
+(define %class-rows
+  '("cntrl" "blank" "space" "upper" "lower" "alpha" "alnum" "punct"
+    "graph" "print" "word" "digit" "xdigit" "ascii" "nonascii"
+    "unibyte" "multibyte"))
+
+(define (classes-at cp fold)
+  (with-buffer
+   (lambda ()
+     (parameterize ((*case-fold-search* fold))
+       (let ((b (get-buffer-create "*class-row*")))
+         (set-buffer b)
+         (erase-buffer)
+         (insert (string (integer->char cp)))
+         (goto-char 1)
+         (map (lambda (name)
+                (and (looking-at (string-append "[[" ":" name ":" "]]"))
+                     #t))
+              %class-rows))))))
+
+(test-equal "class row: A, no folding"
+  '(#f #f #f #t #f #t #t #f #t #t #t #f #t #t #f #t #f)
+  (classes-at 65 #f))
+
+(test-equal "class row: A, folding (upper and lower both match)"
+  '(#f #f #f #t #t #t #t #f #t #t #t #f #t #t #f #t #f)
+  (classes-at 65 #t))
+
+(test-equal "class row: DEL is not a control"
+  '(#f #f #f #f #f #f #f #f #f #f #f #f #f #t #f #t #f)
+  (classes-at 127 #f))
+
+(test-equal "class row: no-break space is blank, not graphic"
+  '(#f #t #t #f #f #f #f #t #f #t #f #f #f #f #t #f #t)
+  (classes-at 160 #f))
+
+(test-equal "class row: e-acute, no folding"
+  '(#f #f #f #f #t #t #t #f #t #t #t #f #f #f #t #f #t)
+  (classes-at 233 #f))
+
+(test-equal "class row: e-acute, folding"
+  '(#f #f #f #t #t #t #t #f #t #t #t #f #f #f #t #f #t)
+  (classes-at 233 #t))
+
+(test-equal "class row: combining acute is alphabetic"
+  '(#f #f #f #f #f #t #t #f #t #t #t #f #f #f #t #f #t)
+  (classes-at 769 #f))
+
+(test-equal "class row: an Arabic-Indic digit is alnum, not digit"
+  '(#f #f #f #f #f #f #t #f #t #t #t #f #f #f #t #f #t)
+  (classes-at 1632 #f))
+
+(test-equal "class row: U+FFFF is word by syntax, not graphic"
+  '(#f #f #f #f #f #f #f #f #f #f #t #f #f #f #t #f #t)
+  (classes-at 65535 #f))
+
+(test-equal "class row: an emoji is graphic, not punctuation"
+  '(#f #f #f #f #f #f #f #f #t #t #t #f #f #f #t #f #t)
+  (classes-at 128512 #f))
+
+(test-equal "class row: ideographic space is blank and space and punct"
+  '(#f #t #t #f #f #f #f #t #f #t #f #f #f #f #t #f #t)
+  (classes-at 12288 #f))
+
+(test-equal "a class with folding on finds a lower-case match through the fastmap"
+  0 (parameterize ((*case-fold-search* #t))
+      (string-match "[[:upper:]]" "é")))
+
+(test-equal "and without folding it does not"
+  #f (parameterize ((*case-fold-search* #f))
+       (string-match "[[:upper:]]" "é")))
+
+(test-equal "the word and space classes read the buffer's syntax table"
+  '(#t #t #f #f #t #t)
+  (with-buffer
+   (lambda ()
+     ;; The table is installed on the buffer the test looks in:
+     ;; `with-syntax-table' would set it on the buffer current when it
+     ;; is entered, and the `set-buffer' below changes that.
+     (let ((b (get-buffer-create "*syn-class*")))
+       (set-buffer b)
+       (erase-buffer)
+       (let ((tbl (copy-syntax-table (standard-syntax-table))))
+         (modify-syntax-entry #\- "w" tbl)
+         (modify-syntax-entry #\_ " " tbl)
+         (set-syntax-table tbl))
+       (insert "-_")
+       (goto-char 1)
+       (let ((dash (list (and (looking-at "[[:word:]]") #t)
+                         (and (looking-at "[[:punct:]]") #t)
+                         (and (looking-at "[[:space:]]") #t))))
+         (goto-char 2)
+         (append dash
+                 (list (and (looking-at "[[:word:]]") #t)
+                       (and (looking-at "[[:punct:]]") #t)
+                       (and (looking-at "[[:space:]]") #t))))))))
+
+(test-equal "a non-ASCII punct class is its syntax, not its category"
+  '(#f #t #f)
+  (with-buffer
+   (lambda ()
+     (let ((b (get-buffer-create "*syn-punct*")))
+       (set-buffer b)
+       (erase-buffer)
+       (let ((tbl (copy-syntax-table (standard-syntax-table))))
+         (modify-syntax-entry (integer->char #xe9) "." tbl)
+         (set-syntax-table tbl))
+       (insert "é")
+       (goto-char 1)
+       (list (and (looking-at "[[:word:]]") #t)
+             (and (looking-at "[[:punct:]]") #t)
+             (and (looking-at "[[:space:]]") #t))))))
+
+(test-equal "the case classes read the buffer's case table"
+  '(#t #f #t #f)
+  (with-buffer
+   (lambda ()
+     (parameterize ((*case-fold-search* #f))
+       (let ((b (get-buffer-create "*case-class*")))
+         (set-buffer b)
+         (erase-buffer)
+         (let ((tbl (copy-char-table (current-case-table))))
+           (set-char-table-range tbl (char->integer #\a) (char->integer #\A))
+           (set-case-table tbl))
+         (insert "aA")
+         (goto-char 1)
+         (let ((a (list (and (looking-at "[[:upper:]]") #t)
+                        (and (looking-at "[[:lower:]]") #t))))
+           (goto-char 2)
+           (append a
+                   (list (and (looking-at "[[:upper:]]") #t)
+                         (and (looking-at "[[:lower:]]") #t)))))))))
+
+(test-equal "the category table answers as Emacs 31.1's does"
+  '(#t #t #f #f #t 23 30 28)
+  (list (alphabeticp 769) (alphanumericp 1632)
+        (graphicp 65535) (printablep 65535) (blankp 160)
+        (unicode-category 160) (unicode-category 1114112)
+        (unicode-category 55296)))
 
 (test-end)

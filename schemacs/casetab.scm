@@ -47,7 +47,11 @@
    set-case-table set-standard-case-table
    case-canon-table case-eqv-table upcase-table
    *ascii-downcase-table* *ascii-upcase-table*
-   *ascii-canon-table* *ascii-eqv-table*)
+   *ascii-canon-table* *ascii-eqv-table*
+   ;; `buffer.h:1650-1676''s four INLINEs, which read the buffer's
+   ;; tables. The `%' marks the collision with `casefiddle.c''s Lisp
+   ;; functions `upcase' and `downcase' (see the note below).
+   %downcase %upcase %uppercasep %lowercasep)
 
   (begin
 
@@ -111,6 +115,46 @@
       ;;--------------------------------------------------------------
       (buffer-local-value (current-buffer) 'upcase-table
                           *ascii-upcase-table*))
+
+    ;; ---------------------------------------------------------------
+    ;; `buffer.h:1650-1676''s four INLINEs. They read the current
+    ;; buffer's `downcase_table' and `upcase_table' and are what
+    ;; `regex-emacs.c''s `ISLOWER' and `ISUPPER' call
+    ;; (`regex-emacs.c:139-141'), so the regexp engine asks these, not
+    ;; Guile's Unicode `char-upcase' - a buffer's case table can be
+    ;; replaced (`set-case-table'), and Emacs's classes follow the
+    ;; table.
+    ;;
+    ;; **They are `%'-named** because `casefiddle.c''s Lisp functions
+    ;; `upcase' and `downcase' (which take strings, buffers and chars)
+    ;; already own those names in this tree, and a Lisp-1 cannot export
+    ;; two bindings under one name (`loadup-tests.scm''s clash
+    ;; census).
+    ;;--------------------------------------------------------------
+    (define (%downcase c)
+      ;; `downcase' (`buffer.h:1650'): "Downcase a character C, or
+      ;; make no change if that cannot be done." The table answers a
+      ;; non-negative fixnum for a character it translates, and nil for
+      ;; one it does not (`FIXNATP').
+      ;;----------------------------------------------------------
+      (let ((v (char-table-ref (current-case-table) c)))
+        (if (and (integer? v) (>= v 0)) v c)))
+
+    (define (%upcase c)
+      ;; `upcase' (`buffer.h:1659').
+      ;;----------------------------------------------------------
+      (let ((v (char-table-ref (upcase-table) c)))
+        (if (and (integer? v) (>= v 0)) v c)))
+
+    (define (%uppercasep c)
+      ;; `uppercasep' (`buffer.h:1665').
+      ;;----------------------------------------------------------
+      (not (= (%downcase c) c)))
+
+    (define (%lowercasep c)
+      ;; `lowercasep' (`buffer.h:1674').
+      ;;----------------------------------------------------------
+      (and (not (%uppercasep c)) (not (= (%upcase c) c))))
 
     (define (range-bounds c)
       ;; C is a character code or a cons of two; answer the two.

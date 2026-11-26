@@ -18545,3 +18545,135 @@ Tests: `chartab-test.scm`'s map-char-table group (3) pins Emacs
 31.1's measured runs for a parented table and a defaulted one; the
 category and casetab suites pin the callers. Shared primitive, so the
 full suite and pty batteries were run (see AGENTS.md).
+
+# The character classes are the C's macros now (2026-11-26)
+
+## What was wrong
+
+`regex-emacs.scm`'s first version (2026-11-21) ported the compiler and
+matcher from `regex-emacs.c` but implemented the leaf class predicates
+with Guile's Unicode predicates (`char-alphabetic?`,
+`char-upper-case?`, `char-whitespace?`) and hand-rolled ranges, with a
+comment claiming "the classes are Unicode's". They are not: the C's
+`IS*` macros (`regex-emacs.c:107-153`) are specific rules, and three of
+them depend on the buffer rather than on the character:
+
+| macro | rule |
+|---|---|
+| `ISDIGIT` | ASCII `0`-`9` only |
+| `ISCNTRL` | `c < 32` only (DEL is not a control) |
+| `ISXDIGIT` | `char_hexdigit`, ASCII only |
+| `ISBLANK` | ASCII space/tab, else `blankp` (category `Zs`) |
+| `ISGRAPH` | below 256: `c > 32 && !(127 <= c <= 160)`; else `graphicp` |
+| `ISPRINT` | below 256: `c >= 32 && !(127 <= c <= 159)`; else `printablep` |
+| `ISALNUM`/`ISALPHA` | ASCII letters/digits, else `alphanumericp`/`alphabeticp` |
+| `ISLOWER`/`ISUPPER` | `buffer.h:1665-1676`: the **buffer's case tables** |
+| `ISPUNCT` | ASCII rule (graphic, not alnum - the syntax table is not consulted); else `BUFFER_SYNTAX (c) != Sword` |
+| `ISSPACE` | `BUFFER_SYNTAX (c) == Swhitespace` |
+| `ISWORD` | `BUFFER_SYNTAX (c) == Sword` |
+
+Measured wrongs of the substitution: DEL matched `[[:cntrl:]]`; no-break
+space failed `[[:blank:]]` and matched `[[:graph:]]`; a combining mark
+failed `[[:alpha:]]`/`[[:alnum:]]` and matched `[[:punct:]]`;
+U+FFFF/U+10FFFF matched `[[:graph:]]`/`[[:print:]]`; an emoji matched
+`[[:punct:]]`; a custom case table was ignored; and a code point above
+U+10FFFF raised inside `integer->char`.
+
+## What is ported
+
+* **`character.scm`**: the `UNICODE_CATEGORY_*` enum
+  (`character.h:530-560`), `unicode-category` (`CHAR_TABLE_REF
+  (Vunicode_category_table, c)`), and `alphabeticp`, `alphanumericp`,
+  `graphicp`, `printablep`, `blankp` (`character.c:959-1069`) with
+  their exact category sets.
+* **`casetab.scm`**: `%downcase`, `%upcase`, `%uppercasep`,
+  `%lowercasep` - `buffer.h:1650-1676`'s four INLINEs, reading the
+  current buffer's `downcase_table`/`upcase_table`.
+* **`syntax.scm`**: `buffer-syntax-code`, the `BUFFER_SYNTAX (c)` /
+  `syntax_property (c, 0)` read (`regex-emacs.c:51`, `syntax.h:97`,
+  `:134`): the low byte of the entry in the buffer's syntax table,
+  **ignoring syntax-table text properties**, and `Swhitespace` for an
+  entry that is not a cons (`syntax.h:100`).
+* **`regex-emacs.scm`**: the thirteen macros as procedures, in the C's
+  names' order; `re-iswctype` (`regex-emacs.c:1622`) over them;
+  `execute_charset` (`:3802`) with the C's branch rule; the class chain
+  (`:3837-3852`) with `BIT_MULTIBYTE`'s unconditional arm and the
+  CANON alternation on the case arms with `corig`.
+
+## The branch rule, which was also wrong
+
+`execute_charset`'s bitmap branch is `if (unibyte && c < 256)`, and the
+matcher sets `unibyte` from `CHAR_TO_BYTE_SAFE (c)` (`character.h:133`),
+which is **ASCII or a raw eight-bit byte only** - `0xE9` is not a byte
+here. So a Latin-1 character takes the class/range branch (measured: a
+Latin-1 e-acute is `[[:multibyte:]]` and alphabetic by category), and a
+raw byte takes the bitmap with its byte value. The old code tested
+`c < 256` and fell through to classes on a bitmap miss; the new code
+tests `char-to-byte-safe` and a bitmap answer is decisive either way.
+The previous `char-byte8? -> not` special case is gone: the C's rule
+covers it, and the measured answers are unchanged (a Scheme string
+cannot contain a raw byte, so no bitmap bit can be set for one).
+
+## The fastmap hole this exposed
+
+The old fastmap answered class membership for code points 0..255
+through `re-charset-member-full?` with **no CANON table**, and its
+"non-ASCII possible" flag covered only code points above 255. A class
+such as `[[:upper:]]` with case folding on legally matches a lower-case
+non-ASCII character (`ISLOWER (corig)` through the CANON arm), so the
+fastmap could skip that start position and lose the match. Measured
+before the fix: `(string-match "[[:upper:]]" "é")` with folding on
+answered nil; Emacs answers 0.
+
+The fastmap now mirrors the C's shape in code-point terms: code points
+0..127 read the **compiled bitmap** (which already carries the
+compiler's class fill and translated variants), and every code point at
+or above 128 is possible when the set can match one - `charset_not`, a
+class bit, a range, or a bitmap bit at or above 128 (a raw byte the set
+holds). The C indexes bytes and marks multibyte **leading codes**, so
+its set is narrower; this one is wider, and the fastmap may only skip a
+start that cannot match. That is a named representation departure, not
+an algorithmic one.
+
+The compiler's own translated-bit fill had the same `< 256` error:
+`regex_compile` does `ASCII_CHAR_P (c1)` then `RE_CHAR_TO_UNIBYTE (c1)`,
+i.e. `CHAR_TO_BYTE_SAFE`, not every code below 256.
+
+## The category data
+
+`Vunicode_category_table` is filled at startup from Emacs's generated
+Unicode data. The table itself is not carried; the data is Guile's
+`char-general-category`, which was compared against Emacs 31.1's
+`(unicode-property-table-internal 'general-category)` at **every code
+point 0..10FFFF** (4,144 runs on each side): zero differences. Named
+departures:
+
+* a surrogate is answered `Cs` (Guile's `integer->char` refuses that
+  range) and anything above U+10FFFF `Cn` (Emacs's table says `Cn` from
+  10FFFE to `MAX_CHAR`); both are what Emacs's table holds.
+* `char-general-category` is imported from `(guile)`, not
+  `(scheme char)`: measured, Guile's `(scheme char)` does not deliver
+  the name to an importing library (a minimal library warns "possibly
+  unbound" and raises at run time), while the binding is the same
+  procedure.
+* a future Guile whose Unicode data differs would make the lower plane
+  differ from Emacs 31.1's; `character-test.scm` pins a boundary set.
+
+## Naming
+
+`buffer.h`'s `upcase` and `downcase` collide in a Lisp-1 with
+`casefiddle.c`'s Lisp functions of the same name, so they are
+`%upcase`/`%downcase`; `uppercasep`/`lowercasep` take the same `%`
+because they are that pair's other half.
+
+## The gate
+
+`tools/class-diff/` runs 43 characters (ASCII boundaries, Latin-1,
+combining marks, category representatives, separators, private use,
+noncharacters, supplementary-plane letters and digits, an emoji) ×
+17 classes × case folding on/off = 1,462 answers on both editors, in a
+fundamental-mode buffer (the syntax-table classes read the current
+buffer's table; `*scratch*`'s lisp-interaction-mode makes newline a
+comment ender). Zero differences. The suite pins representative rows
+and the syntax-table, case-table and fastmap dependencies; the full
+suite and pty batteries were run (see AGENTS.md).

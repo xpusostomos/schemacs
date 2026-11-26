@@ -17949,3 +17949,85 @@ Tests: `chartab-test.scm` 27 (the map-char-table group pins Emacs
 31.1's measured runs for a parented and a defaulted table),
 category-test 20, casetab-test 13; all 104 suites and the 109-check
 pty battery pass on the settled tree.
+
+# The character classes are the C's macros (2026-11-26)
+
+The regexp engine's first version (2026-11-21) ported the compiler and
+matcher from `regex-emacs.c` but substituted Guile's Unicode predicates
+for the C's class macros, with a comment claiming "the classes are
+Unicode's". They are not: `ISDIGIT`/`ISCNTRL`/`ISXDIGIT` are ASCII-only,
+`ISALPHA`/`ISALNUM` are ASCII rules else specific category sets,
+`ISGRAPH`/`ISPRINT` have single-byte rules, `ISBLANK` is `Zs`, and
+`ISUPPER`/`ISLOWER`/`ISSPACE`/`ISWORD`/`ISPUNCT` read the **buffer's
+case tables or syntax table** - so no predicate over a character alone
+can stand in for them. Measured wrongs: DEL matched `[[:cntrl:]]`,
+no-break space failed `[[:blank:]]`, combining marks failed
+`[[:alpha:]]`, noncharacters matched `[[:graph:]]`, emoji matched
+`[[:punct:]]`, a custom case table was ignored, and code points above
+U+10FFFF raised inside `integer->char`.
+
+This pass replaces the substitution with the macros themselves:
+
+* **`character.scm`** - the `UNICODE_CATEGORY_*` enum,
+  `unicode-category`, and `alphabeticp`, `alphanumericp`, `graphicp`,
+  `printablep`, `blankp` (`character.c:959-1069`). The data is Guile's
+  `char-general-category`, compared against Emacs 31.1's
+  `unicode-category-table` at every code point 0..10FFFF: zero
+  differences. Surrogates answer `Cs` (Guile cannot make the
+  character) and above 10FFFF `Cn`, as Emacs's table does.
+* **`casetab.scm`** - `%downcase`, `%upcase`, `%uppercasep`,
+  `%lowercasep` (`buffer.h:1650-1676`); `%`-named because
+  `casefiddle.c`'s Lisp `upcase`/`downcase` own those names in a
+  Lisp-1.
+* **`syntax.scm`** - `buffer-syntax-code`: `BUFFER_SYNTAX (c)` =
+  `syntax_property (c, 0)`, the plain buffer table with syntax-table
+  text properties ignored and `Swhitespace` for a non-cons entry.
+* **`regex-emacs.scm`** - the thirteen macros as procedures,
+  `re-iswctype` over them, the C's class chain (with `BIT_MULTIBYTE`
+  unconditional and the CANON alternation on the case arms with
+  `corig`), and `execute_charset`'s real branch rule:
+  `CHAR_TO_BYTE_SAFE` is **ASCII or a raw byte**, not everything below
+  256, so Latin-1 takes the class/range branch and a raw byte takes
+  the bitmap with its byte value. The compiler's translated-bit fill
+  had the same `< 256` error and now uses `char-to-byte-safe`.
+
+## The fastmap hole this exposed
+
+The old fastmap evaluated class membership for 0..255 with **no CANON
+table**, and its non-ASCII flag covered only code points above 255. A
+class like `[[:upper:]]` with folding on legally matches a lowercase
+non-ASCII character, so the fastmap could skip the start and lose the
+match - measured: `(string-match "[[:upper:]]" "é")` with folding on
+answered nil where Emacs answers 0. The fastmap now reads the compiled
+bitmap for ASCII (as the C does) and treats every non-ASCII code point
+as possible when the set can match one (`charset_not`, a class bit, a
+range, or a bitmap bit at or above 128 for a raw byte). Wider than the
+C's byte-leading-code set on purpose; the fastmap may only skip a start
+that cannot match.
+
+## The gate
+
+`tools/class-diff/` is the differential: 43 characters (every class
+boundary, category representatives, separators, private use,
+noncharacters, supplementary-plane letters/digits, an emoji) × 17
+classes × folding on/off = 1,462 answers, **zero differences** against
+Emacs 31.1. It runs both sides inside a fundamental-mode buffer,
+because `string-match` reads the current buffer's syntax table and
+batch Emacs's current buffer is `*scratch*`, whose lisp-interaction
+newline is a comment ender.
+
+Tests: `search-test.scm` 131 (the class matrix, the syntax-table, case
+table and fastmap dependencies), `character-test.scm` 44 (the category
+values and predicate sets), `casetab-test.scm` 15 (the buffer.h
+INLINEs). `imports.scm` is regenerated and `--check` reports it up to
+date. **All 104 suites pass and the full pty battery is 109/109** on
+the settled tree.
+
+## Guile fact worth carrying
+
+`(scheme char)` does **not** deliver `char-general-category` to an
+importing library: a minimal library with only `(scheme char)` warns
+"possibly unbound" at compile time and raises at run time, while
+`(only (guile) char-general-category)` is the same procedure and
+works. `character.scm` imports it from `(guile)` for that reason,
+with the measurement in the comment.

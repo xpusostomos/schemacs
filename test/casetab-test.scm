@@ -70,4 +70,17 @@
                  (eq? (char-table-extra-slot (case-canon-table) 2)
                       (case-eqv-table)))))
 
+
+;; The four `buffer.h:1650-1676` INLINEs the regexp classes read; the
+;; search suite pins the classes themselves against Emacs.
+(let ((ed (allocate-buffer)))
+  (set-buffer ed)
+  (test-equal "buffer.h's downcase and upcase"
+              '(97 65 97)
+              (list (%downcase 65) (%upcase 97) (%downcase 97)))
+  (test-equal "uppercasep and lowercasep"
+              '(#t #f #f #t #f)
+              (list (%uppercasep 65) (%uppercasep 97) (%uppercasep 49)
+                    (%lowercasep 97) (%lowercasep 65))))
+
 (test-end "schemacs_editor_casetab")
