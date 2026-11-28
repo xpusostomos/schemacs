@@ -467,8 +467,16 @@ is the only tab in the frame are supplied as arguments."
 
     ;; The hooks the commands run - `defvar`s in the C, plain (nothing
     ;; `let`-binds them) and read as lists.
-    (define *tab-bar-tab-post-open-functions* (make-parameter '()))
-    (define *tab-bar-tab-post-select-functions* (make-parameter '()))
+    (define-custom *tab-bar-tab-post-open-functions* '()
+      "List of functions to call after creating a new tab.
+The current tab is supplied as an argument.  Any modifications made
+to the tab argument will be applied after all functions are called."
+      :type '(repeat function) :group 'tab-bar :version "27.1")
+    (define-custom *tab-bar-tab-post-select-functions* '()
+      "List of functions to call after selecting a tab.
+Two arguments are supplied: the previous tab that was selected before,
+and the newly selected tab."
+      :type '(repeat function) :group 'tab-bar :version "30.1")
 
     (define-custom *tab-bar-select-restore-windows* #t
       "Function called when selecting a tab to handle windows whose
@@ -2161,7 +2169,13 @@ Function gets one argument: a tab."
                                '())))))
                    (loop (cdr rest) i (append acc out) tab-group)))))))
 
-    (define *tab-bar-tab-post-change-group-functions* (make-parameter '()))
+    (define-custom *tab-bar-tab-post-change-group-functions* '()
+      "List of functions to call after changing a tab group.
+This hook is run at the end of the function `tab-bar-change-tab-group'.
+The current tab is supplied as an argument.  You can use any function,
+but by default it enables the function `tab-bar-move-tab-to-group'
+that moves the tab closer to its group."
+      :type 'hook :group 'tab-bar :version "29.1")
     ;; ^ `tab-bar-tab-post-change-group-functions`, a `defvar` read as a
     ;; hook list.
 

@@ -44,6 +44,8 @@
                 glyph-row-truncated-on-right?
                 set-glyph-row-truncated-on-right!
                 glyph-row-continued? set-glyph-row-continued!
+                glyph-row-continuation-line?
+                set-glyph-row-continuation-line!
                 glyph-row-displays-text? set-glyph-row-displays-text!
                 glyph-row-ends-at-zv? set-glyph-row-ends-at-zv!
                 glyph-row-fill-line? set-glyph-row-fill-line!
@@ -113,7 +115,7 @@
       ;; `clear_glyph_row` over a row that `adjust_glyph_matrix` has just
       ;; made.
       ;;--------------------------------------------------------------
-      (make-glyph-row (vector) 0 0 0 0 0 1 n n))
+      (make-glyph-row (vector) 0 0 0 0 0 1 n n #f))
 
     (define (adjust-glyph-matrix matrix width height)
       ;; GNU Emacs's `adjust_glyph_matrix` (`dispnew.c`): make MATRIX the
@@ -151,7 +153,8 @@
       (set-glyph-row-continued! row #f)
       (set-glyph-row-displays-text! row #f)
       (set-glyph-row-ends-at-zv! row #f)
-      (set-glyph-row-fill-line! row #f))
+      (set-glyph-row-fill-line! row #f)
+      (set-glyph-row-continuation-line! row #f))
 
     (define (clear-glyph-matrix matrix)
       ;; `clear_glyph_matrix`: every row forgotten, both the desired one
@@ -214,6 +217,8 @@
                                     (glyph-row-displays-text? desired))
       (set-glyph-row-ends-at-zv! current (glyph-row-ends-at-zv? desired))
       (set-glyph-row-fill-line! current (glyph-row-fill-line? desired))
+      (set-glyph-row-continuation-line!
+       current (glyph-row-continuation-line? desired))
       (set-glyph-row-enabled! current #t))
 
     (define (matrix-diff-rows current desired)

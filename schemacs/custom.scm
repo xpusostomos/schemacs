@@ -70,9 +70,11 @@
   ;; (`custom-set-variables' is the theme half's, so `setopt' is the
   ;; spelling apart); `custom-initialize-delay' and
   ;; `custom-initialize-after-file-load' (both exist for the dump and for
-  ;; `after-load-functions', neither of which this tree has); and
-  ;; `defgroup' (`custom-declare-group') - `defface' is faces.scm's, and
-  ;; the group is the Custom UI's one missing half.
+  ;; `after-load-functions', neither of which this tree has); and the
+  ;; Customize buffers themselves (`cus-edit.el`) - `defgroup` and its
+  ;; group machinery ARE here (`custom-declare-group`,
+  ;; `custom-group-of-mode`), and `defface` is faces.scm's; the UI that
+  ;; reads the group tree is what waits on the widget library.
 
   (import
     (scheme base)
@@ -81,8 +83,8 @@
     ;; reason: a clause list cannot be walked by `syntax-rules'. `syntax'
     ;; itself is what `#'` reads as, and leaving it out is the "unexpected
     ;; syntax in form ()" the compiler says when it is missing.
-    (only (guile) identifier? quasisyntax syntax syntax->datum syntax-case
-          unsyntax unsyntax-splicing)
+    (only (guile) datum->syntax identifier? quasisyntax syntax syntax->datum
+          syntax-case unsyntax unsyntax-splicing with-syntax)
     ;; `get' and `put' are `fns.c`'s symbol properties, in their own
     ;; leaf so that this library can sit below `character' and `fns' -
     ;; see that library's header.
@@ -97,6 +99,7 @@
    custom-add-version custom-add-package-version custom-add-load
    custom-add-link custom-add-dependencies
    custom-handle-keyword
+   defgroup custom-declare-group custom-group-of-mode
    custom-variable-p custom-variable-names
    custom--standard-value custom--standard-value-p
    custom--getter custom--setter custom--bound?
@@ -204,6 +207,136 @@
              (set! new-deps (cons dep new-deps))))
          value)
         (put symbol 'custom-dependencies new-deps)))
+
+    ;;--------------------------------------------------------------
+    ;; The `defgroup' macro (`custom.el:501'-`:577')
+    ;;--------------------------------------------------------------
+
+    (define (custom-declare-group symbol members doc . clauses)
+      ;; GNU Emacs's `custom-declare-group' (`custom.el:506'): "Like
+      ;; `defgroup', but SYMBOL is evaluated as a normal argument."
+      ;;
+      ;; **CLAUSES is a list of `(KEYWORD VALUE)' lists**, not Elisp's
+      ;; flat `&rest args', for the reason `custom-declare-variable`'s
+      ;; docstring gives: a macro cannot alternate a datum and an
+      ;; expression into one flat list without making the datum raw
+      ;; syntax.
+      ;;--------------------------------------------------------------
+      (for-each (lambda (member)
+                  (apply custom-add-to-group symbol member))
+                members)
+      (when doc
+        ;; This text doesn't get into DOC.
+        (put symbol 'group-documentation doc))
+      (for-each
+       (lambda (clause)
+         (let ((keyword (car clause))
+               (value (cadr clause)))
+           (unless (symbol? keyword)
+             (error "Junk in args ~a" clause))
+           (cond
+            ((eq? keyword ':prefix)
+             ;; "The keyword :prefix can only be used for customization
+             ;; groups" (`custom.el:548').
+             (put symbol 'custom-prefix value))
+            (else
+             (custom-handle-keyword symbol keyword value 'custom-group)))))
+       clauses)
+      ;; Record the group on the `current' list. Emacs keys the entry by
+      ;; `load-file-name'; this tree has no per-file load variable, so the
+      ;; key is #f - the same entry `custom-current-group` reads, which
+      ;; makes a group declared here the current group for declarations
+      ;; that follow it, as Emacs's does within one file.
+      (let ((elt (assq #f (*custom-current-group-alist*))))
+        (if elt
+            (set-cdr! elt symbol)
+            (*custom-current-group-alist*
+             (cons (cons #f symbol) (*custom-current-group-alist*)))))
+      ;; "Run `custom-declare-variable-hook'" (Emacs's `custom-define-hook').
+      (for-each (lambda (hook) (hook)) (*custom-declare-variable-hook*))
+      symbol)
+
+    (define (%custom-syntax->list stx)
+      ;; A syntax object that is a proper list, as a list of syntax
+      ;; objects. Guile has `syntax->list` but does not export it from
+      ;; `(guile)'; `easy-mmode.scm` writes the same helper out for the
+      ;; same reason.
+      ;;--------------------------------------------------------------
+      (let loop ((s stx) (out '()))
+        (syntax-case s ()
+          (() (reverse out))
+          ((a . d) (loop (syntax d) (cons (syntax a) out)))
+          (_ (reverse out)))))
+
+    (define-syntax defgroup
+      ;; GNU Emacs's `defgroup' (`custom.el:536'): "Declare SYMBOL as a
+      ;; customization group containing MEMBERS."
+      ;;
+      ;;   (defgroup electricity ()
+      ;;     "Electric behavior for self inserting keys."
+      ;;     :group 'editing)
+      ;;
+      ;; The keyword is *syntax* and its value an expression, as in
+      ;; `define-custom'; each clause becomes `(list 'KEYWORD VALUE)`,
+      ;; which is the list `custom-declare-group' walks.
+      ;;--------------------------------------------------------------
+      (lambda (stx)
+        (define (keyword? x)
+          (and (identifier? x)
+               (memq (syntax->datum x)
+                     '(:group :prefix :version :package-version :link
+                       :load :tag))))
+        (syntax-case stx ()
+          ((_ name members doc clause ...)
+           (let loop ((rest (%custom-syntax->list #'(clause ...)))
+                      (built '()))
+             (cond
+              ((null? rest)
+               (let ((clauses (reverse built))
+                     (name-sym (datum->syntax stx
+                                              (list 'quote
+                                                    (syntax->datum #'name))))
+                     (members-q (datum->syntax stx
+                                               (list 'quote
+                                                     (syntax->datum #'members)))))
+                 (with-syntax ((name-sym name-sym)
+                               (members-q members-q)
+                               ((clause-forms ...) clauses))
+                   #'(custom-declare-group name-sym members-q doc
+                                           clause-forms ...))))
+              ((or (null? (cdr rest)) (not (keyword? (car rest))))
+               (error "Keyword ~a is missing an argument or junk in args"
+                      (syntax->datum (car rest))))
+              (else
+               (let ((k (car rest))
+                     (v (cadr rest)))
+                 (loop (cddr rest)
+                       (cons (with-syntax ((k k) (v v))
+                               #'(list 'k v))
+                             built))))))))))
+
+    (define (custom-group-of-mode mode)
+      ;; GNU Emacs's `custom-group-of-mode' (`custom.el:577'): "Return the
+      ;; custom group corresponding to the major or minor MODE."
+      ;;
+      ;; Emacs asks `(string-match "-mode\\'" ...)'; this library sits
+      ;; below `search` (and below `subr`, which would have
+      ;; `string-suffix-p'), so the suffix test is spelled out - the same
+      ;; test, without a regexp.
+      ;;--------------------------------------------------------------
+      (or (get mode 'custom-mode-group)
+          (if (get mode 'custom-group)
+              mode
+              ;; "(and (string-match "-mode\\='" (symbol-name mode))
+              ;;       (get (setq mode (intern ...)) 'custom-group))" -
+              ;; the answer is the *stripped* symbol when it names a group.
+              (let* ((name (symbol->string mode))
+                     (n (string-length name)))
+                (if (and (> n 5)
+                         (string=? "-mode" (substring name (- n 5) n)))
+                    (let ((base (string->symbol (substring name 0 (- n 5)))))
+                      (if (get base 'custom-group) base #f))
+                    #f)))))
 
     (define (custom-handle-keyword symbol keyword value type)
       ;; GNU Emacs's `custom-handle-keyword': "For customization option

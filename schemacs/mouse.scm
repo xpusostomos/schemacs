@@ -547,12 +547,27 @@ point at the click position."
     ;; Dragging past the edge of a window
     ;;------------------------------------------------------------------
 
-    (define *mouse-scroll-delay* (make-parameter 0.25))
+    (define-custom *mouse-scroll-delay* 0.25
+      "The pause between scroll steps caused by mouse drags, in seconds.
+If you drag the mouse beyond the edge of a window, Emacs scrolls the
+window to bring the text beyond that edge into view, with a delay of
+this many seconds between scroll steps.  Scrolling stops when you move
+the mouse back into the window, or release the button.
+This variable's value may be non-integral.
+Setting this to zero causes Emacs to scroll as fast as it can."
+      :type 'number)
     ;; ^ GNU Emacs's `mouse-scroll-delay' (`mouse.el:1679'), "The pause
     ;; between scroll steps caused by mouse drags, in seconds. ... Setting
     ;; this to zero causes Emacs to scroll as fast as it can."
 
-    (define *mouse-scroll-min-lines* (make-parameter 1))
+    (define-custom *mouse-scroll-min-lines* 1
+      "The minimum number of lines scrolled by dragging mouse out of window.
+Moving the mouse out the top or bottom edge of the window begins
+scrolling repeatedly.  The number of lines scrolled per repetition
+is normally equal to the number of lines beyond the window edge that
+the mouse has moved.  However, it always scrolls at least the number
+of lines specified by this variable."
+      :type 'integer)
     ;; ^ GNU Emacs's `mouse-scroll-min-lines' (`mouse.el:1687'): "The
     ;; minimum number of lines scrolled by dragging mouse out of window."
     ;; The pointer one row past the edge scrolls one line either way, so
@@ -957,13 +972,24 @@ is dragged over to."
     ;; shorter. `tab-line.el`'s "+" button is the caller that matters
     ;; here; M-` and C-Down-mouse-1 use the same three functions.
 
-    (define *mouse-buffer-menu-mode-mult* 4)
+    (define-custom *mouse-buffer-menu-mode-mult* 4
+      "Group the buffers by the major mode groups on \\[mouse-buffer-menu]?
+This number which determines (in a hairy way) whether \\[mouse-buffer-menu]
+will split the buffer menu by the major modes (see
+`mouse-buffer-menu-mode-groups') or just by menu length.
+Set to 1 (or even 0!) if you want to group by major mode always, and to
+a large number if you prefer a mixed multitude.  The default is 4."
+      :type 'integer :version "20.3")
     ;; ^ `(defvar mouse-buffer-menu-mode-mult 4 ...)' - "Group the menu
     ;; by major mode if the sum of squares of the number of buffers in
     ;; each mode, multiplied by this, is less than the square of the
     ;; total number of buffers."
 
-    (define *mouse-buffer-menu-maxlen* 20)
+    (define-custom *mouse-buffer-menu-maxlen* 20
+      "Number of buffers in one pane (submenu) of the buffer menu.
+If we have lots of buffers, divide them into groups of
+`mouse-buffer-menu-maxlen' and make a pane (or submenu) for each one."
+      :type 'integer)
     ;; ^ `(defvar mouse-buffer-menu-maxlen 20 ...)': "Number of buffers
     ;; in each pane. If there are more than this many buffers, they are
     ;; split into panes of this size."
@@ -1006,7 +1032,7 @@ is dragged over to."
                      sum
                      (let ((len (length (cddr (car tail)))))
                        (loop (cdr tail) (+ sum (* len len))))))))
-          (if (< (* sum-of-squares *mouse-buffer-menu-mode-mult*)
+          (if (< (* sum-of-squares (*mouse-buffer-menu-mode-mult*))
                  (* (length buffers) (length buffers)))
               ;; "Subdividing by major modes really helps, so let's do it."
               (let ((buffers-left (length buffers))
@@ -1113,15 +1139,15 @@ is dragged over to."
       ;; have lots of buffers, divide them into groups of 20 and make a
       ;; pane (or submenu) for each one."
       ;;--------------------------------------------------------------
-      (if (> (length alist) (quotient (* *mouse-buffer-menu-maxlen* 3) 2))
+      (if (> (length alist) (quotient (* (*mouse-buffer-menu-maxlen*) 3) 2))
           (let loop ((rest alist) (sublists '()) (i 1))
             (if (null? rest)
                 (reverse sublists)
-                (let ((next (list-tail-or rest *mouse-buffer-menu-maxlen*)))
+                (let ((next (list-tail-or rest (*mouse-buffer-menu-maxlen*))))
                   (loop (if next next '())
                         (cons (cons (format #f "Buffers ~a" i)
                                     (if next
-                                        (list-head rest *mouse-buffer-menu-maxlen*)
+                                        (list-head rest (*mouse-buffer-menu-maxlen*))
                                         rest))
                               sublists)
                         (+ i 1)))))

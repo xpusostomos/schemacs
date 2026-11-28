@@ -15,7 +15,8 @@
  (only (schemacs custom)
        define-custom custom-declare-variable custom-initialize-set
        custom-add-option custom-add-dependencies custom-handle-keyword
-       custom-variable-p custom--standard-value
+       custom-variable-p custom--standard-value defgroup
+       custom-declare-group custom-group-of-mode
        *custom-dont-initialize* *custom-declare-variable-hook*)
  (only (schemacs intervals) get put)
  (only (schemacs faces) face-attribute face-defface-spec
@@ -344,5 +345,38 @@
     (list (command? th:load-theme)
           (command? th:enable-theme)
           (command? th:disable-theme))))
+
+
+;;-------------------------------------------------------------
+;; The group half (`custom.el:501')
+;; Emacs 31.1, on the same declarations:
+;;   members=((sx-opt custom-variable))
+;;   doc="Doc here."
+;;   parent=(sx-group custom-group)
+;;   (custom-group-of-mode 'sx-test-mode) = sx-test after
+;;   (put 'sx-test 'custom-group t)
+;; Here the variable's name carries the tree's stars, so the member is
+;; `(*sx-opt* custom-variable)'.
+;;-------------------------------------------------------------
+
+(defgroup sx-group () "Doc here." :group 'editing)
+(define-custom *sx-opt* 1 "D." :type 'integer :group 'sx-group)
+
+(test-equal "a group records its members"
+            '((*sx-opt* custom-variable))
+            (get 'sx-group 'custom-group))
+(test-equal "and its documentation"
+            "Doc here."
+            (get 'sx-group 'group-documentation))
+(test-equal "and itself in its parent group"
+            '(sx-group custom-group)
+            (assq 'sx-group (get 'editing 'custom-group)))
+(test-equal "a mode name is resolved to a group of that base name"
+            'sx-test
+            (begin (put 'sx-test 'custom-group #t)
+                   (custom-group-of-mode 'sx-test-mode)))
+(test-equal "a mode whose base names a group resolves to that group"
+            'sx-group
+            (custom-group-of-mode 'sx-group-mode))
 
 (test-end "schemacs_editor_custom")

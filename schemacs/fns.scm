@@ -74,7 +74,11 @@
     ;; the version comparison `string-version-lessp' is written over -
     ;; gnulib's `lib/filevercmp.c'.
     (only (schemacs filevercmp) %filevercmp)
-    (only (guile) LC_COLLATE LC_CTYPE logxor)
+    (only (guile) LC_COLLATE LC_CTYPE logxor lognot logand logior ash
+          inexact->exact sin caddr cadddr hash-for-each)
+    ;; `md5`'s UTF-8 bytes of a string; the C encodes with
+    ;; `coding.c`, which this library is below.
+    (only (ice-9 iconv) string->bytevector)
     )
 
   (export compare-strings
@@ -84,6 +88,7 @@
           delete
           %string
           nthcdr
+   take
           nth
           elt
           %length
@@ -91,13 +96,15 @@
           mapcar
           mapcan
           %substring
+          md5
           buffer-hash
+          maphash
           concat
           vconcat
           copy-sequence
           copy-alist
           nreverse
-          nconc
+          nconc clear-string
           %assq
           rassq rassoc
           %count-lines
@@ -105,7 +112,7 @@
           line-number-at-pos
           plist-get plist-put
           string-collate-lessp
-          string-equal
+          string-equal string-search
           string-lessp
           string-version-lessp
           ;; `fns.c`'s two dialog-box switches.
@@ -126,6 +133,11 @@
       ;; what makes "abc" sort before "abcd".
       ;;--------------------------------------------------------------
       (let ((ignore-case (if (pair? args) (car args) #f))
+            ;; Emacs's docstring: "A value of nil for START1 or START2
+            ;; means to use the beginning of the string" - `s-ends-with?'
+            ;; is the caller that passes them as nil.
+            (start1 (if start1 start1 0))
+            (start2 (if start2 start2 0))
             (end1 (if end1 end1 (string-length string1)))
             (end2 (if end2 end2 (string-length string2))))
         (let loop ((i start1) (j start2) (n 0))
@@ -167,6 +179,141 @@
       (set! %add-text-properties-from-list add-text-properties-from-list))
 
     ;;----------------------------------------------------------------
+    ;; `md5' (`fns.c:6381')
+    ;;
+    ;; The RFC 1321 digest over a string's UTF-8 bytes. Emacs encodes
+    ;; with `prefer-coding-system' (UTF-8 in a stock session) and lets
+    ;; the caller name another with CODING-SYSTEM; **that argument is
+    ;; not carried** - `fns.scm' is below `coding.scm', and a non-nil
+    ;; CODING-SYSTEM signals rather than silently digesting UTF-8. The
+    ;; buffer arm is not carried either, for the same reason: encoding a
+    ;; buffer is the coding layer's. `md5'-as-a-checksum is what
+    ;; `rfc2104-hash' asks for, and that is a string.
+    ;;------------------------------------------------------------
+
+    (define (%md5-u32 x) (logand x #xffffffff))
+
+    (define (%md5-rotl x s)
+      (%md5-u32 (logior (ash x s) (ash x (- s 32)))))
+
+    (define %md5-k
+      ;; `K[i] = floor(2^32 * abs(sin(i + 1)))' (RFC 1321, section 3.4).
+      (list->vector
+       (map (lambda (x)
+              (%md5-u32 (inexact->exact (floor (* 4294967296 (abs (sin x)))))))
+            (let loop ((i 1) (acc '()))
+              (if (> i 64) (reverse acc) (loop (+ i 1) (cons i acc)))))))
+
+    (define %md5-s
+      ;; The per-round left-rotation amounts (RFC 1321, section 3.4).
+      #(7 12 17 22 7 12 17 22 7 12 17 22 7 12 17 22
+        5 9 14 20 5 9 14 20 5 9 14 20 5 9 14 20
+        4 11 16 23 4 11 16 23 4 11 16 23 4 11 16 23
+        6 10 15 21 6 10 15 21 6 10 15 21 6 10 15 21))
+
+    (define (%md5-f i b c d)
+      ;; The four auxiliary functions F, G, H, I of RFC 1321, 3.4.
+      (cond ((< i 16) (logior (logand b c) (logand (lognot b) d)))
+            ((< i 32) (logior (logand d b) (logand (lognot d) c)))
+            ((< i 48) (logxor b c d))
+            (else (logxor c (logior b (lognot d))))))
+
+    (define (%md5-g i)
+      (cond ((< i 16) i)
+            ((< i 32) (modulo (+ (* 5 i) 1) 16))
+            ((< i 48) (modulo (+ (* 3 i) 5) 16))
+            (else (modulo (* 7 i) 16))))
+
+    (define (%md5-block m a b c d)
+      (let ((aa a) (bb b) (cc c) (dd d))
+        (do ((i 0 (+ i 1))) ((= i 64))
+          (let* ((f (%md5-f i bb cc dd))
+                 (g (%md5-g i))
+                 (sum (%md5-u32 (+ aa (%md5-u32 f)
+                                   (vector-ref %md5-k i)
+                                   (vector-ref m g))))
+                 (rot (%md5-rotl sum (vector-ref %md5-s i)))
+                 (tmp dd))
+            (set! dd cc)
+            (set! cc bb)
+            (set! bb (%md5-u32 (+ bb rot)))
+            (set! aa tmp)))
+        (list (%md5-u32 (+ a aa)) (%md5-u32 (+ b bb))
+              (%md5-u32 (+ c cc)) (%md5-u32 (+ d dd)))))
+
+    (define (%md5-digest msg)
+      ;; MSG is a bytevector: the digest is over bytes, and the caller
+      ;; has already chosen the encoding (see `md5` below).
+      (let* ((len (bytevector-length msg))
+             (pad (modulo (- 56 (+ len 1)) 64))
+             (total (+ len 1 pad 8))
+             (padded (make-bytevector total 0)))
+        (bytevector-copy! padded 0 msg)
+        (bytevector-u8-set! padded len #x80)
+        (let ((bits (* len 8)))
+          (do ((i 0 (+ i 1))) ((= i 8))
+            (bytevector-u8-set! padded (+ len 1 pad i)
+                                (logand (ash bits (- (* 8 i))) #xff))))
+        (let loop ((off 0)
+                   (a #x67452301) (b #xefcdab89) (c #x98badcfe) (d #x10325476))
+          (if (>= off total)
+              (let ((out (make-bytevector 16 0)))
+                (do ((i 0 (+ i 1))) ((= i 4))
+                  (bytevector-u8-set! out i (logand (ash a (- (* 8 i))) #xff))
+                  (bytevector-u8-set! out (+ 4 i) (logand (ash b (- (* 8 i))) #xff))
+                  (bytevector-u8-set! out (+ 8 i) (logand (ash c (- (* 8 i))) #xff))
+                  (bytevector-u8-set! out (+ 12 i) (logand (ash d (- (* 8 i))) #xff)))
+                out)
+              (let ((m (make-vector 16 0)))
+                (do ((i 0 (+ i 1))) ((= i 16))
+                  (vector-set! m i
+                               (logior (bytevector-u8-ref padded (+ off (* 4 i)))
+                                       (ash (bytevector-u8-ref padded (+ off (* 4 i) 1)) 8)
+                                       (ash (bytevector-u8-ref padded (+ off (* 4 i) 2)) 16)
+                                       (ash (bytevector-u8-ref padded (+ off (* 4 i) 3)) 24))))
+                (let ((r (%md5-block m a b c d)))
+                  (loop (+ off 64) (car r) (cadr r) (caddr r) (cadddr r))))))))
+
+    (define (%md5-two-hex n)
+      (let ((s (number->string n 16)))
+        (if (= (string-length s) 1) (string-append "0" s) s)))
+
+    (define (md5 object . rest)
+      ;; GNU Emacs's `md5' (`fns.c:6381'): "Return MD5 message digest of
+      ;; OBJECT, a buffer or string. ... The MD5 digest is 32-character
+      ;; long." START and END are string positions, and a string's
+      ;; positions are zero-based and END is exclusive - measured:
+      ;; `(md5 "abcdef" 2 3)' is the digest of "c".
+      ;;--------------------------------------------------------------
+      ;; **A bytevector is accepted as well as a string**, which Emacs's
+      ;; `md5' does not: Scheme has no unibyte string, and the HMAC in
+      ;; `(schemacs net rfc2104)' needs the digest of raw bytes. This is
+      ;; the named departure of the tree's string model.
+      (unless (or (string? object) (bytevector? object))
+        (error "md5: only a string or bytevector is supported here (the buffer arm needs `coding.scm')"))
+      (when (and (>= (length rest) 3) (list-ref rest 2))
+        (error "md5: CODING-SYSTEM is not supported (fns.scm is below coding.scm)"))
+      (let* ((start (if (and (pair? rest) (car rest)) (car rest) 0))
+             (end (if (and (pair? rest) (pair? (cdr rest)) (cadr rest))
+                      (cadr rest)
+                      (if (bytevector? object)
+                          (bytevector-length object)
+                          (string-length object))))
+             (bytes (if (bytevector? object)
+                        (let ((bv (make-bytevector (- end start))))
+                          (bytevector-copy! bv 0 object start end)
+                          bv)
+                        (string->bytevector (substring object start end)
+                                            "UTF-8")))
+             (digest (%md5-digest bytes)))
+        (let loop ((i 0) (acc ""))
+          (if (= i 16)
+              acc
+              (loop (+ i 1)
+                    (string-append acc
+                                   (%md5-two-hex (bytevector-u8-ref digest i))))))))
+
+    ;;----------------------------------------------------------------
     ;; `buffer-hash`
     ;;----------------------------------------------------------------
 
@@ -203,6 +350,14 @@
                             (or (get-buffer buffer-or-name)
                                 (error "Wrong type argument" buffer-or-name))))))
         (%text-hash (text-editor-text buffer))))
+
+    (define (maphash function table)
+      ;; GNU Emacs's `maphash' (`fns.c:4644'): "Call FUNCTION on each
+      ;; key/value pair in TABLE. FUNCTION is called with two arguments,
+      ;; KEY and VALUE. Return nil."
+      ;;--------------------------------------------------------------
+      (hash-for-each (lambda (key value) (function key value)) table)
+      #f)
 
     (define (%text-hash text)
       ;; FNV-1a over the code points, one pass and no allocation - which
@@ -574,6 +729,28 @@
             rest
             (loop (- n 1) (cdr rest)))))
 
+    (define (take n list)
+      ;; GNU Emacs's `take' (`fns.c:1672'): "Return the first N elements
+      ;; of LIST. If N is zero or negative, return nil. If N is greater
+      ;; or equal to the length of LIST, return LIST (or a copy)."
+      ;;
+      ;; The C builds the copy with `Fcons' and answers `Qnil' for the
+      ;; empty cases; this tree spells an empty list `'()`, so the
+      ;; answer can be `append`ed, as `rx''s caller does.
+      ;;--------------------------------------------------------------
+      (cond ((not (integer? n))
+             (error "Wrong type argument: integerp, ~s" n))
+            ((<= n 0) '())
+            ((null? list) '())
+            ((list? list)
+             ;; `(list X)' would apply the parameter `list` - Lisp-1.
+             (let loop ((m (- n 1)) (rest (cdr list))
+                        (acc (cons (car list) '())))
+               (if (and (> m 0) (pair? rest))
+                   (loop (- m 1) (cdr rest) (cons (car rest) acc))
+                   (reverse acc))))
+            (else (error "Wrong type argument: listp, ~s" list))))
+
     (define (nth n list)
       ;; GNU Emacs's `nth' (`fns.c:1846`): "Return the Nth element of
       ;; LIST. N counts from zero. If LIST is not that long, nil is
@@ -817,6 +994,26 @@
        ((string? seq) (list->string (reverse (string->list seq))))
        (else (error "Wrong type argument: arrayp" seq))))
 
+    (define (clear-string string)
+      ;; GNU Emacs's `clear-string` (`fns.c:3365'): "Clear the contents
+      ;; of STRING.  This makes STRING unibyte, clears its contents to
+      ;; null characters, and removes all text properties.  This may
+      ;; change its length."
+      ;;
+      ;; The string's text properties live in its interval tree;
+      ;; dropping the tree is `Fset_text_properties (0, len, nil,
+      ;; string)`.  **Departure**: this tree has no unibyte strings, so
+      ;; the filled string keeps one NUL *character* per character where
+      ;; Emacs's holds one NUL byte per byte of the old string; for an
+      ;; ASCII string - the password `read-passwd` clears - the two are
+      ;; the same.
+      ;;--------------------------------------------------------------
+      (if (not (string? string))
+          (error "Wrong type argument: stringp, ~a" string))
+      (set!string-intervals string #f)
+      (string-fill! string #\nul)
+      #f)
+
     (define (nconc . lists)
       ;; GNU Emacs's `nconc' (`fns.c:3390'): "Concatenate any number of
       ;; lists by altering them. Only the last argument is not altered,
@@ -878,6 +1075,33 @@
       ;;--------------------------------------------------------------
       (string=? (if (symbol? s1) (symbol->string s1) s1)
                 (if (symbol? s2) (symbol->string s2) s2)))
+
+    (define (string-search needle haystack . rest)
+      ;; GNU Emacs's `string-search' (`fns.c:6583'): "Search for the
+      ;; string NEEDLE in the string HAYSTACK.  The return value is the
+      ;; position of the first occurrence of NEEDLE in HAYSTACK, or nil
+      ;; if no match was found.  ... Case is always significant and text
+      ;; properties are ignored."
+      ;;
+      ;; START-POS must be between zero and the length of HAYSTACK,
+      ;; inclusive, as the C's `CHECK_FIXNUM' arm says; nil is zero.
+      ;;--------------------------------------------------------------
+      (let* ((start (if (and (pair? rest) (car rest)) (car rest) 0))
+             (n (string-length needle))
+             (h (string-length haystack)))
+        (when (or (< start 0) (> start h))
+          (error "Args out of range" start))
+        (let loop ((i start))
+          (cond
+           ((> i (- h n)) #f)
+           ((let inner ((j 0))
+              (cond ((= j n) #t)
+                    ((char=? (string-ref haystack (+ i j))
+                             (string-ref needle j))
+                     (inner (+ j 1)))
+                    (else #f)))
+            i)
+           (else (loop (+ i 1)))))))
 
     (define (string-lessp s1 s2)
       ;; GNU Emacs's `string-lessp' (fns.c): "Return t if first arg

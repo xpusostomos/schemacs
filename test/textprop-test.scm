@@ -17,8 +17,10 @@
  (only (schemacs undo) undo-modified-entry?)
  (only (schemacs editfns)
        buffer-substring buffer-substring-no-properties delete-region insert insert-and-inherit
-       point point-min point-max propertize narrow-to-region widen)
+       point point-min point-max propertize narrow-to-region widen
+       get-pos-property)
  (only (schemacs fns) concat copy-sequence)
+ (only (schemacs marker) make-marker set-marker)
  (prefix (schemacs textprop) tp:)
  (only (ice-9 exceptions) exception-message))
 
@@ -597,5 +599,62 @@
     (guard (e (else (exception-message e)))
       (tp:text-property-stickiness 'x 2 ed)
       "no error")))
+
+;;----------------------------------------------------------------------
+;; Positions may be markers.
+;;
+;; `CHECK_FIXNUM_COERCE_MARKER` is on `validate_interval_range`
+;; (`textprop.c:136'), on every property-change walk (`:818', `:905',
+;; `:974', ...) and on `get-pos-property` (`editfns.c:288');
+;; `get-text-property`/`get-char-property` use `fix_position`
+;; (`textprop.c:614'), which takes a marker from any buffer.
+;;
+;; comint is what found them: its output filter marks a prompt with
+;; `comint-last-output-start` (a marker), snapshots it with the two
+;; markers of `comint-last-prompt` (`comint.el:2131') and asks
+;; `next-single-property-change` about one - so before this coercion
+;; every comint prompt raised "Wrong type argument". Every expectation
+;; below is Emacs 31.1's own answer.
+(define (marker-of pos)
+  (let ((m (make-marker)))
+    (set-marker m pos)
+    m))
+
+(test-equal "put-text-property takes marker positions"
+  (list #f 'x)
+  (let ((ed (buffer-of "abcdef")))
+    (with-current-buffer ed
+      (list (tp:put-text-property (marker-of 2) (marker-of 4) 'p 'x)
+            (tp:get-text-property 2 'p)))))
+
+(test-equal "add-text-properties takes marker positions"
+  #t
+  (let ((ed (buffer-of "abcdef")))
+    (with-current-buffer ed
+      (tp:add-text-properties (marker-of 2) (marker-of 4) '(q y)))))
+
+(test-equal "the property walks take a marker position and a marker limit"
+  (list 4 2 2)
+  (let ((ed (buffer-of "abcdef")))
+    (with-current-buffer ed
+      (tp:put-text-property 2 4 'p 'x)
+      (list (tp:next-single-property-change (marker-of 2) 'p #f 6)
+            (tp:previous-single-property-change (marker-of 4) 'p)
+            (tp:next-single-property-change 1 'p #f (marker-of 4))))))
+
+(test-equal "get-char-property and get-pos-property take marker positions"
+  (list 'x #f)
+  (let ((ed (buffer-of "abcdef")))
+    (with-current-buffer ed
+      (tp:put-text-property 2 4 'p 'x)
+      (list (tp:get-char-property (marker-of 2) 'p)
+            (get-pos-property (marker-of 2) 'p)))))
+
+(test-equal "text-property-not-all takes marker positions"
+  4
+  (let ((ed (buffer-of "abcdef")))
+    (with-current-buffer ed
+      (tp:put-text-property 2 4 'p 'x)
+      (tp:text-property-not-all (marker-of 2) 6 'p 'x))))
 
 (test-end "schemacs_editor_textprop")

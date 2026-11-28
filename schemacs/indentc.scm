@@ -49,6 +49,8 @@
     (only (schemacs frame)
           %window-hscroll %window-start frame-width selected-window
           window-body-width window-buffer window-frame window-width
+          window-box-width
+          window-left-fringe-width window-right-fringe-width
           ;; `window-start` answers the redisplay's marker (`w->start`).
           ;; It was defined in this library until the window-state pass;
           ;; `w->start` is `window.c`'s and it is in `frame.scm` now.
@@ -61,7 +63,8 @@
     ;; walk uses it for the `%l` cache's arithmetic.
     (only (schemacs fns) %count-lines)
     (only (schemacs textprop)
-          get-text-property next-single-property-change)
+          get-text-property get-char-property text-prop-means-invisible
+          next-single-property-change)
     (only (schemacs syntax) skip-chars-forward)
     (only (schemacs character) string-width)
     )
@@ -90,9 +93,73 @@
    window-line-slices-at window-line-slices %window-line-slices
    rows-above rows-row-of-column %row-of-position %row-beginning
    vertical-motion line-next-start window-start
+   ;; The horizontal unit, bound by the display layer around a line's
+   ;; layout: the advance of one column in the display's own units
+   ;; (`face-text-width`), and one cell's width there.
+   *line-text-measure* *line-unit-width*
+   *line-measure-function* *line-unit-width-function*
+   *line-reserve-width* *line-reserve-width-function*
+   %call-with-line-measure
    )
 
   (begin
+
+    (define *line-text-measure* (make-parameter #f))
+    ;; ^ `(lambda (i col) width)`, in the display's own horizontal units
+    ;; - pixels on a window system, character cells on a terminal - or #f
+    ;; for the cell rule. Bound by the display layer around one line's
+    ;; layout: a column's width is its glyph's advance in its *face's*
+    ;; font, which is what `plans/PER-FACE-FONTS.md`'s stage 4 needs and
+    ;; what `texts-width` cannot ask for by itself (the face lives above
+    ;; this library).
+    (define *line-unit-width* (make-parameter 1))
+    ;; ^ One character cell in the same units: 9 on this Gtk display, 1
+    ;; on a terminal. The row's right edge and its truncation marker are
+    ;; one cell wide whatever the faces on the row are.
+
+    (define *line-measure-function* (make-parameter #f))
+    ;; ^ `(lambda (ed line-start texts) measure-or-#f)`, installed by
+    ;; the display layer (`xdisp.scm`). It is the seam that lets the
+    ;; layout measure with `face-text-width' without importing the face
+    ;; machinery: Emacs's `init_iterator' knows the faces because it is
+    ;; the redisplay.
+    (define *line-unit-width-function* (make-parameter #f))
+    ;; ^ `(lambda (window) units-per-cell)`, installed with it.
+
+    (define *line-reserve-width* (make-parameter #f))
+    ;; ^ The units a right/left edge marker (`$` or `\`) takes when there
+    ;; is no fringe to draw it: `init_iterator`'s
+    ;; `it->continuation_pixel_width` (`xdisp.c:3509`). One frame cell
+    ;; only when the default face is the frame's font; a text-scaled
+    ;; buffer's marker is as wide as its face.
+    (define *line-reserve-width-function* (make-parameter #f))
+    ;; ^ `(lambda (window) units)`, installed by `xdisp.scm`: the advance
+    ;; of the default face's `\` in WINDOW's buffer. `#f` falls back to
+    ;; the character cell.
+
+    (define (%call-with-line-measure window ed line-start texts thunk)
+      ;; Run THUNK with the line's per-column measurement bound, when the
+      ;; display layer has installed one. LINE-START #f - the line-number
+      ;; entry points - leaves the cell rule in place.
+      ;;
+      ;; ED is the buffer TEXTS came from, which is not always the
+      ;; window's: `vertical-motion` measures the *current* buffer with
+      ;; the window only for geometry, and `tab-line-auto-hscroll` is the
+      ;; caller that does. The measure builds its face runs against ED,
+      ;; and a run walk over the window's buffer read "Args out of range"
+      ;; where the scratch buffer's line was longer.
+      (let ((factory (*line-measure-function*))
+            (unit-of (*line-unit-width-function*))
+            (reserve-of (*line-reserve-width-function*)))
+        (if (and factory line-start)
+            (let* ((unit (if unit-of (unit-of window) 1))
+                   (reserve (and reserve-of (reserve-of window))))
+              (parameterize ((*line-text-measure*
+                              (factory window ed line-start texts))
+                             (*line-unit-width* unit)
+                             (*line-reserve-width* (or reserve unit)))
+                (thunk)))
+            (thunk))))
 
     (define-custom *indent-tabs-mode* #t
       "Indentation can insert tabs if this is non-nil."
@@ -393,14 +460,35 @@
         (let loop ((i 0) (acc '()))
           (if (>= (+ line-start i) line-end)
               (list->vector (reverse acc))
-              (let ((prop (and ed
-                               (get-text-property (+ line-start i)
-                                                  'display ed))))
-                (loop (+ i 1)
-                      (cons (if (string? prop)
-                                prop
-                                (fetch-char ed (+ line-start i)))
-                            acc)))))))
+              (let* ((pos (+ line-start i))
+                     (prop (and ed (get-text-property pos 'display ed)))
+                     ;; **`invisible` text is zero columns wide.**
+                     ;; `handle_invisible_prop` (`xdisp.c:5206`) runs
+                     ;; after `handle_display_prop` (`:1018`), so a
+                     ;; `display` string on the character wins; with no
+                     ;; replacement the character is not displayed at
+                     ;; all (1), or a `"..."` takes its place (2 - a
+                     ;; `buffer-invisibility-spec` element whose cdr is
+                     ;; non-nil). The ellipsis belongs to the *start* of
+                     ;; a run, not to every character in it.
+                     (invisible
+                      (and ed
+                           (text-prop-means-invisible
+                            (get-char-property pos 'invisible ed) ed)))
+                     (text
+                      (cond
+                       ((not ed) (fetch-char ed pos))
+                       ((string? prop) prop)
+                       ((= invisible 1) "")
+                       ((= invisible 2)
+                        (let ((before (and (> pos (buffer-beg ed))
+                                           (not (= 0 (text-prop-means-invisible
+                                                      (get-char-property
+                                                       (- pos 1) 'invisible ed)
+                                                      ed))))))
+                          (if before "" "...")))
+                       (else (fetch-char ed pos)))))
+                (loop (+ i 1) (cons text acc)))))))
 
     (define (buffer-line-texts-at window line-start . args)
       ;; The texts of the line beginning at buffer position LINE-START in
@@ -452,15 +540,20 @@
         (if (string? entry) entry (char-display-glyph entry col))))
 
     (define (texts-width texts i col)
-      ;; How many screen cells buffer column I of TEXTS takes, drawn at
-      ;; screen column COL - `char-display-width', or the width of the
-      ;; `display' string standing there. The two conds must agree with
-      ;; `texts-glyph', as `char-display-width''s own note says.
+      ;; How wide buffer column I of TEXTS is, drawn at screen column
+      ;; COL - in *cells* normally, or in the display's own units when
+      ;; `*line-text-measure*` is bound (a face's advance in pixels).
+      ;; `texts-glyph' is the string that width belongs to: `char-
+      ;; display-width', the width of a `display' string, or the face
+      ;; font's advance for that string.
       ;;--------------------------------------------------------------
-      (let ((entry (vector-ref texts i)))
-        (if (string? entry)
-            (display-text-width entry col)
-            (char-display-width entry col))))
+      (let ((measure (*line-text-measure*)))
+        (if measure
+            (measure i col)
+            (let ((entry (vector-ref texts i)))
+              (if (string? entry)
+                  (display-text-width entry col)
+                  (char-display-width entry col))))))
 
     (define (line-texts-width texts)
       ;; The display width of TEXTS, all of it: `line-display-width' over
@@ -628,36 +721,31 @@
       ;;--------------------------------------------------------------
       (line-texts-rows (string->texts line-string) width wrap? word-wrap?))
 
-    (define (line-texts-rows texts width wrap? word-wrap?)
-      ;; The screen rows LINE-STRING is drawn on, each a
-      ;; `(FIRST . LAST)' pair of *buffer* columns. One row when the line
-      ;; is truncated or short enough; several when it wraps.
+    (define (line-texts-rows texts width wrap? word-wrap? . args)
+      ;; The screen rows TEXTS is drawn on, each a `(FIRST . LAST)'
+      ;; pair of *buffer* columns. One row when the line is truncated or
+      ;; short enough; several when it wraps.
       ;;
-      ;; This is the heart of what `display_line' does in `xdisp.c': it
-      ;; produces one screen row per call, and calls itself again for the
-      ;; rest of the line. The two things it decides are where to break -
-      ;; at the window edge, or at "the space or tab character nearest to
-      ;; the right window edge" when `word-wrap' is set - and that a row
-      ;; never holds more than WIDTH cells.
-      ;;
-      ;; The column a tab expands to is measured from the start of the
-      ;; *row*, not of the line, because a wrapped row starts at screen
-      ;; column zero. That is why this cannot use `line-display-offsets',
-      ;; which measures from the start of the line.
-      ;;
-      ;; The last cell of a row that carries a marker is not text, and
-      ;; that matters to the arithmetic: `init_iterator' reduces the
-      ;; usable width by the marker's width - `it->last_visible_x -=
-      ;; it->continuation_pixel_width' (`xdisp.c':3509-3518) - and only
-      ;; when the window has no right fringe. This editor has no fringes,
-      ;; so a row holds WIDTH-1 cells and the marker takes the last one.
-      ;; Emacs on a terminal was measured doing exactly that: 100 `X' in
-      ;; an 80-column window came out 79 and `\', then 21 on the row
-      ;; below. Reserving the cell is what stops the marker from landing
-      ;; on top of the line's last character and losing it.
+      ;; **WIDTH is in display units** - pixels on a window system,
+      ;; character cells on a terminal - because that is what
+      ;; `window_box_width' is and what the per-face measurement
+      ;; answers. The optional RESERVE argument is the number of those
+      ;; units a right-edge marker needs (`init_iterator`'s
+      ;; `it->last_visible_x -= it->continuation_pixel_width`,
+      ;; `xdisp.c:3509-3518'): one cell on a terminal, zero when a right
+      ;; fringe draws the marker instead. It used to be a boolean
+      ;; multiplied by the cell width, which could not express a
+      ;; scaled-face marker.
       ;;--------------------------------------------------------------
-      (let ((len (vector-length texts))
-            (usable (max 1 (- width 1))))
+      (let* ((unit (*line-unit-width*))
+             (len (vector-length texts))
+             (reserve (if (pair? args)
+                          (car args)
+                          (or (*line-reserve-width*) unit)))
+             (reserve-width (cond ((number? reserve) reserve)
+                                  (reserve (or (*line-reserve-width*) unit))
+                                  (else 0)))
+             (usable (max unit (- width reserve-width))))
         (cond
          ((or (not wrap?) (<= len 0))
           ;; truncated, or nothing to lay out: one row, the whole line
@@ -710,8 +798,25 @@
       ;; character is more than one cell and a hscroll of its middle
       ;; would tear it.
       ;;--------------------------------------------------------------
-      (let* ((h (%window-hscroll window))
-             (width (window-body-width window))
+      (let* ((unit (*line-unit-width*))
+             (h (%window-hscroll window))
+             ;; `window_box_width' in the display's units, and the
+             ;; hscroll in the same units. A *column* count times the
+             ;; cell is Emacs's `first_visible_x = w->hscroll *
+             ;; FRAME_COLUMN_WIDTH` (`xdisp.c:3501').
+             (width-units (window-box-width window))
+             ;; `insert_left_trunc_glyphs` is only for a window with no
+             ;; left fringe on a window system (`xdisp.c:23908`); with
+             ;; one, the truncation is the fringe bitmap and no text cell
+             ;; is given up. The right edge keeps its reserve only when
+             ;; there is no right fringe (`:3510`).
+             (left-reserve (zero? (window-left-fringe-width window)))
+             (right-reserve (zero? (window-right-fringe-width window)))
+             (left-reserve-width
+              (if left-reserve (or (*line-reserve-width*) unit) 0))
+             (right-reserve-width
+              (if right-reserve (or (*line-reserve-width*) unit) 0))
+             (h-units (* h unit))
              (len (vector-length texts))
              ;; a vector, because the walk indexes it per character and
              ;; a `list-ref' per step would make a long line quadratic
@@ -722,8 +827,12 @@
            ((not start)
             ;; the first character whose display column is past the
             ;; truncation glyph
-            (loop (+ i 1) (if (>= (vector-ref offsets i) (+ h 1)) i #f)))
-           ((>= (vector-ref offsets i) (+ h (- width 1)))
+            (loop (+ i 1)
+                  (if (>= (vector-ref offsets i)
+                          (+ h-units left-reserve-width))
+                      i #f)))
+           ((>= (vector-ref offsets i)
+                (+ h-units (- width-units right-reserve-width)))
             (cons start i))
            (else (loop (+ i 1) start))))))
 
@@ -738,28 +847,38 @@
       ;; wraps.
       ;;--------------------------------------------------------------
       (let ((texts (buffer-line-texts-at window line-start)))
-        (if texts (%window-line-rows window texts) 1)))
+        (if texts (%window-line-rows window texts line-start) 1)))
 
     (define (window-line-rows window line-index)
       ;; `window-line-rows-at' for a caller with a line number and no
       ;; position.
       ;;--------------------------------------------------------------
       (let ((texts (buffer-line-texts window line-index)))
-        (if texts (%window-line-rows window texts) 1)))
+        (if texts
+            (%window-line-rows window texts
+                               (window-line-start (window-buffer window)
+                                                  line-index))
+            1)))
 
-    (define (%window-line-rows window texts)
+    (define (%window-line-rows window texts line-start)
       ;; `window-line-rows' over texts already in hand.
       ;;--------------------------------------------------------------
-      (cond ((and (not (window-wraps? window))
-                  (> (%window-hscroll window) 0))
-             ;; an hscrolled line is one row, whatever its length
-             1)
-            (else
-             (length (line-texts-rows texts
-                                      (window-body-width window)
-                                      (window-wraps? window)
-                                      (buffer-word-wrap
-                                       (window-buffer window)))))))
+      (%call-with-line-measure
+       window (window-buffer window) line-start texts
+       (lambda ()
+         (cond ((and (not (window-wraps? window))
+                     (> (%window-hscroll window) 0))
+                ;; an hscrolled line is one row, whatever its length
+                1)
+               (else
+                (length (line-texts-rows
+                         texts
+                         (window-box-width window)
+                         (window-wraps? window)
+                         (buffer-word-wrap (window-buffer window))
+                         (if (zero? (window-right-fringe-width window))
+                             (or (*line-reserve-width*) (*line-unit-width*))
+                             0))))))))
 
     (define (window-line-slices-at window line-start . args)
       ;; The `(FIRST . LAST)' buffer columns of each screen row the line
@@ -767,30 +886,44 @@
       ;; order.
       ;;--------------------------------------------------------------
       (let ((texts (apply buffer-line-texts-at window line-start args)))
-        (if texts (apply %window-line-slices window texts args) '())))
+        (if texts
+            (apply %window-line-slices window texts line-start args)
+            '())))
 
     (define (window-line-slices window line-index)
       ;; `window-line-slices-at' for a caller with a line number and no
       ;; position.
       ;;--------------------------------------------------------------
       (let ((texts (buffer-line-texts window line-index)))
-        (if texts (%window-line-slices window texts) '())))
+        (if texts
+            (%window-line-slices
+             window texts
+             (window-line-start (window-buffer window) line-index))
+            '())))
 
-    (define (%window-line-slices window texts . args)
+    (define (%window-line-slices window texts line-start . args)
       ;; `window-line-slices' over texts already in hand. The row walk
       ;; computes them itself, beside the line's buffer position, so that
       ;; a line with a `display' property is walked for it once.
       ;;--------------------------------------------------------------
-      (cond ((and (not (window-wraps? window))
-                  (> (%window-hscroll window) 0))
-             (list (hscroll-line-slice window texts)))
-            (else
-             (line-texts-rows texts
-                              (window-body-width window)
-                              (apply window-wraps? window args)
-                              (buffer-word-wrap
-                               (if (pair? args) (car args)
-                                   (window-buffer window)))))))
+      (%call-with-line-measure
+       window (if (pair? args) (car args) (window-buffer window))
+       line-start texts
+       (lambda ()
+         (cond ((and (not (window-wraps? window))
+                     (> (%window-hscroll window) 0))
+                (list (hscroll-line-slice window texts)))
+               (else
+                (line-texts-rows
+                 texts
+                 (window-box-width window)
+                 (apply window-wraps? window args)
+                 (buffer-word-wrap
+                  (if (pair? args) (car args)
+                      (window-buffer window)))
+                 (if (zero? (window-right-fringe-width window))
+                     (or (*line-reserve-width*) (*line-unit-width*))
+                     0)))))))
 
     (define (rows-above window line-start)
       ;; How many screen rows the lines between WINDOW's top and the line

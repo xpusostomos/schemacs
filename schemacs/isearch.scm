@@ -309,13 +309,20 @@
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
-    (define *search-upper-case*
+    (define-custom *search-upper-case*
       ;; GNU Emacs's `search-upper-case' (isearch.el): "If non-nil, an
       ;; upper case character (or REGEXP char) in a search string forces
       ;; case insensitive search." perform-replace consults it with
       ;; `isearch-no-upper-case-p' to decide the search's folding.
       ;;--------------------------------------------------------------
-      (make-parameter #t))
+       #t
+      "If non-nil, upper case chars disable case fold searching.
+That is, upper and lower case chars must match exactly.
+This applies no matter where the chars come from, but does not
+apply to chars in regexps that are prefixed with `\\'.
+If this value is `not-yanks', text yanked into the search string
+in Isearch mode is always downcased."
+      :type '(choice (const :tag "off" nil) (const not-yanks) (other :tag "on" t)))
 
     ;;----------------------------------------------------------------
     ;; The search ring
@@ -420,16 +427,34 @@
     ;; was not drawn at all (a row-by-row search cannot see one).
     ;;------------------------------------------------------------------
 
-    (define *search-highlight* (make-parameter #t))
+    (define-custom *search-highlight* #t
+      "Non-nil means incremental search highlights the current match."
+      :type 'boolean)
     ;; ^ GNU Emacs's `search-highlight' (isearch.el:200), t by default:
     ;; "Non-nil means highlight the current match during search."
 
-    (define *isearch-lazy-highlight* (make-parameter #t))
+    (define-custom *isearch-lazy-highlight* #t
+      "Controls the lazy-highlighting during incremental search.
+When non-nil, all text currently visible on the screen
+matching the current search string is highlighted lazily
+(see `lazy-highlight-initial-delay' and `lazy-highlight-interval').
+However, if `lazy-highlight-buffer' is non-nil, all text in the
+entire buffer matching the search string is highlighted lazily.
+The highlighting uses the `lazy-highlight' face.
+
+When multiple windows display the current buffer, the
+highlighting is displayed only on the selected window, unless
+this variable is set to the symbol `all-windows'."
+      :type '(choice (const :tag "Off" nil) (const :tag "On, and applied to current window" t) (const :tag "On, and applied to all windows" all-windows)) :group 'lazy-highlight)
     ;; ^ GNU Emacs's `isearch-lazy-highlight' (isearch.el:345), t by
     ;; default: "Non-nil means highlight all matches of the current
     ;; search string."
 
-    (define *lazy-highlight-cleanup* (make-parameter #t))
+    (define-custom *lazy-highlight-cleanup* #t
+      "Controls whether to remove extra highlighting after a search.
+If this is nil, extra highlighting can be \"manually\" removed with
+\\[lazy-highlight-cleanup]."
+      :type 'boolean :group 'lazy-highlight)
     ;; ^ GNU Emacs's `lazy-highlight-cleanup' (isearch.el:329), t by
     ;; default: "If non-nil, remove lazy highlighting when no search
     ;; string is active."

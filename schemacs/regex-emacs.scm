@@ -86,10 +86,15 @@
     ;; 0)'; `buffer-syntax-code' is that read with the table passed in.
     (only (schemacs syntax) syntax-table
           sword swhitespace ssymbol %spec-code %class-in %setup-syntax-table
-          buffer-syntax-code)
+          buffer-syntax-code *parse-sexp-lookup-properties*)
     (only (schemacs buffer) current-buffer)
     (only (schemacs chartab)
-          char-table? char-table-ref char-table-extra-slot))
+          char-table? char-table-ref char-table-extra-slot)
+    ;; The string half of `SYNTAX (c)' - the C's
+    ;; `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT' walks the object's intervals.
+    (only (schemacs intervals)
+          string-intervals find-interval next-interval textget
+          interval-plist interval-position))
 
   (export
    ;; `struct re_pattern_buffer' (`regex-emacs.h:64')
@@ -410,14 +415,19 @@
           (alphabeticp c)))
     (define (%islower c) (%lowercasep c))
     (define (%isupper c) (%uppercasep c))
-    (define (%ispunct c syntax-table)
+    ;; The three syntax-table classes take the character's **class**
+    ;; (`SYNTAX (c)' masked) rather than the table, because the class of
+    ;; a character in a *string* can come from that string's
+    ;; `syntax-table' text properties - see `%make-class-reader'. The
+    ;; caller computes it through the same reader the matcher uses.
+    (define (%ispunct c class)
       (if (%isrealascii c)
           (and (> c 32) (< c #x7F) (not (%isalnum c)))
-          (not (= (buffer-syntax-code syntax-table c) sword))))
-    (define (%isspace c syntax-table)
-      (= (buffer-syntax-code syntax-table c) swhitespace))
-    (define (%isword c syntax-table)
-      (= (buffer-syntax-code syntax-table c) sword))
+          (not (= class sword))))
+    (define (%isspace class)
+      (= class swhitespace))
+    (define (%isword class)
+      (= class sword))
 
     (define (re-iswctype ch cc)
       ;; `re_iswctype` (`regex-emacs.c:1622'): "True if CH is in the
@@ -435,15 +445,15 @@
          ((= cc recc-graph) (%isgraph ch))
          ((= cc recc-lower) (%islower ch))
          ((= cc recc-print) (%isprint ch))
-         ((= cc recc-punct) (%ispunct ch table))
-         ((= cc recc-space) (%isspace ch table))
+         ((= cc recc-punct) (%ispunct ch (buffer-syntax-code table ch)))
+         ((= cc recc-space) (%isspace (buffer-syntax-code table ch)))
          ((= cc recc-upper) (%isupper ch))
          ((= cc recc-xdigit) (%isxdigit ch))
          ((= cc recc-ascii) (%isrealascii ch))
          ((= cc recc-nonascii) (not (%isrealascii ch)))
          ((= cc recc-unibyte) (%isunibyte ch))
          ((= cc recc-multibyte) (not (%isunibyte ch)))
-         ((= cc recc-word) (%isword ch table))
+         ((= cc recc-word) (%isword (buffer-syntax-code table ch)))
          (else #f))))
 
     ;;----------------------------------------------------------------
@@ -529,25 +539,27 @@
               #t)
              (else (loop (+ i 1)))))))))
 
-    (define (%re-charset-class-member bits c corig canon syntax-table)
+    (define (%re-charset-class-member bits c corig canon class)
       ;; `execute_charset`'s class chain (`regex-emacs.c:3837'-`:3852'),
       ;; in the C's order. C is the translated character and CORIG the
-      ;; original; the case arms read CORIG and consult CANON, every
-      ;; other arm reads C. A character reaches this chain only when it
-      ;; has no byte representation, so the C's `BIT_MULTIBYTE' arm is
-      ;; unconditional - that is what "multibyte" means here.
+      ;; original, and CLASS is `SYNTAX (c)' - the class of the
+      ;; character at the position being matched, which for a string
+      ;; may come from its `syntax-table' text properties. A character
+      ;; reaches this chain only when it has no byte representation, so
+      ;; the C's `BIT_MULTIBYTE' arm is unconditional - that is what
+      ;; "multibyte" means here.
       ;;----------------------------------------------------------
       (or (not (zero? (logand bits #x20)))                     ; BIT_MULTIBYTE
           (and (not (zero? (logand bits #x80))) (%isalnum c))
           (and (not (zero? (logand bits #x40))) (%isalpha c))
-          (and (not (zero? (logand bits #x8))) (%isspace c syntax-table))
+          (and (not (zero? (logand bits #x8))) (%isspace class))
           (and (not (zero? (logand bits #x400))) (%isblank c))
-          (and (not (zero? (logand bits #x1))) (%isword c syntax-table))
+          (and (not (zero? (logand bits #x1))) (%isword class))
           (and (not (zero? (logand bits #x10)))
                (or (%isupper corig) (and canon (%islower corig))))
           (and (not (zero? (logand bits #x2)))
                (or (%islower corig) (and canon (%isupper corig))))
-          (and (not (zero? (logand bits #x4))) (%ispunct c syntax-table))
+          (and (not (zero? (logand bits #x4))) (%ispunct c class))
           (and (not (zero? (logand bits #x100))) (%isgraph c))
           (and (not (zero? (logand bits #x200))) (%isprint c))))
 
@@ -556,7 +568,7 @@
       ;; CANON is nil), for the membership query `re-charset-member-full?'.
       ;;----------------------------------------------------------
       (%re-charset-class-member (re-charset-classes cs) ch ch #f
-                                (syntax-table)))
+                                (buffer-syntax-code (syntax-table) ch)))
 
     (define (re-charset-member-full? cs ch)
       (or (re-charset-member? cs ch)
@@ -2333,7 +2345,7 @@
     ;;----------------------------------------------------------------
     ;; `execute_charset' (`regex-emacs.c:3802')
     ;;----------------------------------------------------------------
-    (define (%execute-charset cs c corig canon not? syntax-table)
+    (define (%execute-charset cs c corig canon not? class)
       ;; `execute_charset' (`regex-emacs.c:3802'). C is the translated
       ;; character and CORIG the original; the bitmap branch is taken
       ;; when C has a byte representation (`CHAR_TO_BYTE_SAFE',
@@ -2355,7 +2367,7 @@
             (if (re-charset-simple? cs)
                 not?
                 (if (%re-charset-class-member (re-charset-classes cs)
-                                              c corig canon syntax-table)
+                                              c corig canon class)
                     (not not?)
                     (let ((ranges (re-charset-ranges cs)))
                       (let loop ((i 0))
@@ -2381,7 +2393,7 @@
          ((or (= op1 op-charset) (= op1 op-charset-not))
           (not (%execute-charset (vector-ref (vector-ref pat p1) 1)
                                  c c #f (= op1 op-charset-not)
-                                 syntax-table)))
+                                 (buffer-syntax-code syntax-table c))))
          ((and (= op1 op-anychar) (= c 10)) #t)
          (else #f))))
 
@@ -2485,18 +2497,67 @@
     ;; mistaken for it. It replaces the `<match-result>' record and
     ;; the `raise'/`guard' that carried the answer out of the loop.
 
-    (define (%make-class-reader ctx)
-      ;; `SYNTAX (c)' at text position POS: through the syntax-table
-      ;; property cache for a buffer, the context's table for a string.
+    (define (%make-class-reader ctx text)
+      ;; `SYNTAX (c)' at text position POS, as `syntax_property_entry'
+      ;; (`syntax.h:97') reads it: through the syntax-table property
+      ;; cache for a buffer, and **through the string's own
+      ;; `syntax-table' text properties for a string**.
+      ;;
+      ;; The string half is the C's `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT'
+      ;; (`syntax.c:276'): `gl_state.object' is the string,
+      ;; `update_syntax_table' walks *its* intervals, and a string made
+      ;; by `buffer-substring' carries the buffer's properties. Measured:
+      ;; `groovy-mode''s `groovy-expression-end-regexp' has a `\s|' arm
+      ;; that matches a `/'-with-string-fence-property, and that
+      ;; property exists only on the string.
+      ;;
+      ;; The run cache is `gl_state''s B_PROPERTY/E_PROPERTY: the class
+      ;; of successive characters is asked per position, and the
+      ;; interval walk happens once per run. CUR-TABLE holds the run's
+      ;; syntax table, a raw class integer for a descriptor-valued
+      ;; property, or #f for the context's table.
       ;;----------------------------------------------------------
-      (let ((table (re-context-syntax-table ctx))
-            (buffer? (re-context-buffer? ctx))
-            (base (re-context-position ctx)))
-        (lambda (c pos)
-          (if buffer?
-              (%class-in (current-buffer) (+ base pos) c)
-              (let ((ent (char-table-ref table c)))
-                (logand (if (pair? ent) (car ent) ent) #xff))))))
+      (let* ((table (re-context-syntax-table ctx))
+             (buffer? (re-context-buffer? ctx))
+             (base (re-context-position ctx))
+             (str (and (not buffer?) (re-text-string text)))
+             ;; The properties are read only when
+             ;; `parse-sexp-lookup-properties' is on, as for a buffer -
+             ;; measured on Emacs 31.1: the same propertized string
+             ;; matches `\s|' with it non-nil and does not with it nil.
+             (tree (and str (*parse-sexp-lookup-properties*)
+                        (string-intervals str))))
+        (if (not tree)
+            (lambda (c pos)
+              (if buffer?
+                  (%class-in (current-buffer) (+ base pos) c)
+                  (let ((ent (char-table-ref table c)))
+                    (logand (if (pair? ent) (car ent) ent) #xff))))
+            (let ((cur-table #f) (cur-b -1) (cur-e -1))
+              (lambda (c pos)
+                (if (or (< pos cur-b) (>= pos cur-e))
+                    (let* ((i (find-interval tree pos))
+                           (prop (and i (textget (interval-plist i)
+                                                 'syntax-table))))
+                      ;; The run is this interval and every following one
+                      ;; that carries the same property.
+                      (let loop ((n (and i (next-interval i))))
+                        (if (and n
+                                 (eq? (textget (interval-plist n) 'syntax-table)
+                                      prop))
+                            (loop (next-interval n))
+                            (begin
+                              (set! cur-b (if i (interval-position i) pos))
+                              (set! cur-e (if n (interval-position n)
+                                              (string-length str))))))
+                      (set! cur-table
+                            (cond ((char-table? prop) prop)
+                                  ((pair? prop) (logand (car prop) #xff))
+                                  (else #f)))))
+                (if (integer? cur-table)
+                    cur-table
+                    (let ((ent (char-table-ref (or cur-table table) c)))
+                      (logand (if (pair? ent) (car ent) ent) #xff))))))))
 
     (define (make-match-attempt bufp text stop ctx)
       ;; One matcher, ready to be run at any number of start
@@ -2531,7 +2592,7 @@
              ;; The match length, set by `done!' - the C's `return'
              ;; value from `re_match_2_internal'.
              (result #f)
-             (class-at (%make-class-reader ctx))
+             (class-at (%make-class-reader ctx text))
              (p 0)
              (d 0)
              ;; The attempt's own arguments, set by the reset.
@@ -2801,8 +2862,7 @@
                                            not?
                                            (%execute-charset cs c corig
                                                              translate not?
-                                                             (re-context-syntax-table
-                                                              ctx))))
+                                                             (class-at c d))))
                                    (begin (set! d (+ d 1)) #t)
                                    #f))))
 

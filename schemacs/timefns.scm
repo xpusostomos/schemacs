@@ -68,6 +68,7 @@
           time-equal-p
           time-less-p
           time-since
+          time-add
           time-subtract
           time-convert
           )
@@ -259,9 +260,11 @@
                    (tb (lisp-time-arguments b)))
                (and (= (car ta) (car tb)) (= (cdr ta) (cdr tb)))))))
 
-    (define (time-subtract a . rest)
-      ;; GNU Emacs's `time-subtract': "Subtract two time values, A minus
-      ;; B. ... If B is nil, it defaults to the current time."
+    (define (%time-arith a b subtract?)
+      ;; GNU Emacs's `time_arith' (`timefns.c:1170'), the one body
+      ;; `time-add' and `time-subtract' share: read both times as
+      ;; `(SECONDS . PICOSECONDS)', add or subtract, and split the answer
+      ;; back into the four-element form.
       ;;
       ;; The answer comes back through the C's `ticks_hz_list4', not
       ;; through `make_lisp_time', and the two split the sub-second part
@@ -270,13 +273,23 @@
       ;; the low twelve digits of the value as *picoseconds* and answers
       ;; their high six and low six. Measured on the same pair, Emacs
       ;; gives `(0 65532 999996 999997)' where the other split would
-      ;; give `(0 65532 999996 997000)' - so the whole subtraction is
+      ;; give `(0 65532 999996 997000)' - so the whole computation is
       ;; done in picoseconds, which is where the twelve digits are.
       ;;--------------------------------------------------------------
+      ;; **A time made of two exact integers is an integer again.**
+      ;; `time_arith` returns `ticks` alone when the sum's resolution is
+      ;; one second (`timefns.c:1215`), which for two integer inputs it
+      ;; always is: measured, `(time-add 1 2)` is `3` in Emacs 31.1.
+      ;; A float's form is a separate departure, named in the comment
+      ;; below.
+      (if (and (number? a) (exact? a) (integer? a)
+               (number? b) (exact? b) (integer? b))
+          (if subtract? (- a b) (+ a b))
       (let* ((ta (lisp-time-arguments a))
-             (tb (lisp-time-arguments (if (pair? rest) (car rest) #f)))
-             (total (- (+ (* (car ta) 1000000000000) (cdr ta))
-                       (+ (* (car tb) 1000000000000) (cdr tb)))))
+             (tb (lisp-time-arguments b))
+             (ea (+ (* (car ta) 1000000000000) (cdr ta)))
+             (eb (+ (* (car tb) 1000000000000) (cdr tb)))
+             (total (if subtract? (- ea eb) (+ ea eb))))
         ;; `floor-' and not a plain quotient, so that a time before the
         ;; epoch borrows the way the C's normalisation does
         (let* ((secs (floor-quotient total 1000000000000))
@@ -284,7 +297,21 @@
           (list (ash secs -16)
                 (logand secs #xffff)
                 (quotient rem 1000000)
-                (remainder rem 1000000)))))
+                (remainder rem 1000000))))))
+
+    (define (time-subtract a . rest)
+      ;; GNU Emacs's `time-subtract' (`timefns.c:1234'): "Return the
+      ;; difference between two time values A and B, as a time value.
+      ;; ... For example, nil stands for the current time."
+      ;;--------------------------------------------------------------
+      (%time-arith a (if (pair? rest) (car rest) #f) #t))
+
+    (define (time-add a b)
+      ;; GNU Emacs's `time-add' (`timefns.c:1225'): "Return the sum of
+      ;; two time values A and B, as a time value. ... For example, nil
+      ;; stands for the current time."
+      ;;--------------------------------------------------------------
+      (%time-arith a b #f))
 
     (define (time-since time)
       ;; GNU Emacs's `time-since' (`time-date.el:192'): "Return the time

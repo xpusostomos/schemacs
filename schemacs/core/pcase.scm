@@ -30,6 +30,21 @@
   ;; because a pattern is converted to data; a `pred`/`guard`/`app`
   ;; expression written directly in a pattern is kept as syntax and has
   ;; no such limitation.
+  ;;
+  ;; **Two consequences a port must know**, both in DEPARTURES.md:
+  ;;
+  ;;   * The expanded pattern becomes source at the use site, so any
+  ;;     procedure an expander wants the matcher to call must be named
+  ;;     by an identifier the use site can resolve; a *procedure
+  ;;     object* in the pattern data cannot be compiled at all (Guile
+  ;;     refuses a procedure as a source constant at every
+  ;;     optimization level). `(schemacs core rx)' is the worked
+  ;;     example.
+  ;;   * `pcase-defmacro` registers its expander at run time, so a file
+  ;;     that defines a pattern macro and uses it in the same file does
+  ;;     not compile: the compiler expands every top-level form without
+  ;;     executing the earlier registration. Emacs's byte-compiler
+  ;;     evaluates `defmacro' as it goes; nothing here does.
 
   (import
     (scheme base)

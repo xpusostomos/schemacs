@@ -49,6 +49,7 @@
           *current-buffer* bufferp current-buffer overlay-get overlays-at
           next-overlay-change previous-overlay-change
           with-current-buffer buffer-local-value
+          *check-fixnum-coerce-marker-function*
           *get-text-property-function*)
     ;; `modify_text_properties`'s body is `insdel.c`'s
     ;; `prepare_to_modify_buffer_1` - the half that does not touch the
@@ -64,6 +65,7 @@
     ;; and the function is defined below, in the file that owns it.
     (only (schemacs insdel) prepare-to-modify-buffer-1)
     (only (schemacs undo) record-first-change)
+    (only (schemacs marker) markerp marker-position)
     (only (schemacs buffer) %text-editor-incr-modiff!
           buffer-beg buffer-z)
     ;; `install-intervals-set-text-properties!' is the seam back *up*
@@ -87,7 +89,7 @@
    modify-text-properties
    *in-property-change-p*
    text-property-list
-   get-char-property
+   get-char-property text-prop-means-invisible invisible-p
    remove-text-properties
    set-text-properties
    get-text-property
@@ -148,6 +150,27 @@
       ;;--------------------------------------------------------------
       (or (and (pair? args) (car args)) (current-buffer)))
 
+    (define (%check-fixnum-coerce-marker value)
+      ;; `CHECK_FIXNUM_COERCE_MARKER` (`buffer.h`): a position argument
+      ;; that may be a marker - coerced against the *current* buffer,
+      ;; which is the macro's test whatever object the caller is
+      ;; addressing. The property-change walks take one (`textprop.c:818`,
+      ;; `:905`, `:974`, ...) and so do `add-`/`put-`/`remove-text-
+      ;; properties` (`:136`).
+      ;;--------------------------------------------------------------
+      ((or (*check-fixnum-coerce-marker-function*)
+           (lambda (x _b) x))
+       value (current-buffer)))
+
+    (define (%fix-position value)
+      ;; `fix_position` (`buffer.c:147'): the *getters'* coercion.
+      ;; "POS's marker position if POS is a marker" - and no
+      ;; current-buffer test, unlike the macro above. That is why
+      ;; `get-char-property` accepts a marker from any buffer
+      ;; (`textprop.c:614') while the walks refuse one from another.
+      ;;--------------------------------------------------------------
+      (if (markerp value) (marker-position value) value))
+
     (define (validate-interval-range object start end force?)
       ;; GNU Emacs's `validate_interval_range': the interval covering
       ;; START..END in OBJECT - a buffer or a string, which is the C's
@@ -170,7 +193,17 @@
       ;; not the text - and a position outside them signals rather than
       ;; being clipped. `iv:object-beg-position' is `BEG' (always 1) for
       ;; `create_root_interval' and cannot answer this.
-      (let* ((lo (if (string? object) 0 (buffer-beg object)))
+      (let* ((fix (or (*check-fixnum-coerce-marker-function*)
+                      (lambda (x _b) x)))
+             ;; `CHECK_FIXNUM_COERCE_MARKER` (`textprop.c:136'): START and
+             ;; END may be markers, and every `add-`/`put-`/`remove-text-
+             ;; properties` caller passes them straight in - comint's
+             ;; `comint--mark-as-output` is one (`comint.el:2293`, a
+             ;; position marker). The macro compares against the *current*
+             ;; buffer, whatever OBJECT is.
+             (start (fix start (current-buffer)))
+             (end (fix end (current-buffer)))
+             (lo (if (string? object) 0 (buffer-beg object)))
              (hi (if (string? object) (string-length object) (buffer-z object)))
              (start (if (> start end) end start))
              (end (if (> start end) start end)))
@@ -206,7 +239,8 @@
       ;; Qnil'. It is what makes `(get-text-property (point-max) ...)'
       ;; answer nil rather than reading the last character's properties.
       ;;--------------------------------------------------------------
-      (let ((object (object-or-current args)))
+      (let* ((position (%check-fixnum-coerce-marker position))
+             (object (object-or-current args)))
         (let ((interval (interval-of object position)))
           (cond
            ((not interval) '())
@@ -218,8 +252,62 @@
       ;; or #f. TEXTGET is what answers, so a `category' property and the
       ;; default values are honoured.
       ;;--------------------------------------------------------------
-      (let ((object (object-or-current args)))
+      (let* ((position (%fix-position position))
+             (object (object-or-current args)))
         (iv:textget (text-properties-at position object) prop)))
+
+    (define (%invisible-prop propval list)
+      ;; GNU Emacs's `invisible_prop' (`xdisp.c:30320'): "Return 1 if
+      ;; PROPVAL is invisible according to LIST, 2 if invisible with an
+      ;; ellipsis, 0 otherwise."  A spec element equal to PROPVAL means
+      ;; hidden; a cons element whose car is PROPVAL means hidden, with
+      ;; an ellipsis when its cdr is non-nil.  A cons PROPVAL is checked
+      ;; element by element.
+      ;;--------------------------------------------------------------
+      (let loop ((tail list))
+        (cond
+         ((not (pair? tail)) 0)
+         (else
+          (let ((tem (car tail)))
+            (cond
+             ((eq? propval tem) 1)
+             ((and (pair? tem) (eq? propval (car tem)))
+              (if (cdr tem) 2 1))
+             (else (loop (cdr tail)))))))))
+    ;; The PROPVAL-is-a-cons arm is the C's second loop; it is reached
+    ;; for an `invisible` property whose value is a list of symbols.
+    (define (%invisible-prop-cons propval list)
+      (let loop ((proptail propval))
+        (if (not (pair? proptail))
+            0
+            (let ((one (%invisible-prop (car proptail) list)))
+              (if (not (= one 0))
+                  one
+                  (loop (cdr proptail)))))))
+
+    (define (text-prop-means-invisible propval buffer)
+      ;; GNU Emacs's `TEXT_PROP_MEANS_INVISIBLE` (`intervals.h:240`):
+      ;; "If PROP is the `invisible' property of a character, this is 1
+      ;; if the character should be treated as invisible, and 2 if it is
+      ;; invisible but with an ellipsis."
+      ;;
+      ;; `buffer-invisibility-spec` is `buffer.c`'s `DEFVAR_PER_BUFFER`
+      ;; - `(xdisp.c)'s DEFVAR in the C, a buffer-local here - whose
+      ;; default is `t`: "any non-nil `invisible' property hides the
+      ;; text".
+      ;;--------------------------------------------------------------
+      (let ((spec (buffer-local-value buffer 'buffer-invisibility-spec #t)))
+        (if (eq? spec #t)
+            (if propval 1 0)
+            (let ((list (if (pair? spec) spec '())))
+              (if (not propval)
+                  0
+                  (let ((one (%invisible-prop propval list)))
+                    (if (not (= one 0))
+                        one
+                        (if (pair? propval)
+                            (%invisible-prop-cons propval list)
+                            0))))))))
 
     (define (get-char-property position prop . args)
       ;; GNU Emacs's `get-char-property' (textprop.c:681): "Return the
@@ -232,7 +320,8 @@
       ;; answers only when no overlay has it. This is the seam the
       ;; overlays were always meant to meet the display at.
       ;;--------------------------------------------------------------
-      (let ((object (object-or-current args)))
+      (let* ((position (%fix-position position))
+             (object (object-or-current args)))
         ;; "Both overlay properties and text properties are checked" - but
         ;; only a *buffer* has overlays, which is the C's
         ;; `if (BUFFERP (object))'.
@@ -243,6 +332,33 @@
                 (cond ((null? ovs) (get-text-property position prop object))
                       ((overlay-get (car ovs) prop))
                       (else (loop (cdr ovs)))))))))
+
+    (define (invisible-p pos)
+      ;; GNU Emacs's `invisible-p' (`xdisp.c:30355'): "Non-nil if text
+      ;; properties at POS cause text there to be currently invisible.
+      ;; POS should be a marker or a buffer position; ... POS can also
+      ;; be the actual value of the `invisible' text or overlay property
+      ;; of the text of interest, in which case the value itself is
+      ;; examined.  The non-nil value returned can be t for currently
+      ;; invisible text that is entirely hidden on display, or some
+      ;; other non-nil, non-t value if the text is replaced by an
+      ;; ellipsis."
+      ;;
+      ;; **A named placement departure**: the C's home is `xdisp.c`, but
+      ;; everything it reads is here and in `buffer.scm` (`get-char-
+      ;; property` and `text-prop-means-invisible`), while `xdisp.scm`
+      ;; is *above* `simple.scm` - and `simple.el`'s
+      ;; `forward-visible-line`/`end-of-visible-line` call this.  The
+      ;; renderer imports and re-exports it, so every other caller is
+      ;; unchanged.
+      ;;--------------------------------------------------------------
+      (let ((prop (if (or (integer? pos) (markerp pos))
+                      (get-char-property pos 'invisible)
+                      pos)))
+        (let ((invis (text-prop-means-invisible prop (current-buffer))))
+          (cond ((= invis 0) #f)
+                ((= invis 1) #t)
+                (else invis)))))
 
     ;;----------------------------------------------------------------
     ;; Whether an interval already has some properties
@@ -853,7 +969,10 @@
       ;; can be drawn in one go.
       ;;--------------------------------------------------------------
       (let* ((object (object-or-current args))
-             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (position (%check-fixnum-coerce-marker position))
+             (limit (if (and (pair? args) (pair? (cdr args)))
+                        (%check-fixnum-coerce-marker (cadr args))
+                        #f))
              (end (or limit (iv:object-end-position object))))
         (let ((i (interval-of object (min position
                                           (iv:object-last-position object)))))
@@ -879,7 +998,10 @@
       ;; reported as being before it.
       ;;--------------------------------------------------------------
       (let* ((object (object-or-current args))
-             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+             (position (%check-fixnum-coerce-marker position))
+             (limit (if (and (pair? args) (pair? (cdr args)))
+                        (%check-fixnum-coerce-marker (cadr args))
+                        #f)))
         (let* ((at (interval-of object (min position
                                             (iv:object-last-position object))))
                (i (if (and at (= (iv:interval-position at) position))
@@ -925,7 +1047,10 @@
       ;; change` compares one property of it.
       ;;--------------------------------------------------------------
       (let* ((object (object-or-current args))
-             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (position (%check-fixnum-coerce-marker position))
+             (limit (if (and (pair? args) (pair? (cdr args)))
+                        (%check-fixnum-coerce-marker (cadr args))
+                        #f))
              (end (or limit (iv:object-end-position object))))
         (let ((i (interval-of object (min position
                                           (iv:object-last-position object)))))
@@ -949,7 +1074,10 @@
       ;; interval steps back one first.
       ;;--------------------------------------------------------------
       (let* ((object (object-or-current args))
-             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f)))
+             (position (%check-fixnum-coerce-marker position))
+             (limit (if (and (pair? args) (pair? (cdr args)))
+                        (%check-fixnum-coerce-marker (cadr args))
+                        #f)))
         (let* ((at (interval-of object (min position
                                             (iv:object-last-position object))))
                (i (if (and at (= (iv:interval-position at) position))
@@ -979,7 +1107,9 @@
       ;; property change and an overlay boundary are both found, whichever
       ;; comes first.
       ;;--------------------------------------------------------------
-      (let ((temp (next-overlay-change position)))
+      (let* ((position (%check-fixnum-coerce-marker position))
+             (limit (if limit (%check-fixnum-coerce-marker limit) #f))
+             (temp (next-overlay-change position)))
         (if (and limit (< limit temp)) (set! temp limit))
         ;; `Fnext_property_change (position, Qnil, temp)` - the OBJECT
         ;; is nil, so TEMP is the *limit*, which is the third argument
@@ -990,7 +1120,9 @@
       ;; The C takes the *earlier* of the previous overlay change and
       ;; LIMIT; a position below `point-min` is clipped to it.
       ;;--------------------------------------------------------------
-      (let ((temp (previous-overlay-change position)))
+      (let* ((position (%check-fixnum-coerce-marker position))
+             (limit (if limit (%check-fixnum-coerce-marker limit) #f))
+             (temp (previous-overlay-change position)))
         (if (and limit (> limit temp)) (set! temp limit))
         ;; `Fprevious_property_change (position, Qnil, temp)`: object
         ;; nil, limit TEMP
@@ -1008,7 +1140,10 @@
       ;; what makes this the one a field walk uses.
       ;;--------------------------------------------------------------
       (let* ((object (object-or-current args))
-             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (position (%check-fixnum-coerce-marker position))
+             (limit (if (and (pair? args) (pair? (cdr args)))
+                        (%check-fixnum-coerce-marker (cadr args))
+                        #f))
              (zv (iv:object-end-position object))
              (limit (or limit zv)))
         (if (>= position limit)
@@ -1030,7 +1165,10 @@
       ;; POSITION, and the answer is the position where it began.
       ;;--------------------------------------------------------------
       (let* ((object (object-or-current args))
-             (limit (if (and (pair? args) (pair? (cdr args))) (cadr args) #f))
+             (position (%check-fixnum-coerce-marker position))
+             (limit (if (and (pair? args) (pair? (cdr args)))
+                        (%check-fixnum-coerce-marker (cadr args))
+                        #f))
              (limit (or limit (iv:object-beg-position object))))
         (if (<= position limit)
             limit

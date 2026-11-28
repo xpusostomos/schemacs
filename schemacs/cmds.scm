@@ -262,7 +262,7 @@
     ;; The commands
     ;;------------------------------------------------------------------
 
-    (define-command (self-insert-command count char)
+    (define-command (self-insert-command count . char-arg)
       ;; GNU Emacs's `self-insert-command' (`cmds.c:263'). Its interactive
       ;; spec is
       ;;
@@ -303,6 +303,14 @@ a non-nil value for the inserted character.  At the end, it runs
 `post-self-insert-hook'."
       (interactive (list (uarg->integer 1 (current-prefix-arg))
                          (*last-command-event*)))
+      ;; **CHAR is optional**, as the C's one optional ARG is: Emacs's
+      ;; `self-insert-command` takes only the count and reads the
+      ;; character from `last-command-event`, and a programmatic
+      ;; `(self-insert-command N)` does the same. The interactive spec
+      ;; below still passes the event explicitly - this tree's spelling,
+      ;; and what the tests drive - and an explicit CHAR wins.
+      (let ((char (if (pair? char-arg) (car char-arg)
+                      (*last-command-event*))))
       ;; "if (XFIXNUM (n) < 0) error ("Negative repetition argument %d", n)"
       ;; - one formatted string, so the count is in the message and not an
       ;; irritant. Measured: "Negative repetition argument -1".
@@ -333,7 +341,7 @@ a non-nil value for the inserted character.  At the end, it runs
       ;; and `CHAR_STRING''s rather than this one.
       (if (or (not (characterp char)) (> char #x10FFFF))
           #f
-          (internal-self-insert (integer->char char) count)))
+          (internal-self-insert (integer->char char) count))))
 
     ;; Not an Emacs command: Emacs binds C-i to
     ;; `indent-for-tab-command', which indents. This inserts a tab,

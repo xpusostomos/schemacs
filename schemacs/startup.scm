@@ -86,6 +86,9 @@
     ;; exactly the one the menus must still be there for.
     (only (schemacs menu-bar) menu-bar-file-menu menu-bar-edit-menu)
     (only (schemacs subr) kbd run-hooks)
+    ;; `command-line-normalize-file-name` (`startup.el:3160`) is
+    ;; `string-match`/`replace-match` and nothing else.
+    (only (schemacs search) string-match replace-match save-match-data)
     ;; `substitute-command-keys` is `help.el`'s; the scratch message's
     ;; `\[find-file]` is written for it (`startup.el:1843`), and Emacs
     ;; preloads help.el (`loadup.el`), so startup may import it.
@@ -98,6 +101,7 @@
   (export
    command-line-1
    command-line-1--display
+   command-line-normalize-file-name
    init-path
    load-init
    ;; the startup screen and its one setting - `startup.el''s
@@ -381,12 +385,16 @@
           ;; this one - and the init file says
           ;;
           ;;     (import (schemacs startup))
-          ;;     (set! inhibit-startup-screen #t)
+          ;;     (inhibit-startup-screen #t)
+          ;;
+          ;; It is a parameter (the `define-custom' below), so the value
+          ;; is written by *calling* it; a `set!' would shadow the import
+          ;; with a local binding and the editor would never see it.
           ;;
           ;; **The init file is evaluated in the user environment** -
           ;; the module `open-user-environment!' has just built, which is
           ;; `$XDG_CONFIG_HOME/imports.scm' when the user has one and the
-          ;; whole editor when they do not. So `(set! inhibit-startup-screen
+          ;; whole editor when they do not. So `(inhibit-startup-screen
           ;; #t)' needs no import, as `(setq inhibit-startup-screen t)'
           ;; needs no `require' in Emacs, and the same is true of `M-:' and
           ;; the back door - one environment for the three places where the
@@ -415,7 +423,7 @@
                   ;; then switches to the alternate one, so the message is
                   ;; there but unseeable until the editor exits - measured,
                   ;; with the namespace call removed, where the failure of
-                  ;; `(set! inhibit-startup-screen #t)' is exactly the sort
+                  ;; `(inhibit-startup-screen #t)' is exactly the sort
                   ;; of error a user would be staring at. A frame is current
                   ;; by this point (both front ends make one before
                   ;; `command-line-1'), so the echo area is where it goes.
@@ -452,7 +460,12 @@
     ;; leaves; the command line's files are shown *first*, and the splash
     ;; goes in the window below them.
 
-    (define inhibit-startup-screen #f)
+    (define-custom inhibit-startup-screen #f
+      "Non-nil inhibits the startup screen.
+
+This is for use in your personal init file (but NOT site-start.el),
+once you are familiar with the contents of the startup screen."
+      :type 'boolean)
     ;; ^ GNU Emacs's `inhibit-startup-screen' (`startup.el:68'): "Non-nil
     ;; inhibits the startup screen. This is for use in your personal init
     ;; file (but NOT site-start.el), once you are familiar with the
@@ -464,10 +477,11 @@
     ;; `startup.el''s, so an init file that wants it says
     ;;
     ;;     (import (schemacs startup))
-    ;;     (set! inhibit-startup-screen #t)
+    ;;     (inhibit-startup-screen #t)
     ;;
     ;; which is Emacs's `(require 'startup)' and `(setq ...)' in the same
-    ;; two lines. (An `open-editor-namespace!' call in `load-init' used to
+    ;; two lines, the value written by calling the parameter.
+    ;; (An `open-editor-namespace!' call in `load-init' used to
     ;; import *every* editor library into the user's module so that the
     ;; second line alone would work; that is not how a name is reached here
     ;; - it belongs to the file its Emacs source belongs to.)
@@ -564,7 +578,7 @@
       ;; is `(> displayable-buffers-len 0)': the files the command line
       ;; named are already displayed, so the splash goes below them.
       ;;--------------------------------------------------------------
-      (when (and (not inhibit-startup-screen) (splash-file))
+      (when (and (not (inhibit-startup-screen)) (splash-file))
         (normal-splash-screen concise)))
 
     (define (command-line-1--display displayable-buffers)
@@ -755,7 +769,7 @@ If this is nil, no message will be displayed."
         ;; `normal-top-level`'s tail (`:807`, `:848`) - measured on Emacs
         ;; 31.1, both ways - and that tail is the `else` here, this tree
         ;; having no `normal-top-level`.
-        (if (and (not inhibit-startup-screen) (splash-file))
+        (if (and (not (inhibit-startup-screen)) (splash-file))
             (begin
               (unless *inhibit-startup-hooks*
                 (run-hooks (*emacs-startup-hook*))
@@ -770,5 +784,23 @@ If this is nil, no message will be displayed."
             (unless *inhibit-startup-hooks*
               (run-hooks (*emacs-startup-hook*))
               (run-hooks (*window-setup-hook*))))))
+
+    (define (command-line-normalize-file-name file)
+      "Collapse multiple slashes to one, to handle non-Emacs file names."
+      ;; `startup.el:3160'.  The `system-type' arm that collapses
+      ;; backslashes on MS-DOS and Windows is not carried (`w32' is not
+      ;; ported); the GNU branch is the one this editor runs.
+      ;;--------------------------------------------------------------
+      (save-match-data
+        ;; Use arg 1 so that we don't collapse // at the start of the
+        ;; file name.  However, /// at the beginning is supposed to mean
+        ;; just /, not //.
+        (if (string-match "^///+" file)
+            (set! file (replace-match "/" #t #t file)))
+        (let loop ()
+          (when (string-match "//+" file 1)
+            (set! file (replace-match "/" #t #t file))
+            (loop)))
+        file))
 
     ))

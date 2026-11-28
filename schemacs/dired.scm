@@ -62,6 +62,7 @@
   ;; space appears on the header, as Emacs 31 shows it.
 
   (import
+    (only (schemacs custom) define-custom)
     (scheme base)
     (scheme char)
     ;; `read' is Guile's, and wants a port where Emacs's takes a
@@ -290,7 +291,26 @@
     ;; The options
     ;;------------------------------------------------------------------
 
-    (define *dired-listing-switches* (make-parameter "-al"))
+    (define-custom *dired-listing-switches* "-al"
+      "Switches passed to `ls' for Dired.  MUST contain the `l' option.
+May contain all other options that don't contradict `-l';
+may contain even `F', `b', `i' and `s'.  See also the variable
+`dired-ls-F-marks-symlinks' concerning the `F' switch.
+
+If you have files with names with embedded newline characters, adding
+`b' to the switches will allow Dired to handle those files better.
+
+Options that include embedded whitespace must be quoted
+like this: \"--option=value with spaces\"; you can use
+`combine-and-quote-strings' to produce the correct quoting of
+each option.
+
+On systems such as MS-DOS and MS-Windows, which use `ls' emulation in Lisp,
+some of the `ls' switches are not supported; see the doc string of
+`insert-directory' in `ls-lisp.el' for more details.
+
+For remote Dired buffers, this option supports connection-local values."
+      :type 'string :group 'dired)
     ;; ^ GNU Emacs's `dired-listing-switches' (dired.el:63): "Switches
     ;; passed to `ls' for Dired. MUST contain `l' for proper operation."
 
@@ -303,7 +323,11 @@
     (define *dired-del-marker* (make-parameter #\D))
     ;; ^ "Character used to flag files for deletion."
 
-    (define *dired-trivial-filenames* (make-parameter "\\`\\.\\.?\\'\\|\\`\\.?#"))
+    (define-custom *dired-trivial-filenames* "\\`\\.\\.?\\'\\|\\`\\.?#"
+      "Regexp of files to skip when finding first file of a directory.
+A value of nil means move to the subdir line.
+A value of t means move to first file."
+      :type '(choice (const :tag "Move to subdir" nil) (const :tag "Move to first" t) regexp) :group 'dired)
     ;; ^ "Regexp of files to skip when looking for the first file to
     ;; move to. If it appears at the beginning of a file name, that file
     ;; is not reached by `dired-next-line'."
@@ -330,9 +354,17 @@
     (define (set!dired-actual-switches! value)
       (set-buffer-local-value! (current-buffer) '*dired-actual-switches* value))
 
-    (define *dired-mode-hook* (make-parameter '()))
-    (define *dired-before-readin-hook* (make-parameter '()))
-    (define *dired-after-readin-hook* (make-parameter '()))
+    (define-custom *dired-mode-hook* '()
+      "Run at the very end of `dired-mode'."
+      :type 'hook :group 'dired)
+    (define-custom *dired-before-readin-hook* '()
+      "This hook is run before a Dired buffer is read in (created or reverted)."
+      :type 'hook :group 'dired)
+    (define-custom *dired-after-readin-hook* '()
+      "Hook run after each time a file or directory is read by Dired.
+After each listing of a file or directory, this hook is run
+with the buffer narrowed to the listing."
+      :type 'hook :group 'dired)
     ;; ^ "This hook is run before [after] reading a new directory into a
     ;; Dired buffer. It may be used to change `dired-actual-switches'."
 
@@ -383,7 +415,20 @@
     ;; perm bits to be non-blank, otherwise this matches one char too
     ;; early (looking backward)".
 
-    (define *dired-ls-F-marks-symlinks* (make-parameter #f))
+    (define-custom *dired-ls-F-marks-symlinks* #f
+      "Informs Dired about how `ls -lF' marks symbolic links.
+Set this to t if `ls' (or whatever program is specified by
+`insert-directory-program') with `-lF' marks the symbolic link
+itself with a trailing @ (usually the case under Ultrix and macOS).
+
+Example: if `ln -s foo bar; ls -F bar' gives `bar -> foo', set it to
+nil (the default), if it gives `bar@ -> foo', set it to t.
+
+Dired checks if there is really a @ appended.  Thus, if you have a
+marking `ls' program on one host and a non-marking on another host, and
+don't care about symbolic links which really end in a @, you can
+always set this variable to t."
+      :type 'boolean :group 'dired-mark)
     ;; ^ GNU Emacs's `dired-ls-F-marks-symlinks' (dired.el:157): "Informs
     ;; Dired about how `ls -lF' marks symbolic links. Set this to t if
     ;; `ls' ... with `-lF' marks the symbolic link itself with a trailing
@@ -735,7 +780,14 @@
           (set! content-point (dired--insert-disk-space opoint dir))
           (dired-insert-set-properties content-point (point)))))
 
-    (define *dired-free-space* (make-parameter 'first))
+    (define-custom *dired-free-space* 'first
+      "Whether and how to display the disk space usage info in Dired buffers.
+If nil, don't display.
+If `separate', display on a separate line, and include both the used
+and the free disk space.
+If `first', the default, display only the free disk space on the first
+line, following the directory name."
+      :type '(choice (const :tag "On separate line, display both used and free space" separate) (const :tag "On first line, after directory name, display only free space" first) (const :tag "Don't display disk space usage" nil)) :group 'dired :version "29.1")
     ;; ^ GNU Emacs's `dired-free-space' (dired.el:224), whose default is
     ;; `first': "Whether and how to display the disk space usage info in
     ;; Dired buffers. If nil, don't display. If `separate', display on a
@@ -949,12 +1001,27 @@ With a prefix arg, mark files on the next ARG lines."
     ;; The commands whose homes are `files.el' and `window.el'
     ;;------------------------------------------------------------------
 
-    (define *dired-movement-style* (make-parameter #f))
+    (define-custom *dired-movement-style* #f
+      "Non-nil means point skips empty lines when moving in Dired buffers.
+This affects only `dired-next-line', `dired-previous-line',
+`dired-next-dirline', `dired-prev-dirline'.
+
+Possible non-nil values:
+ * `cycle':   when moving from the last/first visible line, cycle back
+              to the first/last visible line.
+ * `bounded': don't move up/down if the current line is the
+              first/last visible line.
+ * `cycle-files': like `cycle' but moves only over file lines.
+ * `bounded-files': like `bounded' but moves only over file lines.
+Any other non-nil value is treated as `bounded'."
+      :type '(choice (const :tag "Move to any line" nil) (const :tag "Cycle through non-empty lines" cycle) (const :tag "Cycle through file lines" cycle-files) (const :tag "Stop on last/first non-empty line" bounded) (const :tag "Stop on last/first file line" bounded-files)) :group 'dired :version "30.1")
     ;; ^ GNU Emacs's `dired-movement-style' (dired.el:511), nil by
     ;; default: "Non-nil means point skips empty lines when moving in
     ;; Dired buffers."
 
-    (define *dired-kill-when-opening-new-dired-buffer* (make-parameter #t))
+    (define-custom *dired-kill-when-opening-new-dired-buffer* #t
+      "If non-nil, kill the current buffer when selecting a new directory."
+      :type 'boolean :group 'dired :version "28.1")
     ;; ^ GNU Emacs's `dired-kill-when-opening-new-dired-buffer', true by
     ;; default, which `dired--find-possibly-alternative-file' reads.
 
@@ -1050,7 +1117,7 @@ With a prefix arg, mark files on the next ARG lines."
                  (dired--find-file find-alternate-file file))
           (dired--find-file find-file file)))
 
-    (define-command (dired-other-window dirname switches)
+    (define-command (dired-other-window dirname . switches-arg)
       ;; GNU Emacs's `dired-other-window': "`Edit' directory DIRNAME.
       ;; Like `dired' but select in another window."
       ;;
@@ -1060,7 +1127,8 @@ With a prefix arg, mark files on the next ARG lines."
       ;;--------------------------------------------------------------
       "Edit directory DIRNAME, selecting it in another window."
       (interactive (dired-read-dir-and-switches "in other window "))
-      (let ((buf (dired-noselect dirname switches)))
+      (let* ((switches (and (pair? switches-arg) (car switches-arg)))
+             (buf (dired-noselect dirname switches)))
         (if buf
             (switch-to-buffer-other-window buf)
             (current-buffer))))
@@ -1123,7 +1191,10 @@ With a prefix arg, mark files on the next ARG lines."
     (define (set!dired-subdir-alist! value)
       (set-buffer-local-value! (current-buffer) '*dired-subdir-alist* value))
 
-    (define *dired-initial-position-hook* (make-parameter '()))
+    (define-custom *dired-initial-position-hook* '()
+      "Hook used to position point in a new Dired listing display.
+It is run by the function `dired-initial-position'."
+      :type 'hook :group 'dired :version "24.4")
     ;; ^ GNU Emacs's `dired-initial-position-hook' (dired.el): "Hook run
     ;; by `dired-initial-position'."
 
@@ -1982,7 +2053,15 @@ for SWITCHES."
                      "\"[^\"]*\"\\)\\)* *$"))
     ;; ^ "Regexp recognized by Dired to set `by name' mode."
 
-    (define *dired-switches-in-mode-line* (make-parameter #f))
+    (define-custom *dired-switches-in-mode-line* #f
+      "How to indicate `dired-actual-switches' in mode-line.
+Possible values:
+ * nil:      Indicate name-or-date sort order, if possible.
+             Else show full switches.
+ * `as-is':  Show full switches.
+ * Integer:  Show only the first N chars of full switches.
+ * Function: Pass `dired-actual-switches' as arg and show result."
+      :type '(choice (const :tag "Indicate by name or date, else full" nil) (const :tag "Show full switches" as-is) (integer :tag "Show first N chars of switches" :value 10) (function :tag "Format with function" :value identity)) :group 'dired :version "28.1")
     ;; ^ GNU Emacs's `dired-switches-in-mode-line' (dired.el:5145), whose
     ;; default is nil: "Indicate name-or-date sort order, if possible.
     ;; Else show full switches." The `as-is', integer and function arms of
@@ -2033,7 +2112,10 @@ for SWITCHES."
               (file-name-as-directory (abbreviate-file-name filename))
               (abbreviate-file-name filename)))))
 
-    (define *dired-check-symlinks* (make-parameter #t))
+    (define-custom *dired-check-symlinks* #t
+      "Whether symlinks are checked for validity.
+Set it to nil for remote directories, which suffer from a slow connection."
+      :type 'boolean :group 'dired :version "31.1")
     ;; ^ GNU Emacs's `dired-check-symlinks' (dired.el:769), whose default
     ;; is t: "Whether symlinks are checked for validity. Set it to nil for
     ;; remote directories, which suffer from a slow connection." The C
@@ -2300,7 +2382,20 @@ for SWITCHES."
 
     (define *dired-log-buffer* "*Dired log*")
     ;; ^ GNU Emacs's `dired-log-buffer' (dired.el:5043).
-    (define *dired-no-confirm* (make-parameter #f))
+    (define-custom *dired-no-confirm* #f
+      "Dired commands for which Dired should not popup list of affected files, or t.
+
+If non-nil, Dired will not pop up the list of files to be affected by
+some Dired commands, when asking for confirmation.  (Dired will still
+ask for confirmation, just without showing the affected files.)
+
+If the value is t, the list of affected files is never popped up.
+The value can also be a list of command symbols: then the list of the
+affected files will not be popped up only for the corresponding Dired
+commands.  Recognized command symbols are `byte-compile', `chgrp',
+`chmod', `chown', `compress', `copy', `delete', `hardlink', `load',
+`move', `print', `shell', `symlink', `touch' and `uncompress'."
+      :type '(choice (const :tag "Affected files never shown" t) (set (const byte-compile) (const chgrp) (const chmod) (const chown) (const compress) (const copy) (const delete) (const hardlink) (const load) (const move) (const print) (const shell) (const symlink) (const touch) (const uncompress))) :group 'dired)
     ;; ^ GNU Emacs's `dired-no-confirm' (dired.el:4485), whose default is
     ;; nil and which "can also be a list of command symbols" - `#f' or a
     ;; list here, since Elisp's nil is both.
@@ -2316,12 +2411,25 @@ for SWITCHES."
     ;; swap's arity. (`yes-or-no-p' itself now takes one argument, as
     ;; Emacs's does; it used to take the frame as well, and the closure
     ;; was what covered that.)
-    (define *dired-recursive-deletes* (make-parameter 'top))
+    (define-custom *dired-recursive-deletes* 'top
+      "Whether Dired deletes directories recursively.
+If nil, Dired will not delete non-empty directories.
+`always' means to delete non-empty directories recursively,
+without asking.  This is dangerous!
+`top' means to ask for each top-level directory specified by the
+Dired deletion command, and delete its subdirectories without
+asking.
+Any other value means to ask for each directory."
+      :type '(choice :tag "Delete non-empty directories" (const :tag "Yes" always) (const :tag "No--only delete empty directories" nil) (const :tag "Confirm for each directory" t) (const :tag "Confirm for each top directory only" top)) :group 'dired)
     ;; ^ GNU Emacs's `dired-recursive-deletes' (dired.el:4183), whose
     ;; default value is `top': "ask for each top directory only".
-    (define *dired-clean-up-buffers-too* (make-parameter #t))
+    (define-custom *dired-clean-up-buffers-too* #t
+      "Non-nil means offer to kill buffers visiting files and dirs deleted in Dired."
+      :type 'boolean :group 'dired)
     ;; ^ GNU Emacs's `dired-clean-up-buffers-too' (dired.el:4408).
-    (define *dired-clean-confirm-killing-deleted-buffers* (make-parameter #t))
+    (define-custom *dired-clean-confirm-killing-deleted-buffers* #t
+      "If nil, don't ask whether to kill buffers visiting deleted files."
+      :type 'boolean :group 'dired :version "26.1")
     ;; ^ GNU Emacs's `dired-clean-confirm-killing-deleted-buffers'
     ;; (dired.el:4413).
     (define (%dired-over-marks-walk body arg distinguish-one-marked)

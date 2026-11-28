@@ -65,7 +65,7 @@
 
   (export
    <marker>  markerp  make<marker>
-   make-marker  build-marker
+   make-marker  build-marker  move-marker
    marker-buffer  %marker-charpos  set!%marker-charpos
    marker-position  marker-last-position
    set-marker  set-marker-restricted  copy-marker
@@ -327,6 +327,11 @@
     ;;----------------------------------------------------------------
     ;; Asking
     ;;------------------------------------------------------------------
+
+    (define move-marker set-marker)
+    ;; ^ `(defalias 'move-marker #'set-marker)' (`subr.el:2264'). A plain
+    ;; value alias: it is not a command, so there is no command record to
+    ;; share, and a caller reads it as the procedure it is.
 
     (define (marker-position marker)
       ;; GNU Emacs's `marker-position' (`marker.c:447'): "Return the

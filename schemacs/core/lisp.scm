@@ -24,6 +24,7 @@
   ;; that.
 
   (import
+    (only (schemacs custom) define-custom)
     (scheme base)
     (only (guile) caddr)
     (prefix (schemacs keymap) km:)
@@ -67,7 +68,7 @@
           match-end match-beginning)
     ;; `narrow-to-defun`'s INCLUDE-COMMENTS walk reads the page delimiter
     ;; (`lisp.el:783`).
-    (only (schemacs textmodes paragraphs) *page-delimiter*))
+    (only (schemacs textmodes paragraphs) page-delimiter))
 
   (export
    buffer-end
@@ -91,7 +92,7 @@
 
   (begin
 
-    (define insert-pair-alist
+    (define-custom insert-pair-alist
       ;; GNU Emacs's `insert-pair-alist' (lisp.el:794), a defcustom.
       ;;--------------------------------------------------------------
       (list (list (char->integer #\() (char->integer #\)))
@@ -100,13 +101,33 @@
             (list (char->integer #\<) (char->integer #\>))
             (list (char->integer #\") (char->integer #\"))
             (list (char->integer #\') (char->integer #\'))
-            (list (char->integer #\`) (char->integer #\`))))
+            (list (char->integer #\`) (char->integer #\`)))
+      "Alist of paired characters inserted by `insert-pair'.
+Each element looks like (OPEN-CHAR CLOSE-CHAR) or (COMMAND-CHAR
+OPEN-CHAR CLOSE-CHAR).  The characters OPEN-CHAR and CLOSE-CHAR
+of the pair whose key is equal to the last input character with
+or without modifiers, are inserted by `insert-pair'.
+
+If COMMAND-CHAR is specified, it is a character that triggers the
+insertion of the open/close pair, and COMMAND-CHAR itself isn't
+inserted."
+      :type '(repeat (choice (list :tag "Pair" (character :tag "Open") (character :tag "Close")) (list :tag "Triple" (character :tag "Command") (character :tag "Open") (character :tag "Close")))) :group 'lisp :version "27.1")
 
     ;; ---------------------------------------------------------------
     ;; `forward-sexp' and the motion commands (`lisp/emacs-lisp/lisp.el').
     ;; ---------------------------------------------------------------
-    (define *defun-prompt-regexp* (make-parameter #f))
-    (define *parens-require-spaces* (make-parameter #t))
+    (define-custom *defun-prompt-regexp* #f
+      "If non-nil, matches a prefix on the line of a defun's opening paren.
+This regexp should begin with \"^\".  It is used to recognize a function's
+opening paren or brace when it is not in column 0.
+The prefix typically names the defun, and possibly gives its type and
+arguments.
+See function `beginning-of-defun'."
+      :type '(choice (const nil) regexp) :group 'lisp)
+    (define-custom *parens-require-spaces* #t
+      "If non-nil, add whitespace as needed when inserting parentheses.
+This affects `insert-parentheses' and `insert-pair'."
+      :type 'boolean :group 'lisp)
 
     (define (buffer-end arg)
       ;; GNU Emacs's `buffer-end' (`lisp.el:576'): "Return the \"far
@@ -751,9 +772,9 @@ Leave point after the first character."
             (close (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest))
                         (caddr rest))))
         (if (not (and open close))
-            (let ((pair (or (assq *last-command-event* insert-pair-alist)
+            (let ((pair (or (assq *last-command-event* (insert-pair-alist))
                             (assq (event-basic-type *last-command-event*)
-                                  insert-pair-alist))))
+                                  (insert-pair-alist)))))
               (if pair
                   (if (list-ref pair 2)
                       (begin (set! open (list-ref pair 1))
@@ -919,10 +940,10 @@ Interactively, the behavior depends on `narrow-to-defun-include-comments'."
                   (when (forward-comment -1) (loop)))
                 ;; "Move forwards past any page breaks within these
                 ;; comments."
-                (when (and (*page-delimiter*)
-                           (not (string=? (*page-delimiter*) "")))
+                (when (and (page-delimiter)
+                           (not (string=? (page-delimiter) "")))
                   (let loop ()
-                    (when (re-search-forward (*page-delimiter*) beg #t)
+                    (when (re-search-forward (page-delimiter) beg #t)
                       (loop))))
                 ;; "Lastly, move past any empty lines."
                 (skip-chars-forward "[:space:]\n")

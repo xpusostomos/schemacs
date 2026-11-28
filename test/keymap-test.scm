@@ -601,3 +601,49 @@
     (equal? seen (list 'my-filter (list 'quote command)))))
 
 (test-end "schemacs_keymap")
+
+;;------------------------------------------------------------------
+;; `copy-keymap' (`keymap.c:1018') - added for compile.el's toolbar map.
+;; The copy has the same definitions, and changing either side leaves
+;; the other alone; a subkeymap and the parent are copied recursively.
+;; Measured shapes on Emacs 31.1 (its `copy-keymap' shares nothing that
+;; is a keymap).
+(test-begin "schemacs_keymap_copy")
+
+(define copy-orig (make-sparse-keymap))
+(define copy-sub (make-sparse-keymap))
+(define copy-parent (make-sparse-keymap))
+(define (copy-cmd) 'orig)
+(define (copy-cmd-2) 'new)
+(define-key copy-orig (kbd "a") copy-cmd)
+(define-key copy-orig (kbd "C-c") copy-sub)
+(define-key copy-sub (kbd "b") copy-cmd)
+(define-key copy-parent (kbd "p") copy-cmd)
+(set-keymap-parent copy-orig copy-parent)
+(define copy-copy (copy-keymap copy-orig))
+
+(test-equal "an ordinary binding is in the copy"
+            copy-cmd (keymap-lookup copy-copy (kbd "a")))
+(test-equal "the parent is copied, so its binding is reachable"
+            copy-cmd (keymap-lookup copy-copy (kbd "p")))
+(test-equal "a subkeymap is copied, so its binding is reachable"
+            copy-cmd (keymap-lookup copy-copy (kbd "C-c b")))
+(test-assert "the copied parent is a different object"
+             (not (eq? (keymap-parent copy-copy) copy-parent)))
+(test-assert "the copied subkeymap is a different object"
+             (not (eq? (keymap-lookup copy-copy (kbd "C-c")) copy-sub)))
+
+(define-key copy-copy (kbd "a") copy-cmd-2)
+(define-key (keymap-lookup copy-copy (kbd "C-c")) (kbd "b") copy-cmd-2)
+(define-key (keymap-parent copy-copy) (kbd "q") copy-cmd-2)
+
+(test-equal "changing the copy's own binding leaves the original"
+            copy-cmd (keymap-lookup copy-orig (kbd "a")))
+(test-equal "changing the copied subkeymap leaves the original subkeymap"
+            copy-cmd (keymap-lookup copy-sub (kbd "b")))
+(test-equal "changing the copied parent leaves the original parent"
+            #f (keymap-lookup copy-parent (kbd "q")))
+(test-equal "the copy holds the change"
+            copy-cmd-2 (keymap-lookup copy-copy (kbd "q")))
+
+(test-end "schemacs_keymap_copy")

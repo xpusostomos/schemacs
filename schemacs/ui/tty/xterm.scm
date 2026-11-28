@@ -48,6 +48,7 @@
   ;; whatever was read that was not the reply.
 
   (import
+    (only (schemacs custom) define-custom)
     (scheme base)
     (scheme char)
     (only (scheme write) display)
@@ -418,12 +419,25 @@
     ;; disabled by default, and if it's disabled, C-y will incur a
     ;; timeout, so we only use it if the user explicitly requests it."
 
-    (define xterm-max-cut-length
+    (define-custom xterm-max-cut-length
       ;; GNU Emacs's `xterm-max-cut-length': "Maximum number of bytes
       ;; to cut into xterm using the OSC 52 sequence." Terminals
       ;; mistreat or ignore a sequence longer than their own limit.
       ;;--------------------------------------------------------------
-      (make-parameter 100000))
+       100000
+      "Maximum number of bytes to cut into xterm using the OSC 52 sequence.
+
+The OSC 52 sequence requires a terminator byte.  Some terminals will ignore or
+mistreat a terminated sequence that is longer than a certain size, usually to
+protect users from runaway sequences.
+
+This variable allows you to tweak the maximum number of bytes that will be sent
+using the OSC 52 sequence.
+
+If you select a region larger than this size, it won't be copied to your system
+clipboard.  Since clipboard data is base 64 encoded, the actual number of
+string bytes that can be copied is 3/4 of this value."
+      :type 'natnum :version "25.1")
 
     (define *xterm--set-selection* (make-parameter #f))
     (define *xterm--get-selection* (make-parameter #f))

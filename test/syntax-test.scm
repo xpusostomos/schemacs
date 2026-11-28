@@ -668,3 +668,45 @@
                 1 (point))))
 
 (test-end "schemacs_editor_silent_propertize")
+
+;;-------------------------------------------------------------
+;; Two rules of `syntax-propertize' that a scan walks straight into
+;;
+;; Both are Emacs 31.1's own answers for the same buffers and the same
+;; propertize functions (measured with `emacs -Q --batch').
+;;-------------------------------------------------------------
+(test-begin "schemacs_editor_propertize_sentinel")
+
+(with-buffer
+ (lambda (b)
+   (insert "0123456789abcdefghij")
+   (set-buffer-local-value!
+    b 'syntax-propertize-function
+    (lambda (start end)
+      ;; A function that calls `syntax-ppss', as groovy-mode's
+      ;; stringifiers do: it updates the parse cache, which makes
+      ;; `syntax-propertize' flush after the function returns. The C
+      ;; keeps the in-process sentinel bound through that flush
+      ;; (`syntax.el:455'-`:466'), and without the same extent the flush
+      ;; rewinds `syntax-propertize--done' to the chunk start - after
+      ;; which every character of the next parse re-ran the whole
+      ;; propertizer (measured: 8.5 s for one `syntax-ppss').
+      (syntax-ppss)
+      (put-text-property start end 'syntax-table '(1))))
+   (syntax-propertize 10)
+   (test-equal "the flush after the function leaves --done at the chunk end"
+               21 (buffer-local-value b 'syntax-propertize--done))))
+
+(with-buffer
+ (lambda (b)
+   (insert "#abc\ndef\n")
+   (set-buffer-local-value!
+    b 'syntax-propertize-function
+    (lambda (start end)
+      ;; The mode's function writes a comment-start property on the
+      ;; buffer's *first* character - groovy-mode's shebang rule.
+      (put-text-property 1 2 'syntax-table (string-to-syntax "< b"))))
+   (test-equal "a property written on the first character is read by the first parse"
+               #t (list-ref (syntax-ppss 3) 4))))
+
+(test-end "schemacs_editor_propertize_sentinel")

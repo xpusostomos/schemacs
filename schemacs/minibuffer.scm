@@ -50,7 +50,8 @@
     ;; `custom.scm' imports nothing that could come back here, so this is
     ;; a safe edge. Emacs needs no import: `read-variable' is
     ;; `minibuf.c'`s and reads `Vobarray' directly.
-    (only (schemacs custom) custom-variable-names custom-variable-p)
+    (only (schemacs custom) custom-variable-names custom-variable-p
+          define-custom)
     (only (schemacs command)
           current-prefix-arg define-command run-command uarg->integer
           *command-table* command-value-of command-interactive-spec
@@ -126,7 +127,7 @@
     (only (schemacs editfns)
           buffer-substring buffer-substring-no-properties
           char-after char-before delete-region eolp forward-line goto-char
-          insert
+          insert mark-marker
           line-end-position
           line-number-at-pos message point point-max point-min
           save-excursion
@@ -139,7 +140,7 @@
     (only (schemacs fns) %count-lines)
     ;; `forward-char' is `cmds.c''s and lives in `(schemacs cmds)'.
     (only (schemacs cmds) forward-char)
-    (only (schemacs search) search-backward search-forward)
+    (only (schemacs search) search-backward search-forward string-match)
     ;; `current-column' is indent.c's, which this library is the first
     ;; user of - `set-fill-column''s bare-C-u case reads it.
     ;; `line-next-start' and `window-line-rows-at' are what
@@ -176,13 +177,30 @@
        ;; the region-overlay updater's minibuffer arm asks
        ;; `minibuffer-selected-window`, which is this library's; the seam
        ;; is installed at the end of the file.
-       *minibuffer-selected-window-function*)
+       *minibuffer-selected-window-function*
+       ;; the shell-command section at the end of this file: the
+       ;; collector it calls through `*shell-command-function*`, and
+       ;; the mark dance its synchronous arm ends with.
+       shell-command-to-string *shell-command-function*
+       *shell-command-default-error-buffer* *shell-command-prompt-show-cwd*
+       mark)
+    ;; `call-process-shell-command` (`subr.el`, placed in callproc.scm
+    ;; where `call-process` lives); `shell-command`'s synchronous arm
+    ;; runs it.
+    (only (schemacs callproc) call-process-shell-command)
+    ;; `shell-command`'s remote-file check: `fileio.c`'s two name
+    ;; helpers.  **`files.el` is not importable here** (it is above this
+    ;; library), so its `make-temp-file`, `abbreviate-file-name` and
+    ;; `file-relative-name` cannot be reached - the two uses are named
+    ;; gaps in the command below.
+    (only (schemacs fileio) directory-file-name find-file-name-handler)
     ;; `minibuffer-message` is an *overlay* with an `after-string`
     ;; (`minibuffer.el:836`), which is what draws it after the input
     ;; instead of over it - and the two message hooks in
     ;; `(schemacs frame)` are this library's, installed below.
     (only (schemacs buffer)
-          make-overlay overlay-put delete-overlay overlays-at)
+          make-overlay overlay-put delete-overlay overlays-at
+          barf-if-buffer-read-only default-directory)
     (only (schemacs core timer) cancel-timer run-at-time)
     ;; `cursor-in-echo-area` is `dispnew.c`'s; `read-key`'s prompt puts the
     ;; cursor in the echo area, which is what `read-char-from-minibuffer`
@@ -190,7 +208,7 @@
     (only (schemacs dispnew) *cursor-in-echo-area*)
     ;; `minibuffer_unwind` reads the start and point `set_window_buffer`
     ;; recorded as markers.
-    (only (schemacs marker) marker-position)
+    (only (schemacs marker) marker-position set-marker)
     (only (schemacs frame)
           *current-frame* *echo-area-buffer* *minibuffer*
           *set-message-function* *clear-message-function* *minibuf-0*
@@ -201,7 +219,8 @@
           window-list window-width
           ;; the completions window's display, as
           ;; `completion--in-region-1` reads and moves it
-          frame-visible-p set-window-start! window-frame window-point)
+          frame-visible-p set-window-start! %window-start-set!
+          window-frame window-point)
     ;; `try-completion' and `all-completions' are `minibuf.c''s and live in
     ;; `(schemacs minibuf)'; this library is `minibuffer.el' and uses
     ;; them rather than defining them.
@@ -212,7 +231,7 @@
           all-completions test-completion try-completion)
     ;; `apply-partially' is `subr.el''s, and `internal-complete-buffer-except'
     ;; is written with it, as Emacs writes it.
-    (only (schemacs subr) apply-partially error-message-string)
+    (only (schemacs subr) apply-partially error-message-string user-error)
     ;; `caddr' is `(scheme cxr)'s: a style's entry in
     ;; `completion-styles-alist' is a four-element list.
     (only (scheme cxr) caddr)
@@ -337,9 +356,12 @@ read-number-history
    make<minibuffer>
    minibuffer-complete
    minibuffer-completion-help
+   *minibuffer-depth* minibuffer-depth active-minibuffer-window
+   *enable-recursive-minibuffers*
+   *read-hide-char* delete-minibuffer-contents
    minibuffer-contents minibuffer-contents-no-properties
    minibuffer-cursor-column
-   minibuffer-history
+   minibuffer-history minibuffer-history-search-history
    minibuffer-insert!
    minibuffer-local-completion-map
    minibuffer-local-map
@@ -355,7 +377,7 @@ read-number-history
    previous-line-or-history-element
    read-char-from-minibuffer read-char-choice
    read-from-minibuffer exit-minibuffer
-   read-string
+   read-string read-shell-command
    read-command read-variable read-minibuffer eval-minibuffer
    custom-variable-history
    ;; the history record itself, for the libraries that hold their own
@@ -369,6 +391,27 @@ read-number-history
    )
 
   (begin
+
+    (define *minibuffer-depth* (make-parameter 0))
+    ;; ^ GNU Emacs's `minibuf_level` (`minibuf.c`): how many minibuffers
+    ;; are being read. Incremented by `read-minibuffer-1` around the
+    ;; recursive edit, which is where `read_minibuf` increments it.
+
+    (define *enable-recursive-minibuffers* (make-parameter #f))
+    ;; ^ GNU Emacs's `enable-recursive-minibuffers` (`minibuf.c:2605`):
+    ;; "Non-nil means commands can use the minibuffer recursively.
+    ;; If this is nil, you cannot use the minibuffer while you are using
+    ;; it." A parameter because Elisp `let`-binds it - `read-passwd`
+    ;; does, and so does `minibuffer-with-setup-hook`'s callers in
+    ;; Emacs that read a second prompt - and the guard below is
+    ;; `read_minibuf`'s, including which of its two arms is which.
+
+    (define *read-hide-char* (make-parameter #f))
+    ;; ^ GNU Emacs's `read-hide-char` (`minibuf.c:2700'): "Whether to
+    ;; hide input characters in noninteractive mode. If non-nil, it
+    ;; must be a character... This variable also overrides the default
+    ;; character that `read-passwd` uses to hide passwords."  A
+    ;; parameter because `read-passwd` `let`-binds it.
 
     (define *minibuffer-selected-window* (make-parameter #f))
     ;; ^ GNU Emacs's `Vminibuffer_selected_window` (`minibuf.c`): the
@@ -423,6 +466,14 @@ read-number-history
     ;; the history records are this library's, and `subr.sld' cannot
     ;; import them: minibuffer.sld already imports keyboard.sld, which
     ;; imports subr.sld, so subr -> minibuffer would be a cycle.
+    (define minibuffer-history-search-history (make<history> '()))
+    ;; ^ GNU Emacs's `minibuffer-history-search-history` (`simple.el:2886',
+    ;; a plain `(defvar ... nil)'): the history the *search* regexp
+    ;; prompts share - `comint-regexp-arg` and `term.el`'s. It lives here
+    ;; with the other histories for the reason `buffer-name-history`
+    ;; does below: the `<history>' record is this library's, and
+    ;; `simple.scm` is below it. Emacs's variable holds a list this tree
+    ;; would have to wrap anyway.
     (define buffer-name-history (make<history> '()))
     ;; ^ GNU Emacs's `buffer-name-history' (`minibuf.c:2515', the C's
     ;; `DEFSYM'/`Fset (..., Qnil)' pair - the same two lines that make
@@ -584,7 +635,18 @@ read-number-history
       ;;--------------------------------------------------------------
       (when (and state mini (window-type? mini))
         (set-window-buffer! mini (car state))
-        (set-window-start! mini (cadr state))
+        ;; **The raw start write, not `set-window-start!`.** The DEFUN
+        ;; also sets `w->force_start` (`window.c:1968`), and
+        ;; `scroll-to-cursor!` then lays the window out from that start
+        ;; and moves *point* into view - which, on a returned prompt,
+        ;; moved the enclosing prompt's point to the beginning of its
+        ;; buffer the next time it was redisplayed. `set-window-buffer!`
+        ;; writes its start the same way and for the same reason: this
+        ;; is state restoration, not an instruction to the redisplay.
+        ;; Found by a nested minibuffer read (an `enable-recursive-
+        ;; minibuffers` prompt inside another), where the outer prompt's
+        ;; answer then came back as "".
+        (%window-start-set! mini (cadr state))
         (set-window-point! mini (caddr state))))
 
     (define (read-minibuffer-1 prompt initial keymap history default)
@@ -599,6 +661,24 @@ read-number-history
       ;; counts the same position from zero and adds one before it gets
       ;; here (minibuffer.el:5214), because the two functions disagree.
       ;;--------------------------------------------------------------
+      ;; GNU Emacs's recursion guard (`minibuf.c:641`): "you cannot use
+      ;; the minibuffer while you are using it" unless the variable
+      ;; says so. With the minibuffer window selected the C signals
+      ;; `user-error`; from another window it throws to `exit`, which
+      ;; abandons the active minibuffer - here `exit-recursive-edit`,
+      ;; which leaves the enclosing recursive edit with the string
+      ;; (that is what the throw's value becomes in the C as well). The
+      ;; second arm is reached only after a click or `C-x o` took the
+      ;; selection out of the prompt and a command then asked a
+      ;; question; the first is the ordinary one.
+      (when (and (not (*enable-recursive-minibuffers*))
+                 (> (*minibuffer-depth*) 0))
+        (let ((str "Command attempted to use minibuffer while in minibuffer"))
+          (if (and (*current-frame*)
+                   (eq? (selected-window)
+                        (frame-minibuffer-window (*current-frame*))))
+              (user-error str)
+              (exit-recursive-edit str))))
       (let* ((frame (*current-frame*))
              ;; **The selected window when the prompt began.** The read
              ;; selects the minibuffer window (`read_minibuf`,
@@ -726,6 +806,7 @@ read-number-history
           ;; after the prompt acts on it: write-file then saved the echo
           ;; editor's text to the file it was given.
           (parameterize ((*minibuffer* mb)
+                         (*minibuffer-depth* (+ 1 (*minibuffer-depth*)))
                          (*echo-area-buffer* ed)
                          ;; the window being edited, which the read is
                          ;; about to take the selection from
@@ -902,6 +983,35 @@ read-number-history
       ;; `(point-min)` (`:521`).
       ;;--------------------------------------------------------------
       (or (%minibuffer-prompt-end (*minibuffer*)) (point-min)))
+
+    (define (minibuffer-depth)
+      "Return current depth of activations of minibuffer, a nonnegative integer."
+      ;; `minibuf.c`: `minibuf_level`.
+      ;;--------------------------------------------------------------
+      (*minibuffer-depth*))
+
+    (define (active-minibuffer-window)
+      "Return the currently active minibuffer window, or nil if none."
+      ;; `minibuf.c:215`.  Emacs walks every frame for the window
+      ;; displaying the innermost minibuffer buffer; this tree draws the
+      ;; prompt on the current frame only (`render!` gates the echo area
+      ;; on the selected frame), so that frame's minibuffer window is the
+      ;; answer - a named departure for a session with more than one
+      ;; frame where another frame is selected mid-prompt.
+      ;;--------------------------------------------------------------
+      (and (> (*minibuffer-depth*) 0)
+           (*current-frame*)
+           (frame-minibuffer-window (*current-frame*))))
+
+    (define-command (delete-minibuffer-contents)
+      "Delete all user input in a minibuffer.
+If the current buffer is not a minibuffer, erase its entire contents."
+      ;; `minibuffer.el:1084'.  Emacs's comment: "We used to do
+      ;; `delete-field' here, but when file name shadowing is on, the
+      ;; field doesn't cover the entire minibuffer contents."
+      ;;--------------------------------------------------------------
+      (interactive)
+      (delete-region (minibuffer-prompt-end) (point-max)))
 
     (define-command (next-line-or-history-element arg)
       ;; GNU Emacs's `next-line-or-history-element' (`simple.el:3136'):
@@ -1483,7 +1593,7 @@ previous element of the minibuffer history in the minibuffer."
     ;; is what makes `basic' (prefix) and `substring' both available
     ;; without either having to know about the other.
 
-    (define *completion-styles*
+    (define-custom *completion-styles*
       ;; GNU Emacs's `completion-styles'. Emacs's default is
       ;; `(basic partial-completion emacs22)'; `partial-completion' is
       ;; the PCM pattern engine and `emacs22' is prefix completion on the
@@ -1492,7 +1602,21 @@ previous element of the minibuffer history in the minibuffer."
       ;; are the first and the one most people reach for, so the default
       ;; is those.
       ;;--------------------------------------------------------------
-      (make-parameter '(basic substring)))
+       '(basic substring)
+      "List of completion styles to use.
+An element should be a symbol which is listed in
+`completion-styles-alist'.
+
+An element can also be a list of the form
+(STYLE ((VARIABLE VALUE) ...))
+STYLE must be a symbol listed in `completion-styles-alist', followed by
+a `let'-style list of variable/value pairs.  VARIABLE will be bound to
+VALUE (without evaluating it) while the style is handling completion.
+This allows repeating the same style with different configurations.
+
+Note that `completion-category-overrides' may override these
+styles for specific categories, such as files, buffers, etc."
+      :type '(repeat :tag "insert a new menu to add more styles" (single-or-list (choice :convert-widget completion--update-styles-options) (repeat :tag "Variable overrides" (group variable sexp)))) :version "31.1")
 
     (define (completion-styles-alist)
       ;; GNU Emacs's `completion-styles-alist': each style as
@@ -1745,7 +1869,7 @@ previous element of the minibuffer history in the minibuffer."
       ;;--------------------------------------------------------------
       (make-parameter #f))
 
-    (define *completion-auto-help*
+    (define-custom *completion-auto-help*
       ;; GNU Emacs's `completion-auto-help': whether a completion that
       ;; cannot go further shows the candidates on its own, and it is
       ;; true by default, as Emacs's is.
@@ -1755,7 +1879,20 @@ previous element of the minibuffer history in the minibuffer."
       ;; implemented here, so `lazy' - the second TAB rather than the
       ;; first - is not among them.
       ;;--------------------------------------------------------------
-      (make-parameter #t))
+       #t
+      "Non-nil means automatically provide help for invalid completion input.
+If the value is t, the *Completions* buffer is displayed whenever completion
+is requested but cannot be done.
+If the value is `lazy', the *Completions* buffer is only displayed after
+the second failed attempt to complete.
+If the value is `always', the *Completions* buffer is always shown
+after a completion attempt, and the list of completions is updated if
+already visible.
+If the value is `visible', the *Completions* buffer is displayed
+whenever completion is requested but cannot be done for the first time,
+but remains visible thereafter, and the list of completions in it is
+updated for subsequent attempts to complete."
+      :type '(choice (const :tag "Don't show" nil) (const :tag "Show only when cannot complete" t) (const :tag "Show after second failed completion attempt" lazy) (const :tag "Leave visible after first failed completion" visible) (const :tag "Always visible" always)))
 
     (define (minibuffer--bitset modified completions exact)
       ;; GNU Emacs's `minibuffer--bitset': what a completion did, as three
@@ -2265,7 +2402,16 @@ previous element of the minibuffer history in the minibuffer."
                                  require-match #f buffer-name-history
                                  def))))))
 
-    (define *confirm-nonexistent-file-or-buffer* (make-parameter 'after-completion))
+    (define-custom *confirm-nonexistent-file-or-buffer* 'after-completion
+      "Whether confirmation is requested before visiting a new file or buffer.
+If nil, confirmation is not requested.
+If the value is `after-completion', confirmation is requested
+ only if the user called `minibuffer-complete' right before
+ `minibuffer-complete-and-exit'.
+Any other non-nil value means to request confirmation.
+
+This affects commands like `switch-to-buffer' and `find-file'."
+      :type '(choice (const :tag "After completion" after-completion) (const :tag "Never" nil) (other :tag "Always" t)) :group 'find-file :version "23.1")
     ;; ^ GNU Emacs's `confirm-nonexistent-file-or-buffer' (`files.el:1898'):
     ;; "Whether confirmation is requested before visiting a new file or
     ;; buffer. If nil, confirmation is not requested. If the value is
@@ -2407,7 +2553,28 @@ previous element of the minibuffer history in the minibuffer."
     ;; whether `minibuffer-local-filename-completion-map' is layered
     ;; over the completion map. `read-file-name' binds it.
 
-    (define *insert-default-directory* (make-parameter #t))
+    (define-custom *insert-default-directory* #t
+      "Non-nil means when reading a filename start with default dir in minibuffer.
+
+When the initial minibuffer contents show a name of a file or a directory,
+typing RETURN without editing the initial contents is equivalent to typing
+the default file name.
+
+If this variable is non-nil, the minibuffer contents are always
+initially non-empty, and typing RETURN without editing will fetch the
+default name, if one is provided.  Note however that this default name
+is not necessarily the same as initial contents inserted in the minibuffer,
+if the initial contents is just the default directory.
+
+If this variable is nil, the minibuffer often starts out empty.  In
+that case you may have to explicitly fetch the next history element to
+request the default name; typing RETURN without editing will leave
+the minibuffer empty.
+
+For some commands, exiting with an empty minibuffer has a special meaning,
+such as making the current buffer visit no file in the case of
+`set-visited-file-name'."
+      :type 'boolean)
     ;; ^ GNU Emacs's `insert-default-directory' (minibuffer.el:3915):
     ;; "Non-nil means when reading a filename start with the default
     ;; directory in the minibuffer." `read-file-name' puts the directory
@@ -2491,19 +2658,28 @@ previous element of the minibuffer history in the minibuffer."
                  'completions-first-difference)
              buffer)))))
 
-    (define *completion-show-help*
+    (define-custom *completion-show-help*
       ;; GNU Emacs's `completion-show-help': whether the `*Completions*'
       ;; buffer carries the two lines that say how to use it.
       ;;--------------------------------------------------------------
-      (make-parameter #t))
+       #t
+      "Non-nil means show help message in *Completions* buffer."
+      :type 'boolean :group 'completion :version "22.1")
 
-    (define *completions-header-format*
+    (define-custom *completions-header-format*
       ;; GNU Emacs's `completions-header-format': the heading line at the
       ;; top of the list, whose one `%s' is the number of candidates, or
       ;; #f for a list with no heading at all. Emacs puts the `shadow'
       ;; face on it.
       ;;--------------------------------------------------------------
-      (make-parameter "%s possible completions:\n"))
+       "%s possible completions:\n"
+      "If non-nil, the format string for completions heading line.
+The heading line is inserted before the completions, and is intended
+to summarize the completions.
+The format string may include one %s, which will be replaced with
+the total count of possible completions.
+If this is nil, no heading line will be shown."
+      :type '(choice (const :tag "No heading line" nil) (string :tag "Format string for heading line")) :version "29.1")
 
     (define (completion-setup-function buffer)
       ;; GNU Emacs's `completion-setup-function', which writes the two
@@ -2601,7 +2777,7 @@ previous element of the minibuffer history in the minibuffer."
         (remove-text-properties start (buffer-z buffer)
                                 '(completion--string) buffer)))
 
-    (define *completions-format*
+    (define-custom *completions-format*
       ;; GNU Emacs's `completions-format': whether the candidates are
       ;; laid out across the window in columns or down the screen one
       ;; per line. `horizontal' is Emacs's default; `one-column' has no
@@ -2610,7 +2786,15 @@ previous element of the minibuffer history in the minibuffer."
       ;; `vertical' arrangement and the truncation of a list taller
       ;; than the window (`completions-max-height') are not implemented.
       ;;--------------------------------------------------------------
-      (make-parameter 'horizontal))
+       'horizontal
+      "Define the appearance and sorting of completions.
+If the value is `vertical', display completions sorted vertically
+in columns in the *Completions* buffer.
+If the value is `horizontal', display completions sorted in columns
+horizontally in alphabetical order, rather than down the screen.
+If the value is `one-column', display completions down the screen
+in one column."
+      :type '(choice (const horizontal) (const vertical) (const one-column)) :version "23.2")
 
     (define (completion--insert-strings buffer completions)
       ;; GNU Emacs's `completion--insert-strings': how many columns the
@@ -2756,7 +2940,9 @@ previous element of the minibuffer history in the minibuffer."
           (set!buffer-read-only buffer #t))
         buffer))
 
-    (define *completions-max-height* (make-parameter #f))
+    (define-custom *completions-max-height* #f
+      "Maximum height for *Completions* buffer window."
+      :type '(choice (const nil) natnum) :version "29.1")
     ;; ^ GNU Emacs's `completions-max-height': the most lines the
     ;; `*Completions*' window may have. Nil - Emacs's default - means
     ;; the window may grow to the frame.
@@ -2795,8 +2981,8 @@ previous element of the minibuffer history in the minibuffer."
              (max-height (or (*completions-max-height*)
                              (max 1
                                   (- (- (frame-height (*current-frame*)) 1)
-                                     window-min-height)))))
-        (min (max window-min-height needed) max-height)))
+                                     (window-min-height))))))
+        (min (max (window-min-height) needed) max-height)))
 
     (define (completion-display-window buffer)
       ;; Put the `*Completions*' buffer in a window, and answer with the
@@ -2822,7 +3008,7 @@ previous element of the minibuffer history in the minibuffer."
                           (list-ref windows (- (length windows) 1)))))
         (if (and bottom (eq? (window-buffer bottom) buffer))
             (begin (record-buffer! buffer) bottom)
-            (split-main-window-below buffer window-min-height))))
+            (split-main-window-below buffer (window-min-height)))))
 
     (define (completion-fit-window buffer)
       ;; Size the `*Completions*' window to its list, and answer with it:
@@ -2955,7 +3141,17 @@ previous element of the minibuffer history in the minibuffer."
     ;; (`minibuffer.el:797`): "Text properties added to the text shown by
     ;; `minibuffer-message'." Nil by default.
 
-    (define *minibuffer-message-clear-timeout* (make-parameter #f))
+    (define-custom *minibuffer-message-clear-timeout* #f
+      "How long to display an echo-area message when the minibuffer is active.
+If the value is a number, it is the time in seconds after which to
+remove the echo-area message from the active minibuffer.
+If the value is not a number, such messages are never removed,
+and their text is displayed until the next input event arrives.
+Unlike `minibuffer-message-timeout' used by `minibuffer-message',
+this option affects the pair of functions `set-minibuffer-message'
+and `clear-minibuffer-message' called automatically via
+`set-message-function' and `clear-message-function'."
+      :type '(choice (const :tag "Never time out" nil) (integer :tag "Wait for the number of seconds" 2)) :version "27.1")
     ;; ^ GNU Emacs's `minibuffer-message-clear-timeout`
     ;; (`minibuffer.el:864`): how long a message routed through
     ;; `message` stays while a prompt is up. A number is a timeout; nil,
@@ -3525,13 +3721,23 @@ previous element of the minibuffer history in the minibuffer."
     ;; this library (see `read-number-history' above).
     ;;----------------------------------------------------------------
 
-    (define minibuffer-default-prompt-format
+    (define-custom minibuffer-default-prompt-format
       ;; GNU Emacs's `minibuffer-default-prompt-format' (minibuffer.el:5485):
       ;; "Format string used to output "default" values" - the
       ;; "(default 50)" in "Number of articles (default 50): ". It is
       ;; read-number's, below, and any other prompt that names its default.
       ;;--------------------------------------------------------------
-      " (default %s)")
+      " (default %s)"
+      "Format string used to output \"default\" values.
+When prompting for input, there will often be a default value,
+leading to prompts like \"Number of articles (default 50): \".
+The \"default\" part of that prompt is controlled by this
+variable, and can be set to, for instance, \" [%s]\" if you want
+a shorter displayed prompt, or \"\", if you don't want to display
+the default at all.
+
+This variable is used by the `format-prompt' function."
+      :type 'string :version "28.1")
 
     (define (minibuffer-default-clause default)
       ;; `minibuffer-default-prompt-format' with DEFAULT written into it:
@@ -3545,7 +3751,7 @@ previous element of the minibuffer history in the minibuffer."
       ;; `" [%s]"' as the way a user shortens it. Emacs fills the field
       ;; with whatever `format' prints, so a number comes out as digits.
       ;;--------------------------------------------------------------
-      (let* ((format-string minibuffer-default-prompt-format)
+      (let* ((format-string (minibuffer-default-prompt-format))
              (value (if (pair? default) (car default) default))
              (text (if (string? value) value (format #f "~a" value)))
              (at (string-contains format-string "%s")))
@@ -3895,12 +4101,19 @@ Just \\[universal-argument] as argument means to use the current column."
     ;; echo area, `eval-expression-print-format''s octal/hex/character
     ;; suffix for an integer, and a `*Backtrace*' buffer when it raises.
 
-    (define *eval-expression-print-maximum-character* (make-parameter 127))
+    (define-custom *eval-expression-print-maximum-character* 127
+      "The largest integer that will be displayed as a character.
+This affects printing by `eval-expression' (via
+`eval-expression-print-format')."
+      :type '(choice (const :tag "ASCII characters" 127) (const :tag "All characters" 4194303) (integer :tag "Max codepoint to display as character")) :group 'lisp :version "26.1")
     ;; ^ GNU Emacs's `eval-expression-print-maximum-character'
     ;; (`simple.el:2034'): "The largest integer that will be displayed as
     ;; a character." 127 by default.
 
-    (define *eval-expression-debug-on-error* (make-parameter #t))
+    (define-custom *eval-expression-debug-on-error* #t
+      "If non-nil set `debug-on-error' to t in `eval-expression'.
+If nil, don't change the value of `debug-on-error'."
+      :type 'boolean :group 'lisp :version "21.1")
     ;; ^ `eval-expression-debug-on-error' (`simple.el:2027'): "If non-nil
     ;; set `debug-on-error' to t in `eval-expression'." On by default,
     ;; which is why an error puts up a backtrace.
@@ -4392,5 +4605,181 @@ else is Emacs's - the `Eval: ' prompt, the result echoed, and a
     ;; function, and `simple.scm` is below this library. Installed here,
     ;; after the definition, because a seam names a procedure and the
     ;; procedure has to exist when the form runs.
+
+
+    ;;------------------------------------------------------------------
+    ;; "Executing external commands" - the part of `simple.el`'s
+    ;; shell-command section that PROMPTS, which is why it lives here
+    ;; (the `goto-line` placement rule).  The synchronous
+    ;; output-to-current-buffer path is ported whole - it is what
+    ;; `shell-command-to-string` runs - and the two other arms are named
+    ;; gaps: the separate-buffer path is `shell-command-on-region`, and
+    ;; the asynchronous one is built on `start-process` (process.c),
+    ;; which this tree does not have yet.  `shell-command-to-string`
+    ;; itself is `simple.scm`'s, and reaches the command through
+    ;; `*shell-command-function*`, installed at the end of this
+    ;; section.
+    ;;------------------------------------------------------------------
+
+    (define-custom *shell-command-dont-erase-buffer* #f
+      "Whether to erase the output buffer before executing shell command."
+      :type '(choice (const :tag "Erase output buffer if not the current one" nil)
+                     (const :tag "Always erase output buffer" erase)
+                     (const :tag "Set point to beginning of last output" beg-last-out)
+                     (const :tag "Set point to end of last output" end-last-out)
+                     (const :tag "Save point" save-point))
+      :group 'shell
+      :version "27.1")
+
+    (define shell-command-saved-pos '())
+    ;; "Record of point positions in output buffers after command
+    ;; completion.  The value is an alist whose elements are of the form
+    ;; (BUFFER . POS)..."
+
+    (define (shell-command-save-pos-or-erase . args)
+      ;; GNU Emacs's `shell-command-save-pos-or-erase`
+      ;; (`simple.el:4504`): "Store a buffer position or erase the
+      ;; buffer.  Optional argument OUTPUT-TO-CURRENT-BUFFER, if non-nil,
+      ;; means that the output of the shell command goes to the caller
+      ;; current buffer."
+      (let ((output-to-current-buffer (and (pair? args) (car args)))
+            (sym (*shell-command-dont-erase-buffer*)))
+        (set!buffer-read-only (current-buffer) #f)
+        ;; "Setting buffer-read-only to nil doesn't suffice if some text
+        ;; has a non-nil read-only property, which comint sometimes adds
+        ;; for prompts."
+        (let ((pos (cond ((eq? sym 'save-point)
+                          (if (not output-to-current-buffer) (point)))
+                         ((eq? sym 'beg-last-out)
+                          (if (not output-to-current-buffer) (point-max)))
+                         ((or (eq? sym 'erase)
+                              (and (not sym) (not output-to-current-buffer)))
+                          (parameterize ((*inhibit-read-only* #t))
+                            (erase-buffer)
+                            #f)))))
+          (when pos
+            (goto-char (point-max))
+            (set! shell-command-saved-pos
+                  (cons (cons (current-buffer) pos) shell-command-saved-pos))))))
+
+    (define shell-command-history (make<history> '()))
+    ;; `shell-command-history` (`simple.el:4352`): "History list for
+    ;; `shell-command`."
+
+    (define minibuffer-local-shell-command-map
+      ;; GNU Emacs's `minibuffer-local-shell-command-map`
+      ;; (`simple.el:4387`): "Keymap used for completing shell commands
+      ;; in minibuffer."
+      ;;
+      ;; **The TAB binding is not carried**: it is `completion-at-point`
+      ;; in the C and this tree has no `completion-at-point` (the whole
+      ;; `completion-in-region` half of `minibuffer.el` is unported).
+      ;; The completion-list keys are.
+      (let ((map (km:make-sparse-keymap)))
+        (km:set-keymap-parent map minibuffer-local-map)
+        (km:define-key map (kbd "M-<up>") minibuffer-previous-completion)
+        (km:define-key map (kbd "M-<down>") minibuffer-next-completion)
+        (km:define-key map (kbd "M-RET") minibuffer-choose-completion)
+        map))
+
+    (define (read-shell-command prompt . rest)
+      ;; GNU Emacs's `read-shell-command` (`simple.el:4398`): "Read a
+      ;; shell command from the minibuffer, and return it as a string."
+      ;;
+      ;; **Not carried**: the C's `(require 'shell)` with
+      ;; `shell-completion-vars` and `minibuffer-default-add-function`
+      ;; (`minibuffer-default-add-shell-commands`, which needs
+      ;; `dired-aux`'s `shell-command-guess`).  Both make the prompt's
+      ;; completion shell-aware; the read itself, the map and the
+      ;; history are the C's.
+      ;;--------------------------------------------------------------
+      (let* ((initial (and (pair? rest) (car rest)))
+             (hist (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+             (args (if (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)))
+                       (cddr rest)
+                       '()))
+             (default (and (pair? args) (car args))))
+        (read-from-minibuffer prompt initial
+                              minibuffer-local-shell-command-map
+                              (or hist shell-command-history)
+                              default)))
+
+    (define-command (shell-command command . rest)
+      "Execute string COMMAND in inferior shell; display output, if any.
+With prefix argument, insert the COMMAND's output at point.
+
+Interactively, prompt for COMMAND in the minibuffer.
+
+If COMMAND ends in `&', execute it asynchronously.  Otherwise
+COMMAND is executed synchronously.
+
+**Not carried yet**: the asynchronous arm (it is built on
+`start-process`, which needs the process layer), and the
+separate-output-buffer arm (it is `shell-command-on-region`, which is
+not ported).  The synchronous output-to-current-buffer arm is Emacs's
+whole, and it is the one `shell-command-to-string` runs."
+      (interactive
+       ;; **Two named gaps in this spec**: Emacs abbreviates the
+       ;; directory in the prompt (`abbreviate-file-name`) and offers
+       ;; the visited file's relative name as the initial contents
+       ;; (`file-relative-name` for a file buffer, `dired-get-filename`
+       ;; for a dired one).  All three are `files.el`/`dired.el`'s and
+       ;; those libraries are above this one; the directory is shown
+       ;; unabbreviated and the initial contents are nil.
+       (list
+        (read-shell-command
+         (if (*shell-command-prompt-show-cwd*)
+             (format #f "Shell command in `~a': " (default-directory))
+             "Shell command: ")
+         #f #f)
+        (current-prefix-arg)
+        (*shell-command-default-error-buffer*)))
+      (let ((output-buffer (and (pair? rest) (car rest)))
+            (error-buffer (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+      ;; "Look for a handler in case default-directory is a remote file
+      ;; name."  No file-name handler is registered in this tree
+      ;; (`find-file-name-handler` answers nil for everything), and the
+      ;; branch is written as the C writes it.
+      (let ((handler (find-file-name-handler (directory-file-name (default-directory))
+                                             'shell-command)))
+        (if handler
+            (handler 'shell-command command output-buffer error-buffer)
+            (if (and output-buffer
+                     (not (string-match "[ \t]*&[ \t]*\\'" command))
+                     (or (eq? output-buffer (current-buffer))
+                         (and (string? output-buffer)
+                              (eq? (get-buffer output-buffer) (current-buffer)))
+                         (not (or (bufferp output-buffer) (string? output-buffer)))))
+                ;; Synchronous command with output in current buffer.
+                ;;
+                ;; **The ERROR-BUFFER arm is a named gap**: Emacs sends
+                ;; stderr to a temp file (`make-temp-file`, `files.el`)
+                ;; and reads it back with `format-insert-file`
+                ;; (`format.el`), and neither library is reachable from
+                ;; here.  With ERROR-BUFFER nil - the default, and what
+                ;; `shell-command-to-string` passes - the path is
+                ;; Emacs's whole.
+                (begin
+                (when error-buffer
+                  (error "shell-command: an error buffer needs format-insert-file (format.el is not ported)"))
+                (barf-if-buffer-read-only)
+                (push-mark #f #t)
+                (shell-command-save-pos-or-erase 'output-to-current-buffer)
+                ;; "We do not use -f for csh; we will not support broken
+                ;; use of .cshrcs."
+                (call-process-shell-command command #f #t)
+                ;; "This is like exchange-point-and-mark, but doesn't
+                ;; activate the mark."
+                (goto-char (let ((pos (mark #t)))
+                             (set-marker (mark-marker) (point)
+                                         (current-buffer))
+                             pos)))
+                ;; Output goes in a separate buffer.
+                (if (string-match "[ \t]*&[ \t]*\\'" command)
+                    (error "shell-command: asynchronous commands need start-process (the process layer is not ported)")
+                    (error "shell-command: a separate output buffer needs shell-command-on-region (not ported)")))))))
+
+    ;; `shell-command-to-string` (`simple.scm`) calls through here.
+    (*shell-command-function* shell-command)
 
     ))

@@ -74,7 +74,7 @@ NO_SPLASH_INIT = (
     '(import (schemacs frame))\n'
     '(import (schemacs menu-bar))\n'
     '(import (schemacs simple))\n'
-    '(set! inhibit-startup-screen #t)\n'
+    '(inhibit-startup-screen #t)\n'
     ';; **Column Number mode is on for these checks.** Emacs\'s default\n'
     ';; mode line shows only the line number (`mode-line-position`,\n'
     ';; `bindings.el:727`), and several checks below read the *column*\n'
@@ -1492,6 +1492,79 @@ def check_awk_mode():
     if "BEGIN { print" not in screen:
         problems.append("the file's text is not on screen: %r"
                         % screen[-200:])
+    return problems
+
+
+def check_groovy_mode():
+    """A .groovy file opens in `groovy-mode' through the mode autoload.
+
+    `files.scm`'s `%mode-autoloads' names the `schemacs/external' library
+    for `auto-mode-alist`'s `.groovy` entry - the same `;;;###autoload`
+    arrangement Emacs's package autoloads give it. The mode line shows
+    the mode's own "Groovy" (a `define-derived-mode`, so no
+    `c-update-modeline` suffix), and the shebang line is a comment
+    because of the mode's syntax-propertize rule. The face runs are
+    pinned by `groovy-mode-test.scm`'s highlight group.
+    """
+    path = "/tmp/pty-check-groovy.groovy"
+    open(path, "w").write("#!/usr/bin/env groovy\ndef foo() {\n    println 'hi'\n}\n")
+    screen = screen_of(drive([], path))
+    problems = []
+    if "(Groovy)" not in screen:
+        problems.append("the mode line does not say Groovy (the mode was "
+                        "not chosen): %r" % screen.split("\n")[-3:])
+    if "println" not in screen:
+        problems.append("the file's text is not on screen: %r"
+                        % screen[-200:])
+    return problems
+
+
+def check_process_output():
+    """A subprocess's output is read and drawn while the editor is idle.
+
+    `src/process.c`'s whole reason to exist: the read loop is a
+    `select` over the keyboard *and* the process descriptors
+    (`compute_input_wait_mask` + `pselect`), the filters run from that
+    wait, and the redisplay follows - so a program that speaks on its
+    own appears without a keystroke. The init starts `sh' on the pty,
+    the keys show its buffer, and then nothing is sent: the text and the
+    default sentinel's "Process live finished" must both turn up on
+    their own. (Emacs's own answer for the same program.)
+    """
+    d = tempfile.mkdtemp(prefix="pty-proc-")
+    cfg = os.path.join(d, "xdg")
+    os.makedirs(os.path.join(cfg, "schemacs"))
+    # **The blink timer is off here, and that is load-bearing**: with it
+    # on, a blink wake redraws the frame every half second and the
+    # process's text would appear even with no process servicing at all
+    # (measured - this check passed with the servicing removed until the
+    # init turned blinking off, which `NO_SPLASH_INIT` does).
+    open(os.path.join(cfg, "schemacs", "init.scm"), "w").write(
+        NO_SPLASH_INIT
+        + "(import (schemacs process) (schemacs buffer))\n"
+        + "(start-process \"live\" (get-buffer-create \"*live*\")\n"
+        + "  \"/bin/sh\" \"-c\" \"sleep 2; echo PROC-OUTPUT-LIVE\")\n")
+    path = os.path.join(d, "f.txt")
+    open(path, "w").write("hello\n")
+    screen = screen_of(drive([C_x, b"b", WAIT(b"Switch to buffer"),
+                              b"*live*", b"\r",
+                              WAIT(b"PROC-OUTPUT-LIVE"),
+                              WAIT(b"Process live finished")],
+                             path, config=cfg))
+    problems = []
+    # **The marker is the literal text, not the WAIT_TIMED_OUT template.**
+    # Testing the template never matches (it holds `%r`), which made this
+    # check pass on screens that contain nothing but the two markers -
+    # measured while verifying that it fails without the servicing.
+    if "gave up waiting" in screen:
+        problems.append("the editor drew nothing while idle: %r" % screen)
+    else:
+        if "PROC-OUTPUT-LIVE" not in screen:
+            problems.append("the process output is not on screen: %r"
+                            % screen[-200:])
+        if "Process live finished" not in screen:
+            problems.append("the sentinel's message is not on screen: %r"
+                            % screen[-200:])
     return problems
 
 
@@ -2984,7 +3057,7 @@ TAB_LINE_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-tabline-config-')
 os.makedirs(os.path.join(TAB_LINE_CONFIG_HOME, 'schemacs'), exist_ok=True)
 open(os.path.join(TAB_LINE_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     '(import (schemacs startup))\n'
-    '(set! inhibit-startup-screen #t)\n'
+    '(inhibit-startup-screen #t)\n'
     '(global-tab-line-mode 1)\n')
 
 TAB_BAR_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-tabbar-config-')
@@ -2996,7 +3069,7 @@ open(os.path.join(TAB_BAR_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     '(import (schemacs startup))\n'
     '(import (schemacs xdisp))\n'
     '(import (schemacs tab-bar))\n'
-    '(set! inhibit-startup-screen #t)\n'
+    '(inhibit-startup-screen #t)\n'
     '(*global-mode-string* (list "CLOCK"))\n'
     '(*tab-bar-format* (list tab-bar-format-tabs tab-bar-format-add-tab\n'
     '                        tab-bar-format-align-right tab-bar-format-global))\n'
@@ -3007,7 +3080,7 @@ MENUBAR_CONFIG_HOME = tempfile.mkdtemp(prefix='schemacs-menubar-config-')
 os.makedirs(os.path.join(MENUBAR_CONFIG_HOME, 'schemacs'), exist_ok=True)
 open(os.path.join(MENUBAR_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     '(import (schemacs startup))\n'
-    '(set! inhibit-startup-screen #t)\n')
+    '(inhibit-startup-screen #t)\n')
 
 
 def check_splash():
@@ -3029,7 +3102,7 @@ def check_splash():
         only visible because `quit-window' now gives the window another
         buffer when it is the frame's only one;
       * and an init file that says `(import (schemacs startup))'
-        and `(set! inhibit-startup-screen #t)' - the variable is
+        and `(inhibit-startup-screen #t)' - the variable is
         `startup.el''s and lives in that library, so the file imports it -
         means it never appears at all.
     """
@@ -3085,7 +3158,7 @@ os.makedirs(os.path.join(SCRATCH_CONFIG_HOME, 'schemacs'), exist_ok=True)
 SCRATCH_HOOK_LOG = os.path.join(SCRATCH_CONFIG_HOME, 'hooks.txt')
 open(os.path.join(SCRATCH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     '(import (schemacs startup))\n'
-    '(set! inhibit-startup-screen #t)\n'
+    '(inhibit-startup-screen #t)\n'
     '(define (log-hook! s)\n'
     '  (let ((out (open-file "%s" "a")))\n'
     '    (display s out)\n'
@@ -3093,6 +3166,93 @@ open(os.path.join(SCRATCH_CONFIG_HOME, 'schemacs', 'init.scm'), 'w').write(
     '(add-hook *emacs-startup-hook* (lambda () (log-hook! "e")))\n'
     '(add-hook *window-setup-hook* (lambda () (log-hook! "w")))\n'
     % SCRATCH_HOOK_LOG)
+
+
+def check_comint():
+    """A `comint-mode` buffer: RET sends the input, the shell answers.
+
+    `comint.el`'s whole loop in a real terminal: the init makes a
+    `/bin/sh' comint buffer and shows it, the keys type a command and
+    press RET (bound to `comint-send-input`, which Emacs binds to
+    control-M - the same key), and the shell's echo of the command and
+    its output must both reach the screen. The mode line must say
+    "Comint", which is the `define-derived-mode` name.
+    """
+    d = tempfile.mkdtemp(prefix="pty-comint-")
+    cfg = os.path.join(d, "xdg")
+    os.makedirs(os.path.join(cfg, "schemacs"))
+    open(os.path.join(cfg, "schemacs", "init.scm"), "w").write(
+        NO_SPLASH_INIT
+        + "(import (schemacs comint) (schemacs buffer) (schemacs window))\n"
+        + "(switch-to-buffer (make-comint \"ptysh\" \"/bin/sh\"))\n")
+    # **The answer is computed by the shell**, so the typed text cannot
+    # satisfy the assertion: "PTC-42" appears only if RET sent the
+    # command and the shell ran it.
+    screen = screen_of(drive([WAIT(b"Comint"),
+                              b"echo PTC-$((6*7))", b"\r",
+                              WAIT(b"PTC-42")],
+                             None, config=cfg))
+    problems = []
+    if "gave up waiting" in screen:
+        problems.append("the comint buffer never came up: %r" % screen)
+    else:
+        if "Comint" not in screen:
+            problems.append("the mode line does not say Comint: %r"
+                            % screen[-200:])
+        if "PTC-42" not in screen:
+            problems.append("the shell's answer is not on screen: %r"
+                            % screen[-200:])
+    return problems
+
+
+def check_inf_groovy():
+    """An inferior Groovy (groovysh) process, end to end.
+
+    `inf-groovy.el`'s whole path in a real terminal: the init imports
+    the library and calls `run-groovy` on a stand-in for groovysh, which
+    prints the interpreter's prompt and answers each line with "GOT ...".
+    The answer is *computed by the child*, so "GOT println 1" can only be
+    on screen if `run-groovy` made the comint buffer, `inferior-groovy-mode`
+    installed the prompt regexp and the shell minor mode, and RET sent
+    the line. The mode line must say "Inferior Groovy" and carry the
+    " Shell-Compile" lighter.
+    """
+    d = tempfile.mkdtemp(prefix="pty-inf-groovy-")
+    prog = os.path.join(d, "fakegroovysh")
+    with open(prog, "w") as f:
+        f.write("#!/bin/sh\n"
+                "printf 'groovy:000> '\n"
+                "while IFS= read -r line; do\n"
+                "  printf 'GOT %s\\n' \"$line\"\n"
+                "  printf 'groovy:000> '\n"
+                "done\n")
+    os.chmod(prog, 0o755)
+    cfg = os.path.join(d, "xdg")
+    os.makedirs(os.path.join(cfg, "schemacs"))
+    open(os.path.join(cfg, "schemacs", "init.scm"), "w").write(
+        NO_SPLASH_INIT
+        + "(import (schemacs external groovy-modes inf-groovy))\n"
+        + "(run-groovy \"%s\")\n" % prog)
+    screen = screen_of(drive([WAIT(b"Inferior Groovy"),
+                              WAIT(b"groovy:000>"),
+                              b"println 1", b"\r",
+                              WAIT(b"GOT println 1")],
+                             None, config=cfg))
+    problems = []
+    if "gave up waiting" in screen:
+        problems.append("the inferior groovy buffer never spoke: %r"
+                        % screen[-300:])
+        return problems
+    if "Inferior Groovy" not in screen:
+        problems.append("the mode line does not say Inferior Groovy: %r"
+                        % screen[-200:])
+    if "Shell-Compile" not in screen:
+        problems.append("the Shell-Compile lighter is not on the mode line: %r"
+                        % screen[-200:])
+    if "GOT println 1" not in screen:
+        problems.append("the child's answer is not on screen: %r"
+                        % screen[-300:])
+    return problems
 
 
 def check_scratch():
@@ -3626,7 +3786,7 @@ def check_imports():
     cfg = tempfile.mkdtemp(prefix="schemacs-imports-")
     os.makedirs(os.path.join(cfg, "schemacs"))
     open(os.path.join(cfg, "schemacs", "init.scm"), "w").write(
-        '(message "INIT-RAN")\n(set! inhibit-startup-screen #t)\n')
+        '(message "INIT-RAN")\n(inhibit-startup-screen #t)\n')
     open(os.path.join(cfg, "schemacs", "imports.scm"), "w").write(
         "(import (schemacs imports))\n")
     path = "/tmp/pty-check-imports.txt"
@@ -5768,6 +5928,41 @@ def check_dired_delete():
     return problems
 
 
+def check_compile():
+    """`M-x compile` runs a command, parses its errors, and `RET` visits one.
+
+    The command is a script that prints one gcc-style line, so the
+    parser's default rule table matches it.  `C-x o` selects the
+    *compilation* window, `n` (`next-error-no-select`) moves point onto
+    the message, and `RET` (`compile-goto-error`) visits the source at
+    the line the message named.
+    """
+    d = tempfile.mkdtemp(prefix="pty-check-compile-")
+    src = os.path.join(d, "errf.txt")
+    with open(src, "w") as f:
+        f.write("one\ntwo\nthree\n")
+    sh = os.path.join(d, "err.sh")
+    with open(sh, "w") as f:
+        f.write('#!/bin/sh\necho "errf.txt:2: error: boom"\n')
+    os.chmod(sh, 0o755)
+    M_x = b"\x1b" + b"x"
+    out = drive([M_x, b"compile", RET, WAIT(b"Compile command: "),
+                 C_a, C_k, b"./err.sh", RET, WAIT(b"boom"),
+                 C_x + b"o", b"n", RET],
+                src)
+    problems = []
+    if "[[harness: gave up waiting" in out:
+        problems.append("the compile prompt or its output never appeared")
+    screen = screen_of(out)
+    if "compilation" not in screen:
+        problems.append("the compilation buffer never appeared: %r" % screen)
+    if "errf.txt" not in screen:
+        problems.append("RET on the message did not visit errf.txt: %r" % screen)
+    if not re.search(r"\(2,|L2\b", screen):
+        problems.append("the visited line was not 2: %r" % screen)
+    return problems
+
+
 def check_cd():
     """`M-x cd' makes the directory the buffer's `default-directory'.
 
@@ -6307,6 +6502,7 @@ CHECKS = {
     "find-alternate-file": check_find_alternate_file,
     "revert-buffer": check_revert_buffer,
     "not-modified": check_not_modified,
+    "compile": check_compile,
     "pwd": check_pwd,
     "find-file-substitution": check_find_file_substitution,
     "set-fill-column": check_set_fill_column,
@@ -6348,6 +6544,8 @@ CHECKS = {
     "c-mode-eof-comment": check_c_mode_eof_comment,
     "c-mode-space": check_c_mode_space,
     "c-menu": check_c_menu,
+    "groovy-mode": check_groovy_mode,
+    "process-output": check_process_output,
     "objc-mode": check_objc_mode,
     "awk-mode": check_awk_mode,
     "java-mode": check_java_mode,
@@ -6380,6 +6578,8 @@ CHECKS = {
     "back-door": check_back_door,
     "splash": check_splash,
     "scratch": check_scratch,
+    "comint": check_comint,
+    "inf-groovy": check_inf_groovy,
     "switch-buffer": check_switch_buffer,
     "help-bindings": check_help_bindings,
     "metahelp": check_metahelp,

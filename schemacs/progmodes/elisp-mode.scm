@@ -141,9 +141,7 @@
          end))
       #f)
 
-    (define emacs-lisp-mode-hook '())
-
-    (define-custom *emacs-lisp-mode-hook* '()
+    (define-custom emacs-lisp-mode-hook '()
       "Hook run when entering Emacs Lisp mode."
       :type 'hook
       :group 'lisp)
@@ -169,7 +167,9 @@
     ;; ":parent lisp-mode-shared-map" (`elisp-mode.el:1759').
     (km:set-keymap-parent lisp-interaction-mode-map lisp-mode-shared-map)
 
-    (define lisp-interaction-mode-hook '())
+    (define-custom lisp-interaction-mode-hook '()
+      "Hook run when entering Lisp Interaction mode."
+      :type 'hook :group 'lisp)
 
     (define-derived-mode (lisp-interaction-mode emacs-lisp-mode
                                                 "Lisp Interaction"

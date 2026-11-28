@@ -633,7 +633,18 @@
                  (< %syntax-propertize-done zv))
             (begin
               (%internal-syntax-propertize (min zv (+ 1 charpos)))
-              (%setup-syntax-table))
+              (%setup-syntax-table)
+              ;; The C's `parse_sexp_propertize' ends with
+              ;; `SETUP_SYNTAX_TABLE (charpos, 1)', and that primes the
+              ;; cache for CHARPOS (`update_syntax_table_forward').
+              ;; `%setup-syntax-table' here only resets - the priming is
+              ;; lazy, done by the next `%syntax-entry-in' - and the
+              ;; caller (`%syntax-entry-in') is in the middle of reading
+              ;; CHARPOS itself, so the property the mode *just wrote*
+              ;; there was skipped and the character read from the syntax
+              ;; table instead. Measured: `groovy-mode''s shebang rule
+              ;; puts `< b' on the `#' and the parse never saw it.
+              (%update-syntax-table charpos 1))
             (when (> (vector-ref %gl-state %gl-e-property)
                      %syntax-propertize-done)
               ;; "e_property_truncated" - the run the cache believes in
@@ -3256,17 +3267,33 @@ by `find-word-boundary-function-table'.  It is also not interactive."
                           (%set-propertize-done! most-positive-fixnum)
                           (set-buffer-local-value!
                            (current-buffer) 'syntax-ppss--updated-cache #f)
+                          ;; The C's `let' binds the sentinel around the
+                          ;; function *and* the updated-cache check that
+                          ;; follows it (`syntax.el:455'-`:466'), so the
+                          ;; `syntax-ppss-flush-cache' there sees the
+                          ;; in-process sentinel and does not rewind
+                          ;; `syntax-propertize--done'. With the restore
+                          ;; (the `dynamic-wind' after-thunk) in between,
+                          ;; that flush ran with DONE at the chunk end and
+                          ;; `(min BEG DONE)' put the limit back at the
+                          ;; chunk *start* - after which every character
+                          ;; of the next parse re-ran the whole
+                          ;; propertizer (`groovy-mode''s stringifiers call
+                          ;; `syntax-ppss', so it was every visit: measured
+                          ;; 8.5 s for `(syntax-ppss 20)').
                           (dynamic-wind
                             (lambda () #f)
-                            (lambda () (fun b e))
-                            (lambda () (%set-propertize-done! e)))
-                          ;; "`syntax-ppss' was called and updated the cache
-                          ;; while we were propertizing so we need to flush
-                          ;; the part of the cache that may have been
-                          ;; rendered out-of-date by the new properties."
-                          (when (buffer-local-value
-                                 (current-buffer) 'syntax-ppss--updated-cache #f)
-                            (syntax-ppss-flush-cache b)))
+                            (lambda ()
+                              (fun b e)
+                              ;; "`syntax-ppss' was called and updated
+                              ;; the cache while we were propertizing so
+                              ;; we need to flush the part of the cache
+                              ;; that may have been rendered out-of-date
+                              ;; by the new properties."
+                              (when (buffer-local-value
+                                     (current-buffer) 'syntax-ppss--updated-cache #f)
+                                (syntax-ppss-flush-cache b)))
+                            (lambda () (%set-propertize-done! e))))
                          (else
                           (let ((new (let ((saved (%propertize-done)))
                                        (%set-propertize-done! most-positive-fixnum)

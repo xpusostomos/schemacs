@@ -21,6 +21,12 @@
     ;; `define-custom' - the C variables `cus-start.el' makes
     ;; customizable (see the declaration below).
     (only (schemacs custom) define-custom)
+    ;; The printer `%s' and `%S' substitute - print.c's `princ-to-string'
+    ;; and `prin1-to-string'. `print.scm' is below this library and does
+    ;; not import it.
+    (only (schemacs print)
+          *standard-output* *print-echo-function*
+          prin1-to-string princ-to-string)
     (scheme base)
     ;; `string-upcase' is `%format-integer''s - `%X' and `%B' write the
     ;; digits upper case, as the C's sprintf does.
@@ -37,11 +43,21 @@
     ;; `current-buffer' and `set-buffer', which `save-excursion' saves
     ;; and restores beside point.
     (only (guile) caddr cadddr cadr cdddr call-with-output-string
-          exact->inexact string-index
+          datum->syntax quasisyntax syntax syntax-case unsyntax
+          unsyntax-splicing with-syntax
+          exact->inexact inexact->exact string-index
           ;; the two bit vectors `replace-region-contents` records its
           ;; edits in (`set_bit`/`bit_is_set`, `editfns.c:2222`)
-          logior logand ash)
-    (only (schemacs buffer) bufferp current-buffer set-buffer
+          logior logand ash
+          ;; `user-login-name`'s passwd lookup (`editfns.c:92`, `:1139`).
+          getenv geteuid getpwuid passwd:name)
+    (only (schemacs buffer) bufferp buffer-name current-buffer set-buffer
+          ;; `with-output-to-string` below makes a hidden buffer and
+          ;; kills it again through the mechanism (`%kill-buffer`), as
+          ;; Emacs's does through `kill-buffer` - which for a
+          ;; non-interactive call on a buffer visiting no file is the
+          ;; same function (see the macro's comment).
+          generate-new-buffer %kill-buffer with-current-buffer
           *inhibit-read-only*
           ;; validating a *source* buffer's region is `validate_region`
           ;; with that buffer current, as the C's temporary
@@ -108,6 +124,13 @@
     ;; direction: `editfns.c` calls into `search.c`, so the scans sit
     ;; below this library. That is why `search.scm` must not import this
     ;; one, and why `editfns.scm` gave up its `search`-blocking imports.
+    ;; `compare-buffer-substrings`' case folding: the current buffer's
+    ;; CANON table, and `char_table_translate` (`character.h`) applied
+    ;; through it.
+    (only (schemacs casetab) case-canon-table)
+    (only (schemacs chartab) char-table-translate)
+    (only (schemacs data) /=)
+    (only (schemacs buffer) get-buffer)
     (only (schemacs search)
           scan-newline-from-point
           find-newline find-before-next-newline)
@@ -202,7 +225,7 @@
 bobp
    bolp
    eolp
-   char-after
+   char-after string-to-char
    char-before
    following-char
    preceding-char
@@ -226,13 +249,16 @@ point-marker
    mark-marker
    buffer-size
    insert-char
-   buffer-string
+   buffer-string with-output-to-string *standard-output*
+   user-login-name
    buffer-substring-no-properties
+   compare-buffer-substrings
    propertize
    delete-and-extract-region
    forward-line
    *inhibit-field-text-motion*
    constrain-to-field field-beginning field-end
+   field-string field-string-no-properties field-at-pos
    get-pos-property
    get-local-map
    delete-region
@@ -552,6 +578,16 @@ point-marker
       (let ((ed (current-buffer)))
         (= (point) (text-editor-get-end-of-line ed))))
 
+    (define (string-to-char string)
+      ;; GNU Emacs's `string-to-char' (`editfns.c:176'): "Return the
+      ;; first character in STRING." The C answers a fixnum - the
+      ;; character *code* - and 0 for the empty string.
+      ;;--------------------------------------------------------------
+      (cond ((not (string? string))
+             (error "Wrong type argument: stringp, ~s" string))
+            ((= 0 (string-length string)) 0)
+            (else (char->integer (string-ref string 0)))))
+
     (define (char-after . rest)
       ;; GNU Emacs's `char-after' (editfns.c): "Return character in
       ;; current buffer at position POSITION" - nil, this tree's #f,
@@ -719,7 +755,12 @@ point-marker
       ;; is the field *before* that position, and the text typed after
       ;; it is another field.
       ;;--------------------------------------------------------------
-      (let ((object (if (pair? args) (car args) (current-buffer))))
+      ;; `CHECK_FIXNUM_COERCE_MARKER (position)' (`editfns.c:288'):
+      ;; `find_field` asks this of a marker when the walk starts from
+      ;; one. `fix-position` is the same coercion without the C macro's
+      ;; current-buffer test.
+      (let* ((position (fix-position position))
+             (object (if (pair? args) (car args) (current-buffer))))
         ;; "pos-property only makes sense in buffers right now, since
         ;; strings have no overlays and no notion of insertion for which
         ;; stickiness could be obeyed" - so a string is
@@ -871,6 +912,40 @@ point-marker
                        #f)))
         (call-with-values (lambda () (find-field pos escape #f limit))
           (lambda (_beg end) end))))
+
+    (define (field-string . pos-arg)
+      ;; GNU Emacs's `field-string` (`editfns.c:498'): "Return the
+      ;; contents of the field surrounding POS as a string. A field is a
+      ;; region of text with the same `field' property. If POS is nil,
+      ;; the value of point is used for POS."
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda ()
+            (find-field (if (pair? pos-arg) (car pos-arg) #f) #f #f #f))
+        (lambda (beg end) (buffer-substring beg end))))
+
+    (define (field-string-no-properties . pos-arg)
+      ;; GNU Emacs's `field-string-no-properties` (`editfns.c:510'):
+      ;; "Return the contents of the field around POS, without text
+      ;; properties."
+      ;;--------------------------------------------------------------
+      (call-with-values
+          (lambda ()
+            (find-field (if (pair? pos-arg) (car pos-arg) #f) #f #f #f))
+        (lambda (beg end) (buffer-substring-no-properties beg end))))
+
+    (define (field-at-pos pos)
+      ;; GNU Emacs's `field-at-pos` (`subr.el:4802'): "Return the field
+      ;; at position POS, taking stickiness etc into account."
+      ;;
+      ;; **A placement departure**: Emacs has this in `subr.el`, and
+      ;; this library is that file's ancestor here (it owns
+      ;; `field-beginning`) - the same seam `back-to-indentation` took.
+      ;;--------------------------------------------------------------
+      (let ((raw-field (get-char-property (field-beginning pos) 'field)))
+        (if (eq? raw-field 'boundary)
+            (get-char-property (- (field-end pos) 1) 'field)
+            raw-field)))
 
     (define (constrain-to-field new-pos old-pos . args)
       ;; GNU Emacs's `constrain-to-field' (`editfns.c:551'): "Return the
@@ -1054,6 +1129,65 @@ point-marker
       ;;--------------------------------------------------------------
       (let-values (((beg end) (validate-region beg end)))
         (make-buffer-string (current-buffer) beg end)))
+
+    (define (compare-buffer-substrings buffer1 start1 end1 buffer2 start2 end2)
+      ;; GNU Emacs's `compare-buffer-substrings` (`editfns.c:1752'):
+      ;; "Compare two substrings of two buffers; return result as
+      ;; number. Return -N if first string is less after N-1 chars, +N
+      ;; if first string is greater after N-1 chars, or 0 if strings
+      ;; match. ... The value of `case-fold-search' in the current
+      ;; buffer determines whether case is significant or ignored."
+      ;;
+      ;; The C walks the two buffers character by character, swapping
+      ;; BEG and END when they arrive inverted, validating against
+      ;; BEGV/ZV, and translating through the *current* buffer's CANON
+      ;; table - which is what makes the folding the current buffer's
+      ;; rather than either compared buffer's. Ported as it stands.
+      ;;--------------------------------------------------------------
+      (define (buffer-of buffer)
+        (cond ((not buffer) (current-buffer))
+              ((bufferp buffer) buffer)
+              (else (let ((b (get-buffer buffer)))
+                      (if b b (error "No buffer named ~a" buffer))))))
+      ;; The C's `fix_position': START and END may be markers, which the
+      ;; DEFUN coerces (`CHECK_FIXNUM_COERCE_MARKER`) - comint's
+      ;; process-echo check passes the two input markers.
+      (define (fix x) (if (markerp x) (marker-position x) x))
+      (let* ((bp1 (buffer-of buffer1))
+             (bp2 (buffer-of buffer2)))
+        (unless (buffer-live-p bp1) (error "Selecting deleted buffer"))
+        (unless (buffer-live-p bp2) (error "Selecting deleted buffer"))
+        (let* ((vals1 (let ((b (if start1 (fix start1) (buffer-beg bp1)))
+                            (e (if end1 (fix end1) (buffer-z bp1))))
+                        (cons (min b e) (max b e))))
+               (begp1 (car vals1))
+               (endp1 (cdr vals1)))
+          (unless (and (<= (buffer-beg bp1) begp1) (<= endp1 (buffer-z bp1)))
+            (error "Args out of range: ~s ~s" start1 end1))
+          (let* ((vals2 (let ((b (if start2 (fix start2) (buffer-beg bp2)))
+                              (e (if end2 (fix end2) (buffer-z bp2))))
+                          (cons (min b e) (max b e))))
+                 (begp2 (car vals2))
+                 (endp2 (cdr vals2)))
+            (unless (and (<= (buffer-beg bp2) begp2) (<= endp2 (buffer-z bp2)))
+              (error "Args out of range: ~s ~s" start2 end2))
+            (let ((trt (and (*case-fold-search*) (case-canon-table)))
+                  (chars 0))
+              (define (codepoint-at buffer pos)
+                (let ((c (fetch-char buffer pos)))
+                  (if (char? c) (char->integer c) c)))
+              (let loop ((i1 begp1) (i2 begp2) (chars 0))
+                (if (and (< i1 endp1) (< i2 endp2))
+                    (let* ((c1 (codepoint-at bp1 i1))
+                           (c2 (codepoint-at bp2 i2))
+                           (c1 (if trt (char-table-translate trt c1) c1))
+                           (c2 (if trt (char-table-translate trt c2) c2)))
+                      (if (/= c1 c2)
+                          (if (< c1 c2) (- -1 chars) (+ chars 1))
+                          (loop (+ i1 1) (+ i2 1) (+ chars 1))))
+                    (cond ((< chars (- endp1 begp1)) (+ chars 1))
+                          ((< chars (- endp2 begp2)) (- -1 chars))
+                          (else 0)))))))))
 
     (define (propertize string . properties)
       ;; GNU Emacs's `propertize' (editfns.c:3296): "Return a copy of
@@ -1462,6 +1596,79 @@ point-marker
       ;; of the current buffer as a string."
       ;;--------------------------------------------------------------
       (buffer-substring (point-min) (point-max)))
+
+    (define (%editfns-syn-list s)
+      ;; A syntax object that is a proper list, as a list of syntax
+      ;; objects - Guile exports no `syntax->list`.
+      ;;--------------------------------------------------------------
+      (syntax-case s ()
+        (() '())
+        ((a . d) (cons (syntax a) (%editfns-syn-list (syntax d))))))
+
+    (define %user-login-name #f)
+    ;; The cache `Vuser_login_name` is (`editfns.c:114`), filled on the
+    ;; first call. Emacs also exposes it as the variable
+    ;; `user-login-name`; here the function and the variable would be
+    ;; one Scheme binding, so only the function is carried.
+
+    (define (user-login-name . uid)
+      ;; GNU Emacs's `user-login-name' (`editfns.c:1115'): "Return the
+      ;; name under which the user logged in, as a string. This is based
+      ;; on the effective uid, not the real uid. Also, if the
+      ;; environment variables LOGNAME or USER are set, that determines
+      ;; the value of this function. If optional argument UID is an
+      ;; integer, return the login name of the user with that uid, or
+      ;; nil if there is no such user."
+      ;;--------------------------------------------------------------
+      (let ((pw-name
+             (lambda (id)
+               ;; The C's `getpwuid' answers NULL for an unknown uid;
+               ;; Guile's signals `entry not found', so the nil answer is
+               ;; taken here.
+               (guard (e (#t #f))
+                 (let ((pw (getpwuid id)))
+                   (and pw (passwd:name pw)))))))
+        (if (pair? uid)
+            (pw-name (car uid))
+            (or %user-login-name
+                (begin
+                  (set! %user-login-name
+                        (or (getenv "LOGNAME")
+                            (getenv "USER")
+                            (pw-name (geteuid))
+                            "unknown"))
+                  %user-login-name)))))
+
+    (define-syntax with-output-to-string
+      ;; GNU Emacs's `with-output-to-string' (`subr.el:5500'):
+      ;; "Execute BODY, return the text it sent to `standard-output', as
+      ;; a string."
+      ;;
+      ;; **Placement departure**: `subr.el`'s, but it makes a buffer and
+      ;; reads back its text, and `subr.scm` is below both
+      ;; `generate-new-buffer` and `buffer-string`.
+      ;;
+      ;; `standard-output` is `print.scm`'s parameter now, so the body's
+      ;; `princ`/`prin1` reach the buffer this binds it to - the sink is
+      ;; real rather than a binding nothing consulted. Emacs's
+      ;; `(let ((standard-output (generate-new-buffer ... t)))
+      ;; (unwind-protect ... (kill-buffer standard-output)))` is the
+      ;; shape; `unwind-protect` is a `dynamic-wind` with a no-op before
+      ;; thunk, and `kill-buffer` is the mechanism `%kill-buffer`, which
+      ;; for a non-interactive call on a buffer visiting no file *is*
+      ;; what Emacs runs.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ body ...)
+         (let ((out (generate-new-buffer " *string-output*")))
+           (parameterize ((*standard-output* out))
+             (dynamic-wind
+               (lambda () #f)
+               (lambda ()
+                 (with-current-buffer out
+                   body ...
+                   (buffer-string)))
+               (lambda () (%kill-buffer out))))))))
 
     (define (delete-and-extract-region beg end)
       ;; GNU Emacs's `delete-and-extract-region' (editfns.c): "Delete
@@ -2223,16 +2430,13 @@ argument.  To gain access to other portions of the buffer, use
     (define (%object->string obj readable?)
       ;; The object OBJ as `%s' (READABLE? false) or `%S' (true) writes
       ;; it: `styled_format' sends a `%S' argument through `prin1' and a
-      ;; `%s' argument through `princ' (editfns.c:3687). Guile's `write'
-      ;; is `prin1' and its `display' is `princ' - both print a string
-      ;; inside a list without its quotes, which is what princ does and
-      ;; what makes `%s' of a list differ from its printed form.
+      ;; `%s' argument through `princ' (editfns.c:3687), and print.c's
+      ;; two string forms are those. (`print.scm`'s object printer is
+      ;; Guile's `write`/`display`, the departure its header records.)
       ;;--------------------------------------------------------------
-      (if (and (not readable?) (string? obj))
-          obj
-          (call-with-output-string
-           (lambda (port)
-             (if readable? (write obj port) (display obj port))))))
+      (if readable?
+          (prin1-to-string obj)
+          (princ-to-string obj)))
 
     (define (%format-digits text i len)
       ;; The run of digits at I as a number, and the index after it:
@@ -2512,10 +2716,32 @@ argument.  To gain access to other portions of the buffer, use
                        precision)
                       width minus #f 0))
         ((#\d #\i #\o #\x #\X #\b #\B)
-         (if (integer? arg)
-             (%format-integer arg conversion minus plus space sharp zero
-                              width precision)
-             (error "Format specifier doesn't match argument type")))
+         ;; `editfns.c:3843': an integer conversion accepts a fixnum, a
+         ;; bignum *or a float* - and a float is truncated toward zero
+         ;; (measured: `(format "%d" 1.9)' is "1", `(format "%d" -1.9)'
+         ;; is "-1", and `(format "%d" 1e20)' prints every digit).  A
+         ;; ratio is not one of the accepted types and signals.
+         ;;
+         ;; **`number?` is asked first, and `exact?` is bound to a
+         ;; variable, because Guile 3.0.11's default optimization level
+         ;; miscompiles the natural shape.** Measured on a two-line
+         ;; library: `(if (integer? x) 'i (if (inexact? x) 'x 'o))'
+         ;; compiled at -O2 raises "inexact?: Wrong type argument ...
+         ;; 1.5" when called with a flonum, and a `cond` whose first
+         ;; test is `(and (integer? x) (exact? x))` takes the else arm
+         ;; for every float.  -O0 and -O1 are correct.  This shape is
+         ;; correct at all three; it is not an idiom to copy blindly.
+         (if (not (number? arg))
+             (error "Format specifier doesn't match argument type")
+             (let ((ex (exact? arg)))
+               (if ex
+                   (if (integer? arg)
+                       (%format-integer arg conversion minus plus space
+                                        sharp zero width precision)
+                       (error "Format specifier doesn't match argument type"))
+                   (%format-integer (inexact->exact (truncate arg))
+                                    conversion minus plus space sharp zero
+                                    width precision)))))
         ((#\e #\f #\g)
          (if (not (number? arg))
              (error "Format specifier doesn't match argument type")
@@ -2683,5 +2909,10 @@ argument.  To gain access to other portions of the buffer, use
     ;; `syntax.scm' sits below it. Installed after the definition, as the
     ;; tree's rule says for a library's own functions.
     (*constrain-to-field-function* constrain-to-field)
+
+    ;; `princ' with a destination of `t' prints into the echo area, which
+    ;; is `message`'s - installed here, where `message` is defined, as the
+    ;; tree's rule for a library's own functions says.
+    (*print-echo-function* (lambda (string) (message "%s" string)))
 
     ))

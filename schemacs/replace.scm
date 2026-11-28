@@ -250,11 +250,13 @@
     ;; The variables
     ;;------------------------------------------------------------------
 
-    (define *case-replace*
+    (define-custom *case-replace*
       ;; GNU Emacs's `case-replace' (replace.el:35): "Non-nil means
       ;; `query-replace' should preserve case in replacements."
       ;;--------------------------------------------------------------
-      (make-parameter #t))
+       #t
+      "Non-nil means `query-replace' should preserve case in replacements."
+      :type 'boolean :group 'matching)
 
     (define *query-replace-history*
       ;; GNU Emacs's `query-replace-history' (replace.el:66): the
@@ -269,7 +271,7 @@
       ;;--------------------------------------------------------------
       (make-parameter '()))
 
-    (define *query-replace-from-to-separator*
+    (define-custom *query-replace-from-to-separator*
       ;; GNU Emacs's `query-replace-from-to-separator' (replace.el:73):
       ;; "String that separates FROM and TO in the history of replacement
       ;; pairs. When nil, the pair will not be added to the history".
@@ -278,7 +280,11 @@
       ;; no text properties on a minibuffer answer here, so it is found
       ;; as a substring (`query-replace--split-string').
       ;;--------------------------------------------------------------
-      " → ")
+      " → "
+      "String that separates FROM and TO in the history of replacement pairs.
+When nil, the pair will not be added to the history (same behavior
+as in Emacs 24.5)."
+      :type '(choice (const :tag "Disabled" nil) string) :group 'matching :version "25.1")
 
     (define *query-replace-read-from-default*
       ;; GNU Emacs's `query-replace-read-from-default' (replace.el:221):
@@ -293,14 +299,17 @@
       ;;--------------------------------------------------------------
       #f)
 
-    (define *query-replace-show-replacement*
+    (define-custom *query-replace-show-replacement*
       ;; GNU Emacs's `query-replace-show-replacement' (replace.el): show
       ;; the CASED replacement in the prompt - what the match would
       ;; become - rather than the raw replacement string.
       ;;--------------------------------------------------------------
-      (make-parameter #t))
+       #t
+      "Non-nil means show substituted replacement text in the minibuffer.
+This variable affects only `query-replace-regexp'."
+      :type 'boolean :group 'matching :version "23.1")
 
-    (define *query-replace-lazy-highlight*
+    (define-custom *query-replace-lazy-highlight*
       ;; GNU Emacs's `query-replace-lazy-highlight' (replace.el:153):
       ;; "Controls the lazy-highlighting during query replacements. When
       ;; non-nil, all text matching the current match that is currently
@@ -308,13 +317,22 @@
       ;; highlighting." `replace-highlight' reads it to decide whether to
       ;; run the lazy loop, exactly as the C does.
       ;;--------------------------------------------------------------
-      (make-parameter #t))
+       #t
+      "Controls the lazy-highlighting during query replacements.
+When non-nil, all text matching the current match that is
+currently visible in the window is highlighted lazily using
+isearch lazy highlighting (see `lazy-highlight-initial-delay'
+and `lazy-highlight-interval').  Uses the `lazy-highlight' face
+to highlight matching text."
+      :type 'boolean :group 'lazy-highlight :version "22.1")
 
-    (define *query-replace-highlight*
+    (define-custom *query-replace-highlight*
       ;; GNU Emacs's `query-replace-highlight' (replace.el:130): "Non-nil
       ;; means to highlight matches during query replacement."
       ;;--------------------------------------------------------------
-      (make-parameter #t))
+       #t
+      "Non-nil means to highlight matches during query replacement."
+      :type 'boolean :group 'matching)
 
     (define replace-overlay (make-parameter #f))
     ;; ^ GNU Emacs's `replace-overlay' (replace.el:3031): the overlay the
@@ -442,7 +460,7 @@ re-executed as a normal key sequence.")
       ;; `(string-to-char "")' is 0, and 0 is an ASCII character and so
       ;; always displayable, which is the branch taken here.
       ;;--------------------------------------------------------------
-      (let ((separator *query-replace-from-to-separator*))
+      (let ((separator (*query-replace-from-to-separator*)))
         (and separator
              (let loop ((i 0))
                (cond ((>= i (string-length separator)) separator)
@@ -2833,13 +2851,14 @@ RESET non-nil means rewind to the first match."
         (if win (set-window-point! win (point))))
       (occur-mode-goto-occurrence #f)))
 
-    (define occur-mode-hook '())
+    (define-custom occur-mode-hook '()
+      "Hook run when entering Occur mode."
+      :type 'hook :group 'matching)
     ;; ^ GNU Emacs's `occur-mode-hook' (`replace.el:1643'), a defcustom
-    ;; whose default is `(turn-on-font-lock)`. A plain list, like every
-    ;; mode hook here (`special-mode-hook`, `prog-mode-hook`), because
-    ;; `define-derived-mode` hands the hook to `run-mode-hooks` as a
-    ;; value; the defcustom half waits for a mode macro that can take a
-    ;; parameter. Its default is set at the bottom of this section.
+    ;; whose default is `(turn-on-font-lock)`. A `define-custom` like
+    ;; every Emacs mode-hook defcustom here; `define-derived-mode` hands
+    ;; the parameter to `run-mode-hooks`, and `run-hooks` dereferences it.
+    ;; Its default is set at the bottom of this section.
 
     (define-custom *occur-hook* '()
       "Hook run by Occur when there are any matches."
@@ -2883,7 +2902,7 @@ Alternatively, click \\[occur-mode-mouse-goto] on an item to go to it.
     ;; Emacs's default `occur-mode-hook` runs `turn-on-font-lock`
     ;; (`replace.el:1643`), which is why the occurrences' faces are
     ;; there when the buffer is first shown.
-    (set! occur-mode-hook (list turn-on-font-lock))
+    (occur-mode-hook (list turn-on-font-lock))
 
     ;; The map's bindings, at the end because a binding holds the
     ;; command's value. What Emacs's map also binds and this does not:

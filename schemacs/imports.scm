@@ -27,9 +27,11 @@
   (import
     (schemacs abbrev)
     (schemacs arrays)
+    (schemacs auth-source)
     (schemacs buff-menu)
     (schemacs buffer)
     (schemacs buffer-text)
+    (schemacs button)
     (schemacs callproc)
     (schemacs casefiddle)
     (schemacs casetab)
@@ -39,6 +41,7 @@
     (schemacs chartab)
     (schemacs cmds)
     (schemacs coding)
+    (schemacs comint)
     (schemacs command)
     (schemacs core byte-run)
     (schemacs core cl-indent)
@@ -52,12 +55,17 @@
     (schemacs core map-ynp)
     (schemacs core pcase)
     (schemacs core regexp-opt)
+    (schemacs core ring)
     (schemacs core rmc)
+    (schemacs core rx)
     (schemacs core seq)
+    (schemacs core subr-x)
     (schemacs core syntax-macros)
     (schemacs core tabulated-list)
+    (schemacs core text-property-search)
     (schemacs core timer)
     (schemacs core warnings)
+    (schemacs cus-edit)
     (schemacs custom)
     (schemacs data)
     (schemacs diffseq)
@@ -76,6 +84,7 @@
     (except (schemacs fileio)  *buffer-visited-file-modtime-function*)
     (except (schemacs files)  default-directory expand-file-name directory-name-p file-exists-p file-writable-p file-name-directory-part file-name-nondirectory-part)
     (schemacs filevercmp)
+    (schemacs find-cmd)
     (except (schemacs fns)  line-number-at-pos)
     (schemacs font)
     (schemacs font-core)
@@ -94,12 +103,14 @@
     (schemacs international characters)
     (schemacs international mule)
     (schemacs international mule-cmds)
+    (schemacs international mule-conf)
     (schemacs international mule-diag)
     (schemacs international mule-util)
     (schemacs intervals)
     (schemacs isearch)
     (schemacs itree)
     (schemacs jit-lock)
+    (schemacs json)
     (except (schemacs keyboard)  signal-quit quit-char *quit-flag* *inhibit-quit* maybe-quit timer-next-delay)
     (schemacs keymap)
     (schemacs loadup)
@@ -115,6 +126,9 @@
     (schemacs novice)
     (schemacs pages)
     (schemacs paren)
+    (schemacs password-cache)
+    (except (schemacs print)  *standard-output*)
+    (schemacs process)
     (schemacs progmodes cc-align)
     (schemacs progmodes cc-awk)
     (schemacs progmodes cc-cmds)
@@ -127,6 +141,7 @@
     (schemacs progmodes cc-styles)
     (schemacs progmodes cc-vars)
     (schemacs progmodes cmacexp)
+    (schemacs progmodes compile)
     (schemacs progmodes elisp-mode)
     (schemacs progmodes prog-mode)
     (schemacs progmodes scheme)
@@ -139,7 +154,7 @@
     (schemacs scroll-bar)
     (schemacs search)
     (schemacs select)
-    (except (schemacs simple)  backward-char beginning-of-line delete-char end-of-line forward-char *page-delimiter* back-to-indentation self-insert-command self-insert-tab mark)
+    (except (schemacs simple)  backward-char beginning-of-line delete-char end-of-line forward-char *page-delimiter* page-delimiter set!page-delimiter back-to-indentation self-insert-command self-insert-tab shell-command-switch mark)
     (schemacs startup)
     (except (schemacs subr)  menu-bar-separator char-alt char-super char-hyper char-shift char-ctl char-meta parse-solitary-modifier make-ctrl-char parse-modifiers-uncached event-symbol-elements event-modifiers event-basic-type apply-modifiers event-convert-list kbd nthcdr nth)
     (except (schemacs symbol-props)  get put)
@@ -149,7 +164,7 @@
     (schemacs term tty-colors)
     (schemacs test-display)
     (except (schemacs textmodes fill)  *inhibit-auto-fill*)
-    (except (schemacs textmodes paragraphs)  *use-hard-newlines* *page-delimiter*)
+    (except (schemacs textmodes paragraphs)  *use-hard-newlines* *page-delimiter* page-delimiter set!page-delimiter)
     (schemacs textmodes text-mode)
     (schemacs textprop)
     (schemacs theme)
@@ -157,9 +172,10 @@
     (schemacs tool-bar)
     (schemacs tooltip)
     (except (schemacs undo)  text-editor-undo-list set!text-editor-undo-list)
+    (schemacs version)
     (except (schemacs window)  *cursor-in-echo-area* window-live-p window-normal-size window-size)
     (schemacs window-x)
-    (except (schemacs xdisp)  *truncate-partial-width-windows* line-display-rows window-line-rows window-line-slices window-start window-truncates-lines? vertical-motion)
+    (except (schemacs xdisp)  *truncate-partial-width-windows* line-display-rows invisible-p window-line-rows window-line-slices window-start window-truncates-lines? vertical-motion)
     (schemacs xfaces)
     )
   (export
@@ -182,6 +198,7 @@
     %c-lang-function
     %c-langvar
     %c-true
+    %call-with-line-measure
     %class-in
     %comend-first?
     %comend-second?
@@ -274,6 +291,23 @@
     *ascii-downcase-table*
     *ascii-eqv-table*
     *ascii-upcase-table*
+    *auth-source-backend-parser-functions*
+    *auth-source-cache-expiry*
+    *auth-source-creation-defaults*
+    *auth-source-creation-prompts*
+    *auth-source-debug*
+    *auth-source-do-cache*
+    *auth-source-gpg-encrypt-to*
+    *auth-source-ignore-non-existing-file*
+    *auth-source-ignored-keys*
+    *auth-source-netrc-cache*
+    *auth-source-netrc-use-gpg-tokens*
+    *auth-source-protocols*
+    *auth-source-protocols-customize*
+    *auth-source-save-behavior*
+    *auth-sources*
+    *authinfo-hidden*
+    *authinfo-hide-elements*
     *auto-coding-alist*
     *auto-coding-regexp-alist*
     *auto-fill-inhibit-regexp*
@@ -423,6 +457,41 @@
     *colon-double-space*
     *color-name-rgb-alist*
     *column-number-indicator-zero-based*
+    *comint--prompt-recursion-depth*
+    *comint-buffer-maximum-size*
+    *comint-delete-old-input*
+    *comint-delimiter-argument-list*
+    *comint-eol-on-send*
+    *comint-get-old-input*
+    *comint-highlight-input*
+    *comint-inhibit-carriage-motion*
+    *comint-input-autoexpand*
+    *comint-input-filter*
+    *comint-input-filter-functions*
+    *comint-input-history-ignore*
+    *comint-input-ignoredups*
+    *comint-input-ring-file-name*
+    *comint-input-ring-file-prefix*
+    *comint-input-ring-separator*
+    *comint-input-ring-size*
+    *comint-input-sender*
+    *comint-input-sender-no-newline*
+    *comint-insert-previous-argument-from-end*
+    *comint-max-line-length*
+    *comint-move-point-for-matching-input*
+    *comint-move-point-for-output*
+    *comint-output-filter-functions*
+    *comint-pager*
+    *comint-password-prompt-max-length*
+    *comint-password-prompt-regexp*
+    *comint-preoutput-filter-functions*
+    *comint-process-echoes*
+    *comint-prompt-read-only*
+    *comint-prompt-regexp*
+    *comint-scroll-show-maximum-output*
+    *comint-scroll-to-bottom-on-input*
+    *comint-terminfo-terminal*
+    *comint-use-prompt-regexp*
     *command-execute--query-function*
     *command-table*
     *comment-auto-fill-only-comments*
@@ -437,6 +506,35 @@
     *comment-style*
     *comment-use-global-state*
     *comment-use-syntax-ppss*
+    *compilation-always-kill*
+    *compilation-ask-about-save*
+    *compilation-auto-jump-to-first-error*
+    *compilation-context-lines*
+    *compilation-disable-input*
+    *compilation-environment*
+    *compilation-error-case-fold-search*
+    *compilation-error-regexp-alist*
+    *compilation-error-screen-columns*
+    *compilation-filter-hook*
+    *compilation-filter-start*
+    *compilation-finish-functions*
+    *compilation-hidden-output*
+    *compilation-highlight-regexp*
+    *compilation-max-output-line-length*
+    *compilation-message-face*
+    *compilation-mode-hook*
+    *compilation-read-command*
+    *compilation-save-buffers-predicate*
+    *compilation-scroll-output*
+    *compilation-search-all-directories*
+    *compilation-search-extra-path*
+    *compilation-search-path*
+    *compilation-skip-threshold*
+    *compilation-skip-visited*
+    *compilation-start-hook*
+    *compilation-transform-file-match-alist*
+    *compilation-window-height*
+    *compile-command*
     *completion-at-point-function*
     *completion-auto-help*
     *completion-auto-wrap*
@@ -472,6 +570,7 @@
     *default-frame-alist*
     *default-justification*
     *default-keymap*
+    *default-process-coding-system*
     *default-text-properties*
     *defun-prompt-regexp*
     *del-range-function*
@@ -479,6 +578,7 @@
     *delayed-after-hook-functions*
     *delayed-mode-hooks*
     *delete-by-moving-to-trash*
+    *delete-exited-processes*
     *delete-horizontal-space-function*
     *describe-bindings-show-prefix-commands*
     *describe-coding-system-function*
@@ -514,6 +614,7 @@
     *dired-trivial-filenames*
     *disabled-command-function*
     *dispatch-event*
+    *display-buffer-overriding-action*
     *display-color-cells*
     *display-type*
     *down-list-function*
@@ -522,9 +623,15 @@
     *echo-area-buffer*
     *echo-buffers*
     *electric-indent-actions*
+    *electric-indent-chars*
     *electric-indent-functions*
+    *electric-indent-functions-without-reindent*
+    *electric-layout-allow-duplicate-newlines*
+    *electric-layout-allow-in-comment-or-string*
+    *electric-layout-rules*
     *electric-pair-delete-adjacent-pairs*
     *electric-pair-inhibit-predicate*
+    *electric-pair-newline-binder*
     *electric-pair-open-newline-between-pairs*
     *electric-pair-pairs*
     *electric-pair-preserve-balance*
@@ -532,7 +639,15 @@
     *electric-pair-skip-whitespace*
     *electric-pair-skip-whitespace-chars*
     *electric-pair-text-pairs*
+    *electric-pair-text-pairs-function*
     *electric-quote-chars*
+    *electric-quote-comment*
+    *electric-quote-context-sensitive*
+    *electric-quote-inhibit-functions*
+    *electric-quote-paragraph*
+    *electric-quote-replace-consecutive*
+    *electric-quote-replace-double*
+    *electric-quote-string*
     *emacs-lisp-docstring-fill-column*
     *emacs-startup-hook*
     *enable-disabled-menus-and-buttons*
@@ -540,6 +655,7 @@
     *enable-local-eval*
     *enable-local-variables*
     *enable-multibyte-characters*
+    *enable-recursive-minibuffers*
     *end-of-defun-function*
     *end-of-defun-moves-to-eol*
     *eval-expression-debug-on-error*
@@ -547,6 +663,7 @@
     *eval-minibuffer-function*
     *event--posn-at-point-function*
     *exchange-point-and-mark-highlight-region*
+    *exec-path*
     *exec-suffixes*
     *extended-command-history*
     *face-attribute-name-alist*
@@ -568,6 +685,7 @@
     *fill-separate-heterogeneous-words-with-space*
     *find-directory-functions*
     *find-file-run-dired*
+    *find-program*
     *find-word-boundary-function-table*
     *font-lock-comment-end-skip*
     *font-lock-comment-start-skip*
@@ -631,6 +749,7 @@
     *idl-font-lock-extra-types*
     *ignored-local-variable-values*
     *image-load-path*
+    *imenu--menubar-keymap*
     *imenu-after-jump-hook*
     *imenu-allow-duplicate-menu-items*
     *imenu-auto-rescan*
@@ -642,6 +761,7 @@
     *imenu-max-index-time*
     *imenu-max-item-length*
     *imenu-max-items*
+    *imenu-menubar-modified-tick*
     *imenu-sort-function*
     *imenu-space-replacement*
     *imenu-use-markers*
@@ -708,9 +828,15 @@
     *last-read-event*
     *last-thing-searched*
     *lazy-highlight-cleanup*
+    *line-measure-function*
     *line-move-visual*
     *line-number-display-limit*
     *line-number-display-limit-width*
+    *line-reserve-width*
+    *line-reserve-width-function*
+    *line-text-measure*
+    *line-unit-width*
+    *line-unit-width-function*
     *lisp-backquote-indentation*
     *lisp-indent-backquote-substitution-mode*
     *lisp-indent-error-function*
@@ -758,6 +884,7 @@
     *max-char*
     *max-eol-check-count*
     *max-mini-window-height*
+    *maximum-scroll-margin*
     *menu-bar-close-window*
     *menu-bar-edit-menu*
     *menu-bar-final-items*
@@ -780,6 +907,7 @@
     *minibuffer-completion-confirm*
     *minibuffer-completion-predicate*
     *minibuffer-completion-table*
+    *minibuffer-depth*
     *minibuffer-exit-hook*
     *minibuffer-message-clear-timeout*
     *minibuffer-message-properties*
@@ -797,6 +925,7 @@
     *mode-line-position-column-format*
     *mode-line-position-column-line-format*
     *mode-line-position-line-format*
+    *mode-line-process-status-function*
     *mode-line-window*
     *mode-require-final-newline*
     *mouse-1-click-follows-link*
@@ -808,12 +937,14 @@
     *mouse-fixup-help-message-function*
     *mouse-scroll-delay*
     *mouse-scroll-min-lines*
+    *next-error-find-buffer-function*
     *next-error-found-function*
     *next-error-highlight*
     *next-error-highlight-no-select*
     *next-error-hook*
     *next-error-message-highlight*
     *next-error-recenter*
+    *next-error-verbose*
     *next-screen-context-lines*
     *next-selection-coding-system*
     *objc-font-lock-extra-types*
@@ -835,6 +966,10 @@
     *parens-require-spaces*
     *parse-sexp-ignore-comments*
     *parse-sexp-lookup-properties*
+    *password-cache*
+    *password-cache-expiry*
+    *password-colon-equivalents*
+    *password-word-equivalents*
     *pending-coding-system*
     *pending-undo-list*
     *pike-font-lock-extra-types*
@@ -848,6 +983,10 @@
     *prefix-cu*
     *prefix-digits*
     *prefix-negative*
+    *print-echo-function*
+    *process-connection-type*
+    *process-environment*
+    *process-event-function*
     *prog-indentation-context*
     *ptrdiff-max*
     *ptrdiff-min*
@@ -866,15 +1005,18 @@
     *read-char-event-function*
     *read-coding-system-function*
     *read-command-function*
+    *read-hide-char*
     *read-key-sequence-function*
     *read-key-sequence-vector-function*
     *read-minibuffer-function*
     *read-non-nil-coding-system-function*
     *read-number-function*
+    *read-passwd-function*
     *read-regexp-defaults-function*
     *read-string-function*
     *read-variable-function*
     *real-this-command*
+    *recenter-positions*
     *record-window-buffer-function*
     *recursive-edit-exit*
     *redisplay-in-progress*
@@ -894,6 +1036,7 @@
     *scheme-mit-dialect*
     *scratch-buffer-name*
     *scroll-bar-mode*
+    *scroll-margin*
     *search-case-fold?*
     *search-highlight*
     *search-pattern*
@@ -918,6 +1061,9 @@
     *set-marker-function*
     *set-marker-insertion-type-function*
     *set-message-function*
+    *shell-command-default-error-buffer*
+    *shell-command-function*
+    *shell-command-prompt-show-cwd*
     *show-help-echo-function*
     *show-help-function*
     *show-paren-context-when-offscreen*
@@ -936,6 +1082,7 @@
     *special-event-map*
     *split-string-default-separators*
     *standard-display-table*
+    *standard-output*
     *switch-to-prev-buffer-skip*
     *switch-to-prev-buffer-skip-regexp*
     *switch-to-visible-buffer*
@@ -1001,6 +1148,8 @@
     *tab-width*
     *tabulated-list-entries*
     *tabulated-list-format*
+    *temp-buffer-setup-hook*
+    *temp-buffer-show-hook*
     *temporary-file-directory*
     *temporary-goal-column*
     *text-property-append*
@@ -1128,10 +1277,12 @@
     abbrevs-changed
     abort-recursive-edit
     accept-change-group
+    accept-process-output
     access-keymap
     accessible-keymaps
     activate-change-group
     activate-mark
+    active-minibuffer-window
     adaptive-fill-first-line-regexp
     adaptive-fill-function-value
     adaptive-fill-mode
@@ -1143,6 +1294,7 @@
     add-text-properties
     add-text-properties-from-list
     add-to-history
+    add-to-invisibility-spec
     add-to-list
     adjust-coding-eol-type
     adjust-frame-size!
@@ -1156,11 +1308,14 @@
     adjust-overlays-for-insert
     adjust-point
     adjust-window-trailing-edge
+    all
     all-completions
     allocate-buffer
     alphabeticp
     alphanumericp
     amalgamating-command?
+    and-let*
+    any
     append-key
     apply-command
     apply-modifiers
@@ -1174,6 +1329,74 @@
     atomic-change-group
     attribute-value
     attributes-set
+    auth-info-password
+    auth-source--aget
+    auth-source--aput-1
+    auth-source--decode-octal-string
+    auth-source--deobfuscate
+    auth-source--obfuscate
+    auth-source--symbol-keyword
+    auth-source-backend
+    auth-source-backend-create-function
+    auth-source-backend-data
+    auth-source-backend-host
+    auth-source-backend-parse
+    auth-source-backend-parse-parameters
+    auth-source-backend-port
+    auth-source-backend-search-function
+    auth-source-backend-source
+    auth-source-backend-type
+    auth-source-backend-user
+    auth-source-backend?
+    auth-source-backends
+    auth-source-backends-parser-file
+    auth-source-backends-parser-macos-keychain
+    auth-source-backends-parser-secrets
+    auth-source-current-line
+    auth-source-delete
+    auth-source-ensure-strings
+    auth-source-file-name-p
+    auth-source-forget
+    auth-source-forget+
+    auth-source-forget-all-cached
+    auth-source-format-cache-entry
+    auth-source-format-prompt
+    auth-source-json-check
+    auth-source-json-search
+    auth-source-keys
+    auth-source-macos-keychain-create
+    auth-source-macos-keychain-result-append
+    auth-source-macos-keychain-search
+    auth-source-macos-keychain-search-items
+    auth-source-netrc-create
+    auth-source-netrc-element-or-first
+    auth-source-netrc-looking-at-token
+    auth-source-netrc-normalize
+    auth-source-netrc-parse
+    auth-source-netrc-parse-all
+    auth-source-netrc-parse-entries
+    auth-source-netrc-parse-next-interesting
+    auth-source-netrc-parse-one
+    auth-source-netrc-saver
+    auth-source-netrc-search
+    auth-source-pick-first-password
+    auth-source-read-passwd-create
+    auth-source-read-passwd-search
+    auth-source-recall
+    auth-source-remember
+    auth-source-remembered-p
+    auth-source-returned-keys
+    auth-source-search
+    auth-source-search-backends
+    auth-source-search-collection
+    auth-source-search-keys
+    auth-source-search-spec
+    auth-source-specmatchp
+    auth-source-user-and-password
+    authinfo--hide-passwords
+    authinfo--keywords
+    authinfo--toggle-display
+    authinfo-mode
     auto-coding-alist-lookup
     auto-coding-regexp-alist-lookup
     auto-fill-chars
@@ -1335,6 +1558,18 @@
     build-marker
     bury-buffer
     butlast
+    button--area-button-p
+    button--properties
+    button-activate
+    button-at
+    button-buffer-map
+    button-end
+    button-get
+    button-map
+    button-put
+    button-start
+    buttonize
+    buttonize-region
     byte-run--constant-obsolete-warning
     byte8-to-char
     bytes-have-null?
@@ -2194,6 +2429,7 @@
     call-interactively
     call-process
     call-process-region
+    call-process-shell-command
     call-with-buffer-local
     called-interactively?
     cancel-change-group
@@ -2264,6 +2500,7 @@
     char-table-set
     char-table-set-range
     char-table-subtype
+    char-table-translate
     char-table?
     char-to-byte-safe
     char-to-byte8
@@ -2309,6 +2546,8 @@
     clear-minibuffer-message
     clear-mouse-face!
     clear-prefix!
+    clear-realized-face-cache!
+    clear-string
     clear-to-end!
     code-point->char
     coding-read-char
@@ -2339,12 +2578,121 @@
     column-number-mode-variable
     column-width
     combine-windows
+    comint-accum-marker
+    comint-accumulate
+    comint-add-to-input-history
+    comint-adjust-window-point
+    comint-after-pmark-p
+    comint-args
+    comint-arguments
+    comint-backward-matching-input
+    comint-bol
+    comint-bol-or-process-mark
+    comint-carriage-motion
+    comint-check-proc
+    comint-check-source
+    comint-clear-buffer
+    comint-continue-subjob
+    comint-copy-old-input
+    comint-delchar-or-maybe-eof
+    comint-delete-input
+    comint-delete-output
+    comint-delim-arg
+    comint-delimiter-argument-list
+    comint-eol-on-send
+    comint-exec
+    comint-exec-1
+    comint-exec-hook
+    comint-extract-string
+    comint-file-name-chars
+    comint-file-name-prefix
+    comint-file-name-quote-list
+    comint-forward-matching-input
+    comint-get-next-from-history
+    comint-get-old-input
+    comint-get-old-input-default
+    comint-get-source
+    comint-goto-process-mark
+    comint-how-many-region
+    comint-input-filter
+    comint-input-ring
+    comint-input-ring-index
+    comint-insert-input
+    comint-insert-previous-argument
+    comint-insert-previous-argument-last-index
+    comint-insert-previous-argument-last-start-pos
+    comint-interrupt-subjob
+    comint-kill-input
+    comint-kill-region
+    comint-kill-subjob
+    comint-kill-whole-line
+    comint-last-input-end
+    comint-last-input-start
+    comint-last-output-start
+    comint-last-prompt
+    comint-line-beginning-position
+    comint-magic-space
+    comint-matching-input-from-input-string
+    comint-mode
+    comint-mode-hook
+    comint-mode-map
+    comint-next-input
+    comint-next-matching-input
+    comint-next-matching-input-from-input
+    comint-next-prompt
+    comint-nonblank-p
+    comint-output-filter
+    comint-password-function
+    comint-postoutput-scroll-to-bottom
+    comint-preinput-scroll-to-bottom
+    comint-previous-input
+    comint-previous-matching-input
+    comint-previous-matching-input-from-input
+    comint-previous-matching-input-string
+    comint-previous-matching-input-string-position
+    comint-previous-prompt
+    comint-proc-query
+    comint-process-echoes
+    comint-prompt-regexp
+    comint-ptyp
+    comint-quit-subjob
+    comint-read-input-ring
+    comint-read-noecho
+    comint-regexp-arg
+    comint-replace-by-expanded-history
+    comint-replace-by-expanded-history-before-point
+    comint-restore-input
+    comint-save-input-ring-index
+    comint-search-arg
+    comint-search-start
+    comint-send-eof
+    comint-send-input
+    comint-send-invisible
+    comint-send-region
+    comint-send-string
+    comint-set-process-mark
+    comint-show-maximum-output
+    comint-show-output
+    comint-simple-send
+    comint-skip-input
+    comint-snapshot-last-prompt
+    comint-source-default
+    comint-stop-subjob
+    comint-stored-incomplete-input
+    comint-strip-ctrl-m
+    comint-term-environment
+    comint-truncate-buffer
+    comint-update-fence
+    comint-use-prompt-regexp
+    comint-watch-for-password-prompt
+    comint-within-quotes
     command-api
     command-autoload-names
     command-doc-string
     command-interactive-spec
     command-line-1
     command-line-1--display
+    command-line-normalize-file-name
     command-loop
     command-loop-idle!
     command-loop-key!
@@ -2411,9 +2759,136 @@
     common-lisp-indent-function-1
     common-lisp-loop-part-indentation
     common-prefix
+    compare-buffer-substrings
     compare-string-intervals
     compare-strings
     compareseq
+    compilation--default-buffer-name
+    compilation--downcase-mode-name
+    compilation--ensure-parse
+    compilation--expand-fn
+    compilation--file-known-p
+    compilation--file-struct->file-spec
+    compilation--file-struct->formats
+    compilation--file-struct->loc-tree
+    compilation--flush-directory-cache
+    compilation--flush-file-structure
+    compilation--flush-parse
+    compilation--hide-output
+    compilation--insert-abbreviated-line
+    compilation--loc->col
+    compilation--loc->file-struct
+    compilation--loc->line
+    compilation--loc->marker
+    compilation--loc->visited
+    compilation--make-cdrloc
+    compilation--make-file-struct
+    compilation--make-message
+    compilation--message->end-loc
+    compilation--message->loc
+    compilation--message->rule
+    compilation--message->type
+    compilation--message?
+    compilation--note-type
+    compilation--parse-region
+    compilation--parsed
+    compilation--previous-directory
+    compilation--put-prop
+    compilation--remove-properties
+    compilation--start-time
+    compilation--unsetup
+    compilation--update-markers
+    compilation-arguments
+    compilation-assq
+    compilation-auto-jump
+    compilation-auto-jump-to-next
+    compilation-beginning-of-line
+    compilation-buffer-internal-p
+    compilation-buffer-name
+    compilation-buffer-name-function
+    compilation-buffer-p
+    compilation-button-map
+    compilation-column-face
+    compilation-context-lines
+    compilation-current-error
+    compilation-debug
+    compilation-directory
+    compilation-directory-matcher
+    compilation-directory-properties
+    compilation-display-error
+    compilation-enter-directory-face
+    compilation-environment
+    compilation-error
+    compilation-error-face
+    compilation-error-properties
+    compilation-error-regexp-alist
+    compilation-error-regexp-alist-alist
+    compilation-error-screen-columns
+    compilation-exit-message-function
+    compilation-face
+    compilation-fake-loc
+    compilation-filter
+    compilation-find-buffer
+    compilation-find-file
+    compilation-find-file-1
+    compilation-first-column
+    compilation-forget-errors
+    compilation-get-file-structure
+    compilation-goto-in-progress-buffer
+    compilation-goto-locus
+    compilation-handle-exit
+    compilation-highlight-overlay
+    compilation-highlight-regexp
+    compilation-in-progress
+    compilation-info-face
+    compilation-insert-annotation
+    compilation-internal-error-properties
+    compilation-leave-directory-face
+    compilation-line-face
+    compilation-locs
+    compilation-menu-map
+    compilation-messages-start
+    compilation-minor-mode
+    compilation-minor-mode-map
+    compilation-minor-mode-variable
+    compilation-mode
+    compilation-mode-font-lock-keywords
+    compilation-mode-font-lock-keywords-function
+    compilation-mode-line-errors
+    compilation-mode-map
+    compilation-mode-tool-bar-map
+    compilation-move-to-column
+    compilation-next-error
+    compilation-next-error-function
+    compilation-next-file
+    compilation-next-single-property-change
+    compilation-num-errors-found
+    compilation-num-infos-found
+    compilation-num-warnings-found
+    compilation-page-delimiter
+    compilation-parse-errors
+    compilation-parse-errors-filename-function
+    compilation-previous-error
+    compilation-previous-file
+    compilation-process-setup-function
+    compilation-revert-buffer
+    compilation-search-path
+    compilation-sentinel
+    compilation-set-overlay-arrow
+    compilation-set-skip-threshold
+    compilation-set-window
+    compilation-set-window-height
+    compilation-setup
+    compilation-shell-minor-mode
+    compilation-shell-minor-mode-map
+    compilation-shell-minor-mode-variable
+    compilation-skip-to-next-location
+    compilation-start
+    compilation-type
+    compilation-warning-face
+    compile
+    compile-goto-error
+    compile-history
     complete-with-action
     completing-read
     completion--complete-and-exit
@@ -2441,6 +2916,7 @@
     cond-e
     confirm-nonexistent-file-or-buffer
     constrain-to-field
+    continue-process
     copy-abbrev-table
     copy-alist
     copy-category-table
@@ -2450,6 +2926,7 @@
     copy-interval-parent
     copy-intervals
     copy-intervals-to-string
+    copy-keymap
     copy-marker
     copy-properties
     copy-region-as-kill
@@ -2500,15 +2977,18 @@
     custom-check-theme
     custom-current-group
     custom-declare-face
+    custom-declare-group
     custom-declare-theme
     custom-declare-variable
     custom-enabled-themes-set
+    custom-group-of-mode
     custom-handle-keyword
     custom-initialize-changed
     custom-initialize-default
     custom-initialize-reset
     custom-initialize-set
     custom-push-theme
+    custom-quote
     custom-set-faces
     custom-set-variables
     custom-theme--load-path
@@ -2523,15 +3003,16 @@
     custom-variable-history
     custom-variable-names
     custom-variable-p
+    customize-set-variable
     daemonp
     deactivate-mark
     debugger-mode-map
     debugger-quit
     decf
     decode-char
+    decode-coding-bytes
     decode-coding-string
     decode-eol
-    decode-file-bytes
     default-boundp
     default-buffer-file-coding-system
     default-directory
@@ -2541,6 +3022,7 @@
     default-to-grave-quoting-style
     default-value
     defface
+    defgroup
     define-abbrev
     define-abbrev-table
     define-alias
@@ -2548,6 +3030,7 @@
     define-charset
     define-coding-system-alias
     define-command
+    define-compilation-mode
     define-custom
     define-derived-mode
     define-globalized-minor-mode
@@ -2557,6 +3040,7 @@
     define-minor-mode
     define-obsolete-function-alias
     define-theme
+    defsubst
     del-range
     del-range-1
     del-range-2
@@ -2569,6 +3053,7 @@
     delete-char
     delete-directory
     delete-directory-internal
+    delete-dups
     delete-file
     delete-file-internal
     delete-frame
@@ -2578,9 +3063,11 @@
     delete-indentation-command
     delete-interval
     delete-leading-space
+    delete-minibuffer-contents
     delete-other-frames
     delete-other-windows
     delete-overlay
+    delete-process
     delete-region
     delete-trailing-space
     delete-window
@@ -2770,7 +3257,9 @@
     doxygen-font-lock-doc-comments
     doxygen-font-lock-keywords
     draw-box!
+    draw-fringe!
     draw-window-cursor!
+    drop-while
     easy-menu-add
     easy-menu-add-item
     easy-menu-always-true-p
@@ -2808,7 +3297,6 @@
     electric-indent--activate-indent-actions
     electric-indent-can-reindent-p
     electric-indent-chars
-    electric-indent-functions-without-reindent
     electric-indent-inhibit
     electric-indent-just-newline
     electric-indent-local-mode
@@ -2818,7 +3306,14 @@
     electric-indent-mode-value
     electric-indent-post-self-insert-function
     electric-indent-save-hook
-    electric-layout-allow-duplicate-newlines
+    electric-layout-local-mode
+    electric-layout-local-mode-hook
+    electric-layout-mode
+    electric-layout-mode-hook
+    electric-layout-mode-value
+    electric-layout-post-self-insert-function
+    electric-layout-post-self-insert-function-1
+    electric-layout-rules
     electric-newline-and-maybe-indent
     electric-pair--balance-info
     electric-pair--insert
@@ -2848,6 +3343,12 @@
     electric-pair-syntax-info
     electric-pair-text-syntax-table
     electric-pair-will-use-region
+    electric-quote-local-mode
+    electric-quote-local-mode-hook
+    electric-quote-mode
+    electric-quote-mode-hook
+    electric-quote-mode-value
+    electric-quote-post-self-insert-function
     elisp--preceding-sexp
     elisp-mode-syntax-propertize
     elt
@@ -2855,6 +3356,9 @@
     emacs-lisp-mode-hook
     emacs-lisp-mode-map
     emacs-lisp-mode-syntax-table
+    emacs-major-version
+    emacs-minor-version
+    emacs-version
     en/disable-command
     enable-command
     enable-theme
@@ -2865,11 +3369,13 @@
     end-of-defun
     end-of-line
     end-of-paragraph-text
+    end-of-visible-line
     end-of-visual-line
     enlarge-window
     ensure-empty-lines
     ensure-final-newline-on-save!
     ensure-final-newline-on-visit
+    ensure-list
     ensure-surface!
     ensure-window-matrices!
     env--substitute-vars-regexp
@@ -2880,6 +3386,7 @@
     erase-buffer
     erase-window-cursor!
     error-message-string
+    eval-and-compile
     eval-defun
     eval-expression
     eval-expression-get-print-arguments
@@ -2939,10 +3446,15 @@
     face-spec-set
     face-spec-set-2
     face-spec-set-match-display
+    face-text-width
     facep
     fetch-char
+    field-at-pos
     field-beginning
     field-end
+    field-string
+    field-string-no-properties
+    file-accessible-directory-p
     file-attribute-access-time
     file-attribute-device-number
     file-attribute-group-id
@@ -2958,6 +3470,8 @@
     file-directory-p
     file-executable-p
     file-exists-p
+    file-expand-wildcards
+    file-local-name
     file-local-variables-alist
     file-modes
     file-modes-string
@@ -2968,6 +3482,7 @@
     file-name-completion-table
     file-name-concat
     file-name-directory-part
+    file-name-extension
     file-name-history
     file-name-nondirectory-part
     file-name-sans-extension
@@ -2997,6 +3512,7 @@
     fill-find-break-point
     fill-forward-paragraph
     fill-forward-paragraph-function
+    fill-frame-remainder!
     fill-french-nobreak-p
     fill-indent-to-left-margin
     fill-individual-paragraphs
@@ -3024,11 +3540,15 @@
     filladapt-token-match-table
     filladapt-token-table
     find-alternate-file
+    find-and
     find-and-call-menu-selection
     find-auto-coding
     find-before-next-newline
     find-buffer-visiting
+    find-cmd
     find-coding-system
+    find-command
+    find-constituents
     find-file
     find-file-existing
     find-file-name-handler
@@ -3036,18 +3556,25 @@
     find-file-other-window
     find-file-read-args
     find-file-read-only
+    find-generic
     find-image
     find-image--cache
     find-interval
     find-newline
+    find-not
     find-operation-coding-system
+    find-or
+    find-prune
+    find-to-string
     finish-menu-items
+    first-error
     fix-position
     fixup-whitespace
     float-time
     flush-display!
     following-char
     font-family-list
+    font-lock--remove-face-from-text-property
     font-lock-add-keywords
     font-lock-after-change-function
     font-lock-append-text-property
@@ -3070,6 +3597,7 @@
     font-lock-eval-keywords
     font-lock-extend-after-change-region-function
     font-lock-extend-jit-lock-region-after-change
+    font-lock-extend-region-functions
     font-lock-extend-region-multiline
     font-lock-extend-region-wholelines
     font-lock-fillin-text-property
@@ -3123,6 +3651,8 @@
     forward-sexp
     forward-sexp-default-function
     forward-symbol
+    forward-to-indentation
+    forward-visible-line
     forward-word
     forward-word-position
     forward-word-strictly
@@ -3138,6 +3668,7 @@
     frame-inhibit-resize?
     frame-inner-width
     frame-keymap-state
+    frame-left-fringe-width
     frame-list
     frame-live-p
     frame-menu-bar-items
@@ -3155,6 +3686,7 @@
     frame-parameters
     frame-parameters-alist
     frame-quit-cont
+    frame-right-fringe-width
     frame-root-window
     frame-root-window-p
     frame-scroll-bar-width
@@ -3183,13 +3715,16 @@
     get
     get-buffer
     get-buffer-create
+    get-buffer-process
     get-buffer-window
     get-buffer-window-list
     get-char-property
+    get-file-buffer
     get-free-disk-space
     get-keyelt
     get-local-map
     get-pos-property
+    get-process
     get-scratch-buffer-create
     get-selection
     get-specified-cursor-type
@@ -3222,6 +3757,7 @@
     glyph-padding?
     glyph-pixel-width
     glyph-row-ascent
+    glyph-row-continuation-line?
     glyph-row-continued?
     glyph-row-displays-text?
     glyph-row-enabled?
@@ -3305,8 +3841,10 @@
     help-key-description
     help-map
     help-mode
+    help-mode-finish
     help-mode-hook
     help-mode-map
+    help-mode-setup
     help-quit
     help-setup-xref
     highlight-nonselected-windows
@@ -3344,11 +3882,16 @@
     imenu
     imenu--cleanup
     imenu--completion-buffer
+    imenu--create-keymap
     imenu--generic-function
     imenu--history-list
     imenu--in-alist
     imenu--index-alist
+    imenu--last-menubar-index-alist
     imenu--make-index-alist
+    imenu--menubar-keymap
+    imenu--menubar-select
+    imenu--mouse-menu
     imenu--relative-position
     imenu--rescan-item
     imenu--sort-by-name
@@ -3358,6 +3901,8 @@
     imenu--split-submenus
     imenu--subalist-p
     imenu--truncate-items
+    imenu-add-menubar-index
+    imenu-add-to-menubar
     imenu-case-fold-search
     imenu-choose-buffer-index
     imenu-create-index-function
@@ -3368,11 +3913,13 @@
     imenu-find-default
     imenu-flush-cache
     imenu-generic-expression
+    imenu-menubar-modified-tick
     imenu-name-lookup-function
     imenu-prev-index-position-function
     imenu-submenus-on-top
     imenu-syntax-alist
     imenu-unavailable-error
+    imenu-update-menubar
     imports-path
     incf
     indent-according-to-mode
@@ -3426,6 +3973,8 @@
     internal-complete-buffer
     internal-complete-buffer-except
     internal-copy-lisp-face
+    internal-default-process-filter
+    internal-default-process-sentinel
     internal-describe-syntax-value
     internal-get-lisp-face-attribute
     internal-lisp-face-attributes
@@ -3435,6 +3984,8 @@
     internal-set-lisp-face-attribute
     internal-show-cursor
     internal-show-cursor-p
+    internal-temp-output-buffer-show
+    interrupt-process
     interval-both-kids?
     interval-default?
     interval-deletion-adjustment
@@ -3466,6 +4017,7 @@
     invalidate-frame-rows!
     invalidate-region-cache
     invert-face
+    invisible-p
     isearch
     isearch-backward
     isearch-case-fold-search
@@ -3567,6 +4119,14 @@
     jit-lock-refontify
     jit-lock-register
     jit-lock-unregister
+    json-array-type
+    json-false
+    json-key-type
+    json-null
+    json-object-type
+    json-read
+    json-read-file
+    json-read-from-string
     just-one-space
     justify-current-line
     kbd
@@ -3597,10 +4157,12 @@
     kill-all-local-variables
     kill-append
     kill-buffer
+    kill-compilation
     kill-line
     kill-local-variable
     kill-new
     kill-paragraph
+    kill-process
     kill-range
     kill-region
     kill-ring-save
@@ -3609,6 +4171,7 @@
     kill-this-buffer
     kill-this-buffer-enabled-p
     kill-visual-line
+    kill-whole-line
     kill-word
     know-region-cache
     last
@@ -3708,6 +4271,8 @@
     load-theme
     local-abbrev-table
     local-variable-p
+    locate-dominating-file
+    locate-dominating-stop-dir-regexp
     locate-file
     locate-file-internal
     looking-at
@@ -3743,6 +4308,8 @@
     make-category-table
     make-char-table
     make-coding-system
+    make-comint
+    make-comint-in-buffer
     make-ctrl-char
     make-diff-context
     make-directory
@@ -3764,12 +4331,15 @@
     make-mode-line-mouse-map
     make-obsolete
     make-overlay
+    make-process
+    make-prop-match
     make-re-charset
     make-re-context
     make-re-fastmap
     make-re-pattern-buffer
     make-re-registers
     make-re-text
+    make-ring
     make-scan-error
     make-search-failed
     make-separator-line
@@ -3797,6 +4367,7 @@
     mapcan
     mapcar
     mapconcat
+    maphash
     mark
     mark-active
     mark-defun
@@ -3824,6 +4395,8 @@
     matrix-mark-current!
     max-char
     maybe-quit
+    md5
+    member-if
     member-ignore-case
     menu-bar-define-mouse-key
     menu-bar-edit-menu
@@ -3886,8 +4459,10 @@
     minibuffer-contents-no-properties
     minibuffer-cursor-column
     minibuffer-default-prompt-format
+    minibuffer-depth
     minibuffer-hide-completions
     minibuffer-history
+    minibuffer-history-search-history
     minibuffer-insert!
     minibuffer-lazy-highlight-setup
     minibuffer-local-bindings
@@ -3915,6 +4490,7 @@
     minor-mode-menu-from-indicator
     minor-mode-variable-true?
     minusp
+    mod
     modal-lookup-state-key-index
     modal-lookup-state-keymaps
     modal-lookup-state-step!
@@ -3994,6 +4570,7 @@
     mouse-set-region
     mouse-set-region-1
     mouse-start-end
+    move-marker
     move-overlay
     move-past-close-and-reindent
     move-to-column
@@ -4017,11 +4594,27 @@
     newline-and-indent
     next-buffer
     next-char-property-change
+    next-error
+    next-error-buffer-on-selected-frame
+    next-error-buffer-p
+    next-error-buffer-unnavigated-current
+    next-error-find-buffer
+    next-error-follow-minor-mode
+    next-error-follow-minor-mode-variable
+    next-error-follow-mode-post-command-hook
     next-error-found
+    next-error-function
     next-error-highlight-timer
+    next-error-internal
     next-error-last-buffer
     next-error-message-highlight
+    next-error-move-function
+    next-error-no-select
     next-error-overlay-arrow-position
+    next-error-quit-window
+    next-error-select-buffer
+    next-error-select-buffer-read-function
+    next-error-this-buffer-no-select
     next-frame
     next-history-element
     next-interval
@@ -4045,6 +4638,9 @@
     nreverse
     nth
     nthcdr
+    num-processors
+    number-sequence
+    number-to-string
     objc-font-lock-keywords
     objc-font-lock-keywords-1
     objc-font-lock-keywords-2
@@ -4097,6 +4693,7 @@
     open-line-command
     open-user-environment!
     optimize-char-table
+    oset
     other-buffer
     other-frame
     other-window
@@ -4120,6 +4717,7 @@
     overwrite-mode
     overwrite-mode-hook
     pad-line
+    page-delimiter
     paragraph-ignore-fill-prefix
     paragraph-separate
     paragraph-start
@@ -4130,6 +4728,13 @@
     parse-single-submenu
     parse-solitary-modifier
     parse-tool-bar-item
+    password-cache-add
+    password-cache-remove
+    password-data
+    password-in-cache-p
+    password-read
+    password-read-from-cache
+    password-reset
     pcase
     pcase--macroexpand
     pcase-defmacro
@@ -4193,6 +4798,9 @@
     prepare-to-modify-buffer-1
     previous-buffer
     previous-char-property-change
+    previous-error
+    previous-error-no-select
+    previous-error-this-buffer-no-select
     previous-frame
     previous-history-element
     previous-interval
@@ -4205,8 +4813,35 @@
     previous-single-char-property-change
     previous-single-property-change
     primitive-undo
+    prin1
+    prin1-to-string
+    princ
+    princ-to-string
+    print
     print-coding-system-briefly
     printablep
+    process-alive-processes?
+    process-buffer
+    process-coding-system
+    process-command
+    process-exit-status
+    process-filter
+    process-id
+    process-list
+    process-live-p
+    process-mark
+    process-name
+    process-query-on-exit-flag
+    process-send-eof
+    process-send-region
+    process-send-string
+    process-sentinel
+    process-service!
+    process-service-ready!
+    process-status
+    process-tty-name
+    process-wait-descriptors
+    processp
     prog--text-at-point-or-region-p
     prog--text-at-point-p
     prog-fill-reindent-defun
@@ -4221,12 +4856,17 @@
     prog1
     prog2
     progn
+    prop-match-beginning
+    prop-match-end
+    prop-match-value
+    prop-match?
     proper-list-p
     propertize
     propertized-buffer-identification
     provide-theme
     provided-mode-derived-p
     push
+    push-button
     push-left-right-boundary
     push-mark
     push-mark-command
@@ -4245,6 +4885,7 @@
     query-replace-regexp
     quit-char
     quit-condition?
+    quit-process
     quit-restore-window
     quit-window
     quoted-insert
@@ -4323,15 +4964,28 @@
     read-number
     read-number-history
     read-only-mode
+    read-passwd
+    read-passwd--hide-password
+    read-passwd--mini-buffers
+    read-passwd--mode-line-icon
+    read-passwd--password-hidden
+    read-passwd-map
+    read-passwd-mode
+    read-passwd-mode-variable
+    read-passwd-toggle-visibility
     read-quoted-char
     read-regexp
+    read-shell-command
     read-string
     read-variable
     read-wait-ms
     realize-face
     realize-tty-face
     recenter
+    recenter-current-error
+    recenter-top-bottom
     recombine-windows
+    recompile
     record-buffer!
     record-delete
     record-first-change
@@ -4361,8 +5015,10 @@
     region-end
     region-limit
     register-command!
+    register-mode-line-variable!
     remember-mouse-glyph
     remove
+    remove-from-invisibility-spec
     remove-hook
     remove-list-of-text-properties
     remove-text-properties
@@ -4398,6 +5054,27 @@
     revert-buffer-with-coding-system
     right-char
     ring-bell-function
+    ring-convert-sequence-to-ring
+    ring-copy
+    ring-elements
+    ring-empty-p
+    ring-extend
+    ring-index
+    ring-insert
+    ring-insert+extend
+    ring-insert-at-beginning
+    ring-length
+    ring-member
+    ring-minus1
+    ring-next
+    ring-p
+    ring-plus1
+    ring-previous
+    ring-ref
+    ring-remove
+    ring-remove+insert+extend
+    ring-resize
+    ring-size
     risky-local-variable-p
     rmc--add-key-description
     rmc--show-help
@@ -4411,6 +5088,7 @@
     run-hook-with-args
     run-hook-with-args-until-failure
     run-hook-with-args-until-success
+    run-hook-wrapped
     run-hooks
     run-mode-hooks
     run-post-command-hook!
@@ -4420,6 +5098,16 @@
     run-window-change-functions
     run-with-idle-timer
     run-with-timer
+    rx
+    rx--char-classes
+    rx--pcase-match-1
+    rx--pcase-match-n
+    rx--pcase-pred
+    rx--to-expr
+    rx--translate
+    rx-define
+    rx-let-eval
+    rx-to-string
     safe-local-variable-p
     sanitize-char-width
     save-buffer
@@ -4501,8 +5189,10 @@
     self-insert-command
     self-insert-layer
     self-insert-tab
+    send-invisible
     sendcomment
     sentence-end
+    seq-contains-p
     seq-copy
     seq-difference
     seq-do-indexed
@@ -4519,6 +5209,7 @@
     seq-sort-by
     seq-subseq
     seq-take
+    seq-union
     seq-uniq
     sescape
     set!%buffer-modtime
@@ -4653,21 +5344,44 @@
     set!c-syntax-table-hwm
     set!cache-long-scans
     set!cd-path
+    set!comint-eol-on-send
+    set!comint-get-old-input
+    set!comint-input-filter
+    set!comint-password-function
+    set!comint-process-echoes
+    set!comint-prompt-regexp
+    set!comint-use-prompt-regexp
     set!comment-end
     set!comment-multi-line
     set!comment-start
+    set!compilation--parsed
+    set!compilation--start-time
+    set!compilation-arguments
+    set!compilation-auto-jump-to-next
+    set!compilation-current-error
+    set!compilation-environment
+    set!compilation-error-regexp-alist
+    set!compilation-error-screen-columns
+    set!compilation-first-column
+    set!compilation-highlight-regexp
+    set!compilation-locs
+    set!compilation-messages-start
+    set!compilation-search-path
     set!dir-local-variables-alist
     set!dired-actual-switches!
     set!dired-buffers!
     set!dired-directory!
     set!dired-subdir-alist!
+    set!electric-indent-chars
     set!electric-indent-inhibit
+    set!electric-layout-rules
     set!electric-pair-skip-whitespace-function
     set!file-local-variables-alist
     set!fill-paragraph-function
     set!fill-paragraph-handle-comment
     set!font-lock-defaults!
     set!font-lock-extend-after-change-region-function!
+    set!font-lock-extend-region-functions!
     set!font-lock-fontify-region-function!
     set!font-lock-keywords!
     set!font-lock-mode!
@@ -4695,11 +5409,13 @@
     set!frame-windows
     set!history-entries
     set!imenu--index-alist
+    set!imenu--menubar-keymap!
     set!imenu-case-fold-search
     set!imenu-create-index-function
     set!imenu-default-goto-function-variable!
     set!imenu-extract-index-name-function
     set!imenu-generic-expression
+    set!imenu-menubar-modified-tick!
     set!imenu-name-lookup-function
     set!imenu-prev-index-position-function
     set!imenu-submenus-on-top
@@ -4725,6 +5441,9 @@
     set!mark-ring
     set!menu-items-n-panes!
     set!mode-name
+    set!next-error-function
+    set!next-error-move-function
+    set!page-delimiter
     set!paragraph-ignore-fill-prefix
     set!paragraph-separate
     set!paragraph-start
@@ -4822,6 +5541,7 @@
     set-glyph-padding!
     set-glyph-pixel-width!
     set-glyph-row-ascent!
+    set-glyph-row-continuation-line!
     set-glyph-row-continued!
     set-glyph-row-displays-text!
     set-glyph-row-enabled!
@@ -4862,6 +5582,12 @@
     set-mouse-position
     set-object-intervals
     set-point
+    set-process-buffer
+    set-process-coding-system
+    set-process-filter
+    set-process-mark
+    set-process-query-on-exit-flag
+    set-process-sentinel
     set-re-pattern-buffer-buffer!
     set-re-pattern-buffer-can-be-null!
     set-re-pattern-buffer-fastmap!
@@ -4897,13 +5623,23 @@
     set-window-new-total
     set-window-next-buffers
     set-window-parameter
+    set-window-pixel-height!
+    set-window-pixel-left!
+    set-window-pixel-top!
+    set-window-pixel-width!
+    set-window-point
     set-window-point!
     set-window-prev-buffers
     set-window-scroll-bars
+    set-window-start
     set-window-start!
     set-window-vscroll
     set-windows-or-buffers-changed!
     setq
+    shell-command-buffer-name
+    shell-command-buffer-name-async
+    shell-command-switch
+    shell-command-to-string
     shell-file-name
     shell-quote-argument
     show-command
@@ -4938,6 +5674,7 @@
     shrink-window-horizontally
     signal-after-change
     signal-before-change
+    signal-process
     signal-quit
     single-key-description
     single-keymap-panes
@@ -4951,6 +5688,8 @@
     skip-line-prefix
     skip-syntax-backward
     skip-syntax-forward
+    slot-value
+    smallest-font-height
     smath
     smax
     sopen
@@ -4977,8 +5716,13 @@
     standard-category-table
     standard-syntax-runs
     standard-syntax-table
+    start-file-process
+    start-file-process-shell-command
     start-of-paragraph-text
+    start-process
+    start-process-shell-command
     status-string
+    stop-process
     store-in-alist
     store-in-keymap
     string->re-text
@@ -4990,15 +5734,20 @@
     string-help-echo-at
     string-intervals
     string-lessp
+    string-limit
+    string-lines
     string-match
     string-match-p
     string-pixel-width
     string-prefix-p
     string-property-run-at
     string-replace
+    string-search
     string-search-forward
     string-suffix-p
+    string-to-char
     string-to-list
+    string-to-number
     string-to-syntax
     string-trim
     string-trim-left
@@ -5272,10 +6021,13 @@
     tabulated-list-print-entry
     tabulated-list-revert
     tabulated-list-set-col
+    take
+    temp-buffer-show-function
     temp-buffer-window-setup
     temp-buffer-window-show
     temporary-file-directory
     terminal-coding-system
+    terpri
     test-completion
     test-display-color-cells
     test-display-column-width
@@ -5311,10 +6063,16 @@
     text-mode-map
     text-mode-syntax-table
     text-mode-variant
+    text-prop-means-invisible
     text-properties-at
+    text-property--find-end-backward
+    text-property--find-end-forward
+    text-property--match-p
     text-property-any
     text-property-list
     text-property-not-all
+    text-property-search-backward
+    text-property-search-forward
     text-property-stickiness
     text-quoting-style
     text-scale-adjust
@@ -5332,6 +6090,7 @@
     textget
     texts-glyph
     texts-width
+    time-add
     time-convert
     time-equal-p
     time-less-p
@@ -5440,11 +6199,13 @@
     turn-on-font-lock-if-desired
     turn-on-visual-line-mode
     uarg->integer
+    unbuttonize-region
     unchain-marker
     uncomment-region
     uncomment-region-default
     uncomment-region-default-1
     undefined
+    underline-line-scaling-flag
     undo
     undo--last-change-was-undo-p
     undo-deletion-entry?
@@ -5458,6 +6219,7 @@
     unibyte-to-char
     unicode-category
     unify-charset
+    universal-argument
     universal-coding-system-argument
     unjustify-current-line
     unjustify-region
@@ -5488,6 +6250,7 @@
     use-region-end
     use-region-p
     user-error
+    user-login-name
     validate-interval-range
     validate-plist
     validate-region
@@ -5503,6 +6266,7 @@
     walk-window-tree-1
     what-cursor-position
     when-e
+    when-let*
     where-is
     where-is-internal
     while-e
@@ -5557,6 +6321,10 @@
     window-body-top
     window-body-width
     window-bottom-divider-width
+    window-box-height
+    window-box-left
+    window-box-top
+    window-box-width
     window-buffer
     window-change-stamp
     window-child
@@ -5579,6 +6347,7 @@
     window-end
     window-force-start?
     window-frame
+    window-fringe-cols
     window-fringes
     window-full-height-p
     window-full-width?
@@ -5602,6 +6371,8 @@
     window-left
     window-left-child
     window-left-column
+    window-left-fringe-cols
+    window-left-fringe-width
     window-left-scroll-bar-cols
     window-left-sibling
     window-leftmost?
@@ -5661,6 +6432,8 @@
     window-resize-pixelwise
     window-right-border?
     window-right-divider-width
+    window-right-fringe-cols
+    window-right-fringe-width
     window-right-scroll-bar-cols
     window-right-sibling
     window-safe-min-height
@@ -5673,6 +6446,7 @@
     window-scroll-bar-height
     window-scroll-bar-width
     window-scroll-bars
+    window-set-parent-and-normal-sizes
     window-sizable
     window-sizable-p
     window-size
@@ -5709,6 +6483,8 @@
     with-current-buffer-window
     with-defun-functions-nil
     with-help-window
+    with-output-to-string
+    with-output-to-temp-buffer
     with-restriction
     with-selected-frame
     with-selected-window
@@ -5724,6 +6500,7 @@
     write-file
     write-file-code-points
     write-glyphs!
+    write-region
     x-file-dialog
     x-get-clipboard
     x-hide-tip

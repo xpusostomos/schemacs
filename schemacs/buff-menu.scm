@@ -39,6 +39,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+    (only (schemacs custom) define-custom)
     ;; `kbd' - see `character.sld''s export note for why it is there
     (only (schemacs character) kbd)
     (scheme base)
@@ -190,15 +191,24 @@
                        (string=? (list-ref entry 2) " "))
               (tabulated-list-set-col ed 2 "*" #t))))))
 
-    (define *Buffer-menu-size-width* 7)
-    (define *Buffer-menu-mode-width* 16)
-    (define *Buffer-menu-name-width*
+    (define-custom *Buffer-menu-size-width* 7
+      "Width of buffer size column in the Buffer Menu."
+      :type 'natnum :group 'Buffer-menu :version "24.3")
+    (define-custom *Buffer-menu-mode-width* 16
+      "Width of mode name column in the Buffer Menu."
+      :type 'natnum :group 'Buffer-menu)
+    (define-custom *Buffer-menu-name-width*
       ;; GNU Emacs's `Buffer-menu-name-width', whose default is
       ;; `Buffer-menu--dynamic-name-width': the window's width divided by
       ;; 4.2, but never narrower than 19 characters and never wider than
       ;; the longest name.
       ;;--------------------------------------------------------------
-      #f)
+      #f
+      "Width of buffer name column in the Buffer Menu.
+This can either be a number (used directly) or a function that
+will be called with the list of buffers and should return a
+number."
+      :type '(choice function number) :group 'Buffer-menu :version "28.1")
 
     (define (Buffer-menu--dynamic-name-width buffers)
       ;; The width of the name column for these buffers: GNU Emacs's
@@ -214,8 +224,8 @@
                                  (string-length (buffer-name (car rest))))))))))
 
     (define (Buffer-menu-name-width buffers)
-      (if *Buffer-menu-name-width*
-          *Buffer-menu-name-width*
+      (if (*Buffer-menu-name-width*)
+          (*Buffer-menu-name-width*)
           (Buffer-menu--dynamic-name-width buffers)))
 
     (define (Buffer-menu--pretty-name name)
@@ -358,8 +368,8 @@
                  (list "R" 1 #f ':pad-right 0)
                  (list "M" 1 #f)
                  (list "Buffer" (Buffer-menu-name-width (buffer-list)) #f)
-                 (list "Size" *Buffer-menu-size-width* #f ':right-align #t)
-                 (list "Mode" *Buffer-menu-mode-width* #f)
+                 (list "Size" (*Buffer-menu-size-width*) #f ':right-align #t)
+                 (list "Mode" (*Buffer-menu-mode-width*) #f)
                  (list "File" 1 #f)))
           (*tabulated-list-entries*
            (lambda () (list-buffers--refresh old-buffer buffer)))

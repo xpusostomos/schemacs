@@ -24,6 +24,7 @@
   ;; clipboard, which is what `pgtkselect.c' is under pgtk-win.el.
 
   (import
+   (only (schemacs custom) define-custom)
    (scheme base)
    (scheme cxr)
    ;; `window-system' is what `gui-select-text' and the rest dispatch
@@ -82,13 +83,21 @@
   (begin
 
     ;; `(defcustom select-enable-clipboard t)' (`select.el:91').
-    (define *select-enable-clipboard* (make-parameter #t))
+    (define-custom *select-enable-clipboard* #t
+      "Non-nil means cutting and pasting uses the clipboard.
+This can be in addition to, but in preference to, the primary selection,
+if applicable (i.e. under X11)."
+      :type 'boolean :group 'killing :version "24.1")
     ;; ^ Non-nil means cutting and pasting uses the clipboard. This can
     ;; be in addition to, but in preference to, the primary selection,
     ;; if applicable (i.e. under X11).
 
     ;; `(defcustom select-enable-primary nil)' (`select.el:102').
-    (define *select-enable-primary* (make-parameter #f))
+    (define-custom *select-enable-primary* #f
+      "Non-nil means cutting and pasting uses the primary selection.
+The existence of a primary selection depends on the underlying GUI you use.
+E.g. it doesn't exist under MS-Windows."
+      :type 'boolean :group 'killing :version "25.1")
     ;; ^ Non-nil means cutting and pasting uses the primary selection.
     ;; The existence of a primary selection depends on the underlying
     ;; GUI you use. E.g. it doesn't exist under MS-Windows.
@@ -130,7 +139,19 @@
     ;; what sets it - the Bug#16382 line - and the command-loop half
     ;; that reads it is keyboard.sld's to come.
 
-    (define *x-select-request-type* (make-parameter #f))
+    (define-custom *x-select-request-type* #f
+      "Data type request for X selection.
+The value is one of the following data types, a list of them, or nil:
+  `COMPOUND_TEXT', `UTF8_STRING', `STRING', `TEXT', `text/plain\\;charset=utf-8'
+
+If the value is one of the above symbols, try only the specified type.
+
+If the value is a list of them, try each of them in the specified
+order until succeed.
+
+The value nil is the same as the list (UTF8_STRING COMPOUND_TEXT STRING
+text/plain\\;charset=utf-8)."
+      :type '(choice (const :tag "Default" nil) (const COMPOUND_TEXT) (const UTF8_STRING) (const STRING) (const TEXT) (const #{text/plain;charset=utf-8}#) (set :tag "List of values" (const COMPOUND_TEXT) (const UTF8_STRING) (const STRING) (const TEXT) (const #{text/plain;charset=utf-8}#))) :group 'killing)
     ;; ^ Data type request for X selection: one data type, a list of
     ;; them, or nil - nil meaning the list
     ;; (UTF8_STRING COMPOUND_TEXT STRING text/plain;charset=utf-8),
@@ -547,7 +568,39 @@
     ;;     `-to-save-targets' and `-to-identity'.
     ;;------------------------------------------------------------------
 
-    (define *selection-coding-system* (make-parameter #f))
+    (define-custom *selection-coding-system* #f
+      "Coding system for communicating with other programs.
+
+For MS-Windows and MS-DOS:
+When sending or receiving text via selection and clipboard, the text
+is encoded or decoded by this coding system.  The default value is
+the current system default encoding on 9x/Me, `utf-16le-dos'
+(Unicode) on NT/W2K/XP, and `iso-latin-1-dos' on MS-DOS.
+
+For X Windows:
+
+This coding system replaces that of the default coding system
+selection text is encoded by in reaction to a request for the
+polymorphic `TEXT' selection target when its base coding system
+is compatible with `compound-text' and the text being encoded
+cannot be rendered Latin-1 without loss of information.
+
+It also replaces the coding system by which calls to
+`gui-get-selection' decode selection requests for text data
+types, which are enumerated below beside their respective coding
+systems otherwise used.
+
+DATA TYPE			CODING SYSTEM
+-------------------------- 	-------------
+UTF8_STRING			utf-8
+text/plain\\;charset=utf-8	utf-8
+COMPOUND_TEXT			compound-text-with-extensions
+STRING				iso-latin-1
+C_STRING			raw-text-unix
+
+See also the documentation of the variable `x-select-request-type' how
+to control which data-type to request for receiving text."
+      :type 'coding-system :group 'mule :version "23.1")
     ;; ^ `selection-coding-system' (`select.el:42'): "Coding system for
     ;; communicating with other programs." The workspace's whole default
     ;; is nil - Emacs's is too, on X - and its only effect here is on

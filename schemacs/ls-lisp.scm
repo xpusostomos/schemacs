@@ -57,6 +57,7 @@
   ;;   * the `-R' recursion, which dired does itself.
 
   (import
+    (only (schemacs custom) define-custom)
     (scheme base)
     (scheme char)
     ;; `sort' has no R7RS spelling, and `string-index' is Guile's.
@@ -123,23 +124,57 @@
     ;; The options
     ;;------------------------------------------------------------------
 
-    (define *ls-lisp-verbosity*
-      (make-parameter '(modes links uid gid)))
+    (define-custom *ls-lisp-verbosity* '(modes links uid gid)
+      "A list of optional file attributes that ls-lisp should display.
+It should contain none or more of the symbols: links, uid, gid.
+A value of nil (or an empty list) means display none of them.
+
+Concepts come from UNIX: `links' means count of names associated with
+the file; `uid' means user (owner) identifier; `gid' means group
+identifier; `modes' means Unix-style permission bits (drwxrwxrwx).
+
+If emulation is MacOS then default is nil;
+if emulation is MS-Windows then default is `(links)' if platform is
+Windows NT/2K, nil otherwise;
+if emulation is UNIX then default is `(links uid)';
+if emulation is GNU then default is `(links uid gid)'."
+      :type '(set (const :tag "Show Link Count" links) (const :tag "Show User" uid) (const :tag "Show Group" gid) (const :tag "Show Modes" modes)) :group 'ls-lisp)
     ;; ^ GNU Emacs's `ls-lisp-verbosity', which says which parts the
     ;; long listing shows at all. Emacs computes its default from
     ;; `ls-lisp-emulation', dropping `gid' under MS-Windows; the four
     ;; are what a Unix Emacs ends up with. Where Emacs's default omits
     ;; `modes' and prints four characters, ours names it.
 
-    (define *ls-lisp-ignore-case* (make-parameter #f))
+    (define-custom *ls-lisp-ignore-case* #f
+      "Non-nil causes ls-lisp alphabetic sorting to ignore case."
+      :type 'boolean :group 'ls-lisp)
     ;; ^ "Non-nil means treat file names in a case-insensitive way."
 
-    (define *ls-lisp-use-localized-time-format* (make-parameter #f))
+    (define-custom *ls-lisp-use-localized-time-format* #f
+      "Non-nil means to always use `ls-lisp-format-time-list' for time stamps.
+This applies even if a valid locale is determined by `ls-lisp-format-time'.
+
+WARNING: Using localized date/time format might cause Dired columns
+to fail to line up, e.g. if month names are not all of the same length."
+      :type 'boolean :group 'ls-lisp)
     ;; ^ GNU Emacs's `ls-lisp-use-localized-time-format': "Non-nil means
     ;; to always format file times with a localized format, even when
     ;; the locale is the C or POSIX locale."
 
-    (define *ls-lisp-use-string-collate* (make-parameter #t))
+    (define-custom *ls-lisp-use-string-collate* #t
+      "Non-nil causes ls-lisp to sort files in locale-dependent collation order.
+
+A value of nil means use ordinary string comparison (see `compare-strings')
+for sorting files.  A non-nil value uses `string-collate-lessp' instead,
+which more closely emulates what GNU `ls' does.
+
+On GNU/Linux systems, if the locale's codeset specifies UTF-8, as
+in \"en_US.UTF-8\", the collation order follows the Unicode
+Collation Algorithm (UCA), which places together file names that
+differ only in punctuation characters.  On MS-Windows, customize
+the option `ls-lisp-UCA-like-collation' to a non-nil value to get
+similar behavior."
+      :type 'boolean :group 'ls-lisp :version "25.1")
     ;; ^ GNU Emacs's `ls-lisp-use-string-collate': "Non-nil causes
     ;; ls-lisp to sort files in locale-dependent collation order. A
     ;; value of nil means use ordinary string comparison (see
@@ -152,16 +187,42 @@
     ;; GNU/Linux takes. There is no `ls-lisp-emulation' here, so it is
     ;; that branch's answer.
 
-    (define *ls-lisp-dirs-first* (make-parameter #f))
+    (define-custom *ls-lisp-dirs-first* #f
+      "Non-nil causes ls-lisp to sort directories first in any ordering.
+(Or last if it is reversed.)  Follows Microsoft Windows Explorer."
+      :type 'boolean :group 'ls-lisp)
     ;; ^ "Non-nil means group directories first, then files, like GNU ls
     ;; invoked with `--group-directories-first'."
 
-    (define *ls-lisp-support-shell-wildcards* (make-parameter #t))
+    (define-custom *ls-lisp-support-shell-wildcards* #t
+      "Non-nil means ls-lisp treats file patterns as shell wildcards.
+Otherwise they are treated as Emacs regexps (for backward compatibility)."
+      :type 'boolean :group 'ls-lisp)
     ;; ^ "Non-nil means treat file name wildcards as shell wildcards;
     ;; nil means treat them as regexps."
 
-    (define *ls-lisp-format-time-list*
-      (make-parameter '("%b %e %H:%M" "%b %e  %Y")))
+    (define-custom *ls-lisp-format-time-list* '("%b %e %H:%M" "%b %e  %Y")
+      "List of `format-time-string' specs to display file time stamps.
+These specs are used ONLY if a valid locale can not be determined,
+or if the locale is \"C\" or \"POSIX\".  If a valid non-\"C\" locale
+can be determined, file time stamps are displayed using hardcoded
+formats \"%m-%d %H:%M\" for new files and \"%Y-%m-%d\" for old files.
+
+If `ls-lisp-use-localized-time-format' is non-nil, the specs specified
+by this option are used regardless of whether the locale can be determined.
+
+The locale is determined by `ls-lisp-format-time', which see.
+
+Syntax:  (EARLY-TIME-FORMAT OLD-TIME-FORMAT)
+
+The EARLY-TIME-FORMAT is used if file has been modified within the
+current year.  The OLD-TIME-FORMAT is used for older files.  To use ISO
+8601 dates, you could set:
+
+(setq ls-lisp-format-time-list
+       \\='(\"%Y-%m-%d %H:%M\"
+         \"%Y-%m-%d      \"))"
+      :type '(list (string :tag "Early time format") (string :tag "Old time format")) :group 'ls-lisp)
     ;; ^ "List of format strings used for display of file times. The
     ;; first element is used for recent files, the second for older
     ;; ones." Emacs's own defaults for a C locale.

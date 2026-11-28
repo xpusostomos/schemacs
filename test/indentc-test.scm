@@ -4,13 +4,14 @@
  (only (srfi 64) test-assert test-equal test-begin test-end)
  (only (guile) setvbuf)
  (only (schemacs buffer)
-       get-buffer-create set-buffer current-buffer erase-buffer)
+       get-buffer-create set-buffer current-buffer erase-buffer
+       set-buffer-local-value!)
  (only (schemacs editfns)
        insert goto-char point buffer-string)
  (only (schemacs textprop) put-text-property)
  (only (schemacs indentc)
        current-column current-line-display-column move-to-column
-       scan-for-column))
+       scan-for-column line-display-texts))
 
 ;; Unbuffered output, so a run that hangs shows where it got to.
 (setvbuf (current-output-port) 'none)
@@ -209,3 +210,24 @@
     (map (lambda (j) (current-line-display-column ed j)) (iota 6))))
 
 (test-end "schemacs_editor_indentc")
+
+;;----------------------------------------------------------------------
+;; `line-display-texts`' invisible handling (`handle_invisible_prop`,
+;; `xdisp.c:5206').  Measured on Emacs 31.1 with the same text and
+;; properties: with the default `buffer-invisibility-spec` t an
+;; `invisible` property hides the characters; with `((foo . t))` a run
+;; of `foo` collapses to "..." at its start and nothing after it.
+(test-begin "schemacs_editor_indentc_invisible")
+(test-equal "an invisible run takes no columns"
+            (vector #\a "" "" #\d #\e #\f)
+            (let ((ed (buffer-of "abcdef")))
+              (put-text-property 2 4 'invisible #t)
+              (line-display-texts ed 1)))
+(test-equal "with an ellipsis spec the run starts with ..."
+            (vector #\a "..." "" #\d #\e #\f)
+            (let ((ed (buffer-of "abcdef")))
+              (set-buffer-local-value! ed 'buffer-invisibility-spec
+                                       (list (cons 'foo #t)))
+              (put-text-property 2 4 'invisible 'foo)
+              (line-display-texts ed 1)))
+(test-end "schemacs_editor_indentc_invisible")

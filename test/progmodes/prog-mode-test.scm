@@ -21,11 +21,11 @@
         set-syntax-table copy-syntax-table standard-syntax-table)
   (only (schemacs progmodes elisp-mode) emacs-lisp-mode)
   (only (schemacs progmodes prog-mode)
-        prog-mode prog-mode-map prog-indent-sexp prog-fill-reindent-defun
-        prog--text-at-point-p)
+        prog-mode prog-mode-map prog-mode-hook prog-indent-sexp
+        prog-fill-reindent-defun prog--text-at-point-p)
   (only (schemacs keymap) keymap-lookup)
   (only (schemacs keyboard) key-binding)
-  (only (schemacs subr) kbd))
+  (only (schemacs subr) kbd add-hook remove-hook))
 
 (test-begin "schemacs_editor_prog_mode")
 
@@ -136,3 +136,26 @@
      (procedure-name (key-binding (kbd "M-q"))))))
 
 (test-end "schemacs_editor_prog_mode")
+
+;;----------------------------------------------------------------------
+;; `prog-mode-hook` runs through a derived mode's parent call
+;;----------------------------------------------------------------------
+;; `emacs-lisp-mode` derives from `prog-mode`, so entering it runs
+;; `prog-mode` and then `run-mode-hooks prog-mode-hook`. `prog-mode-hook`
+;; is a `define-custom` parameter (Emacs's is a defcustom), and
+;; `run-hooks` dereferences it, so a function added with `add-hook` runs.
+
+(test-begin "schemacs_editor_prog_mode_hook")
+
+(test-equal "a function added with add-hook runs through the parent mode"
+  1
+  (with-buffer
+   (lambda (b)
+     (let* ((ran 0)
+            (f (lambda () (set! ran (+ ran 1)))))
+       (add-hook prog-mode-hook f)
+       (emacs-lisp-mode)
+       (remove-hook prog-mode-hook f)
+       ran))))
+
+(test-end "schemacs_editor_prog_mode_hook")

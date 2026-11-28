@@ -34,7 +34,8 @@
     ;; coordinates arrive as inexact numbers and every cell here
     ;; is an exact one - `pgtk.sld''s `pgtk-ensure-surface!' makes
     ;; the same conversion for the same reason.
-    (only (guile) delq filter sort string<? inexact->exact format
+    (only (guile) delq filter sort string<? inexact->exact format cdddr
+          make-hash-table hashq-set! hashq-ref
           ;; `string-pixel-width` measures the widest line of a string
           ;; that holds newlines, as the C's `buffer-text-pixel-size`
           ;; does over the work buffer.
@@ -55,7 +56,9 @@
           ;; to be recomputed. Set by a window or buffer switch; cleared
           ;; with the other one at the end of `redisplay-frames!`.
           update-mode-lines? set-update-mode-lines!
-          write-glyphs! draw-box! face-metrics display-cell-size clear-frame-area!
+          write-glyphs! draw-box! draw-fringe!
+          face-metrics face-text-width smallest-font-height display-cell-size clear-frame-area!
+          fill-frame-remainder!
           clear-end-of-line! ensure-surface!
           update-window-begin! update-window-end!
           update-begin! update-end!
@@ -119,7 +122,8 @@
     ;; `add-text-properties-from-list' are what carry the properties
     ;; across the truncation that fits the line to the window.
     (only (schemacs textprop)
-          get-text-property text-property-list add-text-properties-from-list)
+          get-text-property get-char-property text-prop-means-invisible
+          invisible-p text-property-list add-text-properties-from-list)
     ;; `concat' is `fns.c`'s and is what joins a mode line's runs - and
     ;; unlike `string-append' it copies the pieces' text properties, as
     ;; the C's does; `pad-line`'s padding goes on through it.
@@ -185,9 +189,19 @@
          ;; text area's bottom is the window's pixel height less this.
          window-mode-line-height
          window-body-width window-buffer set!window-buffer window-height window-left
+         ;; The window's pixel rectangle, the authority `window-box-*'
+         ;; and the mode line's bottom edge read.
+         window-pixel-top window-pixel-height window-pixel-left window-pixel-width
+         ;; `window_box' in pixels: the text area's left, width, top and
+         ;; height, after the scroll bar, the fringes and the mode/tab
+         ;; lines. The redisplay lays every row out in these.
+         window-box-left window-box-width window-box-top window-box-height
          ;; The text area's first column and the bar's share of the
          ;; window: `WINDOW_BOX_LEFT_EDGE_X` and the scroll bar macros.
          window-body-left window-scroll-bar-cols window-left-scroll-bar-cols
+         window-left-fringe-width window-right-fringe-width
+         window-left-fringe-cols window-right-fringe-cols
+         window-fringe-cols
          window-vertical-scroll-bar-type window-config-scroll-bar-width
          window-config-scroll-bar-cols window-scroll-bar-width window-live-p
          scroll-bar-adjust-thumb-portion
@@ -258,6 +272,9 @@
           window-line-slices-at window-line-slices %window-line-slices
           rows-above rows-row-of-column %row-of-position %row-beginning
           line-texts-offsets
+          *line-measure-function* *line-unit-width-function*
+          *line-reserve-width-function*
+          %call-with-line-measure
           vertical-motion line-next-start window-start)
     ;; `mode-line-eol-desc' reads the buffer's coding system: its eol
     ;; half is what the mnemonic is drawn from.
@@ -344,6 +361,8 @@
           glyph-row-truncated-on-right?
           set-glyph-row-truncated-on-right!
           glyph-row-continued? set-glyph-row-continued!
+          glyph-row-continuation-line?
+          set-glyph-row-continuation-line!
           glyph-row-displays-text? set-glyph-row-displays-text!
           glyph-row-ends-at-zv? set-glyph-row-ends-at-zv!
           glyph-row-fill-line? set-glyph-row-fill-line!
@@ -410,7 +429,7 @@
     ;; the mode line read one and `add-minor-mode' wrote the other, so a
     ;; minor mode registered the Emacs way never reached the mode line.
     (only (schemacs subr) *minor-mode-alist* run-hooks
-          run-hook-with-args
+          run-hook-with-args with-temp-buffer
           ;; `note-mouse-highlight` reads a position list the same way the
           ;; mouse commands do - including the string a click landed on,
           ;; which is where a mode-line item's `keymap` and `pointer`
@@ -517,6 +536,7 @@
    ;; `bindings.el:128`'s default help text for the mode line, and the
    ;; option that chooses it.
    mode-line-default-help-echo *mode-line-default-help-echo*
+   *scroll-margin* *maximum-scroll-margin*
    ;; The major mode's and minor modes' buttons: the two help strings,
    ;; their keymaps, the toggles map and its sorter (`bindings.el:404`),
    ;; and the run a click's flattened string is cut into.
@@ -531,6 +551,8 @@
    *mode-line-position-column-line-format*
    *column-number-indicator-zero-based*
    percent99 mode-line-symbol-value
+   *mode-line-process-status-function* register-mode-line-variable!
+   invisible-p
    ;; The two evaluation steps a lighter goes through, which
    ;; `mouse.scm`'s completion table and `help-fns.scm`'s
    ;; `describe-minor-mode` family read.
@@ -760,15 +782,10 @@
       ;; are built. The mini window with no echo-area text answers zeros,
       ;; which makes the toolkit draw a full-length thumb.
       ;;--------------------------------------------------------------
-      (let* ((frame (window-frame window))
-             (side (window-vertical-scroll-bar-type window))
-             (bar-cols (if side (window-config-scroll-bar-cols window) 0))
-             (cw (frame-char-width frame))
-             (ch (frame-char-height frame))
-             (left (if (eq? side 'left)
-                       (window-left window)
-                       (- (+ (window-left window) (window-width window))
-                          bar-cols)))
+      (let* ((side (window-vertical-scroll-bar-type window))
+             (bar-pixels (if side
+                             (window-config-scroll-bar-width window)
+                             0))
              (data
               (let ((buffer (window-buffer window)))
                 (if (not (and buffer (window-live-p window)))
@@ -782,19 +799,26 @@
                       (when (< whole (- end start))
                         (set! whole (- end start)))
                       (list (- end start) start whole))))))
-        ;; **The bar's box is the text area, not the window's whole
-        ;; rectangle.** `pgtk_set_vertical_scroll_bar` asks
-        ;; `window_box (w, ANY_AREA, 0, &window_y, 0, &window_height)`
-        ;; (`pgtkterm.c:4248`), and `window_box_height` excludes the mode
-        ;; line (and the tab and header lines), while its Y is the window
-        ;; top *plus* those lines (`xdisp.c:1463-1479`). Sizing the bar to
-        ;; the whole window made two stacked windows' bars join across the
-        ;; mode line row, where Emacs draws the mode line out to the frame
-        ;; edge.
+        ;; **The bar's box is the text area's pixels**, as
+        ;; `pgtk_set_vertical_scroll_bar` asks `window_box (w, ANY_AREA,
+        ;; ...)` (`pgtkterm.c:4248`): its y is `window_box_top` and its
+        ;; height `window_box_height`, which excludes the mode, tab and
+        ;; header lines but is otherwise the frame's pixels, not a row
+        ;; count. The x is the box's own edge: the window's pixel left
+        ;; for a left bar, the right fringe's outer edge for a right one
+        ;; (`WINDOW_SCROLL_BAR_AREA_X`).
         (display-set-window-scroll-bar
          (current-display) window side
-         (* left cw) (* (window-body-top window) ch)
-         (* bar-cols cw) (* (window-body-height window) ch)
+         (if (eq? side 'left)
+             (- (window-box-left window)
+                (window-left-fringe-width window)
+                bar-pixels)
+             (+ (window-box-left window)
+                (window-box-width window)
+                (window-right-fringe-width window)))
+         (window-box-top window)
+         bar-pixels
+         (window-box-height window)
          (car data) (cadr data) (caddr data))))
 
     (define (last-visible-line-start window start vheight)
@@ -861,7 +885,41 @@
       (let* ((ed (window-buffer window))
              (vheight (window-body-height window))
              (pt (max (buffer-beg ed) (min (window-point window) (buffer-z ed))))
-             (start (max (buffer-beg ed) (min (window-start window) (buffer-z ed)))))
+             (raw-start (max (buffer-beg ed)
+                             (min (window-start window) (buffer-z ed))))
+             (start
+              ;; **A *forced* start is honoured, Z or not.** Measured on
+              ;; Emacs 31.1: `(set-window-start w (point-max))' then
+              ;; `(sit-for 0)' leaves `window-start` at `point-max' -
+              ;; redisplay does not recentre a start Lisp just asked for,
+              ;; and `mouse-scroll-subr' (`mouse.el:1708') depends on
+              ;; that: it sets the start to point each step and stops
+              ;; when `vertical-motion' at that start answers 0, so a
+              ;; start recentred behind its back makes the drag bounce
+              ;; 446->491 for ever instead of reaching the buffer's end.
+              (if (and (> (buffer-z ed) (buffer-beg ed))
+                       (= raw-start (buffer-z ed))
+                       (not (window-force-start? window)))
+                  (begin
+                    ;; **A start at Z is not a start.**  `try_window`
+                    ;; cannot lay a nonempty buffer out from its end, and
+                    ;; `redisplay_window` gives up and recentres on point
+                    ;; (`xdisp.c:20799`, the failure that sets
+                    ;; `w->force_start` and reaches `recenter:`).  This is
+                    ;; reachable in ordinary use: process output is
+                    ;; inserted with `insert-before-markers` at a mark
+                    ;; that can BE the window's start - a new, empty
+                    ;; process buffer shown in the window - and the start
+                    ;; marker then travels to the end with the text,
+                    ;; leaving the text above the window.  Measured on
+                    ;; Emacs 31.1 the same case answers `(window-start)` 1
+                    ;; with the output on screen; here it was `point-max`
+                    ;; and the rows were blank.
+                    (recenter-window-on-cursor!
+                     window ed (text-editor-get-start-of-line ed pt) vheight)
+                    (max (buffer-beg ed)
+                         (min (window-start window) (buffer-z ed))))
+                  raw-start)))
         (if (window-force-start? window)
             (begin
               ;; **`w->force_start`: the window starts where Lisp put
@@ -1140,6 +1198,25 @@
                  #f)
              (if line-3 "mouse-3: Remove window from frame" #f))
             #f)))
+
+    (define-custom *scroll-margin* 0
+      "Number of lines of margin at the top and bottom of a window.
+Trigger automatic scrolling whenever point gets within this many lines
+of the top or bottom of the window (see info node `Auto Scrolling')."
+      ;; GNU Emacs's `scroll-margin` (`xdisp.c:38756') - a `cus-start'
+      ;; user option despite being a C DEFVAR_INT.
+      :type 'integer
+      :group 'windows)
+
+    (define-custom *maximum-scroll-margin* 0.25
+      "Maximum effective value of `scroll-margin'.
+Given as a fraction of the current window's lines.  The value should
+be a floating point number between 0.0 and 0.5.  The effective maximum
+is limited to (/ (1- window-lines) 2).  Non-float values for this
+variable are ignored and the default 0.25 is used instead."
+      ;; `xdisp.c:38762'.
+      :type 'float
+      :group 'windows)
 
     (define-custom *mode-line-default-help-echo* mode-line-default-help-echo
       "Default help text for the mode line.
@@ -1756,6 +1833,17 @@ buffer size, the line number and the column number."
                                 'mouse-face 'mode-line-highlight
                                 'help-echo mode-line-major-mode-help-echo
                                 'local-map mode-line-major-mode-keymap)
+                    ;; GNU Emacs's `mode-line-modes` puts `'("" mode-line-process)`
+                    ;; here (`bindings.el:609'), between the mode name and
+                    ;; `%n`: the value is itself a mode-line construct,
+                    ;; which is how `compilation-start` shows `:run [0/1]`.
+                    ;; A buffer with no `mode-line-process` contributes
+                    ;; nothing.
+                    (let ((process (buffer-local-value
+                                    (window-buffer window) 'mode-line-process #f)))
+                      (if process
+                          (format-mode-line process window)
+                          ""))
                     (mode-line-minor-modes)
                     (if (buffer-narrowed-p) mode-line-narrowed "")
                     ")"))))
@@ -2015,7 +2103,14 @@ buffer size, the line number and the column number."
        ;; in the format and evaluates it; there is no variable registry
        ;; here, so the construct that produces it is spelled out.
        "  "
-       (list ':eval mode-line-mode-name))))
+       (list ':eval mode-line-mode-name)
+       ;; `(global-mode-string (" " global-mode-string))' - Emacs's
+       ;; element (`bindings.el'), a conditional: a space and the
+       ;; variable, when the variable is non-nil, and nothing when it is
+       ;; empty. `read-passwd-mode' puts its show/hide icon there while a
+       ;; password is being read, and `tab-bar-format-global' reads the
+       ;; same variable for the tab bar's right-hand end.
+       (list 'global-mode-string (list " " 'global-mode-string)))))
 
     (define *line-number-display-limit*
       ;; GNU Emacs's `line-number-display-limit' (`xdisp.c:38806'):
@@ -2189,11 +2284,13 @@ buffer size, the line number and the column number."
         ((mac) "(Mac)")
         (else ":")))
 
-    (define (file-remote-p filename)
+    (define (file-remote-p filename . rest)
       ;; GNU Emacs's `file-remote-p' (`files.el'): "Test whether FILE
       ;; specifies a location on a remote system." Emacs asks the file
       ;; name handlers - `(find-file-name-handler file 'file-remote-p)' -
-      ;; and returns nil when none matches.
+      ;; and returns nil when none matches.  IDENTIFICATION and CONNECTED
+      ;; are accepted and change nothing when no handler matches, as
+      ;; Emacs's docstring says.
       ;;
       ;; **Every name is local here, and that is the honest answer rather
       ;; than a stub.** `*file-name-handler-alist*' is empty - there is no
@@ -2234,6 +2331,27 @@ buffer size, the line number and the column number."
       (let ((ed (window-buffer window)))
         (- (buffer-text-z (text-editor-text ed))
            (%window-end-pos window))))
+
+    ;;----------------------------------------------------------------
+    ;; The two seams the mode line needs from libraries above this one.
+    ;;
+    ;; `*mode-line-process-status-function*` is installed by
+    ;; `process.scm` for `%s` (`xdisp.c:29824`).
+    ;;
+    ;; `*mode-line-variable-readers*` is the missing half of
+    ;; `symbol-value` for a mode-line construct that names a *plain*
+    ;; variable: this tree's plain variables have no symbol, so a
+    ;; library that owns one - `compilation-mode-line-errors` is the
+    ;; first - registers a reader here. It is the same registry idea as
+    ;; `*font-lock-keyword-variables*`, and the same named departure
+    ;; `describe-variable` records.
+    ;;------------------------------------------------------------------
+    (define *mode-line-process-status-function* (make-parameter #f))
+    (define *mode-line-variable-readers* (make-hash-table))
+
+    (define (register-mode-line-variable! symbol reader)
+      "Make SYMBOL's value readable from a mode-line construct by calling READER."
+      (hashq-set! *mode-line-variable-readers* symbol reader))
 
     (define (mode-line-construct spec window)
       ;; The text one `%'-construct stands for: GNU Emacs's
@@ -2390,6 +2508,17 @@ buffer size, the line number and the column number."
                   (decode-mode-spec-coding (keyboard-coding-system) #f)
                   (decode-mode-spec-coding (terminal-coding-system) #f)
                   (decode-mode-spec-coding buffer-cs eol?)))))
+          ;; `%s' is the STATUS OF THE PROCESS in the buffer being
+          ;; displayed (`xdisp.c:29824'): "no process" when the buffer
+          ;; has none, else `symbol-name' of `process-status' - `run',
+          ;; `exit', `signal', `stop', ...  The process layer is above
+          ;; this one (`process.scm` imports `keyboard.scm`, which
+          ;; imports this), so the status is asked through a seam that
+          ;; `process.scm` installs as it loads.
+          ((#\s)
+           (if (not (*mode-line-process-status-function*))
+               "no process"
+               ((*mode-line-process-status-function*) (window-buffer window))))
           ;; `%@' is `mode-line-remote': "@" when the buffer's
           ;; `default-directory' is on a remote system and "-" when it is
           ;; not (`xdisp.c:29823'). It is the third character of the
@@ -2565,6 +2694,13 @@ buffer size, the line number and the column number."
                  (else
                   (loop (+ i 1) pct width start acc))))))))
 
+    ;; `global-mode-string` is a *parameter*, not a `define-custom`, so
+    ;; the registry is what lets a construct name it (see
+    ;; `mode-line-symbol-value`'s three places). `read-passwd-mode` is the
+    ;; first mode to put anything in it (`auth-source.scm`).
+    (register-mode-line-variable! 'global-mode-string
+                                  (lambda () (*global-mode-string*)))
+
     (define (mode-line-symbol-value symbol buffer)
       ;; The value a mode-line construct names - GNU Emacs's
       ;; `symbol-value` as `display_mode_element` uses it, over the three
@@ -2594,6 +2730,8 @@ buffer size, the line number and the column number."
             (buffer-local-value buffer symbol #f))
            ((default-boundp symbol)
             (default-value symbol #f))
+           ((hashq-ref *mode-line-variable-readers* symbol #f)
+            ((hashq-ref *mode-line-variable-readers* symbol)))
            (reader
             (reader (if (get symbol 'custom-reader) symbol starred)))
            (else #f)))))
@@ -2656,12 +2794,21 @@ buffer size, the line number and the column number."
                 ;; that always took the *else* branch - harmless while
                 ;; no format used one, wrong the moment
                 ;; `mode-line-position` did.
-                (process (if (mode-line-symbol-value
-                              (car construct) (window-buffer window))
-                             (and (pair? (cdr construct)) (cadr construct))
-                             (and (pair? (cdr construct))
-                                  (pair? (cddr construct))
-                                  (caddr construct)))))
+                ;;
+                ;; **`'()` is nil in Elisp**, and the test is the C's
+                ;; `!NILP`: `global-mode-string` is empty until a mode
+                ;; puts something there, and an empty list is *true* in
+                ;; Scheme - taking the then-branch would draw the
+                ;; element's separator for nothing (measured: the
+                ;; default mode line grew a trailing space).
+                (let ((value (mode-line-symbol-value
+                              (car construct) (window-buffer window))))
+                  (process (if (or (not value) (null? value))
+                               (and (pair? (cdr construct))
+                                    (pair? (cddr construct))
+                                    (caddr construct))
+                               (and (pair? (cdr construct))
+                                    (cadr construct))))))
                ((integer? (car construct))
                 (let* ((width (car construct))
                        (rest (if (pair? (cdr construct)) (cadr construct) #f))
@@ -2791,7 +2938,20 @@ buffer size, the line number and the column number."
              ;; merging the face's own chain alone left the foreground
              ;; unspecified, and an unspecified foreground is black in
              ;; the Gtk backend and the terminal default on a tty.
-             (base-attrs (merge-face-ref base (merge-face-ref 'default '()))))
+             ;; **The *unremapped* default face.** `realize_named_face`
+             ;; uses `get_lface_attributes_no_remap` for it: a buffer's
+             ;; `face-remapping-alist` is applied to the face being looked
+             ;; up (`default` for buffer text), not to the base every
+             ;; named face is merged onto. Merging the remapped default
+             ;; here made `text-scale-mode` scale the mode line as well -
+             ;; its face would take the buffer's relative `:height` - and
+             ;; that is not what Emacs does. The pending list suppresses
+             ;; the remapping, which is the guard `merge-face-ref` already
+             ;; carries for a remapping's own base.
+             (base-attrs (merge-face-ref
+                          base
+                          (merge-face-ref 'default (face-attributes-empty)
+                                          (list 'default)))))
         (lookup-face (current-display)
                       (merge-face-vectors
                        ;; **A named face is the table's**, and anything
@@ -2858,8 +3018,11 @@ buffer size, the line number and the column number."
 
     (define (line-face-runs ed line-start len)
       ;; LINE-TEXT as maximal runs of characters that share one face:
-      ;; `(FROM TO ATTRIBUTE)' in buffer columns, ATTRIBUTE being the
-      ;; display's token for the face `attrs-at-buffer-position' finds.
+      ;; `(FROM TO ATTRIBUTE ATTRS)' in buffer columns, ATTRIBUTE being
+      ;; the display's token for the face `attrs-at-buffer-position'
+      ;; finds. ATTRS is that face's merged attributes, kept because a
+      ;; run's advance is measured from its *font* (`face-text-width'),
+      ;; which the token alone cannot answer.
       ;;
       ;; The runs, not the characters, are what gets drawn: a terminal is
       ;; told "these cells are bold" once per run rather than once per
@@ -2888,8 +3051,126 @@ buffer size, the line number and the column number."
                        (to (min len (max (+ from 1) (- next line-start)))))
                   (loop to
                         (cons (list from to
-                                    (lookup-face (current-display) attrs))
+                                    (lookup-face (current-display) attrs)
+                                    attrs)
                               acc)))))))
+
+    (define (%display-line-measure display ed line-start texts
+                                   . precomputed-runs)
+      ;; The per-column measure of TEXTS in DISPLAY - the body of
+      ;; `%line-pixel-measure` once the display is known. It is split out
+      ;; because `string-pixel-width` measures a temp buffer with the
+      ;; current display and no window at all; a frame was never what the
+      ;; font measurement needed.
+      ;;--------------------------------------------------------------
+      (let* ((len (vector-length texts))
+             (unit (car (display-cell-size display)))
+             (runs (if (pair? precomputed-runs)
+                       (car precomputed-runs)
+                       ;; The run walk reads the buffer's overlays, and a
+                       ;; test (or a benchmark) can lay a line out with no
+                       ;; current buffer at all. The line is ED's, so ED is
+                       ;; what it is measured in - and the face token is
+                       ;; the *display's*, so `current-display` is bound
+                       ;; for the realization.
+                       (with-current-buffer ed
+                         (parameterize ((current-display display))
+                           (line-face-runs ed line-start len)))))
+             (attrs-vec (make-vector len #f))
+             (cache (make-vector len #f)))
+        (let loop ((rs runs))
+          (when (pair? rs)
+            (let ((from (car (car rs)))
+                  (to (cadr (car rs)))
+                  (attrs (car (cdddr (car rs)))))
+              (let fill ((i from))
+                (when (< i to)
+                  (vector-set! attrs-vec i attrs)
+                  (fill (+ i 1)))))
+            (loop (cdr rs))))
+        (lambda (i col)
+          (let ((entry (vector-ref texts i)))
+            (if (and (char? entry) (char=? entry #\tab))
+                (max 1 (%text-advance
+                                         display (vector-ref attrs-vec i)
+                                         (texts-glyph texts i
+                                                      (quotient col unit))))
+                (or (vector-ref cache i)
+                    (let ((w (max 1 (%text-advance
+                                     display (vector-ref attrs-vec i)
+                                     (texts-glyph texts i
+                                                  (quotient col unit))))))
+                      (vector-set! cache i w)
+                      w)))))))
+
+    (define (%line-pixel-measure window ed line-start texts . precomputed-runs)
+      ;; The advance of each column of TEXTS, in the display's own
+      ;; horizontal units - the face font's `text_extents` on Gtk, the
+      ;; character cells on a terminal (`face-text-width`). Answers
+      ;; `(lambda (i col) width)`; a tab is measured at COL every time
+      ;; because its advance depends on where it starts, and every other
+      ;; column once, because its glyph string does not.
+      ;;
+      ;; PRECOMPUTED-RUNS, when given, is `line-face-runs`' answer the
+      ;; caller already has; asking again would walk the line twice.
+      ;;--------------------------------------------------------------
+      ;; **No display, no per-face measurement.** A window built by a
+      ;; test has no output device, and a benchmark may lay out a line
+      ;; with no frame at all; the cell rule is then the right answer
+      ;; (`texts-width` falls back when this answers `#f`). Asking a
+      ;; `#f` display for its cell raised "No applicable method for
+      ;; display-cell-size" from `vertical-motion` in the mouse and
+      ;; scroll-bar suites.
+      (let ((display (or (frame-output (window-frame window))
+                         (current-display))))
+        (if (not display)
+            #f
+            (apply %display-line-measure display ed line-start texts
+                   precomputed-runs))))
+
+    (define (%display-line-texts-width display ed line-start texts)
+      ;; The whole line's width in DISPLAY's units, with each character
+      ;; measured in its own face. This is `string-pixel-width`'s
+      ;; measurement: Emacs runs the display iterator over a temp buffer,
+      ;; and this is the same walk without needing a window.
+      ;;--------------------------------------------------------------
+      (let ((measure (%display-line-measure display ed line-start texts)))
+        (let loop ((i 0) (col 0))
+          (if (>= i (vector-length texts))
+              col
+              (loop (+ i 1) (+ col (measure i col)))))))
+
+    (define (%window-horizontal-unit window)
+      ;; One character cell of WINDOW's display in the display's own
+      ;; horizontal units: `FRAME_COLUMN_WIDTH` in pixels on Gtk, 1 on a
+      ;; terminal.
+      ;;--------------------------------------------------------------
+      (let ((d (or (frame-output (window-frame window)) (current-display))))
+        (car (display-cell-size d))))
+
+    (*line-measure-function* %line-pixel-measure)
+    (*line-unit-width-function* %window-horizontal-unit)
+
+    (define (%window-reserve-width window)
+      ;; The advance of the edge marker in WINDOW's buffer's default
+      ;; face - `init_iterator`'s `continuation_pixel_width` for a
+      ;; wrapped line and `truncation_pixel_width` for a truncated one
+      ;; (`xdisp.c:3427-3459`), which the layout subtracts from
+      ;; `last_visible_x` when there is no fringe. A cell is the answer
+      ;; only when the default face is the frame's font;
+      ;; `text-scale-mode` makes it wider.
+      ;;--------------------------------------------------------------
+      (let ((display (or (frame-output (window-frame window))
+                         (current-display)))
+            (glyph (if (window-wraps? window) "\\" "$")))
+        (and display
+             (parameterize ((current-display display))
+               (with-current-buffer (or (window-buffer window)
+                                        (current-buffer))
+                 (max 1 (face-text-width display
+                                         (face->attribute 'default)
+                                         glyph)))))))
+    (*line-reserve-width-function* %window-reserve-width)
 
     (define (draw-overlay-strings! entries row-y x)
       ;; Draw each `(OVERLAY . STRING)' of ENTRIES at X, in order, in the
@@ -2992,28 +3273,129 @@ buffer size, the line number and the column number."
       ;; It is the same placement `buffer-text-pixel-size` would have if
       ;; this tree had one.
       ;;
-      ;; **The C's measurement is not carried, and cannot be**: the
-      ;; function fills a work buffer and runs the display iterator over
-      ;; it (`buffer-text-pixel-size`, `xdisp.c`), which asks the font.
-      ;; Here a glyph is one cell, so a line's width is its cell width
-      ;; times the frame's character width - the same product
-      ;; `window-pixel-width` is. The optional BUFFER argument is dropped
-      ;; for the same reason: a face remapping does not change a glyph's
-      ;; width.
+      ;; **The measurement is the display's now**, not a cell product:
+      ;; `buffer-text-pixel-size` runs the display iterator over the
+      ;; string, and the iterator asks each face's font. The temp buffer
+      ;; carries the string's text properties, so a tab caption in
+      ;; `tab-line-tab-current`'s bold face measures in that face - which
+      ;; is what `tab-bar-auto-width` needs. The selected window supplies
+      ;; the display, exactly as Emacs's temp-buffer trick does.
       ;;--------------------------------------------------------------
       (if (= (string-length string) 0)
           0
-          (* (apply max (map string-width (string-split string #\newline)))
-             (frame-char-width))))
+          (let ((display (or (and (*current-frame*)
+                                  (frame-output (*current-frame*)))
+                             (current-display))))
+            (if (not display)
+                ;; No display at all (a batch probe): the old cell rule,
+                ;; which is the only measurement there is.
+                (* (apply max (map string-width
+                                   (string-split string #\newline)))
+                   (frame-char-width))
+                (with-temp-buffer
+                  (insert string)
+                  (let ((ed (current-buffer)))
+                    (let loop ((pos (point-min)) (widest 0))
+                      (if (>= pos (point-max))
+                          widest
+                          (let* ((texts (line-display-texts ed pos))
+                                 (width (%display-line-texts-width
+                                         display ed pos texts))
+                                 (next (line-next-start ed pos)))
+                            (loop (or next (point-max))
+                                  (max widest width)))))))))))
 
-    (define (draw-special-glyph! row-y x0 width glyph)
-      ;; The continuation glyph (`\') or the truncation glyph (`$') in a
-      ;; row's last cell. It is a special display character, not buffer
-      ;; text, and Emacs draws it with the default face even inside a
-      ;; region - `produce_special_glyphs' uses `DEFAULT_FACE_ID'.
+    ;;----------------------------------------------------------------
+    ;; The fringes
+    ;;
+    ;; `fringe.c`'s standard bitmaps, 8 columns by 8 rows and one byte a
+    ;; row, the high bit the leftmost pixel. The continuation arrows are
+    ;; what a wrapped line shows: `right-curly-arrow` at the end of the
+    ;; continued row and `left-curly-arrow` at the start of the row that
+    ;; continues it. `fringe.el`'s `fringe-indicator-alist` maps a
+    ;; truncated line to the left/right arrows.
+    ;;----------------------------------------------------------------
+
+    (define fringe-left-curly-bits
+      (vector #x3c #x7c #xc0 #xe4 #xfc #x7c #x3c #x7c))
+    (define fringe-right-curly-bits
+      (vector #x3c #x3e #x03 #x27 #x3f #x3e #x3c #x3e))
+    (define fringe-left-arrow-bits
+      (vector #x18 #x30 #x60 #xfc #xfc #x60 #x30 #x18))
+    (define fringe-right-arrow-bits
+      (vector #x18 #x0c #x06 #x3f #x3f #x06 #x0c #x18))
+
+    (define (draw-row-fringes! window row)
+      ;; `draw_row_fringe_bitmaps` (`fringe.c:891`) for one text row: the
+      ;; left bitmap is a truncation arrow for a horizontally scrolled
+      ;; row, else the continuation arrow when the row continues a line
+      ;; begun above; the right is a truncation arrow when the row is cut
+      ;; off at the edge, else the continuation arrow when the line goes
+      ;; on below. `fringe.c:1245`, `:1290`.
+      ;;
+      ;; A graphical frame's fringes are gutters outside the text area;
+      ;; the bitmap is 8x8 whatever the text's font or scale, vertically
+      ;; centred in the row (`ALIGN_BITMAP_CENTER`, `fringe.c:632`). A
+      ;; terminal has none, and `draw-fringe!`'s default method does
+      ;; nothing there.
       ;;--------------------------------------------------------------
-      (write-run! (current-display) (list glyph) row-y (+ x0 width -1)
-                  (face->attribute 'default)))
+      (let ((display (current-display)))
+        (when (and display
+                   (window-system-display? display)
+                   (or (> (window-left-fringe-width window) 0)
+                       (> (window-right-fringe-width window) 0)))
+          (let* ((token (face->attribute 'fringe))
+                 (box-left (window-box-left window))
+                 (box-width (window-box-width window))
+                 (left-width (window-left-fringe-width window))
+                 (right-width (window-right-fringe-width window)))
+            (when (> left-width 0)
+              (let ((bits (cond ((and (not (window-wraps? window))
+                                      (> (%window-hscroll window) 0))
+                                 fringe-left-arrow-bits)
+                                ((glyph-row-continuation-line? row)
+                                 fringe-left-curly-bits)
+                                (else #f))))
+                (draw-fringe! display window row
+                              (- box-left left-width)
+                              left-width
+                              bits token)))
+            (when (> right-width 0)
+              (let ((bits (cond ((glyph-row-truncated-on-right? row)
+                                 fringe-right-arrow-bits)
+                                ((glyph-row-continued? row)
+                                 fringe-right-curly-bits)
+                                (else #f))))
+                (draw-fringe! display window row
+                              (+ box-left box-width)
+                              right-width
+                              bits token)))))))
+
+    (define (draw-special-glyph! window row x glyph)
+      ;; The continuation glyph (`\') or the truncation glyph (`$') in a
+      ;; text row's COLUMN. It is a special display character, not buffer
+      ;; text, and its face is the buffer's *remapped* default face -
+      ;; `produce_special_glyphs` uses
+      ;; `lookup_basic_face (it->w, it->f, DEFAULT_FACE_ID)`
+      ;; (`xdisp.c:23971`), which applies `face-remapping-alist`, so a
+      ;; `text-scale-mode` buffer's marker is the scaled size like the
+      ;; text beside it. The *row's* metrics are used for the baseline
+      ;; and the background, as `pgtk_draw_glyph_string` takes
+      ;; `s->ybase = row->y + row->ascent` and `s->height = row->height`;
+      ;; the frame's metrics here left a smaller-font marker in a taller
+      ;; row and an unscaled strip under it.
+      ;;--------------------------------------------------------------
+      (let* ((display (current-display))
+             (token (face->attribute 'default))
+             (unit (car (display-cell-size display)))
+             (w (max 1 (face-text-width display token glyph)))
+             (g (make-glyph glyph token w 'char #f 0))
+             (vec (vector g))
+             (r (make-glyph-row vec 1 x (glyph-row-y row) 1
+                                (glyph-row-ascent row)
+                                (glyph-row-height row)
+                                x (+ x w) #f)))
+        (write-glyphs! display window r 'text x vec 1)))
 
     ;;----------------------------------------------------------------
     ;; The mouse face - `note_mouse_highlight` (`xdisp.c:37061`)
@@ -3442,7 +3824,7 @@ buffer size, the line number and the column number."
           (if (or (>= r row) (not line-start))
               y
               (let* ((texts (line-display-texts ed line-start))
-                     (slices (%window-line-slices window texts))
+                     (slices (%window-line-slices window texts line-start))
                      (want (min (- row r) (length slices))))
                 (let inner ((rest slices) (n 0) (yy y))
                   (if (or (null? rest) (>= n want))
@@ -3470,7 +3852,7 @@ buffer size, the line number and the column number."
       ;; its text over the top of the one above: a split window's lower
       ;; half painted at y 0, on top of the upper half's first rows.
       ;;--------------------------------------------------------------
-      (+ y (row->pixel-y (window-body-top window))))
+      (+ y (window-box-top window)))
 
     (define (rows-above-in-window window line-start)
       ;; How many rows of WINDOW are above the line beginning at
@@ -3532,7 +3914,7 @@ buffer size, the line number and the column number."
              (line-string (line-string-at ed line-start))
              (texts (line-display-texts ed line-start))
              (rows (window-line-slices-at window line-start))
-             (width (window-body-width window))
+             (width (window-box-width window))
              (vheight (window-body-height window))
              ;; The cursor's own row is not its line's row: a wrapped
              ;; line is several rows tall, so the rows above the cursor's
@@ -3547,7 +3929,27 @@ buffer size, the line number and the column number."
              ;; The column within its *row*: a continuation row starts at
              ;; screen column zero, so the cursor's display column is
              ;; measured from where its row begins, not the line.
-             (row-start (car (list-ref rows (rows-row-of-column rows column)))))
+             (row-start (car (list-ref rows (rows-row-of-column rows column))))
+             (unit (car (display-cell-size (current-display))))
+             ;; **The cursor's x is pixels** (`w->cursor.x`), measured
+             ;; with the same per-face advances the row was laid out
+             ;; with: the line's offsets in display units, less the row's
+             ;; own start, and - on an hscrolled line - the hscroll.
+             (column-units
+              (%call-with-line-measure
+               window ed line-start texts
+               (lambda ()
+                 (let* ((len (vector-length texts))
+                        (offsets (list->vector
+                                  (line-texts-offsets texts 0 len)))
+                        (col-units (vector-ref offsets (min column len)))
+                        (row-units (vector-ref offsets (min row-start len)))
+                        (limit (max 0 (- width unit))))
+                   (if (window-wraps? window)
+                       (min (- col-units row-units) limit)
+                       (max 0 (min (- col-units
+                                      (* (%window-hscroll window) unit))
+                                   limit))))))))
         ;; **`if' and not `when'.** A `when' whose test fails answers the
         ;; *unspecified* value, which is true in Scheme - so the caller's
         ;; `(when at ...)' drew a cursor at `(car #<unspecified>)' and
@@ -3557,27 +3959,7 @@ buffer size, the line number and the column number."
         ;; always said `#f' here.
         (if (and (>= screen-row 0) (< screen-row vheight))
           (cons (+ screen-row (window-body-top window))
-                (+ (window-body-left window)
-                   (if (window-wraps? window)
-                       ;; the column within its *row*: a continuation row
-                       ;; starts at screen column zero, so the cursor's
-                       ;; display column is measured from where its row
-                       ;; begins, not the line.
-                       (min (- (current-line-display-column ed column)
-                               (line-texts-column texts (or row-start 0)))
-                            (- width 1))
-                       ;; a truncated line is one row, and an hscrolled
-                       ;; row's first cell is the left truncation glyph
-                       ;; that the character at the hscroll column is
-                       ;; overwritten by - so the cursor's column is its
-                       ;; display column less the hscroll, and never
-                       ;; before the row's first cell, which is where
-                       ;; `w->cursor.x' sits too (`xdisp.c' computes it
-                       ;; from the glyphs' screen positions)
-                       (max 0
-                            (min (- (current-line-display-column ed column)
-                                    (%window-hscroll window))
-                                 (- width 1))))))
+                (+ (window-box-left window) column-units))
           #f)))
 
     (define (window-end window)
@@ -3612,7 +3994,7 @@ buffer size, the line number and the column number."
                   ;; so each line it crosses costs that line and not its
                   ;; distance from the beginning of the buffer
                   (let* ((texts (buffer-line-texts-at window pos))
-                         (slices (%window-line-slices window texts))
+                         (slices (%window-line-slices window texts pos))
                          (fits (- vheight row)))
                     (if (>= fits (length slices))
                         (let ((next (line-next-start ed pos)))
@@ -3644,7 +4026,7 @@ buffer size, the line number and the column number."
           (if (not line-start)
               (buffer-z ed)
               (let* ((texts (line-display-texts ed line-start))
-                     (slices (%window-line-slices window texts)))
+                     (slices (%window-line-slices window texts line-start)))
                 (if (null? slices)
                     (buffer-z ed)
                     (let inner ((rest slices) (row-y y) (row-start line-start)
@@ -3701,7 +4083,7 @@ buffer size, the line number and the column number."
              (line-start (text-editor-get-start-of-line ed pos))
              (column (- pos line-start))
              (texts (line-display-texts ed line-start))
-             (slices (%window-line-slices window texts)))
+             (slices (%window-line-slices window texts line-start)))
         (if (null? slices)
             #f
             (let* ((k (%row-of-position window line-start column))
@@ -3717,19 +4099,18 @@ buffer size, the line number and the column number."
                          (screen-row (+ (or base-row
                                             (rows-above window line-start))
                                         k))
-                         (row (and base-row
-                                   (let* ((current (window-current-matrix window))
-                                          (rows (and current
-                                                     (glyph-matrix-rows current))))
-                                     (and rows
-                                          (< screen-row (vector-length rows))
-                                          (let ((r (vector-ref rows screen-row)))
-                                            (and r
-                                                 (glyph-row-enabled? r)
-                                                 r))))))
-                         (top-y (if row
-                                    (- (glyph-row-y row)
-                                       (row->pixel-y (window-top window)))
+                         ;; **The matrix gives the pixel position.** A
+                         ;; glyph row carries the y it was laid out at and
+                         ;; its own height; the old walk multiplied a row
+                         ;; index by the frame's line height, which is a
+                         ;; different number once a face has scaled the
+                         ;; row or the allocation has a partial row.
+                         (coords (%window-position-pixel-coords window pos))
+                         (row (and coords
+                                   (%window-row-at-pixel-y window (car coords))))
+                         (top-y (if coords
+                                    (- (car coords)
+                                       (window-pixel-top window))
                                     (+ tab-y
                                        (window-pixel-y window screen-row))))
                          (row-height (if row
@@ -3740,18 +4121,22 @@ buffer size, the line number and the column number."
                                          (car metrics)))
                          (bottom-y (+ top-y row-height))
                          (h (%window-hscroll window))
-                         (x (if (> h 0)
-                                (* (- (list-ref
-                                       (line-texts-offsets
-                                        texts 0 (vector-length texts))
-                                       column)
-                                      h)
-                                   cw)
-                                (let ((offsets (line-texts-offsets texts from to)))
-                                  (* (list-ref offsets
-                                               (max 0 (min (- column from)
-                                                           (- to from))))
-                                     cw))))
+                         (x (if coords
+                                (- (cdr coords)
+                                   (window-box-left window))
+                                (if (> h 0)
+                                    (* (- (list-ref
+                                           (line-texts-offsets
+                                            texts 0 (vector-length texts))
+                                           column)
+                                          h)
+                                       cw)
+                                    (let ((offsets (line-texts-offsets
+                                                    texts from to)))
+                                      (* (list-ref offsets
+                                                   (max 0 (min (- column from)
+                                                               (- to from))))
+                                         cw)))))
                          (char-ascent
                           (if (and (>= column from) (< column to)
                                    (< pos (buffer-z ed)))
@@ -3850,9 +4235,7 @@ buffer size, the line number and the column number."
                     ;; `window_text_bottom_y`: the window's pixel height
                     ;; less its mode line. Measured on a 16-row window:
                     ;; rows 0..15 are inside, row 16 is not.
-                    (last-visible-y (* (- (window-height window)
-                                          (window-mode-line-height window))
-                                       ch))
+                    (last-visible-y (+ tab-y (window-box-height window)))
                     (start (window-start window))
                     (beg (buffer-beg ed))
                     (zv (buffer-z ed)))
@@ -3884,6 +4267,43 @@ buffer size, the line number and the column number."
                            (%pos-visible-answer window pos cw ch tab-y
                                                 window-top-y last-visible-y
                                                 partially))))))))
+
+    (define (%row-pixel-x-of-position row position)
+      ;; The pixel x, relative to ROW's left edge, at which POSITION is
+      ;; drawn: the sum of the advances of the glyphs before it. The
+      ;; glyphs are one per buffer column for text rows.
+      ;;--------------------------------------------------------------
+      (let* ((glyphs (glyph-row-glyphs row))
+             (used (glyph-row-used row))
+             (idx (min (- position (glyph-row-start row)) used)))
+        (let loop ((j 0) (x 0))
+          (if (>= j idx)
+              x
+              (loop (+ j 1)
+                    (+ x (glyph-pixel-width (vector-ref glyphs j))))))))
+
+    (define (%window-position-pixel-coords window position)
+      ;; The frame pixel `(Y . X)` at which POSITION is drawn in WINDOW,
+      ;; from the glyph matrix: the row containing it and the advances
+      ;; before it. `pos_visible_in_window_p`'s answer (`xdisp.c:1703`),
+      ;; and what `posn-at-point` hands `posn_at_x_y`.
+      ;;--------------------------------------------------------------
+      (let ((matrix (or (window-current-matrix window)
+                        (window-desired-matrix window))))
+        (and matrix
+             (let ((rows (glyph-matrix-rows matrix)))
+               (let loop ((i 0))
+                 (if (>= i (vector-length rows))
+                     #f
+                     (let ((row (vector-ref rows i)))
+                       (if (and row
+                                (glyph-row-enabled? row)
+                                (>= position (glyph-row-start row))
+                                (<= position (glyph-row-end row)))
+                           (cons (glyph-row-y row)
+                                 (+ (glyph-row-x row)
+                                    (%row-pixel-x-of-position row position)))
+                           (loop (+ i 1))))))))))
 
     (define (posn-at-point position window)
       ;; GNU Emacs's `posn-at-point` (`keyboard.c:13594`): "Return
@@ -3919,34 +4339,40 @@ buffer size, the line number and the column number."
              (current-display)
              (>= pos (buffer-beg ed))
              (<= pos (buffer-z ed))
-             (let* ((line-start (text-editor-get-start-of-line ed pos))
+             (let ((coords (%window-position-pixel-coords window pos)))
+               (if coords
+                   (posn-at-x-y (cdr coords) (car coords)
+                                (window-frame window))
+                   (let* ((line-start (text-editor-get-start-of-line ed pos))
                     (column (- pos line-start))
                     (rows (window-line-slices-at window line-start))
                     (k (rows-row-of-column rows column))
                     (texts (line-display-texts ed line-start))
                     (row-start (car (list-ref rows k)))
-                    (width (window-body-width window))
+                    (width (window-box-width window))
                     (screen-row (+ (or (rows-above-in-window window line-start)
                                        (rows-above window line-start))
                                    k))
                     (vheight (window-body-height window)))
                (and (>= screen-row 0) (< screen-row vheight)
-                    (let* ((display-col (current-line-display-column ed column))
-                           (col (+ (window-body-left window)
-                                   (if (window-wraps? window)
-                                       (min (- display-col
-                                               (line-texts-column texts
-                                                                  (or row-start 0)))
-                                            (- width 1))
-                                       (max 0
-                                            (min (- display-col
-                                                    (%window-hscroll window))
-                                                 (- width 1))))))
+                    (let* ((unit (column-width (current-display)))
+                           (display-col (current-line-display-column ed column))
+                           (cell-col (if (window-wraps? window)
+                                         (min (- display-col
+                                                 (line-texts-column texts
+                                                                    (or row-start 0)))
+                                              (quotient (max 0 (- width unit)) unit))
+                                         (max 0
+                                              (min (- display-col
+                                                      (%window-hscroll window))
+                                                   (quotient (max 0 (- width unit))
+                                                             unit)))))
                            (row (+ screen-row (window-body-top window)))
                            (d (current-display)))
-                      (posn-at-x-y (* col (column-width d))
+                      (posn-at-x-y (+ (window-box-left window)
+                                      (* cell-col unit))
                                    (* row (line-height d))
-                                   (window-frame window))))))))
+                                   (window-frame window))))))))))
 
     (define (event--posn-at-point)
       ;; GNU Emacs's `event--posn-at-point` (`subr.el:1894`): the posn
@@ -4017,6 +4443,47 @@ buffer size, the line number and the column number."
       (set-glyph-voffset! g 0)
       g)
 
+    (define (%string-face-runs text base-attrs)
+      ;; TEXT as maximal runs of its own `face` text properties, each
+      ;; merged onto BASE-ATTRS: `(START END ATTRS)`, string indices.
+      ;; GNU Emacs's `face_at_string_position` walk (`string_width`,
+      ;; `font.c`) - the runs a string's own faces divide it into.
+      ;;--------------------------------------------------------------
+      (let ((len (string-length text)))
+        (let loop ((from 0) (acc '()))
+          (if (>= from len)
+              (reverse acc)
+              (let* ((face (get-text-property from 'face text))
+                     (next (or (next-single-property-change
+                                from 'face text len)
+                               len))
+                     (attrs (if face
+                                (merge-face-ref face base-attrs)
+                                base-attrs)))
+                (loop next (cons (list from next attrs) acc)))))))
+
+    (define (%text-advance display base-attrs text)
+      ;; TEXT's advance in DISPLAY's units, with the faces TEXT carries in
+      ;; its own text properties merged onto BASE-ATTRS - GNU Emacs's
+      ;; `string_width` (`font.c`), which `gui_produce_glyphs` calls for a
+      ;; `display` string and which walks the string's face runs rather
+      ;; than measuring the whole thing in the iterator's face.
+      ;;
+      ;; A one-character text (the ordinary buffer glyph) has no run to
+      ;; walk and takes the direct measurement.
+      ;;--------------------------------------------------------------
+      (if (or (not (string? text)) (<= (string-length text) 1))
+          (face-text-width display base-attrs text)
+          (let loop ((runs (%string-face-runs text base-attrs))
+                     (total 0))
+            (if (null? runs)
+                total
+                (let* ((run (car runs))
+                       (chunk (substring text (car run) (cadr run))))
+                  (loop (cdr runs)
+                        (+ total (face-text-width display
+                                                  (caddr run) chunk))))))))
+
     (define (line-slice-glyphs texts from to x0 line-start pool width)
       ;; The `<glyph>`s of one screen row: the slice [FROM, TO) of the
       ;; line's TEXTS, started at cell X0.
@@ -4084,11 +4551,14 @@ buffer size, the line number and the column number."
              ;; a run is in buffer columns, so the two line up: glyph I
              ;; is character FROM+I.
              (runs (line-face-runs (current-buffer)
-                                   (+ line-start from) (- to from))))
+                                   (+ line-start from) (- to from)))
+             (display (current-display))
+             (unit (car (display-cell-size display))))
         ;; **The walk**: column by column from FROM, carrying the
-        ;; screen column so a tab expands where it is drawn; the runs are
-        ;; consumed in step - the first run still covering column I is
-        ;; this glyph's face.
+        ;; screen x in the display's *units* so a tab expands where it is
+        ;; drawn; the runs are consumed in step - the first run still
+        ;; covering column I is this glyph's face, and its attributes
+        ;; measure the glyph's advance in that face's font.
         (let loop ((i 0) (col 0) (rs runs))
           (when (< i n)
             (let* ((rs (let skip ((rs rs))
@@ -4097,14 +4567,16 @@ buffer size, the line number and the column number."
                              (skip (cdr rs))
                              rs)))
                    (text-index (+ from i))
+                   (attrs (if (pair? rs)
+                              (car (cdddr (car rs)))
+                              (attrs-at-buffer-position
+                               (current-buffer)
+                               (+ line-start text-index))))
                    (token (if (pair? rs)
                               (caddr (car rs))
-                              (lookup-face (current-display)
-                                            (attrs-at-buffer-position
-                                             (current-buffer)
-                                             (+ line-start text-index)))))
-                   (text (texts-glyph texts text-index col))
-                   (w (max 1 (texts-width texts text-index col))))
+                              (lookup-face display attrs)))
+                   (text (texts-glyph texts text-index (quotient col unit)))
+                   (w (max 0 (%text-advance display attrs text))))
               (let ((slot (vector-ref vec i)))
                 (if (glyph? slot)
                     (%reset-glyph! slot text token w)
@@ -4113,6 +4585,28 @@ buffer size, the line number and the column number."
                                              glyph-type-char #f 0))))
               (loop (+ i 1) (+ col w) rs))))
         (cons vec n)))
+
+    (define (%push-overlay-string! push! display ov+str)
+      ;; Push one overlay string's characters through PUSH!, each run in
+      ;; its own face: the overlay's face merged with the string's own
+      ;; `face` properties, which is `display_string`'s rule for an
+      ;; overlay string. PUSH! takes (TEXT TOKEN WIDTH).
+      ;;--------------------------------------------------------------
+      (let* ((ov (car ov+str))
+             (text (cdr ov+str))
+             (base (merge-face-ref (or (overlay-get ov 'face) 'default)
+                                   (face-attributes-empty))))
+        (for-each
+         (lambda (run)
+           (let ((attrs (caddr run))
+                 (token (lookup-face display (caddr run))))
+             (let loop ((i (car run)))
+               (when (< i (cadr run))
+                 (let ((ch (string (string-ref text i))))
+                   (push! ch token
+                          (max 1 (face-text-width display attrs ch)))
+                   (loop (+ i 1)))))))
+         (%string-face-runs text base))))
 
     (define (line-slice-glyphs-with-strings ed texts from to line-start ovs width)
       ;; The `<glyph>`s of one screen row when the row carries overlay
@@ -4135,21 +4629,15 @@ buffer size, the line number and the column number."
       ;; left off.
       ;;--------------------------------------------------------------
       (let* ((n (- to from))
+             (display (current-display))
+             (unit (car (display-cell-size display)))
              (specs '())
              (col 0)
              (push! (lambda (text token w)
                       (set! specs (cons (list text token w) specs))
                       (set! col (+ col w))))
              (push-string! (lambda (ov+str)
-                             (let* ((ov (car ov+str))
-                                    (text (cdr ov+str))
-                                    (token (face->attribute
-                                            (or (overlay-get ov 'face) 'default))))
-                               (let loop ((i 0))
-                                 (when (< i (string-length text))
-                                   (let ((ch (string (string-ref text i))))
-                                     (push! ch token (max 1 (line-display-width ch)))
-                                     (loop (+ i 1)))))))))
+                             (%push-overlay-string! push! display ov+str))))
         (let loop ((i 0))
           (when (< i n)
             (let* ((linecol (+ from i))
@@ -4157,9 +4645,11 @@ buffer size, the line number and the column number."
                                (vector-ref ovs linecol))))
               ;; an entry is `(HEADS . TAILS)' or the empty list
               (when (pair? entry) (for-each push-string! (car entry)))
-              (let ((text (texts-glyph texts linecol col))
-                    (w (max 1 (texts-width texts linecol col))))
-                (push! text (face-at-buffer-position ed (+ line-start linecol)) w))
+              (let* ((text (texts-glyph texts linecol (quotient col unit)))
+                     (attrs (attrs-at-buffer-position
+                             ed (+ line-start linecol)))
+                     (w (max 1 (%text-advance display attrs text))))
+                (push! text (lookup-face display attrs) w))
               (when (pair? entry) (for-each push-string! (cdr entry)))
               (loop (+ i 1)))))
         ;; "The entry at LEN is the row's *end*" - the `after-string` of
@@ -4264,7 +4754,9 @@ buffer size, the line number and the column number."
       ;;--------------------------------------------------------------
       (let* ((vec (glyph-row-glyphs row))
              (n (glyph-row-used row))
-             ;; the cells the row already covers, which is `it->current_x`
+             (display (current-display))
+             (unit (car (display-cell-size display)))
+             ;; the units the row already covers, which is `it->current_x`
              ;; in the C: a glyph is one entry but a wide character is two
              ;; cells, so the count and the width are not the same number
              (used (let loop ((i 0) (w 0))
@@ -4272,7 +4764,10 @@ buffer size, the line number and the column number."
                          w
                          (loop (+ i 1)
                                (+ w (glyph-pixel-width (vector-ref vec i)))))))
-             (pad (- width used))
+             ;; the cells still to fill, each one UNIT units wide. WIDTH
+             ;; is now the text area's width in display units - the
+             ;; `window_box_width' of the row - not a column count.
+             (pad (max 0 (quotient (- width used) unit)))
              (token (and (> pad 0)
                          (extend-fill-token
                           ed end (if (> n 0)
@@ -4303,9 +4798,9 @@ buffer size, the line number and the column number."
               (when (< i need)
                 (let ((slot (vector-ref vec i)))
                   (if (glyph? slot)
-                      (%reset-glyph! slot " " token 1)
+                      (%reset-glyph! slot " " token unit)
                       (vector-set! vec i
-                                   (make-glyph " " token 1
+                                   (make-glyph " " token unit
                                                glyph-type-char #f 0))))
                 (loop (+ i 1))))
             (set-glyph-row-glyphs! row vec)
@@ -4396,16 +4891,19 @@ buffer size, the line number and the column number."
                             (vector-set! new i (vector-ref vec i))
                             (loop (+ i 1))))
                         new))))
-        (let ((slot (vector-ref vec n)))
+        (let ((slot (vector-ref vec n))
+              (unit (car (display-cell-size (current-display)))))
           (if (glyph? slot)
-              (%reset-glyph! slot " " token 1)
-              (vector-set! vec n (make-glyph " " token 1 glyph-type-char #f 0))))
+              (%reset-glyph! slot " " token unit)
+              (vector-set! vec n (make-glyph " " token unit
+                                             glyph-type-char #f 0))))
         (set-glyph-row-glyphs! row vec)
         (set-glyph-row-used! row need)
         need))
 
     (define (build-row! ed row texts from to x0 y width
-                        line-start more? truncated? row-width metrics)
+                        line-start more? truncated? row-width fill-width
+                        metrics)
       ;; Fill ROW from one screen row of a line: `display_line`.
       ;;
       ;; The row keeps the glyphs, the geometry it was drawn at, the two
@@ -4436,9 +4934,18 @@ buffer size, the line number and the column number."
                       (else #t))))
              (made (if any-strings?
                        (line-slice-glyphs-with-strings
-                        ed texts from to line-start ovs width)
+                        ed texts from to line-start ovs
+                        (+ (- to from)
+                           (quotient width
+                                     (car (display-cell-size
+                                           (current-display))))))
                        (line-slice-glyphs texts from to x0 line-start
-                                          (glyph-row-glyphs row) width)))
+                                          (glyph-row-glyphs row)
+                                          (+ (- to from)
+                                             (quotient
+                                              width
+                                              (car (display-cell-size
+                                                    (current-display))))))))
              (vec (car made))
              (n (cdr made)))
         (set-glyph-row-glyphs! row vec)
@@ -4458,20 +4965,27 @@ buffer size, the line number and the column number."
         ;; across a blank line to the edge of the window. The default
         ;; face fills nothing there (the frame's background is already
         ;; the default face's) and `draw-glyph-row!` still clears a
-        ;; shorter row's tail.
-        (extend-face-to-end-of-line ed row (+ line-start to) width)
+        ;; shorter row's tail. FILL-WIDTH is the row's text area for a
+        ;; continued or truncated row and that area plus the right-edge
+        ;; reserve for an ordinary one - the C's fill runs through
+        ;; `it->last_visible_x` inclusive, so the ordinary row reaches the
+        ;; window's last cell and the special row leaves it to the marker.
+        (extend-face-to-end-of-line ed row (+ line-start to) fill-width)
         (set-glyph-row-x! row x0)
         (set-glyph-row-y! row y)
         ;; `compute_line_metrics`: the row is as tall as the tallest face
         ;; on it, which `row-metrics` has already worked out.
         (set-glyph-row-ascent! row (car metrics))
         (set-glyph-row-height! row (cdr metrics))
-        (set-glyph-row-pixel-width!
-         row (* width (car (display-cell-size (current-display)))))
+        (set-glyph-row-pixel-width! row width)
         (set-glyph-row-start! row (+ line-start from))
         (set-glyph-row-end! row (+ line-start to))
         (set-glyph-row-mode-line! row #f)
         (set-glyph-row-continued! row more?)
+        ;; `MATRIX_ROW_CONTINUATION_LINE_P` (`dispextern.h:1300`): the
+        ;; row starts part-way into its line, so the left fringe draws
+        ;; the continuation bitmap.
+        (set-glyph-row-continuation-line! row (> from 0))
         (set-glyph-row-truncated-on-right! row truncated?)
         (set-glyph-row-displays-text! row #t)
         (set-glyph-row-ends-at-zv! row #f)
@@ -4515,12 +5029,12 @@ buffer size, the line number and the column number."
       (set-glyph-row-y! row y)
       (set-glyph-row-ascent! row (car metrics))
       (set-glyph-row-height! row (cdr metrics))
-      (set-glyph-row-pixel-width!
-       row (* width (car (display-cell-size (current-display)))))
+      (set-glyph-row-pixel-width! row width)
       (set-glyph-row-start! row (buffer-z ed))
       (set-glyph-row-end! row (buffer-z ed))
       (set-glyph-row-mode-line! row #f)
       (set-glyph-row-continued! row #f)
+      (set-glyph-row-continuation-line! row #f)
       (set-glyph-row-truncated-on-right! row #f)
       (set-glyph-row-displays-text! row #f)
       ;; **This row *is* the end of its line**, which is what
@@ -4541,6 +5055,25 @@ buffer size, the line number and the column number."
     ;; the desired and current matrices together and draws only the rows
     ;; that differ. A cursor move changes the cursor's row and the mode
     ;; line, so two rows are drawn out of twenty-four.
+
+    (define (%required-matrix-rows window)
+      ;; GNU Emacs's `required_matrix_height` (`dispnew.c:1758`) for a
+      ;; window-system frame: the body's pixel height divided by the
+      ;; *smallest font* the display has opened, rounded up, plus one
+      ;; partially visible line at each end and three for the tab, header
+      ;; and mode line rows. A terminal's matrix is its line count.
+      ;;
+      ;; **This is why a smaller font shows more lines.** The number of
+      ;; glyph rows is not the frame's line count: a buffer scaled down
+      ;; fits more lines in the same pixels, and the matrix must have a
+      ;; row for each.
+      ;;--------------------------------------------------------------
+      (let ((display (frame-output (window-frame window))))
+        (if (not (and display (window-system-display? display)))
+            (window-body-height window)
+            (let* ((ch (max 1 (smallest-font-height display)))
+                   (pixels (window-box-height window)))
+              (+ (quotient (+ pixels ch -1) ch) 2 3)))))
 
     (define (display-window! window)
       ;; GNU Emacs's `redisplay_window` (`xdisp.c`) for one window: bring
@@ -4567,38 +5100,59 @@ buffer size, the line number and the column number."
       ;; up and the window is showing the file.
       (with-current-buffer (window-buffer window)
       (let* ((ed (window-buffer window))
-             (width (window-body-width window))
-             ;; The window's left edge, in frame cells: a row is drawn at
-             ;; the window's own column, not the frame's - a window to the
-             ;; right of a split starts at X0. Passing 0 drew every
-             ;; window's text in the leftmost column.
-             (x0 (window-body-left window))
-             (vheight (window-body-height window))
-             ;; **The text area's bottom in *pixels***, GNU Emacs's
-             ;; `window_text_bottom_y` - the `it.last_visible_y` that
-             ;; `try_window` compares each row against. The window's
-             ;; `height` is a row count because the frame's grid is rows,
-             ;; but a row is as tall as the faces on it, and
-             ;; `text-scale-mode` makes one line two or three lines tall.
-             ;; Laying out `vheight` of those regardless ran the rows past
-             ;; the window's own bottom: over its mode line, and over the
-             ;; window beneath - measured with `C-x C-+` on a split frame,
-             ;; rows of two sizes and two mode lines drawn on top of each
-             ;; other, which is what Chris saw as "a real mess".
-             ;; **A minibuffer window has no mode line, so its text
-             ;; area is the whole of it.** `window_text_bottom_y` is
-             ;; `window_box_height`, which is the window's pixel height
-             ;; less the mode line (`xdisp.c`), and `MINI_WINDOW_P`
-             ;; windows have none. Counting a row for it made a
-             ;; one-row window's limit its own top - measured, the echo
-             ;; area built no row at all (`glyphs: #()`, `enabled: #f`)
-             ;; and the message never reached the screen. It went
-             ;; unnoticed while the echo row was painted by hand.
-             (y-limit (row->pixel-y (+ (window-top window)
-                                       (window-height window)
-                                       (if (window-minibuffer-p window)
-                                           0 -1))))
+             ;; **The text area in pixels**, GNU Emacs's `window_box':
+             ;; its left offset (scroll bar + left fringe), its width
+             ;; less both fringes, its top below the tab line and its
+             ;; height less the mode and tab lines. Every x below is a
+             ;; pixel.
+             (width (window-box-width window))
+             (x0 (window-box-left window))
+             ;; `init_iterator` measures both special glyphs
+             ;; (`xdisp.c:3427-3459`) and uses the one the line's wrap
+             ;; mode needs: `truncation_pixel_width` for a truncated
+             ;; line, `continuation_pixel_width` for a wrapped one.
+             ;; They are measured in the buffer's default face, as
+             ;; `produce_special_glyphs`' `lookup_basic_face` uses it.
+             (truncation-glyph-width
+              (let ((display (current-display)))
+                (max 1 (face-text-width display (face->attribute 'default)
+                                        "$"))))
+             (continuation-glyph-width
+              (let ((display (current-display)))
+                (max 1 (face-text-width display (face->attribute 'default)
+                                        "\\"))))
+             ;; The room `init_iterator` leaves at the right edge for the
+             ;; special glyph, when a right fringe is not there to draw
+             ;; it (`xdisp.c:3509-3518`).
+             (right-reserve
+              (and (zero? (window-right-fringe-width window))
+                   (if (window-wraps? window)
+                       continuation-glyph-width
+                       truncation-glyph-width)))
+             ;; **The matrix's row capacity, not the frame's line
+             ;; count**, on a window-system display: a buffer scaled down
+             ;; has more lines than the frame's lines and each is a glyph
+             ;; row (`required_matrix_height`). The pixel bottom below is
+             ;; still the window's own.
+             (vheight (let* ((d (current-display))
+                             (m (window-desired-matrix window))
+                             (rows (and m (glyph-matrix-rows m))))
+                        (if (and rows (window-system-display? d))
+                            (vector-length rows)
+                            (window-body-height window))))
+             ;; **The text area's bottom in pixels**, GNU Emacs's
+             ;; `window_text_bottom_y`.
+             (y-limit (+ (window-box-top window)
+                         (window-box-height window)))
              (desired (window-desired-matrix window)))
+        ;; **The desired matrix starts empty**, as `redisplay_window`
+        ;; clears it (`clear_glyph_matrix (w->desired_matrix)`) before a
+        ;; from-scratch layout. A row this redisplay does not reach - and
+        ;; with variable row heights a tall line can keep the walk from
+        ;; reaching the bottom slots - must not stay enabled from the
+        ;; previous one: `update_window` would draw its stale pixels over
+        ;; the rows above it.
+        (when desired (clear-glyph-matrix desired))
         ;; **A window start outside [BEGV, ZV] goes to `recenter:`.**
         ;; `redisplay_window` cannot call `start_display` there: every
         ;; optimization it tries is guarded with `CHARPOS (startp) >=
@@ -4622,14 +5176,18 @@ buffer size, the line number and the column number."
             (recenter-window-on-cursor!
              window ed
              (max (buffer-beg ed) (min (buffer-pt ed) (buffer-z ed)))
-             vheight)))
+             ;; The frame's line count, not the matrix's capacity: the
+             ;; matrix has extra rows for a smaller font, and Emacs's
+             ;; centring walks back `window_box_height / 2` pixels - the
+             ;; body, not the spare slots.
+             (window-body-height window))))
         (let loop ((row 0)
-                   (y (row->pixel-y (window-body-top window)))
+                   (y (window-box-top window))
                    (line-start (window-start window)))
           (if (or (>= row vheight) (>= y y-limit) (not desired))
               #t
               (let* ((texts (line-display-texts ed line-start))
-                     (slices (%window-line-slices window texts)))
+                     (slices (%window-line-slices window texts line-start)))
                 (if (null? slices)
                     ;; past the buffer's end: the remaining rows are blank
                     ;; rows, **built and enabled** rather than left out -
@@ -4686,41 +5244,94 @@ buffer size, the line number and the column number."
                                       ;; The row is drawn from X0+1 across
                                       ;; one cell fewer; `draw-glyph-row!`
                                       ;; puts the `$` before it.
-                                      (let* ((hscrolled?
+                                      (let* ((unit (car (display-cell-size
+                                                         (current-display))))
+                                             (hscrolled?
                                               (and (not (window-wraps? window))
                                                    (> (%window-hscroll window) 0)))
-                                             (row-x (if hscrolled? (+ x0 1) x0))
-                                             (row-width (if hscrolled? (- width 1) width)))
+                                             ;; **No cell is given up
+                                             ;; when the frame has a left
+                                             ;; fringe**: the truncation
+                                             ;; is the fringe bitmap and
+                                             ;; the text starts at the
+                                             ;; hscroll column
+                                             ;; (`insert_left_trunc_glyphs`
+                                             ;; is GUI-and-no-fringe
+                                             ;; only, `xdisp.c:23908`).
+                                             (left-reserve
+                                              (and hscrolled?
+                                                   (zero? (window-left-fringe-width window))))
+                                             (row-x (if left-reserve
+                                                        (+ x0 truncation-glyph-width)
+                                                        x0))
+                                             ;; The row's text area is
+                                             ;; `last_visible_x -
+                                             ;; first_visible_x`: the box
+                                             ;; width less the special
+                                             ;; glyph's room at the right
+                                             ;; and, for a line drawn one
+                                             ;; cell in, the truncation
+                                             ;; glyph's room at the left.
+                                             (row-width (max 0
+                                                             (- width
+                                                                (if left-reserve
+                                                                    truncation-glyph-width
+                                                                    0)
+                                                                (or right-reserve 0))))
+                                             (continued? (pair? (cdr rest)))
+                                             ;; Cut off at the right
+                                             ;; edge - `row->
+                                             ;; truncated_on_right_p`,
+                                             ;; which `display_line`
+                                             ;; sets only when
+                                             ;; `it->line_wrap` is
+                                             ;; TRUNCATE. A *wrapped*
+                                             ;; line whose last row is
+                                             ;; short is not truncated,
+                                             ;; and marking it so put a
+                                             ;; `$' after the wrapped
+                                             ;; tail that Emacs never
+                                             ;; draws.
+                                             ;;
+                                             ;; On an hscrolled line the
+                                             ;; edge moves by the
+                                             ;; hscroll alone; the room
+                                             ;; the left truncation
+                                             ;; glyph takes is not part
+                                             ;; of the line's own
+                                             ;; display width.
+                                             (truncated?
+                                              (and (not (window-wraps? window))
+                                                   (null? (cdr rest))
+                                                   (> (line-texts-width texts)
+                                                      (+ (if hscrolled?
+                                                             (* (%window-hscroll window)
+                                                                unit)
+                                                             0)
+                                                         (- width
+                                                            (or right-reserve 0))))))
+                                             ;; **`extend_face_to_end_of_line`
+                                             ;; fills through
+                                             ;; `last_visible_x`
+                                             ;; inclusive** (`xdisp.c:24813`:
+                                             ;; `while (it->current_x <=
+                                             ;; it->last_visible_x)`), so an
+                                             ;; ordinary short row still
+                                             ;; reaches the window's last
+                                             ;; cell. A continued or
+                                             ;; truncated row must not: its
+                                             ;; last cell belongs to the
+                                             ;; special glyph, which
+                                             ;; `draw-glyph-row!` draws over
+                                             ;; it.
+                                             (fill-width (if (or continued? truncated?)
+                                                             row-width
+                                                             (+ row-width
+                                                                (or right-reserve 0)))))
                                         (build-row! ed slot texts (car slice) (cdr slice)
                                                     row-x yy row-width line-start
-                                                    (pair? (cdr rest))
-                                                    ;; Cut off at the right
-                                                    ;; edge - `row->
-                                                    ;; truncated_on_right_p`,
-                                                    ;; which `display_line`
-                                                    ;; sets only when
-                                                    ;; `it->line_wrap` is
-                                                    ;; TRUNCATE. A *wrapped*
-                                                    ;; line whose last row is
-                                                    ;; short is not truncated,
-                                                    ;; and marking it so put a
-                                                    ;; `$' after the wrapped
-                                                    ;; tail that Emacs never
-                                                    ;; draws.
-                                                    ;;
-                                                    ;; On an hscrolled line the
-                                                    ;; edge moves: it is
-                                                    ;; `hscroll + width - 1`,
-                                                    ;; the cell the left
-                                                    ;; marker took.
-                                                    (and (not (window-wraps? window))
-                                                         (null? (cdr rest))
-                                                         (> (line-texts-width texts)
-                                                            (if hscrolled?
-                                                                (+ (%window-hscroll window)
-                                                                   width -1)
-                                                                width)))
-                                                    0 metrics)))
+                                                    continued? truncated?
+                                                    0 fill-width metrics)))
                                     (rloop (cdr rest) (+ k 1)
                                            (+ yy (cdr metrics)) (+ r 1)))))))
                       ;; **`w->window_end_pos` is recorded here, as the
@@ -4793,6 +5404,51 @@ buffer size, the line number and the column number."
                                                  (+ yy (cdr metrics))))
                                         #t)))))))))))))))
 
+    (define (blank-uncovered-window-area! window desired)
+      ;; Clear the physical pixels of WINDOW below the last row it laid
+      ;; out, in the default face. GNU Emacs does not blank a *disabled
+      ;; matrix row by its index*: `update_window` only draws enabled
+      ;; rows, and the frame's own fixed-height rows that no window row
+      ;; covered are cleared by the frame update. A disabled row has no
+      ;; `y` - the rows above it may be taller than a frame line - so
+      ;; mapping its index to `index * FRAME_LINE_HEIGHT` painted blank
+      ;; strips across the scaled rows above it (and left the tail
+      ;; underneath them) once `text-scale-mode` made rows taller.
+      ;; Clearing from the last laid-out row's bottom to the window's
+      ;; text bottom is the same guarantee at this renderer's level.
+      ;;--------------------------------------------------------------
+      (let* ((display (current-display))
+             (cell (cdr (display-cell-size display)))
+             (metrics (face-metrics display #f))
+             (bottom (+ (window-box-top window) (window-box-height window)))
+             (rows (glyph-matrix-rows desired))
+             (top (let loop ((i 0) (y (window-box-top window)))
+                    (if (>= i (vector-length rows))
+                        y
+                        (let ((row (vector-ref rows i)))
+                          (loop (+ i 1)
+                                (if (and row (glyph-row-enabled? row))
+                                    (+ (glyph-row-y row)
+                                       (glyph-row-height row))
+                                    y)))))))
+        (let loop ((y top))
+          (when (< y bottom)
+            (clear-end-of-line-row! display window 0 y
+                                    (window-box-left window)
+                                    (window-box-width window)
+                                    (face->attribute 'default)
+                                    metrics)
+            ;; The gutters too: a band no row covers must not keep the
+            ;; previous fringe background or arrow. The synthetic row is
+            ;; the band's geometry with no flags, so `draw-row-fringes!`
+            ;; fills both fringes and draws no bitmap.
+            (draw-row-fringes!
+             window
+             (make-glyph-row (vector) 0 (window-box-left window) y
+                             (window-box-width window) 0
+                             (min cell (- bottom y)) 0 0 #f))
+            (loop (+ y cell))))))
+
     (define (update-window! window)
       ;; GNU Emacs's `update_window` (`dispnew.c:4400`): draw the rows the
       ;; desired matrix has that the current one does not.
@@ -4805,21 +5461,27 @@ buffer size, the line number and the column number."
             (desired (window-desired-matrix window)))
         (when (and current desired)
           (update-window-begin! (current-display))
-          (for-each (lambda (i)
-                      (let ((d (glyph-matrix-row-ref desired i)))
-                        (cond ((and d (glyph-row-enabled? d))
-                               (draw-glyph-row! window d))
-                              ;; **A row with nothing to show is blanked,
-                              ;; not left as it was.** GNU Emacs's
-                              ;; `update_window` clears a row whose
-                              ;; desired row is not enabled; without that,
-                              ;; a window that scrolled past the end of
-                              ;; its buffer kept the rows that used to be
-                              ;; there - the "corrupted screen" that
-                              ;; showed up the moment the frame stopped
-                              ;; being repainted whole.
-                              (else (blank-glyph-row! window i d)))))
-                    (matrix-diff-rows current desired))
+          ;; **The window's buffer is current while its rows are drawn**,
+          ;; as it is while they are built: the default face's token is
+          ;; the buffer's (its `face-remapping-alist` is what a
+          ;; text-scaled buffer changes), and a split whose other buffer
+          ;; is at a different scale cleared this window's tails in the
+          ;; wrong face. Emacs realizes faces per buffer for the same
+          ;; reason.
+          (with-current-buffer (window-buffer window)
+          (let ((diffs (matrix-diff-rows current desired)))
+            ;; **The area below the last laid-out row is cleared every
+            ;; time**, not only when a diffed row is disabled. A row that
+            ;; the *current* matrix has not enabled either is no diff at
+            ;; all, so after a big zoom followed by a shrink the pixels
+            ;; the old layout put below the new one survived both lists -
+            ;; the slivers between rows at the previous zoom level.
+            (blank-uncovered-window-area! window desired)
+            (for-each (lambda (i)
+                        (let ((d (glyph-matrix-row-ref desired i)))
+                          (when (and d (glyph-row-enabled? d))
+                            (draw-glyph-row! window d))))
+                      diffs)))
           (matrix-mark-current! current desired)
           (update-window-end! (current-display)))))
 
@@ -4833,11 +5495,14 @@ buffer size, the line number and the column number."
       ;; - every row past the end of the buffer - still carries the y its
       ;; record was made with (0), so blanking from the record wiped the
       ;; window's first line once for every empty row.
-      (let ((y (row->pixel-y (+ (window-body-top window) index))))
-        (fill-line-end-row! (current-display) window index y
-                            (window-body-left window)
-                            (window-body-width window)
-                            (face->attribute 'default))))
+      (let* ((y (+ (window-box-top window)
+                   (* index (frame-char-height (window-frame window)))))
+             (metrics (face-metrics (current-display) #f)))
+        (clear-end-of-line-row! (current-display) window index y
+                                (window-box-left window)
+                                (window-box-width window)
+                                (face->attribute 'default)
+                                metrics)))
 
     (define (draw-glyph-row! window row)
       ;; Draw a built row: one `write-glyphs!` per run of glyphs that share
@@ -4866,17 +5531,24 @@ buffer size, the line number and the column number."
              (n (glyph-row-used row))
              (y (glyph-row-y row))
              (x0 (glyph-row-x row))
-             (width (window-body-width window))
-             (marker? (or (glyph-row-continued? row)
-                          (glyph-row-truncated-on-right? row)))
-             ;; the last cell belongs to a marker when the row has one -
-             ;; and **never past the window's body edge**: an hscrolled
-             ;; row is drawn at `body-left + 1`, so `x0 + width` is one
-             ;; cell past the body, and that cell belongs to the scroll
-             ;; bar or the window beside it.
-             (limit (min (+ x0 width (if marker? -1 0))
-                         (+ (window-body-left window)
-                            (window-body-width window)))))
+             (display (current-display))
+             (width (window-box-width window))
+             (box-left (window-box-left window))
+             ;; **The window's box edge in pixels**, and no cell
+             ;; reserved for a marker. Emacs cuts the text where the
+             ;; next character would cross `it->last_visible_x' and puts
+             ;; the special glyph *at that x*, letting its own (possibly
+             ;; scaled) width overflow and clip. Reserving a frame cell
+             ;; here put the marker in the last cell whatever size its
+             ;; face was.
+             (limit (+ box-left width))
+             ;; `produce_special_glyphs` gives each marker its own
+             ;; face-sized advance; a scaled or proportional default face
+             ;; need not make `$' and `\' the same width.
+             (truncation-glyph-width
+              (max 1 (face-text-width display (face->attribute 'default) "$")))
+             (continuation-glyph-width
+              (max 1 (face-text-width display (face->attribute 'default) "\\"))))
         ;; **The row is handed over whole, and the backend splits it into
         ;; runs** - `write_glyphs`' argument list, `(w, row, string, area,
         ;; len)`. The split moved out of here when the interface was
@@ -4892,63 +5564,86 @@ buffer size, the line number and the column number."
                                 (sum (+ i 1)
                                      (+ n2 (glyph-pixel-width
                                             (vector-ref glyphs i)))))))))
-          (if (< end limit)
-              (clear-end-of-line-row! (current-display) window 0 y end
-                                      (- limit end)
-                                      (face->attribute 'default))
-              ;; **`write_row`: "Don't call clear_end_of_line if we
-              ;; already wrote the whole line. The cursor will not be at
-              ;; the right margin in that case but in the line below"-
-              ;; and then `cursor_to (f, vpos, 0)`, "to make sure we are
-              ;; in the right row, otherwise cursor movement with cmgoto
-              ;; might use `ch' in the wrong row".
-              ;;
-              ;; It is not cosmetic. Writing the last column arms the
-              ;; terminal's wrap; `cmplus` books that as "moved to the
-              ;; next row", so `cm` and the terminal would both be one
-              ;; row below where the picture is, and every later
-              ;; `cursor_to` would be off by one. Going back to the row
-              ;; cancels it. Measured, without this a 23-row frame drew
-              ;; 62.
-              (cursor-to! (current-display) window y x0)))
-        ;; the left truncation glyph, when the row was drawn one cell in
-        ;; from the window's left edge - which is what `display-window!`
-        ;; does for an hscrolled line. `$` overwrites the cell at the
-        ;; hscroll column rather than pushing the text right, as
-        ;; `draw-line!`'s hscrolled branch did.
-        (when (> x0 (window-body-left window))
-          ;; at the window's *first* cell, which is the cell the text
-          ;; gave up - `draw-special-glyph!` writes the last cell, so
-          ;; this is its own `write-glyphs!`
-          (write-run! (current-display) (list "$") y
-                      (window-body-left window)
-                      (face->attribute 'default)))
-        ;; the right marker sits in the window's last cell, so the row's
-        ;; own width (one cell short when it made room for the left
-        ;; marker) is not what places it - `window-left window` plus the
-        ;; window's width is.
-        (let ((window-width (window-body-width window))
-              (window-x (window-body-left window)))
-          (cond ((glyph-row-continued? row)
-                 (draw-special-glyph! y window-x window-width "\\"))
-                ((glyph-row-truncated-on-right? row)
-                 (draw-special-glyph! y window-x window-width "$"))))))
+          ;; **The row's own height.** A synthesized frame-metric row
+          ;; cleared only `FRAME_LINE_HEIGHT` pixels of a scaled row's
+          ;; tail, leaving the rest of the old line under it - the
+          ;; "cleared to the end of the line at the wrong zoom level"
+          ;; sliver. `clear_end_of_line` clears the row's whole
+          ;; rectangle.
+          (when (< end limit)
+            (clear-end-of-line-row! (current-display) window 0 y end
+                                    (- limit end)
+                                    (face->attribute 'default)
+                                    (cons (glyph-row-ascent row)
+                                          (- (glyph-row-height row)
+                                             (glyph-row-ascent row))))))
+        ;; The left truncation glyph, when the row was drawn one cell in
+        ;; from the window's left edge - what `display-window!` does for
+        ;; an hscrolled line. `$` fills the cell at the hscroll column
+        ;; rather than pushing the text right (`insert_left_trunc_glyphs`,
+        ;; `xdisp.c:23908`). The test is in pixels: `x0` is the row's
+        ;; pixel x, so comparing it with the body's *cell* column drew a
+        ;; `$` in every window that did not start at column 0.
+        (when (and (zero? (window-left-fringe-width window))
+                   (> x0 box-left))
+          (draw-special-glyph! window row box-left "$"))
+        ;; **The special glyph follows the text, at the face's size.**
+        ;; `display_line` cuts the row where the next character would
+        ;; cross `last_visible_x` and calls `produce_special_glyphs`
+        ;; there; a continued row is then filled with continuation
+        ;; glyphs to the row's edge (`xdisp.c:26411`), so a
+        ;; `text-scale-mode` buffer shows scaled `\`s across the gap, not
+        ;; one frame-sized glyph in the last cell.
+        ;; **The fringes are a gutter, so the glyph does not eat text.**
+        ;; `init_iterator` subtracts the continuation glyph's width from
+        ;; `last_visible_x` only when the window has *no* right fringe
+        ;; (`xdisp.c:3510`); with one, the marker is a fringe bitmap and
+        ;; the text uses the whole text area. A terminal has no fringes
+        ;; and keeps the `$`/`\` glyphs.
+        (when (zero? (window-right-fringe-width window))
+          (let ((end (+ x0 (let sum ((i 0) (n2 0))
+                              (if (>= i n) n2
+                                  (sum (+ i 1)
+                                       (+ n2 (glyph-pixel-width
+                                              (vector-ref glyphs i))))))))
+                (token (face->attribute 'default)))
+            (cond ((glyph-row-continued? row)
+                   (let ((advance continuation-glyph-width))
+                     (let loop ((x end))
+                       (when (< x limit)
+                         (draw-special-glyph! window row x "\\")
+                         (loop (+ x advance))))))
+                  ((glyph-row-truncated-on-right? row)
+                   (draw-special-glyph! window row
+                                        (min end (- limit truncation-glyph-width))
+                                        "$")))))
+        ;; The gutters, in the fringe face: a curved arrow at the end of a
+        ;; continued line and at the start of the row that continues it.
+        (draw-row-fringes! window row)))
 
-    (define (clear-end-of-line-row! display window index y x width token)
-      ;; Blank the cells [X, X+WIDTH) of the row at pixel Y - GNU Emacs's
-      ;; `clear_end_of_line (w, row, area, x)`, whose backend takes the
-      ;; row's y from `row` and the width from `window_box_width (w,
-      ;; area)`. This tree's callers have the y and the width already, so
-      ;; the row is synthesised the way `write-run!` synthesises one.
+    (define (clear-end-of-line-row! display window index y x width token . args)
+      ;; Blank [X, X+WIDTH) - in display units - of the row at pixel Y:
+      ;; GNU Emacs's `clear_end_of_line (w, row, area, x)`, whose backend
+      ;; takes the row's y from `row` and the width from `window_box_width
+      ;; (w, area)`. This tree's callers have the y and the width
+      ;; already, so the row is synthesised with the frame's metrics, as
+      ;; `write-run!` does.
       ;;--------------------------------------------------------------
       (when (> width 0)
-        (clear-end-of-line! display window
-                            (make-glyph-row (vector) 0 x y width 0 1 x x)
-                            'text x width token)))
+        (let* ((metrics (if (pair? args) (car args) (face-metrics display #f)))
+               (metrics metrics))
+          (clear-end-of-line! display window
+                              (make-glyph-row (vector) 0 x y width
+                                              (car metrics)
+                                              (+ (car metrics) (cdr metrics))
+                                              x x #f)
+                              'text x width token))))
 
-    (define (fill-line-end-row! display window index y x width token)
+    (define (fill-line-end-row! display window index y x width token . args)
       ;; Fill [X, X+WIDTH) of the row at pixel Y so that the *line* carries
-      ;; TOKEN to its edge.
+      ;; TOKEN to its edge. X and WIDTH are in *cells* here - they come
+      ;; from the window's column geometry - and are converted to the
+      ;; display's units for the backend.
       ;;
       ;; GNU Emacs's `extend_face_to_end_of_line` (`xdisp.c:24379`) is
       ;; called while the row is built, so its padding is glyphs; the two
@@ -4960,10 +5655,14 @@ buffer size, the line number and the column number."
       ;; emits `ce`, which erases under whatever colours are current - not
       ;; the face's - so the cells have to be written.
       ;;--------------------------------------------------------------
-      (when (> width 0)
-        (if (window-system-display? display)
-            (clear-end-of-line-row! display window index y x width token)
-            (write-run! display (list (make-string width #\space)) y x token))))
+      (let ((unit (car (display-cell-size display))))
+        (when (> width 0)
+          (if (window-system-display? display)
+              (clear-end-of-line-row! display window index y
+                                      (* x unit) (* width unit) token
+                                      (if (pair? args) (car args) #f))
+              (write-run! display (list (make-string width #\space))
+                          y x token)))))
 
     (define (write-run! display glyphs y x token)
       ;; Draw GLYPHS - a list, one per cell - at pixel Y, cell column X,
@@ -5000,15 +5699,29 @@ buffer size, the line number and the column number."
                                                acc))))
                             (else (loop (cdr rest) (cons (car rest) acc))))))
              (n (length cells))
+             (unit (car (display-cell-size display)))
              (vec (if (= n 0)
                       (vector)
                       (list->vector
-                       (map (lambda (g) (make-glyph g token 1 'char #f 0))
+                       (map (lambda (g) (make-glyph g token unit 'char #f 0))
                             cells)))))
         (when (> n 0)
-          (write-glyphs! display #f
-                         (make-glyph-row vec n x y (max 1 n) 0 1 x x)
-                         'text x vec n))))
+          ;; **The fragment's row carries the frame's metrics.** The
+          ;; baseline a run is drawn on and the height its background
+          ;; fills come from the row (GNU Emacs's `compute_line_metrics`
+          ;; writes `row->ascent`/`row->height` before the row is drawn),
+          ;; and a fragment - a mode-line segment, an overlay string, a
+          ;; special glyph - has not been through that walk. It is one
+          ;; line of the frame's font, so the frame's own measurements
+          ;; are the row's; without them the backend would get a height
+          ;; of one pixel and no ascent at all.
+          (let ((metrics (face-metrics display #f)))
+            (write-glyphs! display #f
+                           (make-glyph-row vec n (* x unit) y (max 1 n)
+                                           (car metrics)
+                                           (+ (car metrics) (cdr metrics))
+                                           (* x unit) (* x unit) #f)
+                           'text (* x unit) vec n)))))
 
     (define (row->pixel-y row)
       ;; The pixel y of screen row ROW, counting from the frame's top, as
@@ -5373,8 +6086,17 @@ buffer size, the line number and the column number."
              ;; `window-body-width` leaves out of the body).
              (border (and (window-right-border? window)
                           (+ (window-left window) (window-width window) -1)))
-             (y (row->pixel-y
-                 (+ (window-top window) (window-height window) -1)))
+             ;; **The mode line sits at the window's pixel bottom.** The
+             ;; C places it by `WINDOW_PIXEL_HEIGHT` and
+             ;; `WINDOW_MODE_LINE_HEIGHT`, not by a row index: a window
+             ;; whose allocation is not a whole number of lines has a
+             ;; partial last row, and `(top + total_lines - 1) * line_height`
+             ;; puts the mode line one partial row too high - over the
+             ;; last text row, which is the corruption seen after a zoom
+             ;; down from a large font.
+             (y (- (+ (window-pixel-top window)
+                      (window-pixel-height window))
+                   (line-height (current-display))))
              (line (mode-line-pad
                     (mode-line-truncate
                      ;; `display_mode_lines` (`xdisp.c:29099`) rebinds
@@ -5440,16 +6162,20 @@ buffer size, the line number and the column number."
           (cond
            ((window-system-display? (current-display))
             (unless (frame-has-vertical-scroll-bars? (window-frame window))
-              (let ((cw (frame-char-width (window-frame window)))
-                    (ch (frame-char-height (window-frame window))))
+              (let ((x1 (+ (window-box-left window)
+                           (window-box-width window)))
+                    (y0 (window-box-top window))
+                    (y1 (+ (window-box-top window)
+                           (window-box-height window) -1)))
+                ;; `gui_draw_vertical_border` (`xdisp.c:37917'): the box's
+                ;; right edge, less one pixel when there is no left
+                ;; fringe; the line stops above the mode line.
                 (display-draw-vertical-border
                  (current-display) window
-                 (* border cw)
-                 (* (window-body-top window) ch)
-                 (- (* (+ (window-body-top window)
-                          (window-body-height window))
-                       ch)
-                    1)))))
+                 (if (zero? (window-left-fringe-width window))
+                     (- x1 1)
+                     x1)
+                 y0 y1))))
            (else
             (let loop ((row (window-top window))
                        (end (+ (window-top window) (window-height window))))
@@ -5485,7 +6211,7 @@ buffer size, the line number and the column number."
       ;; columns to leave out.
       (let* ((x0 (window-left window))
              (width (window-width window))
-             (y (row->pixel-y (window-top window)))
+             (y (window-pixel-top window))
              (format (or (window-parameter window 'tab-line-format)
                          (buffer-local-value (window-buffer window)
                                              'tab-line-format #f)))
@@ -5718,7 +6444,17 @@ buffer size, the line number and the column number."
       ;; `C-x n d` was nothing at all after ncurses' own clear.
       (when (or (frame-garbaged-p frame)
                 (windows-or-buffers-changed?))
-        (when (not (graphical-frame?))
+        ;; **A graphical frame is cleared when it is garbaged.** Emacs can
+        ;; repaint a garbaged frame without clearing because its glyph
+        ;; matrices cover every pixel; this renderer's cover the frame's
+        ;; whole *cells*, and an allocation that is not a multiple of the
+        ;; line height (or a font change while the toolkit resizes) leaves
+        ;; a band no row ever paints. It is exactly the band where the
+        ;; previous font's rows survive - the "line or two at the bottom"
+        ;; after a zoom. A full clear costs one pass on a resize or a
+        ;; font/theme change, never on a keystroke.
+        (when (or (not (graphical-frame?))
+                  (frame-garbaged-p frame))
           (clear-frame-area! (current-display)))
         (for-each (lambda (w)
                     (ensure-window-matrices! w (window-body-width w)
@@ -5854,6 +6590,16 @@ buffer size, the line number and the column number."
             ;; (`MINI_WINDOW_P`).
             (windows (window-list frame #t))
             (body (delq (frame-minibuffer-window frame) windows)))
+        ;; **The surface outside the cell grid is painted the frame's
+        ;; background.** A window allocation need not be a whole number
+        ;; of `FRAME_LINE_HEIGHT' cells, and a frame size can lag a font
+        ;; change; either leaves a band below or beside the last row
+        ;; that no window row covers, where the previous font's pixels
+        ;; survive. Emacs's frame is its allocation and its glyph matrix
+        ;; covers it; this call is the host compensation.
+        (let ((display (current-display)))
+          (when display
+            (fill-frame-remainder! display frame)))
         ;; **`prepare_menu_bars`'s `pre-redisplay-function` call**
         ;; (`xdisp.c:14267`), which `redisplay--pre-redisplay-functions`
         ;; (`simple.el:7391`) makes the hook walk: each window's
@@ -6037,23 +6783,39 @@ buffer size, the line number and the column number."
                     ;; nothing to be fresh *about* - and `window-outdated?`
                     ;; has no buffer to ask either.
                     (unless (and (window-buffer w) (window-matrix-valid? w))
-                      (ensure-window-matrices! w (window-body-width w)
-                                               (window-body-height w))
-                      ;; **A window that shows no buffer builds nothing.**
-                      ;; The minibuffer window is one until a prompt is
-                      ;; read (`minibuffer-window-active-p`), and Emacs's
-                      ;; `redisplay_window` likewise has nothing to display
-                      ;; for a window whose `w->contents` is nil. Its
-                      ;; current matrix is emptied instead, so the diff
-                      ;; draws nothing over the row and the echo-area block
-                      ;; below is what paints there.
-                      (if (window-buffer w)
-                          (begin
-                            (display-window! w)
-                            (mark-window-display-accurate-1 w #t))
-                          (let ((m (window-current-matrix w)))
-                            (when m (clear-glyph-matrix m))))
-                      (update-window! w))
+                      ;; **The matrix has room for the smallest font**
+                      ;; (`required_matrix_height`): a buffer scaled down
+                      ;; fits more lines in the same pixels than the
+                      ;; frame's line count, and each needs a row.
+                      (let* ((cols (window-body-width w))
+                             (rows (max (window-body-height w)
+                                        (%required-matrix-rows w))))
+                        (ensure-window-matrices! w cols rows)
+                        ;; **A window that shows no buffer builds
+                        ;; nothing.** The minibuffer window is one until a
+                        ;; prompt is read (`minibuffer-window-active-p`),
+                        ;; and Emacs's `redisplay_window` likewise has
+                        ;; nothing to display for a window whose
+                        ;; `w->contents` is nil. Its current matrix is
+                        ;; emptied instead, so the diff draws nothing over
+                        ;; the row and the echo-area block below is what
+                        ;; paints there.
+                        (if (window-buffer w)
+                            (begin
+                              (display-window! w)
+                              ;; A smaller face can be realized *while*
+                              ;; the rows are built; Emacs notices
+                              ;; (`fonts_changed`) and lays the window out
+                              ;; again in the larger matrix
+                              ;; (`need_larger_matrices`, `xdisp.c:21610`).
+                              (let ((need (%required-matrix-rows w)))
+                                (when (> need rows)
+                                  (ensure-window-matrices! w cols need)
+                                  (display-window! w)))
+                              (mark-window-display-accurate-1 w #t))
+                            (let ((m (window-current-matrix w)))
+                              (when m (clear-glyph-matrix m))))
+                        (update-window! w)))
                     ;; **The scroll bar is updated for every window, fresh
                     ;; or not.** GNU Emacs's early paths out of
                     ;; `redisplay_window` jump to `finish_scroll_bars`
@@ -6303,6 +7065,64 @@ buffer size, the line number and the column number."
               (if display (column-width display) 1)
               (if display (line-height display) 1))))
 
+    (define (%window-row-at-pixel-y window y)
+      ;; The desired/current glyph row whose pixel band contains Y, or
+      ;; `#f`. GNU Emacs reads the row from `w->current_matrix` in
+      ;; `buffer_posn_from_coords`; the rows' `y` are frame pixels and
+      ;; their heights are the faces' (`row->y`, `row->height`).
+      ;;--------------------------------------------------------------
+      (let ((matrix (or (window-current-matrix window)
+                        (window-desired-matrix window))))
+        (and matrix
+             (let ((rows (glyph-matrix-rows matrix)))
+               (let loop ((i 0))
+                 (if (>= i (vector-length rows))
+                     #f
+                     (let ((row (vector-ref rows i)))
+                       (if (and row (glyph-row-enabled? row)
+                                (>= y (glyph-row-y row))
+                                (< y (+ (glyph-row-y row)
+                                        (glyph-row-height row))))
+                           row
+                           (loop (+ i 1))))))))))
+
+    (define (%buffer-posn-from-pixels window y x)
+      ;; The buffer position drawn at frame pixel (X, Y) in WINDOW -
+      ;; `buffer_posn_from_coords`'s glyph walk (`xdisp.c:17110`), not a
+      ;; cell division. Each glyph's `pixel_width` is its face font's
+      ;; advance, so a click in a proportional or scaled row lands on the
+      ;; character actually under the pointer.
+      ;;
+      ;; The row's glyphs are one per buffer column for text this
+      ;; redisplay builds, so the glyph index is the column offset from
+      ;; `row->start`. Overlay-string glyphs are the exception: they are
+      ;; additional glyphs with no buffer column of their own, and a click
+      ;; in one answers through the index it lands on (named in
+      ;; DEPARTURES.md).
+      ;;--------------------------------------------------------------
+      (let ((row (%window-row-at-pixel-y window y)))
+        (if (not row)
+            ;; No matrix (first display): fall back to the window's start,
+            ;; which is the only position known to be there.
+            (window-start window)
+            (let* ((start (glyph-row-start row))
+                   (end (glyph-row-end row))
+                   (glyphs (glyph-row-glyphs row))
+                   (used (glyph-row-used row))
+                   (local (- x (glyph-row-x row))))
+              (if (< local 0)
+                  start
+                  (let loop ((i 0) (cum 0))
+                    (cond
+                     ((>= i used) end)
+                     ((< local (+ cum (glyph-pixel-width
+                                       (vector-ref glyphs i))))
+                      (+ start i))
+                     (else
+                      (loop (+ i 1)
+                            (+ cum (glyph-pixel-width
+                                    (vector-ref glyphs i))))))))))))
+
     (define (buffer-posn-from-coords window row column)
       ;; GNU Emacs's `buffer_posn_from_coords' (`xdisp.c'): the buffer
       ;; position of the character at ROW and COLUMN within WINDOW, both
@@ -6334,7 +7154,7 @@ buffer size, the line number and the column number."
            ((not line-start) last-end)
            (else
             (let* ((texts (line-display-texts ed line-start))
-                   (slices (%window-line-slices window texts)))
+                   (slices (%window-line-slices window texts line-start)))
               (cond
                ((null? slices) last-end)
                ((< row (+ r (length slices)))
@@ -6452,7 +7272,9 @@ buffer size, the line number and the column number."
       (let ((column (quotient (inexact->exact (round x))
                               (column-width (current-display))))
             (row (quotient (inexact->exact (round y))
-                           (line-height (current-display)))))
+                           (line-height (current-display))))
+            (x-pixel (inexact->exact (round x)))
+            (y-pixel (inexact->exact (round y))))
         (let loop ((rest (window-list frame)))
           (cond
            ((< row (frame-top-margin frame))
@@ -6476,17 +7298,22 @@ buffer size, the line number and the column number."
             (list frame #f (cons x y) 0))
            (else
             (let* ((w (car rest))
-                   (top (window-top w))
                    (left (window-left w))
-                   (height (window-height w))
                    (width (window-width w))
-                   (body-left (window-body-left w))
-                   (bar-cols (window-scroll-bar-cols w))
+                   (w-top-px (window-pixel-top w))
+                   (w-left-px (window-pixel-left w))
+                   (w-height-px (window-pixel-height w))
+                   (w-width-px (window-pixel-width w))
+                   (bar-px (if (window-vertical-scroll-bar-type w)
+                               (window-config-scroll-bar-width w)
+                               0))
                    (bar-left (if (eq? (window-vertical-scroll-bar-type w) 'left)
-                                 left
-                                 (- (+ left width) bar-cols))))
-              (if (and (>= row top) (< row (+ top height))
-                       (>= column left) (< column (+ left width)))
+                                 w-left-px
+                                 (- (+ w-left-px w-width-px) bar-px))))
+              (if (and (>= y-pixel w-top-px)
+                       (< y-pixel (+ w-top-px w-height-px))
+                       (>= x-pixel w-left-px)
+                       (< x-pixel (+ w-left-px w-width-px)))
                   (cond
                    ;; **`ON_VERTICAL_BORDER`: a line row's grabbable edge.**
                    ;; `coordinates_in_window` tests the mode, header and
@@ -6500,9 +7327,12 @@ buffer size, the line number and the column number."
                    ;; and the help string "drag-mouse-1: resize"
                    ;; (`xdisp.c:37257`), and `[vertical-line down-mouse-1]`
                    ;; is `mouse-drag-vertical-line`.
-                   ((and (or (and (= row top)
-                                  (> (window-tab-line-height w) 0))
-                             (and (= row (+ top height -1))
+                   ((and (or (and (> (window-tab-line-height w) 0)
+                                  (>= y-pixel w-top-px)
+                                  (< y-pixel (window-box-top w)))
+                             (and (>= y-pixel (+ (window-box-top w)
+                                                 (window-box-height w)))
+                                  (< y-pixel (+ w-top-px w-height-px))
                                   (not (window-minibuffer-p w))))
                          (let ((side (window-vertical-scroll-bar-type w)))
                            (or (and (memq side '(#f right))
@@ -6524,16 +7354,25 @@ buffer size, the line number and the column number."
                    ;; The string is the one the last redisplay drew
                    ;; (`window-last-tab-line`, this renderer's record of it),
                    ;; so the answer agrees with what is on the screen.
-                   ((and (= row top) (> (window-tab-line-height w) 0))
+                   ((and (> (window-tab-line-height w) 0)
+                         (>= y-pixel w-top-px)
+                         (< y-pixel (window-box-top w)))
                     (let* ((record (window-last-tab-line w))
                            (line (and record (car record)))
-                           (pos (- column body-left)))
+                           ;; The tab line is drawn across the window's
+                           ;; whole width from its left edge, fringes
+                           ;; included (`display_tab_bar`), so the
+                           ;; character under the pointer is measured
+                           ;; from there and not from the text area.
+                           (pos (- column left)))
                       (if (and line (string? line)
                                (>= pos 0) (< pos (string-length line)))
                           (list w 'tab-line (cons x y) 0
                                 (%tab-line-string-at line pos))
                           (list w 'tab-line (cons x y) 0))))
-                   ((and (= row (+ top height -1))
+                   ((and (>= y-pixel (+ (window-box-top w)
+                                        (window-box-height w)))
+                         (< y-pixel (+ w-top-px w-height-px))
                            ;; **A minibuffer window has no mode line**, so
                            ;; its one row is text - GNU Emacs's
                            ;; `coordinates_in_window` asks
@@ -6555,7 +7394,9 @@ buffer size, the line number and the column number."
                     ;; nothing in `bindings.el` was clickable.
                     (let* ((record (window-last-mode-line w))
                            (line (and record (car record)))
-                           (pos (- column body-left)))
+                           ;; The mode line spans the window's pixels
+                           ;; (`display_mode_line`), fringes and all.
+                           (pos (- column left)))
                       (if (and line (string? line)
                                (>= pos 0) (< pos (string-length line)))
                           (list w 'mode-line (cons x y) 0 (cons line pos))
@@ -6570,9 +7411,9 @@ buffer size, the line number and the column number."
                    ;; there drags the window edge. The toolkit widget
                    ;; really is over the body columns, so a real click
                    ;; never reaches here; a posn asked for from Lisp does.
-                   ((and (> bar-cols 0)
-                         (>= column bar-left)
-                         (< column (+ bar-left bar-cols)))
+                   ((and (> bar-px 0)
+                         (>= x-pixel bar-left)
+                         (< x-pixel (+ bar-left bar-px)))
                     (list w 'vertical-scroll-bar (cons x y) 0))
                    ;; **A text row's border column.** With no scroll
                    ;; bars the vertical border is the window's last
@@ -6581,11 +7422,29 @@ buffer size, the line number and the column number."
                    ;; the horizontal-drag handle.
                    ((and (not (window-vertical-scroll-bar-type w))
                          (window-right-border? w)
-                         (= column (+ left width -1)))
+                         (let* ((display (frame-output (window-frame w)))
+                                (graphical (and display
+                                                (window-system-display? display)))
+                                (border-x
+                                 (if graphical
+                                     (+ (window-box-left w)
+                                        (window-box-width w))
+                                     (- (+ w-left-px w-width-px) 1))))
+                           (and (>= x-pixel border-x)
+                                (< x-pixel (+ border-x 1)))))
                     (list w 'vertical-line (cons x y) 0))
+                   ;; **The fringes.** `coordinates_in_window`
+                   ;; answers `ON_LEFT_FRINGE`/`ON_RIGHT_FRINGE` for the
+                   ;; gutter pixels (`window.c:1465`), before the text
+                   ;; area's own mapping. They are pixels, not columns:
+                   ;; an 8-pixel fringe is narrower than a zoomed cell.
+                   ((< x-pixel (window-box-left w))
+                    (list w 'left-fringe (cons x y) 0))
+                   ((>= x-pixel (+ (window-box-left w)
+                                   (window-box-width w)))
+                    (list w 'right-fringe (cons x y) 0))
                    (else
-                    (list w (buffer-posn-from-coords
-                             w (- row (window-body-top w)) (- column body-left))
+                    (list w (%buffer-posn-from-pixels w y-pixel x-pixel)
                           (cons x y) 0)))
                   (loop (cdr rest)))))))))
 

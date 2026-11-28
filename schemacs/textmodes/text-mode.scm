@@ -14,6 +14,7 @@
   ;;   * `text-conversion-style' - no input method.
 
   (import
+    (only (schemacs custom) define-custom)
     (scheme base)
     (scheme char)
     (prefix (schemacs keymap) km:)
@@ -60,11 +61,13 @@
       ;;--------------------------------------------------------------
       (setq-local 'text-mode-variant #t))
 
-    (define text-mode-hook
+    (define-custom text-mode-hook
       ;; GNU Emacs's `text-mode-hook' (text-mode.el:34): "Normally
       ;; non-nil defaults for hooks are bad, but since this file is
       ;; preloaded it's ok/better."
-      (list text-mode-hook-identify))
+      (list text-mode-hook-identify)
+      "Normal hook run when entering Text mode and many related modes."
+      :type 'hook :group 'text :version "31.1")
 
     (define-derived-mode (text-mode #f "Text" text-mode-map text-mode-hook
                                     text-mode-syntax-table)

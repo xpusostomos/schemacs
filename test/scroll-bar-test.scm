@@ -82,7 +82,13 @@
 
 ;; **The test frames have no menu bar**, as the mouse suite's do: the bar
 ;; would take a row and change the geometry being asserted.
-(*default-frame-alist* (cons '(menu-bar-lines . 0) (*default-frame-alist*)))
+;; **No fringes either**: they are a graphical frame's default, and a
+;; fringe column would come out of the body the bar arithmetic is about.
+;; The fringe suite is `pgtk-test.scm`'s.
+(*default-frame-alist*
+ (cons '(left-fringe . 0)
+       (cons '(right-fringe . 0)
+             (cons '(menu-bar-lines . 0) (*default-frame-alist*)))))
 
 (define (frame-of display lines rows cols)
   ;; A frame on a buffer of LINES numbered lines, drawn once so the

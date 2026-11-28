@@ -45,7 +45,8 @@
           pointer->bytevector null-pointer? make-pointer pointer-address int void double
           unsigned-int make-c-struct parse-c-struct %null-pointer)
     (only (guile) dynamic-link dynamic-func assq-ref filter
-          u32vector->list current-error-port simple-format exit logand)
+          u32vector->list current-error-port simple-format exit logand
+          make-hash-table hash-ref hash-set! hash-clear!)
     ;; `alist-delete' removes one selection from the ownership record;
     ;; `iota' builds the element offsets the 16- and 32-bit selection
     ;; data rows are read at.
@@ -208,13 +209,14 @@
     (only (schemacs dispnew)
           menu-show
           <display> *mouse-event-keys* clear-frame-area! clear-end-of-line!
+          draw-fringe! fill-frame-remainder!
           ensure-surface! column-width
           current-display
           delete-frame-display!
           display-cell-size
           display-color-cells display-font-families
           display-set-size!
-          face-metrics
+          face-metrics face-text-width smallest-font-height
           draw-box! draw-window-cursor! erase-window-cursor! flush-display!
           key-event->key
           display-mouse-position get-selection line-height read-input-event
@@ -240,6 +242,7 @@
           ;; button reach through `read-file-name`
           x-file-dialog
           realize-face resume-display! screen-size
+          clear-realized-face-cache!
           selection-exists? selection-owner?
           display-define-frame-cursor
           display-draw-vertical-border
@@ -260,11 +263,13 @@
           ;; `flush-display!`'s 7.1 ms per keystroke. See the guard below.
           ;; on every redisplay. Both flags are `xdisp.c`'s and live in
           ;; dispnew for the reason its note gives.
-          windows-or-buffers-changed? update-mode-lines?)
+          windows-or-buffers-changed? update-mode-lines?
+          underline-line-scaling-flag)
     ;; A glyph and a glyph row, which `write-glyphs!` now reads: the
     ;; pixel y is the row's, and each glyph carries its own face.
     (only (schemacs glyph)
-          glyph-char glyph-face-id glyph-pixel-width glyph-row-y)
+          glyph-char glyph-face-id glyph-pixel-width glyph-row-y
+          glyph-row-ascent glyph-row-height)
     ;; The Lisp half of a *read* of a selection this process owns:
     ;; `pgtk-get-local-selection' looks the requested target up in
     ;; `selection-converter-alist' - the C's `Vselection_converter_alist'
@@ -293,6 +298,7 @@
           ;; outside its window (`build_frame_matrix` and
           ;; `fill_glyph_string` both work from the window's own box).
           window-body-left window-body-width
+          window-box-left window-box-width window-box-top window-box-height
           ;; ...and vertically to the text area: a row taller than the
           ;; frame's cell (the per-face fonts this backend does not draw
           ;; yet, but which `xdisp.c` lays out) stops at the mode line
@@ -306,7 +312,7 @@
     (only (schemacs faces)
           *display-color-cells* *display-type* *frame-background-mode*
           *window-system* face-attribute face-list face-spec-recalc
-          set-face-attribute)
+          set-face-attribute *undefined-face-attribute*)
     (only (schemacs xfaces)
           attribute-value face-attributes-empty merge-face-ref)
     ;; reading a *window's* buffer, not the current one - see
@@ -570,6 +576,10 @@
     ;; the font's ascent. 13 is what the `(- *cell-height* 5)' this file
     ;; used to compute at every baseline works out to for the 18-row
     ;; cell the constants above describe.
+    (define *font-underline-thickness* 1)
+    ;; ^ The frame font's underline thickness, from Pango's metrics -
+    ;; `pgtk_draw_glyph_string`'s `font->underline_thickness` (`pgtkterm.c`),
+    ;; which a face with no font of its own draws with.
 
     (define (cell-x x) (* x *cell-width*))
     (define (cell-y y) (* y *cell-height*))
@@ -675,6 +685,13 @@
       (pango-foreign-fn "libpango-1.0.so.0"
                         "pango_font_metrics_get_approximate_char_width"
                         int (list '*)))
+    ;; The underline's thickness in Pango units - `struct font`'s
+    ;; `underline_thickness`, which `pgtk_draw_glyph_string` draws the
+    ;; rule with.
+    (define pango-font-metrics-get-underline-thickness
+      (pango-foreign-fn "libpango-1.0.so.0"
+                        "pango_font_metrics_get_underline_thickness"
+                        int (list '*)))
     ;; The resolution Pango converts a point size at. Emacs does that
     ;; conversion itself with `POINT_TO_PIXEL' (`font.h:572') at
     ;; `FRAME_RES (f)'; here the number is the same one, asked of the font
@@ -697,6 +714,44 @@
     (define gobject-unref
       (pango-foreign-fn "libgobject-2.0.so.0" "g_object_unref"
                         void (list '*)))
+
+    ;;----------------------------------------------------------------
+    ;; Per-face fonts
+    ;;
+    ;; GNU Emacs gives every realized face its own font, and a glyph's
+    ;; advance, ascent and descent come from that font. The functions
+    ;; below are the Pango spelling of building one from a face's
+    ;; attributes: `font_load_for_lface`'s job (`xfaces.c`), as far as
+    ;; Pango can express it. `plans/PER-FACE-FONTS.md` is the plan; this
+    ;; is stage 1, the measurement half.
+    ;;
+    ;; **A description is built with the setters, not from a string.** A
+    ;; family name may contain spaces, which Pango's description-string
+    ;; parser cannot tell from the style words that follow it; the
+    ;; setters have no such ambiguity.
+    ;;------------------------------------------------------------------
+
+    (define pango-font-description-new
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_description_new"
+                        '* (list)))
+    (define pango-font-description-set-family
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_description_set_family"
+                        void (list '* '*)))
+    (define pango-font-description-set-weight
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_description_set_weight"
+                        void (list '* int)))
+    (define pango-font-description-set-style
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_description_set_style"
+                        void (list '* int)))
+    (define pango-font-description-set-stretch
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_font_description_set_stretch"
+                        void (list '* int)))
+    ;; The layout's logical extents, in PANGO units: what
+    ;; `font->driver->text_extents' answers in pixels, and the width half
+    ;; of `it->pixel_width`.
+    (define pango-layout-get-size
+      (pango-foreign-fn "libpango-1.0.so.0" "pango_layout_get_size"
+                        void (list '* '* '*)))
 
     (define *pango-scale* 1024)
     ;; ^ `PANGO_SCALE': Pango counts in 1/1024 of a device unit, and
@@ -762,6 +817,9 @@
           (set! *cell-width*
                 (max 1 (pango-units->pixels
                         (pango-font-metrics-get-approximate-char-width metrics))))
+          (set! *font-underline-thickness*
+                (max 1 (pango-units->pixels
+                        (pango-font-metrics-get-underline-thickness metrics))))
           ;; The measurements are taken, so the font and its metrics can
           ;; go; the *description* is what the layouts are given, so it is
           ;; kept - and the one it replaces is freed, every layout that
@@ -774,7 +832,16 @@
           ;; at the old size goes on drawing at the old size however the
           ;; face changes. Every display's is dropped and remade - the
           ;; same thing Emacs's `fonts_changed' forces.
-          (for-each (lambda (d) (set! (pgtk-layout d) #f)) (*pgtk-displays*)))))
+          (for-each (lambda (d) (set! (pgtk-layout d) #f)) (*pgtk-displays*))
+          ;; The realized faces were interned against the old default
+          ;; size - a face's relative `:height` was resolved with it - so
+          ;; they go with the font, as `clear_face_cache` does for a
+          ;; frame whose font changed.
+          (for-each clear-realized-face-cache! (*pgtk-displays*))
+          ;; The per-face fonts were opened at the old default (a
+          ;; relative `:height` scales against it), so their descriptions
+          ;; and the widths measured with them go with it.
+          (%reset-face-font-cache!))))
 
     (define (pgtk-ensure-font!)
       ;; The frame's measurements, from the `default' face's `:height'.
@@ -792,48 +859,24 @@
       ;; redisplay's own path (`screen-size').
       ;;--------------------------------------------------------------
       (let* ((dpi (pango-font-map-get-resolution (pango-font-map-default)))
-             ;; **The *realized* default face, not its own `:height'.**
-             ;; `realize_default_face' merges the face through the
-             ;; buffer's `face-remapping-alist' before it opens a font,
-             ;; which is what makes `text-scale-mode' - a relative
-             ;; `:height' in that alist - change the size of the text.
-             ;; The raw attribute answers the global face's height and
-             ;; would miss every buffer-local scaling.
+             ;; **The frame's `default' face, not the selected buffer's
+             ;; remapped one.** A frame's font is `set_lface_from_font`'s
+             ;; (`xfaces.c:2221'): the `default' face's own attributes,
+             ;; opened once per frame. A buffer's `text-scale-mode' is a
+             ;; relative `:height' in that buffer's
+             ;; `face-remapping-alist', and Emacs realizes it into the
+             ;; faces of that window's rows - it does not reopen the
+             ;; frame's font. Merging the face through the selected
+             ;; buffer here is what made one buffer's scale resize the
+             ;; whole frame and switching away resize it back; the rows
+             ;; get their own heights from `row-metrics' now, so the
+             ;; frame's grid stays the frame's and a scaled buffer's
+             ;; lines are taller inside it.
              ;;
-             ;; **A departure, and it is the renderer's**: Emacs gives
-             ;; every glyph row its own ascent and descent, so one
-             ;; buffer's scaling makes that window's lines taller and
-             ;; leaves the others alone. This renderer has *one* grid per
-             ;; display - one font, one row height - so the face that is
-             ;; merged here is the one the whole frame is drawn at. The
-             ;; buffer current at redisplay is the one being edited, so
-             ;; scaling a buffer scales the frame, and switching to an
-             ;; unscaled buffer scales it back. Closing that needs
-             ;; per-window row heights (`row->ascent'/'row->height' in
-             ;; `dispextern.h'), which is a renderer of its own.
-             ;; **The buffer is the *selected window's*, not
-             ;; `(current-buffer)`.** A minibuffer prompt makes the echo
-             ;; area current, so reading the current buffer's remapping
-             ;; dropped a scaled frame back to the unscaled font for the
-             ;; whole prompt - `C-x C-f` in a zoomed buffer made the
-             ;; entire screen jump to the normal size, which is what Chris
-             ;; saw. The window you are editing is the one that is scaled;
-             ;; a prompt is not a window.
-             (height (let ((w (let ((frame (*current-frame*)))
-                               (and frame
-                                    (or (minibuffer-selected-window)
-                                        (frame-selected-window frame))))))
-                       (if (and w (window-buffer w))
-                           (with-current-buffer
-                               (window-buffer w)
-                             (attribute-value (merge-face-ref
-                                               'default
-                                               (face-attributes-empty))
-                                              ':height))
-                           (attribute-value (merge-face-ref
-                                             'default
-                                             (face-attributes-empty))
-                                            ':height)))))
+             ;; A face with no height at all - a fresh one, or one
+             ;; `face-spec-recalc' has just reset - takes the height of
+             ;; the font already open, which is the rule below.
+             (height (face-attribute 'default ':height)))
         ;; `unspecified' and nil are both "the face does not say": only a
         ;; number can be a height. A face with none takes the height of
         ;; the font already open, which is what `set_lface_from_font'
@@ -856,22 +899,21 @@
           (when (inexact? height)
             (set! height (inexact->exact (round (* height own)))))
           (unless (eqv? height *default-face-height*)
-            (let ((old-cell-width *cell-width*)
-                  (old-cell-height *cell-height*))
             (pgtk-realize-font! (point->pixel (/ height 10.0) dpi))
-            ;; **`x_new_font`'s last act** (`xterm.c:27167'): ask for the
-            ;; frame to keep its rows and columns at the new font, unless
-            ;; something has inhibited an implied resize. The row and
-            ;; column count is the frame's *own* - `FRAME_COLS (f)' and
-            ;; `FRAME_LINES (f)' at the moment the font changed.
+            ;; **`x_new_font`'s last act** (`xterm.c:27145'): ask for the
+            ;; frame to keep its rows and columns at the *new* font, unless
+            ;; something has inhibited an implied resize:
             ;;
-            ;; **The count is multiplied back with the OLD cell**,
-            ;; captured just above: the pixels it asks for are the ones
-            ;; those rows used to take, and `adjust_frame_size` with
-            ;; inhibit 3 then either leaves them alone (`frame-inhibit-
-            ;; implied-resize`) or grows them to fit the new font. Using
-            ;; the new cell here would ask for exactly the size the frame
-            ;; already has and the resize would never happen.
+            ;;   adjust_frame_size (f, FRAME_COLS (f) * FRAME_COLUMN_WIDTH (f),
+            ;;                      FRAME_LINES (f) * FRAME_LINE_HEIGHT (f),
+            ;;                      3, false, Qfont);
+            ;;
+            ;; The widths are the new cell's, which is the whole point -
+            ;; the request is the pixels the frame's current column and
+            ;; row count need *now*. Multiplying by the old cell asked for
+            ;; the frame's existing pixels, so the "keep the columns"
+            ;; option could never grow it, and the row count drifted as
+            ;; the two disagreed.
             (set! *default-face-height* height)
             (for-each
              (lambda (frame)
@@ -880,10 +922,10 @@
                    ;; `adjust_frame_size`'s `Qfont` case: inhibit 3, which
                    ;; resizes only if `frame_inhibit_resize` allows it.
                    (adjust-frame-size! frame
-                                       (* (frame-width frame) old-cell-width)
-                                       (* (frame-height frame) old-cell-height)
+                                       (* (frame-width frame) *cell-width*)
+                                       (* (frame-height frame) *cell-height*)
                                        3 #f 'font))))
-             (*frame-list*)))))))
+             (*frame-list*))))))
 
     (define (pgtk-ensure-layout! d)
       ;; D's text layout, made once. It belongs to a font map and not to a
@@ -906,8 +948,14 @@
             (set! (pgtk-layout d) layout)
             layout)))
 
-    (define (pgtk-show-text! d text x baseline)
+    (define (pgtk-show-text! d text x baseline . description)
       ;; TEXT with its left edge at X and its *baseline* at BASELINE.
+      ;;
+      ;; DESCRIPTION, when given and not #f, is the `PangoFontDescription'
+      ;; the run is drawn in - the face's own font (`realize-face-token`
+      ;; interns it). Without one, the frame's font is set on the layout
+      ;; first: the layout is shared by every run of the frame, so a run
+      ;; that inherited the previous run's face font would draw in it.
       ;;
       ;; Pango places a layout by its top-left corner, so the move
       ;; subtracts the layout's own baseline - which is what makes this a
@@ -915,7 +963,11 @@
       ;;--------------------------------------------------------------
       (let* ((cr (pgtk-cr d))
              (cairo-t (cairo-context->pointer cr))
-             (layout (pgtk-ensure-layout! d)))
+             (layout (pgtk-ensure-layout! d))
+             (face-font (and (pair? description) (car description))))
+        (unless *font-description* (pgtk-ensure-font!))
+        (pango-layout-set-font-description layout
+                                           (or face-font *font-description*))
         (pango-layout-set-text layout (string->pointer text "UTF-8") -1)
         (pango-cairo-update-layout cairo-t layout)
         (cairo-move-to cr x (- baseline (/ (pango-layout-get-baseline layout)
@@ -988,6 +1040,13 @@
       ;; only swapped ones - so it is honoured by swapping the pair here.
       ;; With neither colour set the pair is black on white, and
       ;; inverting that gives white on black.
+      ;;
+      ;; **The font is part of the key.** Emacs's `struct face` has a
+      ;; font per realized face, and two sets of attributes that agree on
+      ;; colours but not on `:family`/`:height`/`:weight` are two faces
+      ;; there. The fifth component is `%face-font-key`'s request, or #f
+      ;; when the face names no font at all - which is every face that
+      ;; inherits the frame's, the common case.
       ;;--------------------------------------------------------------
       (if (not attrs)
           0
@@ -1003,13 +1062,24 @@
                  ;; given). The token carries whatever the face says, and
                  ;; the drawing picks the ink from its type.
                  (underline (attribute-value attrs ':underline))
+                 (font-request (%face-font-key attrs))
+                 ;; A request that *is* the frame's font - the `default'
+                 ;; face's `:height' resolves to exactly it - costs no
+                 ;; font and is not part of the key. Emacs's default face
+                 ;; has a `struct font' too; the identity this keeps is
+                 ;; that the frame's own appearance is token 0, which the
+                 ;; redisplay's `extend-fill-token' depends on.
+                 (font-key (if (and font-request
+                                    (equal? font-request (%frame-font-key)))
+                               #f
+                               font-request))
                  (fg (if inverse (or background (list 1.0 1.0 1.0))
                          (or foreground (list 0.0 0.0 0.0))))
                  (bg (if inverse (or foreground (list 0.0 0.0 0.0))
                          background))
-                 (key (list fg bg bold underline)))
+                 (key (list fg bg bold underline font-key)))
             (if (and (equal? fg (list 0.0 0.0 0.0))
-                     (not bg) (not bold) (not underline))
+                     (not bg) (not bold) (not underline) (not font-key))
                 0
                 (let ((found (assoc key (*face-table*))))
                   (if found
@@ -1034,7 +1104,8 @@
                    (else (loop (cdr lst)))))))
 
     (define (face-token-part token n)
-      ;; Component N of TOKEN's `(FOREGROUND BACKGROUND BOLD UNDERLINE)'.
+      ;; Component N of TOKEN's
+      ;; `(FOREGROUND BACKGROUND BOLD UNDERLINE FONT-KEY)`.
       ;; The table holds `(KEY . ID)`, so the key is taken first.
       ;;--------------------------------------------------------------
       (let ((found (face-entry token)))
@@ -1042,6 +1113,7 @@
 
     (define (face-token-foreground token) (face-token-part token 0))
     (define (face-token-background token) (face-token-part token 1))
+    (define (face-token-font-key token) (face-token-part token 4))
 
     ;;----------------------------------------------------------------
     ;; Keys
@@ -1654,6 +1726,13 @@
                 (pgtk-enqueue! d 'pgtk-mouse-moved))
               #t))))
 
+    (define (pgtk-pointer-pixel d)
+      ;; Where the pointer is, in this display's *pixels*, or #f -
+      ;; `pgtk_mouse_position`'s own units, and what `posn-at-x-y` takes
+      ;; now that glyph geometry is pixels.
+      ;;--------------------------------------------------------------
+      (%pgtk-pointer-pixels d))
+
     (define (pgtk-pointer-cell d)
       ;; Where the pointer is, in this display's own cells, or #f.
       ;;
@@ -1666,9 +1745,8 @@
       ;;   win = gdk_window_get_device_position (win, device, &win_x,
       ;;                                        &win_y, &mask);
       ;;
-      ;; **Answered as cells**, like every other coordinate this display
-      ;; hands out - `posn-at-x-y' takes cells and `column-width' is 1 -
-      ;; so the Gdk pixels are divided here.
+      ;; **Answered as cells** for the callers that measure in cells;
+      ;; `pgtk-pointer-pixel` is the same position unconverted.
       ;;
       ;; **The *edit widget*, not the toplevel.** `FRAME_GTK_WIDGET (f)'
       ;; is `FRAME_X_OUTPUT (f)->edit_widget' (`pgtkterm.h:484') - the
@@ -1683,6 +1761,15 @@
       ;; window's edge. It is also what makes one event enough however many
       ;; times the pointer was reported - see `note-mouse-movement'.
       ;;--------------------------------------------------------------
+      (let ((pixels (%pgtk-pointer-pixels d)))
+        (and pixels
+             (cons (truncate (/ (car pixels) *cell-width*))
+                   (truncate (/ (cdr pixels) *cell-height*))))))
+
+    (define (%pgtk-pointer-pixels d)
+      ;; The pointer query itself, in Gdk's own pixels: the edit widget's
+      ;; window, its seat's pointer, and where that pointer is on it.
+      ;;--------------------------------------------------------------
       (let ((area (pgtk-area d)))
         (if (not area)
             #f
@@ -1694,8 +1781,7 @@
                          (device (seat:get-pointer seat)))
                     (let*-values (((_win x y _mask)
                                    (window:get-device-position gdkwin device)))
-                      (cons (truncate (/ x *cell-width*))
-                            (truncate (/ y *cell-height*))))))))))
+                      (cons (truncate x) (truncate y)))))))))
 
     (define (pgtk-mouse-movement-event d)
       ;; The `mouse-movement' event GNU Emacs's `make_lispy_movement'
@@ -1715,7 +1801,7 @@
       ;; one connection share the one display-info - and this tree's front
       ;; end has one Gdk display behind all of them.
       ;;--------------------------------------------------------------
-      (let ((cell (pgtk-pointer-cell d)))
+      (let ((position (pgtk-pointer-pixel d)))
         (for-each (lambda (other)
                     (set! (pgtk-mouse-moved other) #f)
                     ;; the notification is consumed by making the event
@@ -1723,9 +1809,9 @@
                           (filter (lambda (x) (not (eq? x other)))
                                   pgtk-move-notified)))
                   (cons d (*pgtk-displays*)))
-        (and cell
+        (and position
              (list 'mouse-movement
-                   (posn-at-x-y (car cell) (cdr cell)
+                   (posn-at-x-y (car position) (cdr position)
                                 (or (pgtk-frame-for d) (*current-frame*)))))))
 
     (define modifier-keysyms
@@ -1832,8 +1918,8 @@
       ;; "e")' hands to a command.
       ;;--------------------------------------------------------------
       (let* ((f (or (pgtk-frame-for from) (*current-frame*)))
-             (cell (pgtk-event-cell e)))
-        (posn-at-x-y (car cell) (cdr cell) f)))
+             (pixel (pgtk-event-pixel e)))
+        (posn-at-x-y (car pixel) (cdr pixel) f)))
 
     (define (pgtk-key-item d e)
       ;; What a key press is queued as: the event *decoded now*, in the
@@ -2322,7 +2408,7 @@
       ;; redisplay that draws it rather than the one after.
       ;;--------------------------------------------------------------
       (pgtk-ensure-font!)
-      (pgtk-cells d))
+      (pgtk-allocated-pixels d))
 
     (define-method (display-mouse-position (d <pgtk-display>))
       ;; **The generic has to be imported, or this defines a new one.** A
@@ -2639,7 +2725,7 @@
         (set! (pgtk-tip-active? d) #f)
         was-open?))
 
-    (define-method (column-width (d <pgtk-display>)) 1)
+    (define-method (column-width (d <pgtk-display>)) *cell-width*)
     (define-method (display-ring-bell (d <pgtk-display>))
       ;; GNU Emacs's `pgtk_ring_bell` (`pgtkterm.c:3933`): the toolkit's
       ;; own bell. `visible_bell`'s flash (`pgtk_flash`) is named in
@@ -2648,36 +2734,299 @@
       (display:beep (display:get-default))
       #f)
 
-    (define-method (line-height (d <pgtk-display>)) 1)
-    (define-method (face-metrics (d <pgtk-display>) face-attrs)
-      ;; The ascent and descent of the line this display draws, in pixels.
-      ;;
-      ;; **The answer is the *frame's* font, not the face's `:height`.**
-      ;; That is what the renderer does: `pgtk-show-text!` draws every run
-      ;; at `*font-pixel-size*`, so a face that names a height is drawn at
-      ;; the frame's size whatever its row says. This used to answer the
-      ;; face's own height, and the two disagreed the moment
-      ;; `text-scale-mode` scaled one buffer: `pgtk-ensure-font!` resizes
-      ;; the whole frame's font from the *current* buffer's default face,
-      ;; while a neighbouring window's rows were measured from *its*
-      ;; faces - 60-pixel rows in the scaled window and 21 in the other -
-      ;; and those 21-pixel rows were drawn with 60-pixel glyphs on top of
-      ;; each other. Measured with `C-x C-+` in a split frame.
-      ;;
-      ;; Emacs measures per face, because it opens a font per face. That
-      ;; is the renderer this file has not written yet - see
-      ;; `pgtk-ensure-font!`'s own note - and until it is, a row's height
-      ;; has to be the height of what is drawn. The *width* is still the
-      ;; frame's one cell for the same reason `text-scale` cannot widen
-      ;; it: the column arithmetic assumes one pitch.
-      ;;--------------------------------------------------------------
-      (cons (max 1 *font-ascent*)
-            (max 0 (- *cell-height* *font-ascent*))))
+    (define-method (line-height (d <pgtk-display>)) *cell-height*)
 
-    (define *face-metrics-cache* '())
-    ;; ^ `((PIXELS . (ASCENT . DESCENT)) ...)`. A redisplay asks for the
-    ;; same face on every row, and opening a font per row would be the
-    ;; most expensive thing in a repaint.
+    ;;----------------------------------------------------------------
+    ;; A face's font: the measurement interface
+    ;;
+    ;; GNU Emacs opens a font per realized face and reads a glyph's
+    ;; advance, ascent and descent from it - `font_load_for_lface`
+    ;; (`xfaces.c`) chooses it and `font->driver->text_extents` answers the
+    ;; advance. Pango expresses the same request as family, weight, style,
+    ;; stretch and an absolute size in device units; a *foundry* it cannot
+    ;; express, so that attribute is ignored (the plan's stage 1 says so).
+    ;;
+    ;; **A description is built with the setters, not from a string.** A
+    ;; family name may contain spaces, and Pango's description-string
+    ;; parser cannot tell those from the style words that follow.
+    ;;------------------------------------------------------------------
+
+    (define *pango-weight-table*
+      ;; Emacs's weight names as Pango's numeric weights. The two scales
+      ;; differ (`normal' is 80 in Emacs's `font-weight-table', 400 in
+      ;; Pango; `bold' 200 against 700), so the table is written out.
+      '((thin . 100) (ultra-light . 200) (extra-light . 200)
+        (light . 300) (semi-light . 300) (regular . 400) (normal . 400)
+        (medium . 500) (semi-bold . 600) (bold . 700)
+        (extra-bold . 800) (ultra-bold . 900) (black . 900)
+        (heavy . 900)))
+
+    (define *pango-style-table*
+      ;; `PANGO_STYLE_NORMAL' is 0, `OBLIQUE' 1, `ITALIC' 2. Pango has no
+      ;; reverse slants; `reverse-oblique'/`reverse-italic' map to the
+      ;; forward ones, which is what a terminal does with them too.
+      '((normal . 0) (oblique . 1) (italic . 2)
+        (reverse-oblique . 1) (reverse-italic . 2)))
+
+    (define *pango-stretch-table*
+      ;; `PANGO_STRETCH_ULTRA_CONDENSED' is 0 ... `NORMAL' 4 ...
+      ;; `ULTRA_EXPANDED' 8.
+      '((ultra-condensed . 0) (extra-condensed . 1) (condensed . 2)
+        (semi-condensed . 3) (normal . 4) (semi-expanded . 5)
+        (expanded . 6) (extra-expanded . 7) (ultra-expanded . 8)))
+
+    (define (%table-value table key default)
+      (let ((entry (assq key table))) (if entry (cdr entry) default)))
+
+    (define (%face-attr-value attrs attribute)
+      ;; ATTRIBUTE's value in ATTRS, or #f when absent or nil. The
+      ;; absent marker is a record, so `eq?' is Emacs's `UNSPECIFIEDP`.
+      (let ((value (if attrs
+                       (attribute-value attrs attribute)
+                       *undefined-face-attribute*)))
+        (if (or (eq? value *undefined-face-attribute*) (not value))
+            #f
+            value)))
+
+    (define (%face-font-pixels attrs)
+      ;; ATTRIBUTE `:height` as a pixel size: an integer is tenths of a
+      ;; point (`POINT_TO_PIXEL`), a float is a scale of the frame's
+      ;; absolute default, and no height at all is the frame's default -
+      ;; `merge_face_heights`' three cases, with the frame's default as
+      ;; the absolute a relative height resolves against.
+      (let ((height (%face-attr-value attrs ':height)))
+        (cond
+         ((and (real? height) (inexact? height))
+          (max 1 (inexact->exact (round (* height *font-pixel-size*)))))
+         ((real? height)
+          (max 1 (point->pixel
+                  (/ height 10.0)
+                  (pango-font-map-get-resolution (pango-font-map-default)))))
+         (else *font-pixel-size*))))
+
+    (define (%face-font-key attrs)
+      ;; ATTRS as the Pango request it names:
+      ;; `(FAMILY WEIGHT STYLE STRETCH PIXELS)`, or #f when the face
+      ;; names no font attribute at all.
+      ;;
+      ;; **#f is the frame's font**, and it is not the same thing as a
+      ;; request that happens to equal the frame's today: a face that
+      ;; says nothing about fonts must follow the frame when the frame's
+      ;; font changes, and a cached request would pin it to the size it
+      ;; was realized at. Emacs's realized face keeps a `struct font *`
+      ;; and re-realizes when the frame's font changes; this is the
+      ;; equivalent statement in the key.
+      ;;--------------------------------------------------------------
+      (let ((family (%face-attr-value attrs ':family))
+            (height (%face-attr-value attrs ':height))
+            (weight (%face-attr-value attrs ':weight))
+            (bold (%face-attr-value attrs ':bold))
+            (slant (%face-attr-value attrs ':slant))
+            (width (%face-attr-value attrs ':width)))
+        (if (and (not family) (not height) (not weight) (not bold)
+                 (not slant) (not width))
+            #f
+            (let* ((family (cond ((string? family) family)
+                                 ((symbol? family) (symbol->string family))
+                                 (else *font-family*)))
+                   (weight (cond ((number? weight)
+                                  (max 100 (min 900
+                                                (inexact->exact
+                                                 (round (+ 100 (* 4 weight)))))))
+                                 ((and weight (not (eq? weight #t)))
+                                  (%table-value *pango-weight-table* weight 400))
+                                 (bold 700)
+                                 (else 400)))
+                   (style (%table-value *pango-style-table* slant 0))
+                   (stretch (%table-value *pango-stretch-table* width 4)))
+              (list family weight style stretch (%face-font-pixels attrs))))))
+
+    (define (%frame-font-key)
+      ;; The request `pgtk-realize-font!` opened the frame's font with.
+      (list *font-family* 400 0 4 *font-pixel-size*))
+
+    (define *face-font-table* '())
+    ;; ^ `((KEY . #(DESCRIPTION ASCENT DESCENT UNDERLINE-THICKNESS)) ...)`,
+    ;; one entry per distinct font request. A redisplay asks for the same
+    ;; faces on every row, and opening a font per row would be the most
+    ;; expensive thing in a repaint.
+
+    (define *face-font-context* #f)
+    ;; ^ One Pango context for every per-face font: `pango_context_load_font`
+    ;; needs one, and a context per face would be a GObject leak on a path
+    ;; that runs once per distinct face.
+
+    (define (%face-font-context)
+      ;; `set!` answers the unspecified value, so it cannot stand in
+      ;; value position - the first call would hand `load_font` nothing.
+      (if *face-font-context*
+          *face-font-context*
+          (let ((context (pango-font-map-create-context
+                          (pango-font-map-default))))
+            (set! *face-font-context* context)
+            context)))
+
+    (define (%make-face-description key)
+      (let ((description (pango-font-description-new)))
+        (pango-font-description-set-family
+         description (string->pointer (list-ref key 0)))
+        (pango-font-description-set-weight description (list-ref key 1))
+        (pango-font-description-set-style description (list-ref key 2))
+        (pango-font-description-set-stretch description (list-ref key 3))
+        (pango-font-description-set-absolute-size
+         description (* (list-ref key 4) *pango-scale*))
+        description))
+
+    (define (%face-font-record key)
+      (let ((found (assoc key *face-font-table*)))
+        (if found
+            (cdr found)
+            (let* ((description (%make-face-description key))
+                   (font (pango-context-load-font (%face-font-context)
+                                                  description))
+                   (metrics (pango-font-get-metrics font (make-pointer 0)))
+                   (ascent (max 1 (pango-units->pixels
+                                   (pango-font-metrics-get-ascent metrics))))
+                   (descent (max 0 (pango-units->pixels
+                                    (pango-font-metrics-get-descent metrics))))
+                   (thickness
+                    (max 1 (pango-units->pixels
+                            (pango-font-metrics-get-underline-thickness
+                             metrics))))
+                   (record (vector description ascent descent thickness)))
+              (pango-font-metrics-unref metrics)
+              (gobject-unref font)
+              (set! *face-font-table*
+                    (cons (cons key record) *face-font-table*))
+              record))))
+
+    (define *face-text-width-cache* (make-hash-table))
+    ;; ^ `(TEXT . FONT-KEY) -> WIDTH`, cleared when the frame's font
+    ;; changes. `TEXT` repeats constantly across redisplays; measuring it
+    ;; in Pango every time would be the per-character cost the plan's
+    ;; method note warns about.
+
+    (define *measure-layout* #f)
+    ;; ^ One layout for measuring, separate from any display's drawing
+    ;; layout: `face-text-width` must not leave its own font description
+    ;; behind on a layout the next run would draw with.
+
+    (define (%measure-layout)
+      (if *measure-layout*
+          *measure-layout*
+          (let ((layout (pango-layout-new (%face-font-context))))
+            (set! *measure-layout* layout)
+            layout)))
+
+    (define (%layout-width-pixels layout)
+      (let ((width-ptr (make-c-struct (list int) (list 0)))
+            (height-ptr (make-c-struct (list int) (list 0))))
+        (pango-layout-get-size layout width-ptr height-ptr)
+        (pango-units->pixels (car (parse-c-struct width-ptr (list int))))))
+
+    (define (%face-text-width attrs text)
+      (if (or (not (string? text)) (= 0 (string-length text)))
+          0
+          (let* ((request (if attrs (%face-font-key attrs) #f))
+                 (key (if (and request (equal? request (%frame-font-key)))
+                          #f
+                          request))
+                 (cache-key (cons text (or key (%frame-font-key))))
+                 (found (hash-ref *face-text-width-cache* cache-key)))
+            (or found
+                (let* ((layout (%measure-layout))
+                       (description
+                        (if key
+                            (vector-ref (%face-font-record key) 0)
+                            (begin
+                              (unless *font-description* (pgtk-ensure-font!))
+                              *font-description*))))
+                  (pango-layout-set-font-description layout description)
+                  (pango-layout-set-text layout
+                                         (string->pointer text "UTF-8") -1)
+                  (let ((width (%layout-width-pixels layout)))
+                    (hash-set! *face-text-width-cache* cache-key width)
+                    width))))))
+
+    (define (%reset-face-font-cache!)
+      ;; The frame's font changed: every cached description was opened at
+      ;; the old size (or against the old default, for a relative
+      ;; `:height`), so both caches go. The measurement layout keeps no
+      ;; state a caller can see - its description is set per measurement
+      ;; - so it stays.
+      (for-each (lambda (entry)
+                  (pango-font-description-free (vector-ref (cdr entry) 0)))
+                *face-font-table*)
+      (set! *face-font-table* '())
+      (hash-clear! *face-text-width-cache*))
+
+    (define-method (face-metrics (d <pgtk-display>) face-attrs)
+      ;; The ascent and descent of FACE-ATTRS in pixels - Emacs's
+      ;; `struct face`'s font ascent and descent, which
+      ;; `compute_line_metrics` accumulates into a row.
+      ;;
+      ;; A row with no glyphs of its own (`face-attrs` #f) is the frame's
+      ;; default face, and so is a face that names no font of its own.
+      ;; Anything else gets its own font.
+      ;;--------------------------------------------------------------
+      (let ((frame-metrics (cons (max 1 *font-ascent*)
+                                 (max 0 (- *cell-height* *font-ascent*))))
+            (request (and face-attrs (%face-font-key face-attrs))))
+        (if (or (not request) (equal? request (%frame-font-key)))
+            frame-metrics
+            (let ((record (%face-font-record request)))
+              (cons (vector-ref record 1) (vector-ref record 2))))))
+
+    (define-method (smallest-font-height (d <pgtk-display>))
+      ;; `FRAME_SMALLEST_FONT_HEIGHT`: the shortest font this display has
+      ;; opened, kept down by every new one (`font.c:3013`). The glyph
+      ;; matrix is sized by it, so a scaled-down buffer gets more rows
+      ;; than the frame's own line count - which is how Emacs shows more
+      ;; lines at a smaller font.
+      ;;--------------------------------------------------------------
+      (let loop ((rest *face-font-table*) (smallest *cell-height*))
+        (if (null? rest)
+            (max 1 smallest)
+            (let* ((record (cdr (car rest)))
+                   (height (max 1 (+ (vector-ref record 1)
+                                     (vector-ref record 2)))))
+              (loop (cdr rest) (min smallest height))))))
+
+    (define-method (face-text-width (d <pgtk-display>) face-attrs text)
+      ;; TEXT's advance in pixels in FACE-ATTRS - GNU Emacs's
+      ;; `text_extents`. This is the per-face half of the row layout; the
+      ;; renderer still counts cells until the plan's stage 4.
+      ;;--------------------------------------------------------------
+      (%face-text-width face-attrs text))
+
+    (define (face-token-font-description token)
+      ;; The `PangoFontDescription' TOKEN draws its glyphs in, or #f for
+      ;; the frame's font - which is what a token with no font key, and
+      ;; no token at all, mean. The frame's description is ensured here so
+      ;; that the caller can hand this straight to `pgtk-show-text!'.
+      ;;--------------------------------------------------------------
+      (let ((key (face-token-font-key token)))
+        (if (not key)
+            (begin (unless *font-description* (pgtk-ensure-font!)) #f)
+            (vector-ref (%face-font-record key) 0))))
+
+    (define (face-token-font-descent token)
+      ;; TOKEN's font descent in pixels: the baseline's distance to the
+      ;; bottom of its glyphs, which is where the underline is placed
+      ;; (`pgtk_draw_glyph_string` reads `font->descent`).
+      ;;--------------------------------------------------------------
+      (let ((key (face-token-font-key token)))
+        (if (not key)
+            (max 0 (- *cell-height* *font-ascent*))
+            (vector-ref (%face-font-record key) 2))))
+
+    (define (face-token-underline-thickness token)
+      ;; TOKEN's font underline thickness in pixels.
+      ;;--------------------------------------------------------------
+      (let ((key (face-token-font-key token)))
+        (if (not key)
+            *font-underline-thickness*
+            (vector-ref (%face-font-record key) 3))))
 
     (define-method (display-set-size! (d <pgtk-display>) width height)
       ;; Ask the window manager for WIDTH x HEIGHT pixels: GNU Emacs's
@@ -2808,13 +3157,10 @@
       ;;--------------------------------------------------------------
       (and window
            (window-live-p window)
-           (let* ((ch *cell-height*)
-                  (top (* (window-body-top window) ch))
-                  (bottom (* (+ (window-top window) (window-height window)
-                                (if (window-minibuffer-p window) 0 -1))
-                             ch)))
-             (list 0 top (car (pgtk-allocated-pixels d))
-                   (- bottom top)))))
+           (list (window-box-left window)
+                 (window-box-top window)
+                 (window-box-width window)
+                 (window-box-height window))))
 
     (define (with-pgtk-clip d clip thunk)
       ;; Run THUNK with cairo limited to CLIP, an `(X Y WIDTH HEIGHT)`
@@ -2830,6 +3176,71 @@
               (cairo-restore cr))
             (thunk))))
 
+    (define-method (fill-frame-remainder! (d <pgtk-display>) frame)
+      ;; The part of the allocation outside the frame's whole cells,
+      ;; painted the frame's background. See the generic's note: Emacs
+      ;; has no such band, and this renderer's cell grid can leave one.
+      ;;--------------------------------------------------------------
+      (let ((cr (pgtk-cr d)))
+        (when cr
+          (let* ((alloc (pgtk-allocated-pixels d))
+                 (aw (car alloc))
+                 (ah (cdr alloc))
+                 (cell (pgtk-cell-size))
+                 (width (* (frame-width frame) (car cell)))
+                 (height (* (frame-height frame) (cdr cell)))
+                 (colour (or (frame-background-colour frame)
+                             (list 1.0 1.0 1.0))))
+            (apply cairo-set-source-rgb cr colour)
+            (when (> aw width)
+              (cairo-rectangle cr width 0 (- aw width) ah)
+              (cairo-fill cr))
+            (when (> ah height)
+              (cairo-rectangle cr 0 height (min width aw) (- ah height))
+              (cairo-fill cr))))))
+
+    (define-method (draw-fringe! (d <pgtk-display>) window row x width bits
+                                 token)
+      ;; One fringe of a text row. `fringe.c`'s `draw_fringe_bitmap_1`:
+      ;; the fringe face's background fills the gutter for the row's
+      ;; height, and BITS - 8 rows of 8 bits, the high bit leftmost - is
+      ;; drawn 8x8, centred horizontally in the fringe and vertically in
+      ;; the row (`ALIGN_BITMAP_CENTER`, `fringe.c:632`). The bitmap does
+      ;; not take the text's font or scale, which is why a text-scaled
+      ;; buffer's gutter arrow stays the same size.
+      ;;--------------------------------------------------------------
+      (let ((cr (pgtk-cr d)))
+        (when (and cr (> width 0))
+          (with-pgtk-clip
+           d #f
+           (lambda ()
+             (let ((y (glyph-row-y row))
+                   (height (glyph-row-height row)))
+               (apply cairo-set-source-rgb
+                      cr (or (face-token-background token)
+                             (list 1.0 1.0 1.0)))
+               (cairo-rectangle cr x y width height)
+               (cairo-fill cr)
+               (when bits
+                 (let* ((bw 8)
+                        (bh (vector-length bits))
+                        (bx (+ x (max 0 (quotient (- width bw) 2))))
+                        (by (+ y (max 0 (quotient (- height bh) 2)))))
+                   (apply cairo-set-source-rgb
+                          cr (or (face-token-foreground token)
+                                 (list 0.0 0.0 0.0)))
+                   (let row-loop ((r 0))
+                     (when (< r bh)
+                       (let ((byte (vector-ref bits r)))
+                         (let col-loop ((b 0))
+                           (when (< b bw)
+                             (when (not (zero? (logand byte
+                                                       (ash 1 (- 7 b)))))
+                               (cairo-rectangle cr (+ bx b) (+ by r) 1 1)
+                               (cairo-fill cr))
+                             (col-loop (+ b 1)))))
+                       (row-loop (+ r 1))))))))))))
+
     (define-method (clear-end-of-line! (d <pgtk-display>) window row area x
                                        width token)
       ;; Blank the cells [X, X+WIDTH) of row Y. A GUI fill already covers
@@ -2841,15 +3252,16 @@
       ;;--------------------------------------------------------------
       (let* ((cr (pgtk-cr d))
              (y (glyph-row-y row))
+             (unit *cell-width*)
              ;; **Clip to the window's body rectangle**, as
              ;; `write-glyphs!` does: the C's `gui_clear_end_of_line`
              ;; fills to the window's right edge and not past it. A
              ;; frame-matrix row has no window and is clipped to the
-             ;; frame.
+             ;; frame. X and WIDTH are in display units (pixels).
              (right (if window
-                        (+ (window-body-left window)
-                           (window-body-width window))
-                        (car (pgtk-cells d))))
+                        (+ (window-box-left window)
+                           (window-box-width window))
+                        (* (car (pgtk-cells d)) unit)))
              (width (min width (- right x))))
         (when (and cr (> width 0))
           (with-pgtk-clip
@@ -2865,12 +3277,12 @@
                     ;; The leftover pixels of the last cell take the row's
                     ;; face, as `fill_stretch_glyph` gives them to the last
                     ;; glyph - the same rule as `%pgtk-write-run`.
-                    (rest (if (= (+ x width) grid)
-                              (- alloc (* *cell-width* grid))
+                    (rest (if (>= (+ x width) (* grid unit))
+                              (- alloc (* unit grid))
                               0)))
-               (cairo-rectangle cr (cell-x x) y
-                                (+ (* *cell-width* width) (max rest 0))
-                                *cell-height*)
+               (cairo-rectangle cr x y
+                                (+ width (max rest 0))
+                                (max 1 (glyph-row-height row)))
                (cairo-fill cr)))))))
 
     (define-method (update-window-begin! (d <pgtk-display>)) #t)
@@ -2892,11 +3304,16 @@
             (loop (+ i 1)
                   (+ col (char-display-width (string-ref text i) col))))))
 
-    (define (%pgtk-write-run d glyphs y x token)
+    (define (%pgtk-write-run d glyphs y x token ascent height)
       ;; One run: the cells [X, X+width) of the row at pixel Y, all in
       ;; TOKEN's face. The body of the old `write-glyphs!`, which is now
       ;; `write-glyphs!`'s per-run step below - `fill_glyph_string`'s
       ;; split is the caller's.
+      ;;
+      ;; ASCENT and HEIGHT are the *row's*, from `compute_line_metrics`:
+      ;; every run of a row sits on the row's baseline (its top plus the
+      ;; row's ascent), whatever the run's own font is, and its
+      ;; background fills the row's height.
       ;;--------------------------------------------------------------
       ;; Draw TEXT at cell (X, Y), a *cluster* at a time.
       ;;
@@ -2925,10 +3342,29 @@
       ;; Pango takes a string, as GNU Emacs's pgtk back end hands it one
       ;; built from a `struct glyph_string' - so the join is here, at the
       ;; boundary, and a run is one face.
-      (let ((cr (pgtk-cr d))
-            (text (glyphs->text glyphs))
-            (foreground (face-token-foreground token))
-            (background (face-token-background token)))
+      (let* ((cr (pgtk-cr d))
+             ;; GLYPHS is `((STRING . WIDTH) ...)` in display units -
+             ;; each glyph's advance in its face's font, as Emacs's
+             ;; `glyph->pixel_width` is on a window system.
+             (run-width (let loop ((ps glyphs) (w 0))
+                          (if (null? ps) w
+                              (loop (cdr ps) (+ w (cdar ps))))))
+             (foreground (face-token-foreground token))
+            (background (face-token-background token))
+            ;; The run's own font: a description, or #f for the
+            ;; frame's. The baseline is the row's, the underline's place
+            ;; and thickness are the *font's* - `pgtk_draw_glyph_string`
+            ;; reads `font->descent` and `font->underline_thickness`.
+            (description (face-token-font-description token))
+            (descent (face-token-font-descent token))
+            ;; `pgtkterm.c:2664`: a one-pixel rule unless
+            ;; `underline-line-scaling-flag` is set, in which case the
+            ;; face font's own thickness.
+            (underline-thickness
+             (if underline-line-scaling-flag
+                 (face-token-underline-thickness token)
+                 1))
+            (baseline (+ y ascent)))
         (when cr
           ;; The run's cells first: the face's own background, so that a
           ;; face which paints cells rather than glyphs - the mode line,
@@ -2945,9 +3381,7 @@
                  cr (or background
                         (colour->rgb (face-attribute 'default ':background))
                         (list 1.0 1.0 1.0)))
-          (cairo-rectangle cr (cell-x x) y
-                           (* *cell-width* (text-cells text))
-                           *cell-height*)
+          (cairo-rectangle cr x y run-width height)
           (cairo-fill cr)
           ;; **The last cell of a row is stretched to the frame's pixel
           ;; edge**, which is what GNU Emacs does with the final glyph of
@@ -2961,10 +3395,9 @@
                  (alloc (car (pgtk-allocated-pixels d)))
                  (rest (- alloc (* *cell-width* grid))))
             (when (and (> rest 0)
-                       (= (+ x (text-cells text)) grid))
-              (cairo-rectangle cr (+ (cell-x x)
-                                     (* *cell-width* (text-cells text)))
-                               y rest *cell-height*)
+                       (= (+ x run-width) (* *cell-width* grid)))
+              (cairo-rectangle cr (+ x run-width)
+                               y rest height)
               (cairo-fill cr)))
           ;; An unspecified foreground is the *frame's* - the default
           ;; face's foreground, which is `FRAME_FOREGROUND_PIXEL` after
@@ -2974,28 +3407,21 @@
                  cr (or foreground
                         (colour->rgb (face-attribute 'default ':foreground))
                         (list 0.0 0.0 0.0)))
-          (let loop ((i 0) (col 0))
-            (when (< i (string-length text))
-              (let* ((end (let scan ((j (+ i 1)))
-                            (if (and (< j (string-length text))
-                                     (= 0 (char-display-width
-                                           (string-ref text j) col)))
-                                (scan (+ j 1))
-                                j)))
-                     (c (string-ref text i)))
-                (pgtk-show-text! d (substring text i end)
-                                 (cell-x (+ x col))
-                                 (+ y *font-ascent*))
-                (loop end (+ col (char-display-width c col)))))))
+          (let loop ((ps glyphs) (px x))
+            (when (pair? ps)
+              (pgtk-show-text! d (caar ps) px baseline description)
+              (loop (cdr ps) (+ px (cdar ps)))))
           ;; **The underline.** `realize-face-token` interns the face's
           ;; `:underline`, and until this was drawn nothing acted on it -
           ;; a `header-line` face with only an underline came out plain.
           ;; GNU Emacs's `pgtk_draw_glyph_string` (`pgtkterm.c:2662'): a
-          ;; single line of thickness one pixel at
-          ;; `(font->descent + 1) / 2` below the baseline - rounded down,
-          ;; and at least `underline_minimum_offset' (1) - clamped to the
-          ;; row by the C's two sanity checks. The string height is the
-          ;; cell's, so `s->ybase - s->y` is the ascent.
+          ;; line at `(font->descent + 1) / 2` below the baseline -
+          ;; rounded down, and at least `underline_minimum_offset` (1) -
+          ;; one pixel thick, or `font->underline_thickness` pixels when
+          ;; `underline-line-scaling-flag` says to scale it, clamped to
+          ;; the row by the C's two sanity checks. The descent is the
+          ;; *run's font's*, so a scaled face underlines where its own
+          ;; glyphs end, not where the frame's do.
           ;;
           ;; The ink is the face's `:underline` when that is a *colour*
           ;; (a theme's `:underline "#3f8f8a"`) and the foreground when
@@ -3006,18 +3432,15 @@
           ;; position - Pango's metrics are not read anywhere else in
           ;; this renderer.
           (when (face-token-part token 3)
-            (let* ((baseline (+ y *font-ascent*))
-                   (descent (max 0 (- *cell-height* *font-ascent*)))
-                   (position (max 1 (quotient (+ descent 1) 2)))
-                   (position (if (<= (+ y *cell-height*)
-                                     (+ baseline position))
-                                 (- (- *cell-height* 1) *font-ascent*)
+            (let* ((raw-descent (max 0 descent))
+                   (position (max 1 (quotient (+ raw-descent 1) 2)))
+                   (position (if (<= (+ y height) (+ baseline position))
+                                 (max 0 (- height 1 ascent))
                                  position))
-                   (thickness (if (< (+ y *cell-height*)
-                                    (+ baseline position 1))
-                                  (- (+ y *cell-height*)
-                                     (+ baseline position))
-                                  1)))
+                   (thickness (if (< (+ y height)
+                                    (+ baseline position underline-thickness))
+                                  (- (+ y height) (+ baseline position))
+                                  underline-thickness)))
               (when (> thickness 0)
                 (apply cairo-set-source-rgb
                        cr (or (and (string? (face-token-part token 3))
@@ -3026,11 +3449,11 @@
                               (colour->rgb
                                (face-attribute 'default ':foreground))
                               (list 0.0 0.0 0.0)))
-                (cairo-rectangle cr (cell-x x)
+                (cairo-rectangle cr x
                                  (+ baseline position)
-                                 (* *cell-width* (text-cells text))
+                                 run-width
                                  thickness)
-                (cairo-fill cr))))))
+                (cairo-fill cr)))))))
 
     (define-method (write-glyphs! (d <pgtk-display>) window row area x
                                   glyphs len)
@@ -3054,8 +3477,20 @@
       ;; pixel offset and not a screen row, since rows differ in height
       ;; once a buffer is scaled.
       ;;--------------------------------------------------------------
-      (let ((y (glyph-row-y row))
-            (x0 (+ x (if (eq? area 'text) 0 0)))
+      (let* ((y (glyph-row-y row))
+             (row-ascent (glyph-row-ascent row))
+             (row-height (glyph-row-height row))
+             ;; A *fragment* row - a mode-line segment, an overlay string,
+             ;; a special glyph - is synthesized rather than laid out, and
+             ;; `write-run!` gives it the frame's metrics. One that still
+             ;; arrives without any falls back here: a run cannot be
+             ;; placed without a baseline.
+             (frame-metrics (and (< row-height 2) (face-metrics d #f)))
+             (ascent (if frame-metrics (car frame-metrics) row-ascent))
+             (height (if frame-metrics
+                         (+ (car frame-metrics) (cdr frame-metrics))
+                         row-height))
+             (x0 (+ x (if (eq? area 'text) 0 0)))
             ;; **The window's body rectangle is the clip**, which is the
             ;; C's own guarantee: `build_frame_matrix` never lets a row
             ;; exceed `FRAME_COLS`, and each window's glyph matrix is its
@@ -3072,16 +3507,21 @@
             ;; matrix* row (the continuation marker at the frame's last
             ;; column) with no window, and that row is clipped to the
             ;; frame instead.
+            ;; **X and the glyph widths are in display units now** -
+            ;; pixels here, as Emacs's glyph `pixel_width` is on a window
+            ;; system, and cells on a terminal. The window's rectangle is
+            ;; in cells, so it is multiplied out.
+            (unit *cell-width*)
             (right (if window
-                       (+ (window-body-left window)
-                          (window-body-width window))
-                       (car (pgtk-cells d))))
+                       (+ (window-box-left window)
+                          (window-box-width window))
+                       (* (car (pgtk-cells d)) unit)))
             (clip (and (eq? area 'text) (pgtk-text-area-clip d window))))
         (with-pgtk-clip
          d clip
          (lambda ()
         (if (= len 0)
-            (clear-end-of-line! d window row area x 0 0)
+            (clear-end-of-line! d window row area (quotient x unit) 0 0)
             (let loop ((i 0) (col x0))
               (when (and (< i len) (< col right))
                 (let* ((g (vector-ref glyphs i))
@@ -3097,12 +3537,23 @@
                        (parts (let build ((j i) (acc '()) (n 0))
                                 (if (or (>= j end) (>= n room))
                                     (reverse acc)
-                                    (build (+ j 1)
-                                           (cons (glyph-char
-                                                  (vector-ref glyphs j))
-                                                 acc)
-                                           (+ n (glyph-pixel-width
-                                                 (vector-ref glyphs j)))))))
+                                    (let* ((gj (vector-ref glyphs j))
+                                           (s (glyph-char gj))
+                                           (w (glyph-pixel-width gj)))
+                                      ;; a zero-width glyph - a combining
+                                      ;; mark - joins the previous
+                                      ;; cluster, so the accent is drawn
+                                      ;; on its letter
+                                      (if (and (= w 0) (pair? acc))
+                                          (build (+ j 1)
+                                                 (cons (cons (string-append
+                                                              (caar acc) s)
+                                                             (cdar acc))
+                                                       (cdr acc))
+                                                 n)
+                                          (build (+ j 1)
+                                                 (cons (cons s w) acc)
+                                                 (+ n w)))))))
                        (cells (let sum ((j i) (n 0))
                                 (if (or (>= j end) (>= n room))
                                     n
@@ -3116,7 +3567,7 @@
                                         (+ n (glyph-pixel-width
                                               (vector-ref glyphs j))))))))
                   (when (> cells 0)
-                    (%pgtk-write-run d parts y col token))
+                    (%pgtk-write-run d parts y col token ascent height))
                   ;; A run cut by the clip ends the window's row: what
                   ;; follows it is outside this window and must not be
                   ;; drawn there.
@@ -3378,7 +3829,7 @@
           (with-pgtk-clip
            d (pgtk-text-area-clip d window)
            (lambda ()
-          (let ((left (cell-x column))
+          (let ((left column)
                 (top row)
                 (box-w (* *cell-width* (max 1 cells))))
             (let ((frame (pgtk-frame-for d)))
@@ -3426,7 +3877,7 @@
           (with-pgtk-clip
            d (pgtk-text-area-clip d window)
            (lambda ()
-          (let* ((left (cell-x column))
+          (let* ((left column)
                  (top row)
                  (box-w (* *cell-width* (max 1 cells))))
             (apply cairo-set-source-rgb
@@ -3927,8 +4378,8 @@
                    ;; `some_mouse_moved` (`keyboard.c:1290`) answers
                    ;; nothing for a `mouse-movement` event unless the
                    ;; gesture asked for one.
-                   (let ((cell (pgtk-event-cell e)))
-                     (note-mouse-movement d (car cell) (cdr cell)))
+                   (let ((pixel (pgtk-event-pixel e)))
+                     (note-mouse-movement d (car pixel) (cdr pixel)))
                    #t))
         ;; The pointer has gone: GNU Emacs's `note_mouse_highlight
         ;; (frame, -1, -1)` (`pgtkterm.c:5945`), which clears the mouse

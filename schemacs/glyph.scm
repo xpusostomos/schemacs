@@ -56,6 +56,10 @@
    glyph-row-displays-text? set-glyph-row-displays-text!
    glyph-row-ends-at-zv? set-glyph-row-ends-at-zv!
    glyph-row-fill-line? set-glyph-row-fill-line!
+   ;; `row->continuation_lines_width > 0` (`dispextern.h:1300`): this row
+   ;; is a later screen line of a wrapped line. The left fringe's
+   ;; continuation bitmap reads it.
+   glyph-row-continuation-line? set-glyph-row-continuation-line!
    glyph-row-start glyph-row-end
    set-glyph-row-start! set-glyph-row-end!
    ;; `row_equal_p` and the hash it compares first
@@ -210,7 +214,7 @@
 
     (define-record-type <glyph-row>
       (make-glyph-row glyphs used x y pixel-width ascent height
-                      start end)
+                      start end continuation-line)
       glyph-row?
       (glyphs        glyph-row-glyphs        set-glyph-row-glyphs!)
       (used          glyph-row-used          set-glyph-row-used!)
@@ -236,7 +240,11 @@
       (displays-text glyph-row-displays-text?
                      set-glyph-row-displays-text!)
       (ends-at-zv    glyph-row-ends-at-zv?   set-glyph-row-ends-at-zv!)
-      (fill-line     glyph-row-fill-line?    set-glyph-row-fill-line!))
+      (fill-line     glyph-row-fill-line?    set-glyph-row-fill-line!)
+      ;; `MATRIX_ROW_CONTINUATION_LINE_P` (`dispextern.h:1300`): this row
+      ;; continues a line begun on an earlier screen row.
+      (continuation-line glyph-row-continuation-line?
+                         set-glyph-row-continuation-line!))
 
     (define (row-hash row)
       ;; GNU Emacs's `hash_row` (`dispnew.c`): a checksum of the row's
@@ -332,6 +340,8 @@
                     (glyph-row-displays-text? b))
                (eq? (glyph-row-ends-at-zv? a) (glyph-row-ends-at-zv? b))
                (eq? (glyph-row-fill-line? a) (glyph-row-fill-line? b))
+               (eq? (glyph-row-continuation-line? a)
+                    (glyph-row-continuation-line? b))
                (let loop ((i 0))
                  (cond ((>= i (glyph-row-used a)) #t)
                        ((not (glyph-equal? (vector-ref (glyph-row-glyphs a) i)

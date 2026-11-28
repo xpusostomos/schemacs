@@ -38,7 +38,9 @@
     ;; definition that is not a command is still named.
     (only (guile) sort procedure-name hashv-ref caddr string-join)
     (only (schemacs subr) split-string keymap-canonicalize
-          *minor-mode-map-alist*)
+          *minor-mode-map-alist*
+          run-hooks *temp-buffer-setup-hook* *temp-buffer-show-hook*
+          temp-buffer-show-function)
     ;; the temporary buffer the walk edits in place
     ;; `with-current-buffer` is `save-current-buffer` with a
     ;; `set-buffer`, and the rest is what a help buffer is made of.
@@ -47,7 +49,9 @@
           get-buffer-create erase-buffer delete-all-overlays
           with-current-buffer buffer-local-value buffer-local-keymap
           buffer-pt *inhibit-read-only* set!buffer-read-only
-          set-buffer-modified-p)
+          set-buffer-modified-p kill-all-local-variables
+          set!buffer-file-name
+          set!buffer-default-directory default-directory)
     (only (schemacs editfns)
           buffer-string buffer-substring-no-properties insert goto-char point
           point-min point-max char-after propertize save-excursion
@@ -79,16 +83,24 @@
           define-command command-type? command-name command-record-of
           called-interactively? current-prefix-arg call-interactively)
     (only (schemacs custom) define-custom)
+    ;; `with-output-to-temp-buffer` binds the sink `princ` writes into.
+    (only (schemacs print) *standard-output*)
+    (only (schemacs core syntax-macros) prog1)
+    ;; `prepare_to_modify_buffer`'s gate, which the temp buffer sets.
+    (only (schemacs insdel) *inhibit-modification-hooks*)
     (only (schemacs core derived) derived-mode-p)
     (only (schemacs fns) string-version-lessp)
     ;; the window a description is laid out in, and the separator line
-    (only (schemacs frame) selected-window window-body-width)
+    (only (schemacs frame) selected-window window-body-width
+          %window-start-set! set-window-point!)
     (only (schemacs window)
           display-buffer set-window-hscroll! pop-to-buffer
+          with-selected-window
           current-window-configuration set-window-configuration
           *cursor-in-echo-area*)
     (only (schemacs simple)
-          make-separator-line scroll-up-command scroll-down-command)
+          make-separator-line scroll-up-command scroll-down-command
+          buffer-disable-undo)
     ;; `pos-visible-in-window-p` is the renderer's, and
     ;; `help--help-screen` asks it to pick the prompt's wording.
     (only (schemacs xdisp) pos-visible-in-window-p)
@@ -120,6 +132,7 @@
   (export substitute-quotes substitute-command-keys key-valid-p
           help--key-description-fontified
           help-buffer help-key help-setup-xref help--window-setup with-help-window
+          with-output-to-temp-buffer internal-temp-output-buffer-show
           help-fns-function-name help--describe-command
           help--describe-map-compare help--shadow-lookup
           describe-map describe-map--align-section
@@ -523,6 +536,63 @@
           (when window
             (set-window-hscroll! window 0)))
         #f))
+
+    (define (internal-temp-output-buffer-show buffer)
+      ;; GNU Emacs's `internal-temp-output-buffer-show' (`subr.el:5322'):
+      ;; "Internal function for `with-output-to-temp-buffer'." The C's
+      ;; `window-combination-limit` rebinding, `minibuffer-scroll-window`
+      ;; and `make-frame-visible` are not carried - there is no
+      ;; `temp-buffer-resize-mode` here and one frame is the usual case.
+      ;;--------------------------------------------------------------
+      (with-current-buffer buffer
+        (set-buffer-modified-p #f)
+        (goto-char (point-min)))
+      (if temp-buffer-show-function
+          (temp-buffer-show-function buffer)
+          (with-current-buffer buffer
+            (let ((window (display-buffer buffer)))
+              (when window
+                (set-window-hscroll! window 0)
+                ;; NOFORCE non-nil: the C's `%window-start-set!` pair,
+                ;; without `w->force_start` (`window.c:1968`).
+                (%window-start-set! window (point-min))
+                (set-window-point! window (point-min))
+                ;; "Run `temp-buffer-show-hook', with the chosen window
+                ;; selected."
+                (with-selected-window window
+                  (run-hooks (*temp-buffer-show-hook*)))))))
+      #f)
+
+    (define-syntax with-output-to-temp-buffer
+      ;; GNU Emacs's `with-output-to-temp-buffer' (`subr.el:5362'):
+      ;; "Bind `standard-output' to buffer BUFNAME, eval BODY, then show
+      ;; that buffer. ... It empties the BUFNAME buffer before evaluating
+      ;; BODY and disables undo in that buffer."
+      ;;
+      ;; **Placement departure**: `subr.el`'s, but it needs
+      ;; `display-buffer` and `run-hooks`, and `subr.scm` is below both.
+      ;; The binding of `standard-output` is a `parameterize` of
+      ;; `print.scm`'s parameter, so the body's `princ`/`prin1` - in any
+      ;; module - reach the buffer.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ bufname body ...)
+         (let* ((old-dir (default-directory))
+                (buf (with-current-buffer (get-buffer-create bufname)
+                       (prog1 (current-buffer)
+                         (kill-all-local-variables)
+                         (delete-all-overlays (current-buffer))
+                         (set!buffer-default-directory (current-buffer) old-dir)
+                         (set!buffer-read-only (current-buffer) #f)
+                         (set!buffer-file-name (current-buffer) #f)
+                         (buffer-disable-undo)
+                         (parameterize ((*inhibit-read-only* #t)
+                                        (*inhibit-modification-hooks* #t))
+                           (erase-buffer)
+                           (run-hooks (*temp-buffer-setup-hook*)))))))
+           (parameterize ((*standard-output* buf))
+             (prog1 (begin body ...)
+               (internal-temp-output-buffer-show buf)))))))
 
     (define-syntax with-help-window
       ;; GNU Emacs's `with-help-window' (`help.el:2230`).

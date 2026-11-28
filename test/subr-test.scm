@@ -7,7 +7,8 @@
        event-convert-list event-symbol-elements with-silent-modifications
        define-key-after keymap-canonicalize
        add-hook remove-hook
-       assoc-delete-all assq-delete-all)
+       assoc-delete-all assq-delete-all
+       string-lines ensure-list)
  (only (schemacs keymap)
        keymap-index keymap-index->events
        make-sparse-keymap define-key set-keymap-parent keymap-parent
@@ -483,3 +484,23 @@
 (test-end "schemacs_editor_subr_hooks")
 
 (test-end "schemacs_editor_subr")
+
+;;----------------------------------------------------------------------
+;; `string-lines' and `ensure-list' (`subr.el'), added for comint's
+;; output handling and compile.el's argument parsing.  Every expectation
+;; is `emacs -Q --batch' with `subr-x' loaded, on the same input.
+(test-begin "schemacs_editor_subr_lines")
+(test-equal "string-lines splits at newlines" '("a" "b") (string-lines "a\nb\n"))
+(test-equal "empty lines are kept when OMIT-EMPTY is nil"
+            '("a" "" "b") (string-lines "a\n\nb" #f))
+(test-equal "omitting empties drops the middle empty line"
+            '("a" "b") (string-lines "a\n\nb" #t))
+(test-equal "KEEP-NEWLINES leaves the break on the line"
+            '("a\n" "b\n") (string-lines "a\nb\n" #f #t))
+(test-equal "the empty string is one empty line"
+            (list "") (string-lines ""))
+(test-equal "ensure-list wraps a non-list" '(5) (ensure-list 5))
+(test-equal "and leaves a list alone" '(1 2) (ensure-list '(1 2)))
+(test-equal "nil is nil, not (nil)" '() (ensure-list #f))
+(test-equal "the empty list is itself" '() (ensure-list '()))
+(test-end "schemacs_editor_subr_lines")

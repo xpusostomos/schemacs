@@ -54,7 +54,8 @@
           prefix-numeric-value uarg->integer)
     (only (schemacs electric)
           electric--after-char-pos *electric-quote-chars*
-          electric-layout-allow-duplicate-newlines)
+          *electric-layout-allow-duplicate-newlines*
+          *electric-pair-text-pairs-function* *electric-pair-newline-binder*)
     (only (schemacs buffer)
           current-buffer buffer-local-value set-buffer-local-value!
           local-variable-p kill-local-variable call-with-buffer-local
@@ -480,15 +481,18 @@ string."
       ;; Without it the post-self-insert hook would see the inserted
       ;; closer and treat it as a typed key.
       ;;
-      ;; `electric-layout-allow-duplicate-newlines' is bound in Emacs and
-      ;; cannot be here - it is a plain variable, not a parameter, and
-      ;; `electric-layout-mode' (its only other reader) is not ported.
+      ;; **`electric-layout-allow-duplicate-newlines' is a parameter now**
+      ;; (`electric.scm` carries `electric-layout-mode'), and it is bound
+      ;; to t here as Emacs's `let` does: when adding a closing
+      ;; delimiter - a job this function is frequently used for - the
+      ;; layout mode's `before' newline must not be munched.
       ;;--------------------------------------------------------------
       (call-with-buffer-local
        'electric-pair-mode #f
        (lambda ()
          (parameterize ((*last-command-event* (%char-code char))
-                        (*blink-matching-paren* #f))
+                        (*blink-matching-paren* #f)
+                        (*electric-layout-allow-duplicate-newlines* #t))
            (self-insert-command times (%char-code char))))))
 
     (define (electric-pair--syntax-ppss . rest)
@@ -1074,4 +1078,14 @@ To toggle the mode only in the current buffer, use
         ;; Locally enabled, but globally disabled.
         (electric-pair-mode 1)              ; Setup the hooks.
         (set-default 'electric-pair-mode #f)) ; But keep it globally disabled.
-       (else #f)))))
+       (else #f)))
+
+    ;; The two seams `electric.scm` cannot fill itself: it is below this
+    ;; library (this one imports it), and Emacs reaches both variables
+    ;; through the one obarray.
+    (*electric-pair-text-pairs-function*
+     (lambda () (*electric-pair-text-pairs*)))
+    (*electric-pair-newline-binder*
+     (lambda (thunk)
+       (parameterize ((*electric-pair-open-newline-between-pairs* #f))
+         (thunk))))))

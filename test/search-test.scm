@@ -23,7 +23,8 @@
  (only (schemacs simple) primitive-undo)
  (only (schemacs subr) error-message-string)
  (only (srfi 64) test-assert test-equal test-begin test-end test-error)
- (only (schemacs syntax) with-syntax-table set-syntax-table copy-syntax-table standard-syntax-table modify-syntax-entry)
+ (only (schemacs syntax) with-syntax-table set-syntax-table copy-syntax-table standard-syntax-table modify-syntax-entry string-to-syntax *parse-sexp-lookup-properties*)
+ (only (schemacs textprop) put-text-property get-text-property)
  )
 
 ;; The search.c layer's tests: the match data's conventions (one-based
@@ -1080,5 +1081,29 @@
        (re-search-forward "z\\(")
        #f))))
 (test-end "search_failed")
+
+;;-------------------------------------------------------------
+;; A *string*'s `syntax-table' text properties
+;; (`RE_SETUP_SYNTAX_TABLE_FOR_OBJECT', `syntax.c:276')
+;;
+;; Emacs's `string-match' reads the syntax of a string object from the
+;; string's own intervals - which is why `buffer-substring' carries a
+;; mode's propertization into a later match. Measured on Emacs 31.1:
+;; `(string-match "\\s|" S)` with a `(string-to-syntax "|")' property
+;; on the `/` is 2 with `parse-sexp-lookup-properties' non-nil, and nil
+;; with it nil.
+;;-------------------------------------------------------------
+(test-begin "search_string_syntax_properties")
+(let ((s (string-copy "ab/cd")))
+  (put-text-property 2 3 'syntax-table (string-to-syntax "|") s)
+  (test-equal "the property round-trips on the string"
+              (string-to-syntax "|") (get-text-property 2 'syntax-table s))
+  (test-equal "a string's syntax-table property is read by \\sC"
+              2 (parameterize ((*parse-sexp-lookup-properties* #t))
+                  (string-match "\\s|" s)))
+  (test-equal "and is ignored when parse-sexp-lookup-properties is nil"
+              #f (parameterize ((*parse-sexp-lookup-properties* #f))
+                   (string-match "\\s|" s))))
+(test-end "search_string_syntax_properties")
 
 (test-end)

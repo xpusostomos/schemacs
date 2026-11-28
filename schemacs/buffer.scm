@@ -2817,13 +2817,18 @@
       ;;
       ;; **Not carried**: the C's `fix_position` coerces a marker to its
       ;; position before anything is compared, and it is `buffer.c`'s. The
-      ;; callers here are the region commands, whose `region-beginning`
-      ;; and `region-end` answer integers, so there is no marker to coerce
-      ;; - and `marker.scm` is *above* this library, so the coercion could
-      ;; not be written here anyway. It belongs with whichever caller
-      ;; starts accepting an arbitrary object.
+      ;; callers here were the region commands, whose `region-beginning`
+      ;; and `region-end` answer integers, so there was no marker to
+      ;; coerce. `comint-send-input` is the first caller that passes one
+      ;; (`buffer-substring` of the process marker, `comint.el:1974`),
+      ;; and the C's `validate_region` does coerce - through the seam
+      ;; `marker.scm` installs, because that library is above this one.
       ;;--------------------------------------------------------------
-      (let* ((beg (if (< e b) e b))
+      (let* ((fix (or (*check-fixnum-coerce-marker-function*)
+                      (lambda (x _b) x)))
+             (b (fix b (current-buffer)))
+             (e (fix e (current-buffer)))
+             (beg (if (< e b) e b))
              (end (if (< e b) b e))
              (ed (current-buffer)))
         (if (not (and (<= (buffer-beg ed) beg) (<= end (buffer-z ed))))

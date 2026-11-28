@@ -64,6 +64,9 @@
     ;; The face-token interning below is Guile's hash table, as
     ;; `(schemacs minibuf)' uses it for the same job.
     (only (guile) hash-ref hash-set! make-hash-table)
+    ;; The renderer's own cell measure, so the cell model's answer is
+    ;; the one the row builder would give.
+    (only (schemacs disp-table) display-text-width)
     (only (schemacs glyph)
           glyph-char glyph-face-id glyph-pixel-width glyph-row-y)
     (only (schemacs dispnew)
@@ -72,7 +75,7 @@
           column-width
           delete-frame-display! glyphs->text
           display-cell-size display-color-cells display-set-size!
-          face-metrics
+          face-metrics face-text-width
           draw-window-cursor! erase-window-cursor! flush-display!
           ;; The generic the `terminal-cursor` slot below records, so
           ;; the method attaches to the display interface's own.
@@ -170,6 +173,12 @@
       ;; for otherwise, this display has no font to ask.
       ;;--------------------------------------------------------------
       (cons 0 (max 1 (test-display-line-height d))))
+
+    (define-method (face-text-width (d <test-display>) face-attrs text)
+      ;; The cell model: TEXT's display cells times the test display's
+      ;; column width, which is what its glyph widths already are.
+      ;;--------------------------------------------------------------
+      (* (display-text-width text 0) (test-display-column-width d)))
 
     (define-method (display-set-size! (d <test-display>) width height)
       ;; A test display takes the size it is asked for, which is what lets

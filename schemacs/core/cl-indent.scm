@@ -457,7 +457,7 @@ In any case, do not backtrack beyond a backquote substitution."
                                        containing-form-start))
                                 ((= (car path) (+ method 1))
                                  ;; "first body form."
-                                 (+ sexp-column lisp-body-indent))
+                                 (+ sexp-column (lisp-body-indent)))
                                 (else
                                  ;; "other body form"
                                  normal-indent))))
@@ -641,7 +641,7 @@ In any case, do not backtrack beyond a backquote substitution."
                       (throw 'exit
                              (if (and (= n 0)        ; "first body form"
                                       (null? p))     ; "not in subforms"
-                                 (+ sexp-column lisp-body-indent)
+                                 (+ sexp-column (lisp-body-indent))
                                  normal-indent)))
                      ((eq? tem '&rest)
                       ;; "this pattern holds for all remaining forms"
@@ -731,7 +731,7 @@ In any case, do not backtrack beyond a backquote substitution."
                          (guard (e (#t (+ 1 sexp-column)))
                            (backward-sexp 1)
                            (current-column)))
-                        (else (+ sexp-column lisp-body-indent)))
+                        (else (+ sexp-column (lisp-body-indent))))
                   (list-ref state 1)))))
 
     (define (lisp-indent-do path state indent-point sexp-column
@@ -739,7 +739,7 @@ In any case, do not backtrack beyond a backquote substitution."
       ;; GNU Emacs's `lisp-indent-do' (`cl-indent.el:685').
       ;;--------------------------------------------------------------
       (if (>= (car path) 3)
-          (parameterize ((*lisp-tag-body-indentation* lisp-body-indent))
+          (parameterize ((*lisp-tag-body-indentation* (lisp-body-indent)))
             (lisp-indent-tagbody path state indent-point sexp-column
                                  normal-indent))
           (lisp-indent-259
@@ -787,13 +787,13 @@ In any case, do not backtrack beyond a backquote substitution."
           normal-indent
           ;; "line up under function rather than under lambda in order to
           ;; conserve horizontal space. (Which is what #' is for.)"
-          (guard (e (#t (+ sexp-column lisp-body-indent)))
+          (guard (e (#t (+ sexp-column (lisp-body-indent))))
             (save-excursion
               (backward-up-list 2)
               (forward-char 1)
               (if (looking-at "\\(lisp:+\\)?function\\(\\Sw\\|\\S_\\)")
-                  (+ lisp-body-indent -1 (current-column))
-                  (+ sexp-column lisp-body-indent))))))
+                  (+ (lisp-body-indent) -1 (current-column))
+                  (+ sexp-column (lisp-body-indent)))))))
 
     ;;----------------------------------------------------------------
     ;; The table (`cl-indent.el:741-829')

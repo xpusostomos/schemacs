@@ -18,7 +18,8 @@
           ;; sort itself is the runtime's.
           (only (guile) sort))
 
-  (export seq-filter seq-remove seq-find seq-some seq-uniq seq-difference
+  (export seq-filter seq-remove seq-find seq-some seq-contains-p seq-union
+          seq-uniq seq-difference
           seq-sort seq-sort-by seq-position seq-keep seq-subseq seq-take
           seq-drop seq-group-by seq-do-indexed seq-copy seq-length)
 
@@ -155,6 +156,44 @@
       ;; answer for every value: Emacs's nil is false either way.
       ;;--------------------------------------------------------------
       (filter (lambda (x) x) (map function sequence)))
+
+    (define (seq-contains-p sequence elt . testfn-arg)
+      ;; GNU Emacs's `seq-contains-p` (`seq.el:448'): "Return non-nil if
+      ;; SEQUENCE contains an element \"equal\" to ELT. \"Equality\" is
+      ;; defined by the function TESTFN, which defaults to `equal'." The
+      ;; C answers TESTFN's own value - it throws it from the
+      ;; `seq-doseq' walk - so this does too.
+      ;;--------------------------------------------------------------
+      (let ((testfn (if (pair? testfn-arg) (car testfn-arg) equal?)))
+        (let loop ((rest sequence))
+          (cond ((null? rest) #f)
+                ((testfn (car rest) elt))
+                (else (loop (cdr rest)))))))
+
+    (define (seq-union sequence1 sequence2 . testfn-arg)
+      ;; GNU Emacs's `seq-union` (`seq.el:553'): "Return a list of all
+      ;; the elements that appear in either SEQUENCE1 or SEQUENCE2.
+      ;; \"Equality\" of elements is defined by the function TESTFN,
+      ;; which defaults to `equal'. This does not modify SEQUENCE1 or
+      ;; SEQUENCE2."
+      ;;
+      ;; The C is `(seq-reduce accum sequence2 (seq-reduce accum
+      ;; sequence1 nil))' and an `nreverse'; `accum' conses the element
+      ;; when the accumulator does not already hold it, so the answer is
+      ;; in order of first appearance.
+      ;;--------------------------------------------------------------
+      (let* ((testfn (if (pair? testfn-arg) (car testfn-arg) equal?))
+             (accum (lambda (acc elt)
+                      (if (seq-contains-p acc elt testfn)
+                          acc
+                        (cons elt acc)))))
+        (let reduce ((rest sequence1) (acc '()))
+          (if (null? rest)
+              (let finish ((rest sequence2) (acc acc))
+                (if (null? rest)
+                    (reverse acc)
+                    (finish (cdr rest) (accum acc (car rest)))))
+              (reduce (cdr rest) (accum acc (car rest)))))))
 
     (define (seq-uniq sequence . testfn-arg)
       ;; GNU Emacs's `seq-uniq`: "Return a list of the elements of

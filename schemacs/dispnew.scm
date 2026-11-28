@@ -20,7 +20,7 @@
   ;;
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
   (import (oop goops) (scheme base)
-          (only (guile) make-hash-table hash-ref hash-set!))
+          (only (guile) make-hash-table hash-ref hash-set! delq))
 
   (export
    <display>
@@ -32,10 +32,24 @@
    ;; `cursor_in_echo_area` (`dispnew.c:7538`): whether the cursor is
    ;; drawn in the echo area rather than in the selected window's text.
    *cursor-in-echo-area*
+   ;; `underline-line-scaling-flag` (`xdisp.c:39322`): whether an
+   ;; underline is as thick as the face's font says rather than one
+   ;; pixel. Emacs's default is nil and its backend reads the C global;
+   ;; here the backend reads this, which is why it lives beside the
+   ;; other display-facing flags rather than in `xdisp`.
+   underline-line-scaling-flag
    write-glyphs!
    draw-box!
+   ;; The fringes: `draw_fringe_bitmap` (`fringe.c`), whose BITS are an
+   ;; 8-row bitmap chosen by the redisplay and whose rectangle is one
+   ;; fringe of a text row.
+   draw-fringe!
    glyphs->text
    clear-frame-area!
+   ;; The part of the toolkit's allocation that is not whole character
+   ;; cells: a host compensation for a pixel surface whose size is not a
+   ;; multiple of the frame's cell.
+   fill-frame-remainder!
    clear-end-of-line!
    ensure-surface!
    update-window-begin!
@@ -56,6 +70,7 @@
    delete-frame-display!
    realize-face
    lookup-face
+   clear-realized-face-cache!
    menu-show
    x-file-dialog
    ;; `x-show-tip` / `x-hide-tip` (`xfns.c`, and the Gtk build's in
@@ -64,7 +79,9 @@
    screen-size
    column-width
    line-height
+   smallest-font-height
    face-metrics
+   face-text-width
    display-cell-size
    display-set-size!
    display-mouse-position
@@ -176,6 +193,19 @@
     ;; `get_window_cursor_type` (`xdisp.c:34825`) asks it, and
     ;; `update_frame` honours it. `window.scm` re-exports it so that
     ;; every name that reached it there still does.
+
+    (define underline-line-scaling-flag #f)
+    (set! underline-line-scaling-flag underline-line-scaling-flag)
+    ;; ^ The self-assignment marks it assigned, so Guile's compiler does
+    ;; not fold reads of it: a user `setq`s this, and a folded constant
+    ;; would ignore them.
+    ;; ^ GNU Emacs's `underline-line-scaling-flag` (`xdisp.c:39322`), a
+    ;; `DEFVAR_BOOL` that is false by default: "Non-nil means scale the
+    ;; underline line with text scaling." Its reader is the backend's
+    ;; `pgtk_draw_glyph_string` (`pgtkterm.c:2664`), which draws a
+    ;; one-pixel rule unless this is set, so it lives here beside the
+    ;; other display-facing flags rather than in `xdisp`. There is no
+    ;; overline or strike-through yet; their two flags are that work's.
 
     (define-class <display> ()
       ;; The kind of thing a display is. A display answers the generics
@@ -313,6 +343,24 @@
     ;; pixel, as `FRAME_LINE_HEIGHT` is 1 there.
     ;; `(face-metrics display face-attrs)`.
 
+    (define-generic face-text-width)
+    ;; How many pixels TEXT takes when drawn in FACE-ATTRS on this
+    ;; display - GNU Emacs's `text_extents' (`font->driver->text_extents'),
+    ;; which is what `gui_produce_glyphs` (`xdisp.c`) asks for a run's
+    ;; `it->pixel_width`.
+    ;;
+    ;; **It is the per-face advance, not a column count.** On a Gtk
+    ;; display the answer comes from the face's own font, so a scaled or
+    ;; proportional face advances differently from the frame's default;
+    ;; a terminal and a test display keep the cell model and answer
+    ;; `display cells x column-width`, which is what their glyph widths
+    ;; already are.
+    ;;
+    ;; The plan is `plans/PER-FACE-FONTS.md`; this is stage 1, the
+    ;; measurement interface. The row layout still counts cells until
+    ;; stage 4, and the drawing still uses the frame font until stage 2.
+    ;; `(face-text-width display face-attrs text)`.
+
     (define-generic write-glyphs!)
     ;; Draw LEN glyphs of ROW's area AREA, starting at cell column X.
     ;; GNU Emacs's `write_glyphs` (`dispextern.h`):
@@ -412,6 +460,30 @@
     ;; `clear_frame_area` only fills it; this tree had them in one call,
     ;; which is invisible until a redisplay legitimately stops clearing.
     ;; `(ensure-surface! display)`.
+
+    (define-generic fill-frame-remainder!)
+    ;; Fill the part of the display's pixel allocation that lies outside
+    ;; the frame's whole-cell rectangle WIDTH x HEIGHT with the frame's
+    ;; background. Emacs has no such area - a frame's pixel size *is* its
+    ;; allocation and its glyph matrix covers it - but this renderer's
+    ;; rows are laid out on a cell grid, and a window whose allocation is
+    ;; not a multiple of `FRAME_LINE_HEIGHT' (or a frame size that has not
+    ;; caught up with a font change) leaves a band no row paints: the
+    ;; previous font's rows survive there. Default: nothing to do.
+    ;; `(fill-frame-remainder! display frame)`.
+    (define-method (fill-frame-remainder! (d <display>) frame) #f)
+
+    (define-generic draw-fringe!)
+    ;; Draw one fringe of a text row: fill `(X, row-y, WIDTH, row-height)`
+    ;; with TOKEN's background, and BITS - a vector of row bytes, the
+    ;; high bit the leftmost pixel, or `#f` - centred in it. `fringe.c`'s
+    ;; `draw_fringe_bitmap_1`: an 8x8 bitmap with
+    ;; `ALIGN_BITMAP_CENTER` is placed `(row->height - bitmap_height) / 2`
+    ;; down the row and centred in the fringe's width, so it does not
+    ;; scale with the text. A terminal has no fringes and answers `#f`.
+    ;; `(draw-fringe! display window row x width bits token)`.
+    (define-method (draw-fringe! (d <display>) window row x width bits token)
+      #f)
 
     (define-generic clear-end-of-line!)
     ;; Blank ROW's area AREA from cell column X to the window's right
@@ -792,6 +864,22 @@
               (hash-set! cache face-attrs token)
               token))))
 
+    (define (clear-realized-face-cache! display)
+      ;; Drop DISPLAY's realized faces, so the next `lookup-face` makes
+      ;; them again - GNU Emacs's `clear_face_cache` (`xfaces.c:6847`),
+      ;; called when a frame's font changes.
+      ;;
+      ;; The cache is keyed by *merged attributes*, and a face that says
+      ;; `(:height 1.5)` carries the same attributes before and after the
+      ;; frame's font is resized - but the realized face it names is a
+      ;; different font at the new default size. The backend's token
+      ;; records which font was opened, so without this the old token,
+      ;; and the old size, would be reused for ever.
+      ;;--------------------------------------------------------------
+      (let ((hit (assq display *realized-face-caches*)))
+        (when hit
+          (set! *realized-face-caches* (delq hit *realized-face-caches*)))))
+
     (define-generic menu-show)
     ;; GNU Emacs's `terminal->menu_show_hook` (`termhooks.h`): show the
     ;; menu just built into `menu_items` at X, Y, and answer the item the
@@ -874,6 +962,14 @@
     ;; The height of one character unit in pixels: Emacs's
     ;; `FRAME_LINE_HEIGHT', 1 on a text terminal. `(line-height display)'.
 
+    (define-generic smallest-font-height)
+    ;; `FRAME_SMALLEST_FONT_HEIGHT` (`frame.h:1830`): the height of the
+    ;; shortest font opened on this display. `required_matrix_height`
+    ;; (`dispnew.c:1766`) divides a window's pixel height by it to size
+    ;; the glyph matrix, which is why a smaller face shows more lines.
+    ;; A terminal has no fonts, and its matrix is `WINDOW_TOTAL_LINES`.
+    (define-method (smallest-font-height (d <display>)) 1)
+
     (define-generic display-font-families)
     ;; The font families the display can draw with - what `font.c`'s
     ;; `font-family-list` asks each of the frame's font drivers
@@ -889,9 +985,9 @@
     ;; themselves, where `column-width' and `line-height' answer in this
     ;; redisplay's own unit (a windowed display counts in cells and
     ;; scales when it draws, so its answers are 1 and its pixels are
-    ;; here). `frame-char-width' and `frame-char-height' read this, and
-    ;; so does `display-pixel-width', which is `screen-size' times it.
-    ;; `(display-cell-size display)'.
+    ;; here). `frame-char-width' and `frame-char-height' read this.
+    ;; `screen-size' is in these same pixels, so `display-pixel-width'
+    ;; reads it directly. `(display-cell-size display)'.
 
 
     (define-generic display-set-size!)

@@ -317,8 +317,14 @@ face if `blink-matching-paren-highlight-offscreen' is non-nil."
               (set! regions (list (cons pos (+ pos len))))
               (set! openparen-idx 0)))
             ;; Ensure we've font-locked the context region.
+            ;; **`(cdar (last regions))` is the cdr of the *car* of the
+            ;; last element** (`simple.el:9742`): the last region's END.
+            ;; The port had `(cdr (last-pair regions))`, which is the
+            ;; spine's tail - `()` for a one-region context - and
+            ;; `font-lock-ensure` then raised "Wrong type argument ...
+            ;; ()" on the first `(` typed in a c-mode buffer.
             (font-lock-ensure (car (car regions))
-                              (cdr (last-pair regions)))
+                              (cdr (car (last-pair regions))))
             (let ((line-string
                    (mapconcat
                     (lambda (region)

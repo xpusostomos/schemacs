@@ -1097,7 +1097,15 @@
         ("superword-mode" . (schemacs progmodes subword))
         ("global-subword-mode" . (schemacs progmodes subword))
         ("global-superword-mode" . (schemacs progmodes subword))
-        ("capitalized-words-mode" . (schemacs progmodes subword))))
+        ("capitalized-words-mode" . (schemacs progmodes subword))
+        ;; `inf-groovy.el`'s two `;;;###autoload` commands (`run-groovy`
+        ;; and `inferior-groovy-mode`).  Emacs's third autoload,
+        ;; `inf-groovy-keys`, is added to `groovy-mode-hook` as an
+        ;; autoloadable *symbol*; this tree's hooks hold procedures, so
+        ;; the library must be loaded (M-x run-groovy does it) before
+        ;; the keys appear - named in that library's header.
+        ("run-groovy" . (schemacs external groovy-modes inf-groovy))
+        ("inferior-groovy-mode" . (schemacs external groovy-modes inf-groovy))))
 
     (define %autoloading-command #f)
     ;; ^ A re-entrancy guard: loading a command's library resolves that

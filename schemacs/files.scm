@@ -42,7 +42,8 @@
           detect-coding-bytes find-operation-coding-system
           coding-system-bom
           decode-eol encode-eol *last-coding-system-used*
-          *coding-system-for-read* *coding-system-for-write*)
+          *coding-system-for-read* *coding-system-for-write*
+          decode-coding-bytes)
     (only (schemacs international mule) set-auto-coding)
     
     (only (schemacs frame)
@@ -64,7 +65,7 @@
     ;; `use-dialog-box-override` is `subr.el`'s. `mapconcat` and
     ;; `identity` are `fns.c`'s too, and `save-some-buffers` reads both.
     (only (schemacs fns) *use-dialog-box* use-file-dialog line-number-at-pos
-          mapconcat identity)
+          mapconcat identity mapcar nconc concat)
     ;; `funcall` is `eval.c`'s; `save-some-buffers` calls it over
     ;; `save-some-buffers-functions`.
     (only (schemacs eval) funcall)
@@ -130,7 +131,7 @@
     ;; `string-prefix-p' is `subr.el''s and now lives in
     ;; `(schemacs subr)', which is below this library.
     (only (schemacs subr)
-          kbd user-error assq-delete-all
+          kbd user-error assq-delete-all add-to-list delq
           run-hook-with-args-until-success run-hook-with-args-until-failure
           run-hooks string-suffix-p assoc-default *delay-mode-hooks*
           *change-major-mode-after-body-hook* *after-change-major-mode-hook*
@@ -165,7 +166,7 @@
           ;; file-local variables are buffer slots; the *Local Variables*
           ;; prompt's buffer and its cursor are the buffer library's.
           buffer-local-value set-buffer-local-value! local-variable-p
-          get-buffer-create set!buffer-cursor-type
+          get-buffer-create set!buffer-cursor-type validate-region
           ;; the buffer's text, which the save path reads code points out
           ;; of - `buffer-text-to-code-points' below is the walk
           text-editor-text)
@@ -187,6 +188,7 @@
           file-name-case-insensitive-p
           file-name-directory-part file-name-nondirectory-part
           make-directory-internal make-temp-file-internal
+          file-accessible-directory-p
           file-executable-p file-symlink-p file-system-info file-writable-p
           find-file-name-handler
           ;; `read-file-name' runs the typed name through it before
@@ -207,7 +209,7 @@
     (only (schemacs diredc) directory-files file-attributes)
     ;; the truename walk, the home directory, and the last-dot search
     ;; `file-name-sans-extension' does
-    (only (guile) canonicalize-path getenv resolve-module string-rindex)
+    (only (guile) canonicalize-path getenv resolve-module string-rindex list-head)
     ;; `file-name-sans-versions' matches a regexp, as the C's does
     ;; `regexp-quote' and the match-data accessors are what
     ;; `abbreviate-file-name`'s regexp and its `match-beginning 1' need.
@@ -312,6 +314,7 @@
           install-ls-lisp-files! ls-lisp--insert-directory))
 
   (export
+   get-file-buffer
    *byte-count-to-string-function*
    file-size-human-readable
    file-size-human-readable-iec
@@ -329,8 +332,8 @@
    buffer-file-coding-system
    set!buffer-file-coding-system
    coding-system-for-file
-   decode-file-bytes
    write-file-code-points
+   write-region
    files--message
    find-alternate-file
    find-file-other-window
@@ -353,6 +356,7 @@
    directory-listing-before-filename-regexp
    directory-entries
    file-name-base
+   file-name-extension
    file-name-sans-extension
    file-name-sans-versions
    file-size-human-readable
@@ -360,7 +364,7 @@
    files--use-insert-directory-program-p
    *insert-directory-program*
    *ls-lisp-use-insert-directory-program*
-   wildcard-to-regexp
+   wildcard-to-regexp file-local-name file-expand-wildcards
    file-name-version-regexp
    file-relative-name
    file-truename
@@ -394,6 +398,7 @@
    %mode-function
    *initial-major-mode*
    make-temp-file temporary-file-directory
+   locate-dominating-file locate-dominating-stop-dir-regexp
    *temporary-file-directory* *small-temporary-file-directory*
    expand-file-name
 directory-name-p
@@ -542,44 +547,120 @@ save-buffer
         (or (adjust-coding-eol-type base eol)
             base)))
 
-    (define (decode-file-bytes bytes coding)
-      ;; BYTES through CODING: the code points out, with the coding
-      ;; system's end-of-line conversion applied - GNU Emacs's
-      ;; `decode_coding', which `after-insert-file-set-coding' runs over
-      ;; what `insert-file-contents' put in the buffer.
-      ;;
-      ;; The answer is a *list of code points* rather than a string, and
-      ;; it has to be: a byte the coding system cannot decode becomes a
-      ;; byte character, and `#x3FFFE9' is above Guile's `#x10FFFF', so
-      ;; there is no string that holds it.
-      ;;
-      ;; **The byte order mark is consumed here**, as the C's
-      ;; `decode_coding' consumes it for a `-with-signature' coding system:
-      ;; it is a signature on the byte stream and not text, so it is not in
-      ;; the buffer and cannot come back out of it. Guile's ports do this
-      ;; themselves for UTF-8, but *not* for the explicit-endian codecs -
-      ;; measured, `"UTF-16LE"' on `FF FE 41 00' answers `(65279 65)'
-      ;; where `"UTF-16"' answers `(65)' - so it is done at the byte level
-      ;; here for every coding system that carries one.
+    (define (%code-points->file-bytes points coding)
+      ;; The encode half shared by `write-file-code-points' and
+      ;; `write-region': the line ends first, then the codec, then the
+      ;; bytes. The byte order mark comes from the coding system and is
+      ;; written once, at the front (see `write-file-code-points').
       ;;--------------------------------------------------------------
-      (let* ((mark (coding-system-bom coding))
-             (n (if mark (bytevector-length mark) 0))
-             (bytes (if (and mark
-                             (>= (bytevector-length bytes) n)
-                             (equal? (bytevector-copy bytes 0 n) mark))
-                        ;; `mark' is the signature the coding system declares,
-                        ;; so a match *is* the mark - no search, and no
-                        ;; stripping of a U+FEFF that is really text.
-                        (bytevector-copy bytes n (bytevector-length bytes))
-                        bytes)))
-        (call-with-port (open-input-bytevector bytes)
-            (lambda (port)
-              (coding-setup-port! port coding)
-              (let loop ((acc '()))
-                (let ((c (coding-read-char port coding)))
-                  (if (eof-object? c)
-                      (decode-eol (reverse acc) coding)
-                      (loop (cons c acc)))))))))
+      (call-with-port (open-output-bytevector)
+        (lambda (port)
+          (coding-setup-port! port coding)
+          (let ((mark (coding-system-bom coding)))
+            (when mark (put-bytevector port mark)))
+          (for-each (lambda (c) (coding-write-char port c coding))
+                    (encode-eol points coding))
+          (get-output-bytevector port))))
+
+    (define-command (write-region start end filename . rest)
+      "Write current region into specified file.
+When called from a program, requires three arguments:
+START, END and FILENAME.  START and END are normally buffer positions
+specifying the part of the buffer to write.
+If START is nil, that means to use the entire buffer contents; END is
+ignored.
+If START is a string, then output that string to the file
+instead of any buffer contents; END is ignored.
+
+Optional fourth argument APPEND if non-nil means
+  append to existing file contents (if any).
+Optional fifth argument VISIT, if t or a string, means
+  set the last-save-file-modtime of buffer to this file's modtime
+  and mark buffer not modified.
+If VISIT is t, the buffer is marked as visiting FILENAME.
+If VISIT is a string, it is a second file name;
+  the output goes to FILENAME, but the buffer is marked as visiting VISIT.
+If VISIT is neither t nor nil nor a string, do not display the \"Wrote
+file\" message.
+
+This does code conversion according to the value of
+`coding-system-for-write', `buffer-file-coding-system', or
+`file-coding-system-alist', and sets the variable
+`last-coding-system-used' to the coding system actually used.
+
+**Not carried**, each named rather than faked: the annotation hooks
+(`write-region-annotate-functions` and its post hook), file locking
+(LOCKNAME), the numeric form of APPEND (\"seek to that offset\"),
+MUSTBENEW's `excl`/confirmation, backups (they are `basic-save-buffer`'s
+here) and the `Updated`/`Added to` wordings of the message, which need
+the numeric APPEND."
+      ;; GNU Emacs's `write-region' (`fileio.c:5479'). The optional
+      ;; arguments arrive as REST: APPEND, VISIT, LOCKNAME, MUSTBENEW.
+      ;;--------------------------------------------------------------
+      (interactive "r\nFWrite region to file: \ni\ni\ni\np")
+      (let* ((append (and (pair? rest) (car rest)))
+             (visit (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+             (buffer (current-buffer))
+             (filename (or filename (buffer-file-name buffer)))
+             (visiting (or (eq? visit #t) (string? visit)))
+             (visit-file (if (string? visit) visit filename)))
+        (unless filename
+          (error "Wrong type argument: stringp, nil"))
+        (let* ((start (cond ((string? start) start)
+                            (start start)
+                            (else (point-min))))
+               (points
+                (if (string? start)
+                    (map char->integer (string->list start))
+                    (let* ((end (or end (point-max)))
+                           (points (buffer-text-to-code-points
+                                    (text-editor-text buffer))))
+                      ;; `validate_region`'s check, which is the C's
+                      ;; `validate_region` called at the door.
+                      (validate-region start end)
+                      (list-head (list-tail points (- start 1))
+                                 (- end start)))))
+               ;; `choose_write_coding_system` (`fileio.c:7046`):
+               ;; `coding-system-for-write`, then the file's own entry in
+               ;; `file-coding-system-alist`, then the buffer's variable.
+               (by-name (find-operation-coding-system 'write-region filename))
+               (coding (or (*coding-system-for-write*)
+                           (and by-name
+                                (not (eq? (car by-name) 'undecided))
+                                (car by-name))
+                           (buffer-file-coding-system buffer))))
+          (let ((bytes (%code-points->file-bytes points coding)))
+            (let* ((path (expand-file-name filename))
+                   (old (if append
+                            (guard (e (#t #vu8()))
+                              (call-with-port (open-input-file path #:encoding #f)
+                                get-bytevector-all))
+                            #vu8())))
+              (call-with-port (open-output-file path #:encoding #f)
+                (lambda (port)
+                  (put-bytevector port old)
+                  (put-bytevector port bytes)))))
+          (*last-coding-system-used* coding)
+          ;; The C sets the buffer's filename in the visit block below
+          ;; and its `modtime` field directly above it; this tree's
+          ;; `set-visited-file-modtime` stats `buffer-file-name`, so the
+          ;; name goes in first. A buffer that visits nothing and is not
+          ;; being marked as visiting has no file to time.
+          (when visiting
+            ;; The C sets `SAVE_MODIFF', `save_length` and the buffer's
+            ;; filename directly - it does not run `set-visited-file-name`
+            ;; (no renaming, no query).
+            (set!buffer-file-name buffer visit-file)
+            (set-buffer-modified-p #f))
+          (when (buffer-file-name buffer)
+            ;; "to avoid a 'file has changed on disk' warning on next
+            ;; attempt to save" - the C's comment.
+            (set-visited-file-modtime))
+          ;; "if VISIT is neither t nor nil nor a string ... do not
+          ;; display the message". `quietly' is `(not (null visit))`.
+          (unless visit
+            (files--message "Wrote %s" filename))
+          #f)))
 
     (define (write-file-code-points path points coding)
       ;; The encode half: the line ends first, then the codec, then the
@@ -598,15 +679,7 @@ save-buffer
       ;; the same mixing `coding-write-char' relies on for its byte
       ;; characters, in a run rather than one byte at a time.
       ;;--------------------------------------------------------------
-      (let ((bytes
-             (call-with-port (open-output-bytevector)
-               (lambda (port)
-                 (coding-setup-port! port coding)
-                 (let ((mark (coding-system-bom coding)))
-                   (when mark (put-bytevector port mark)))
-                 (for-each (lambda (c) (coding-write-char port c coding))
-                           (encode-eol points coding))
-                 (get-output-bytevector port)))))
+      (let ((bytes (%code-points->file-bytes points coding)))
         (call-with-port (open-output-file path #:encoding #f)
           (lambda (port) (put-bytevector port bytes)))))
 
@@ -615,11 +688,9 @@ save-buffer
       ;; evaluate BODY there, and write the buffer to FILE.  The value
       ;; returned is the value of the last form in BODY."
       ;;
-      ;; Emacs writes with `write-region`; this tree's writer is
-      ;; `write-file-code-points`, so the text goes through the same
-      ;; coding machinery a save does. The departure is that none of
-      ;; `write-region`'s visit bookkeeping, backup or message happens
-      ;; here - which is what the Elisp's VISIT nil asks for anyway.
+      ;; The write is Emacs's own call - `(write-region nil nil FILE nil
+      ;; 0)` - now that `write-region` is here. VISIT 0 is a non-nil
+      ;; value that is neither `t` nor a string: quietly, not visiting.
       ;;--------------------------------------------------------------
       (syntax-rules ()
         ((_ file body ...)
@@ -630,11 +701,7 @@ save-buffer
              (lambda ()
                (let ((value (with-current-buffer temp-buffer body ...)))
                  (with-current-buffer temp-buffer
-                   (write-file-code-points
-                    (expand-file-name temp-file)
-                    (buffer-text-to-code-points
-                     (text-editor-text (current-buffer)))
-                    (buffer-file-coding-system (current-buffer))))
+                   (write-region #f #f (expand-file-name temp-file) #f 0))
                  value))
              (lambda ()
                (and (buffer-name temp-buffer)
@@ -699,6 +766,27 @@ save-buffer
         (cond ((null? rest) #f)
               ((equal? (text-editor-file-name (car rest)) path) (car rest))
               (else (loop (cdr rest))))))
+
+    (define (get-file-buffer filename)
+      ;; GNU Emacs's `get-file-buffer` (`buffer.c`'s `Fget_file_buffer`):
+      ;; "Return the buffer visiting file FILENAME (a string). The
+      ;; buffer's `buffer-file-name` must match exactly the expansion of
+      ;; FILENAME. If there is no such live buffer, return nil."
+      ;;
+      ;; **A placement departure**: the DEFUN is `buffer.c`'s, but it
+      ;; opens with `Fexpand_file_name`, which is `fileio.scm`'s and
+      ;; above `buffer.scm` - the seam that also put
+      ;; `locate-file-internal` here. `comint-check-source` is the
+      ;; caller that wants it (a source-file command asks whether the
+      ;; file is being visited and modified before loading it).
+      ;;--------------------------------------------------------------
+      (let ((filename (expand-file-name filename)))
+        (let loop ((rest (buffer-list)))
+          (cond ((null? rest) #f)
+                ((and (text-editor-file-name (car rest))
+                      (string=? (text-editor-file-name (car rest)) filename))
+                 (car rest))
+                (else (loop (cdr rest)))))))
 
     ;; The two file-visiting commands
     ;;
@@ -1349,7 +1437,25 @@ PRED defaults to the value of `save-some-buffers-default-predicate'."
     ;; Abbreviating a name, and the truename
     ;;------------------------------------------------------------------
 
-    (define *directory-abbrev-alist* (make-parameter '()))
+    (define-custom *directory-abbrev-alist* '()
+      "Alist of abbreviations for file directories.
+A list of elements of the form (FROM . TO), each meaning to replace
+a match for FROM with TO when a directory name matches FROM.  This
+replacement is done when setting up the default directory of a
+newly visited file buffer.
+
+FROM is a regexp that is matched against directory names anchored at
+the first character, so it should start with a \"\\\\\\=`\", or, if
+directory names cannot have embedded newlines, with a \"^\".
+
+FROM and TO should be equivalent names, which refer to the
+same directory.  TO should be an absolute directory name.
+Do not use `~' in the TO strings.
+
+Use this feature when you have directories that you normally refer to
+via absolute symbolic links.  Make TO the name of the link, and FROM
+a regexp matching the name it is linked to."
+      :type '(repeat (cons :format "%v" :value ("\\`" . "") (regexp :tag "From") (string :tag "To"))) :group 'abbrev)
     ;; ^ GNU Emacs's `directory-abbrev-alist' (files.el:43): "Alist of
     ;; abbreviations for file directories.
     ;;
@@ -1552,6 +1658,27 @@ PRED defaults to the value of `save-some-buffers-default-predicate'."
                            (substring file 0 dot))
             filename)))
 
+    (define (file-name-extension filename . rest)
+      ;; GNU Emacs's `file-name-extension' (`files.el:5659'): "Return
+      ;; FILENAME's final \"extension\" sans any backup version strings.
+      ;; The extension, in a file name, is the part that begins with the
+      ;; last `.', except that a leading `.' of the file name, if there
+      ;; is one, doesn't count. ... Return nil for extensionless file
+      ;; names such as `foo'. Return the empty string for file names
+      ;; such as `foo.' that end in a period."
+      ;;
+      ;; PERIOD includes the dot, and then an extensionless name answers
+      ;; the empty string rather than nil.
+      ;;--------------------------------------------------------------
+      (let ((period (and (pair? rest) (car rest))))
+        (save-match-data
+          (let ((file (file-name-sans-versions
+                       (file-name-nondirectory-part filename))))
+            (if (and (string-match "\\.[^.]*\\'" file)
+                     (not (eqv? 0 (match-beginning 0))))
+                (substring file (+ (match-beginning 0) (if period 0 1)))
+                (if period "" #f))))))
+
     (define (file-name-base . rest)
       ;; GNU Emacs's `file-name-base': "Return the base name of the
       ;; FILENAME: no directory, no extension."
@@ -1564,6 +1691,15 @@ PRED defaults to the value of `save-some-buffers-default-predicate'."
                           (buffer-file-name (current-buffer)))))
         (file-name-sans-extension
          (file-name-nondirectory-part (or filename "")))))
+
+(define (file-local-name file)
+  ;; GNU Emacs's `file-local-name' (`files.el:1559'): "Return the local
+  ;; name component of FILE. ... This function removes from FILE the
+  ;; specification of the remote host and the method of accessing the
+  ;; host, leaving only the part that identifies FILE locally on the
+  ;; remote system."
+  ;------------------------------------------------------------
+  (or (file-remote-p file 'localname) file))
 
 (define (wildcard-to-regexp wildcard)
       ;; GNU Emacs's `wildcard-to-regexp' (files.el): "Given a shell file
@@ -1656,6 +1792,71 @@ PRED defaults to the value of `save-some-buffers-default-predicate'."
     ;; later definition shadowed: two definitions of one files.el
     ;; function is a departure the compiler catches as "shadows previous
     ;; definition", and only the live one was ever exercised.
+
+    (define (file-expand-wildcards pattern . rest)
+      ;; GNU Emacs's `file-expand-wildcards' (`files.el:8006'): "Expand
+      ;; (a.k.a. \"glob\") file-name wildcard pattern PATTERN.  This
+      ;; returns a list of file names that match PATTERN.  ... If PATTERN
+      ;; is written as an absolute file name, the expansions in the
+      ;; returned list are also absolute.  ... However, if FULL is
+      ;; non-nil, they are absolute."
+      ;;
+      ;; FULL is the first optional argument and REGEXP the second, as in
+      ;; the DEFUN.  The match is applied per sub-directory, so a match
+      ;; cannot span a `/'; when DIRPART itself holds wildcards the
+      ;; directories are expanded first and each one is then searched.
+      ;;--------------------------------------------------------------
+      (let ((full (and (pair? rest) (car rest)))
+            (regexp (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+        (save-match-data
+          (let* ((nondir (file-name-nondirectory-part pattern))
+                 (dirpart (file-name-directory-part pattern))
+                 ;; A list of all dirs that DIRPART specifies; more than
+                 ;; one when it holds wildcards.
+                 (dirs (if (and dirpart
+                                (string-match "[[*?]" (file-local-name dirpart)))
+                           (mapcar (lambda (dir) (file-name-as-directory dir))
+                                   (file-expand-wildcards
+                                    (directory-file-name dirpart) #f regexp))
+                           (list dirpart)))
+                 (contents '()))
+            (for-each
+             (lambda (dir)
+               (when (or (not dir)       ; possible if DIRPART is not wild
+                         (file-accessible-directory-p dir))
+                 (if (string=? "" nondir)
+                     ;; `nondir' is "" when the pattern ends in "/":
+                     ;; basically "" refers to the directory itself,
+                     ;; like ".", but it is not among the names
+                     ;; `directory-files' returns.
+                     (set! contents (cons (if dir dir nondir) contents))
+                     (let ((this-dir-contents
+                            ;; Filter out "." and ".."
+                            (delq #f
+                                  (mapcar
+                                   (lambda (name)
+                                     (if (string-match
+                                          "\\`\\.\\.?\\'"
+                                          (file-name-nondirectory-part name))
+                                         #f
+                                         name))
+                                   (directory-files
+                                    (if dir dir ".")
+                                    full
+                                    (if regexp
+                                        ;; Matching each file name
+                                        ;; element separately.
+                                        (string-append "\\`" nondir "\\'")
+                                        (wildcard-to-regexp nondir)))))))
+                       (set! contents
+                             (nconc
+                              (if (and dir (not full))
+                                  (mapcar (lambda (name) (concat dir name))
+                                          this-dir-contents)
+                                  this-dir-contents)
+                              contents))))))
+             (reverse dirs))
+            contents))))
 
     (define (file-relative-name filename . rest)
       ;; GNU Emacs's `file-relative-name' (files.el): "Convert FILENAME to
@@ -2184,11 +2385,39 @@ PRED defaults to the value of `save-some-buffers-default-predicate'."
                                 dir))
                         mustmatch initial file-directory-p)))
 
-    (define *require-final-newline*
-      (make-parameter #f))
+    (define-custom *require-final-newline* #f
+      "Whether to add a newline automatically at the end of the file.
 
-    (define *mode-require-final-newline*
-      (make-parameter #t))
+A value of t means do this only when the file is about to be saved.
+A value of `visit' means do this right after the file is visited.
+A value of `visit-save' means do it at both of those times.
+Any other non-nil value means ask user whether to add a newline, when saving.
+A value of nil means don't add newlines.
+
+Certain major modes set this locally to the value obtained
+from `mode-require-final-newline'.
+
+This variable is heeded only when visiting files (or saving
+buffers into files they visit).  Writing data to the file system
+with `write-region' and the like is not influenced by this variable."
+      :type '(choice (const :tag "When visiting" visit) (const :tag "When saving" t) (const :tag "When visiting or saving" visit-save) (const :tag "Don't add newlines" nil) (other :tag "Ask each time" ask)) :group 'editing-basics)
+
+    (define-custom *mode-require-final-newline* #t
+      "Whether to add a newline at end of file, in certain major modes.
+Those modes set `require-final-newline' to this value when you enable them.
+They do so because they are often used for files that are supposed
+to end in newlines, and the question is how to arrange that.
+
+A value of t means do this only when the file is about to be saved.
+A value of `visit' means do this right after the file is visited.
+A value of `visit-save' means do it at both of those times.
+Any other non-nil value means ask user whether to add a newline, when saving.
+
+A value of nil means do not add newlines.  That is a risky choice in this
+variable since this value is used for modes for files that ought to have
+final newlines.  So if you set this to nil, you must explicitly check and
+add a final newline, whenever you save a file that really needs one."
+      :type '(choice (const :tag "When visiting" visit) (const :tag "When saving" t) (const :tag "When visiting or saving" visit-save) (const :tag "Don't add newlines" nil) (other :tag "Ask each time" ask)) :group 'editing-basics :version "22.1")
     ;; ^ GNU Emacs's `mode-require-final-newline' (files.el:3468): "Whether
     ;; to add a final newline when saving files, distinguished from
     ;; `require-final-newline'. The value is the same as for
@@ -2312,12 +2541,19 @@ PRED defaults to the value of `save-some-buffers-default-predicate'."
         (when (and file (file-write-protected? file))
           (set!frame-message frame "Note: file is write protected"))))
 
-    (define *find-file-run-dired* (make-parameter #t))
+    (define-custom *find-file-run-dired* #t
+      "Non-nil means allow `find-file' to visit directories.
+To visit the directory, `find-file' runs `find-directory-functions'."
+      :type 'boolean :group 'find-file)
     ;; ^ GNU Emacs's `find-file-run-dired' (files.el:579): "Non-nil means
     ;; allow `find-file' to visit directories. To visit the directory,
     ;; `find-file' runs `find-directory-functions'." T, as in Emacs.
 
-    (define *find-directory-functions* (make-parameter '()))
+    (define-custom *find-directory-functions* '()
+      "List of functions to try in sequence to visit a directory.
+Each function is called with the directory name as the sole argument
+and should return either a buffer or nil."
+      :type '(hook :options (cvs-dired-noselect dired-noselect)) :group 'find-file)
     ;; ^ GNU Emacs's `find-directory-functions' (files.el:585): "List of
     ;; functions to try in sequence to visit a directory. Each function is
     ;; called with the directory name as the sole argument and should
@@ -2439,7 +2675,7 @@ PRED defaults to the value of `save-some-buffers-default-predicate'."
         (text-editor-undo-disable! ed)
         (unless new?
           (with-current-buffer ed
-            (insert-from-string (decode-file-bytes bytes coding))))
+            (insert-from-string (decode-coding-bytes bytes coding))))
         (text-editor-undo-enable! ed)
         ;; The echo area says what Emacs's `after-find-file' says about a
         ;; file that was not there.
@@ -2553,7 +2789,7 @@ PRED defaults to the value of `save-some-buffers-default-predicate'."
              (bytes (call-with-port (open-input-file filename #:encoding #f)
                       get-bytevector-all))
              (coding (coding-system-for-file filename bytes))
-             (decoded (decode-file-bytes bytes coding))
+             (decoded (decode-coding-bytes bytes coding))
              (ed (current-buffer)))
         (when replace
           (erase-buffer)
@@ -3104,11 +3340,30 @@ Used only by `save-buffer'."
     ;;----------------------------------------------------------------
     ;; insert-directory
 
-    (define *insert-directory-program* (make-parameter "ls"))
+    (define-custom *insert-directory-program* "ls"
+      "Absolute or relative name of the `ls'-like program.
+This is used by `insert-directory' and `dired-insert-directory'
+(thus, also by `dired').  For Dired, this should ideally point to
+GNU ls, or another version of ls that supports the \"--dired\"
+flag.  See `dired-use-ls-dired'.
+
+On GNU/Linux and other capable systems, the default is \"ls\".
+
+On *BSD and macOS systems, the default \"ls\" does not support
+the \"--dired\" flag.  Therefore, the default is to use the
+\"gls\" executable on such machines, if it exists.  This means
+that there should normally be no need to customize this when
+installing GNU coreutils using something like ports or Homebrew."
+      :type 'string :group 'dired :version "30.1")
     ;; ^ GNU Emacs's `insert-directory-program' (files.el): "The program
     ;; to use to list a directory."
 
-    (define *ls-lisp-use-insert-directory-program* (make-parameter #f))
+    (define-custom *ls-lisp-use-insert-directory-program* #f
+      "Non-nil causes ls-lisp to revert back to using `insert-directory-program'.
+This is useful on platforms where ls-lisp is dumped into Emacs, such as
+Microsoft Windows, but you would still like to use a program to list
+the contents of a directory."
+      :type 'boolean :group 'ls-lisp)
     ;; ^ GNU Emacs's `ls-lisp-use-insert-directory-program', whose own
     ;; default is `(not (memq system-type '(ms-dos windows-nt android)))'
     ;; - true on GNU/Linux, where Emacs runs `ls'. It is false here, and
@@ -3199,7 +3454,11 @@ Used only by `save-buffer'."
                       #t))
             (delete-directory-internal directory))))))
 
-    (define *byte-count-to-string-function* (make-parameter #f))
+    (define-custom *byte-count-to-string-function* #f
+      "Function that turns a number of bytes into a human-readable string.
+It is for use when displaying file sizes and disk space where other
+constraints do not force a specific format."
+      :type '(radio (function-item file-size-human-readable-iec) (function-item file-size-human-readable) (function :tag "Custom function" :value number-to-string)) :group 'files :version "27.1")
     ;; ^ GNU Emacs's `byte-count-to-string-function' (files.el:1740), a
     ;; `defcustom': "Function that turns a number of bytes into a
     ;; human-readable string. It is for use when displaying file sizes and
@@ -3534,7 +3793,13 @@ The path separator is colon in GNU and GNU-like systems."
     ;;     without an escape this tree's two readers disagree about.
     ;;------------------------------------------------------------------
 
-    (define *auto-mode-case-fold* (make-parameter #t))
+    (define-custom *auto-mode-case-fold* #t
+      "Non-nil means to try second pass through `auto-mode-alist'.
+This means that if the first case-sensitive search through the alist fails
+to find a matching major mode, a second case-insensitive search is made.
+On systems with case-insensitive file names, this variable is ignored,
+since only a single case-insensitive search through the alist is made."
+      :type 'boolean :group 'files :version "22.1")
     ;; ^ GNU Emacs's `auto-mode-case-fold' (files.el:3084): "Non-nil
     ;; means to try second pass through `auto-mode-alist'."
 
@@ -3878,6 +4143,22 @@ The path separator is colon in GNU and GNU-like systems."
         ("emacs" . emacs-lisp-mode)
         ))))
 
+    ;; The `;;;###autoload' alist entries of the external modes this tree
+    ;; carries. In Emacs the cookie sits on an `(add-to-list
+    ;; 'auto-mode-alist ...)' form in the package's own file, and
+    ;; `loaddefs.el' *executes* that form when the autoloads are built -
+    ;; so the entry is in the alist before the mode itself is loaded.
+    ;; Without the same arrangement here, `C-x C-f x.groovy' matched no
+    ;; entry at all until something had loaded `groovy-mode': measured,
+    ;; the buffer stayed in fundamental-mode on the first visit.
+    ;; `groovy-mode.scm' still adds these when it loads, as its source
+    ;; says; `add-to-list' dedupes them.
+    (for-each (lambda (entry) (add-to-list *auto-mode-alist* entry))
+              '(("\\.g\\(?:ant\\|roovy\\|radle\\)\\'" . groovy-mode)
+                ("/Jenkinsfile\\'" . groovy-mode)))
+    (for-each (lambda (entry) (add-to-list *interpreter-mode-alist* entry))
+              '(("groovy" . groovy-mode)))
+
 
     (define *magic-mode-alist* (make-parameter '()))
     ;; ^ GNU Emacs's `magic-mode-alist' (files.el:3959): "Alist of regexp
@@ -3918,7 +4199,34 @@ The path separator is colon in GNU and GNU-like systems."
 
     (define *inhibit-local-variables-suffixes* (make-parameter '(".~" ".swp" ".swo" ".orig" ".rej")))
     (define *inhibit-local-variables-ignore-case* (make-parameter #f))
-    (define *enable-local-variables* (make-parameter #t))
+    (define-custom *enable-local-variables* #t
+      "Control use of local variables in files you visit.
+The value can be t, nil, :safe, :all, or something else.
+
+A value of t means file local variables specifications are obeyed
+if all the specified variable values are safe; if any values are
+not safe, Emacs queries you, once, whether to set them all.
+(When you say yes to certain values, they are remembered as safe.)
+
+:safe means set the safe variables, and ignore the rest.
+:all means set all variables, whether safe or not.
+ (Don't set it permanently to :all.)
+A value of nil means always ignore the file local variables.
+
+Any other value means always query you once whether to set them all.
+(When you say yes to certain values, they are remembered as safe, but
+this has no effect when `enable-local-variables' is \"something else\".)
+
+This variable also controls use of major modes specified in
+a -*- line.
+
+The command \\[normal-mode], when used interactively,
+always obeys file local variable specifications and the -*- line,
+and ignores this variable.
+
+Also see the `permanently-enabled-local-variables' and
+`safe-local-variable-directories' variables."
+      :type '(choice (const :tag "Query Unsafe" t) (const :tag "Safe Only" :safe) (const :tag "Do all" :all) (const :tag "Ignore" nil) (other :tag "Query" other)) :group 'find-file)
     (define *local-enable-local-variables* (make-parameter #t))
     ;; ^ GNU Emacs's `inhibit-local-variables-suffixes' (`compile.el'? no:
     ;; files.el:3920), `inhibit-local-variables-ignore-case',
@@ -3945,7 +4253,16 @@ The path separator is colon in GNU and GNU-like systems."
                   ((string-match (car temp) name) temp)
                   (else (loop (cdr temp))))))))
 
-    (define *major-mode-remap-alist* (make-parameter '()))
+    (define-custom *major-mode-remap-alist* '()
+      "Alist mapping file-specified modes to alternative modes.
+Each entry is of the form (MODE . FUNCTION) which means that in place
+of activating the major mode MODE (specified via something like
+`auto-mode-alist', file-local variables, ...) we actually call FUNCTION
+instead.
+FUNCTION is typically a major mode which \"does the same thing\" as
+MODE, but can also be nil to hide other entries (either in this var or
+in `major-mode-remap-defaults') and means that we should call MODE."
+      :type '(alist :tag "Remappings" :key-type (symbol :tag "From major mode") :value-type (function :tag "To mode (or function)")))
     (define *major-mode-remap-defaults* (make-parameter '()))
     ;; ^ GNU Emacs's `major-mode-remap-alist' and
     ;; `major-mode-remap-defaults' (files.el:3786, :3800): "Alist mapping
@@ -3984,6 +4301,14 @@ The path separator is colon in GNU and GNU-like systems."
         (lisp-interaction-mode . (schemacs progmodes elisp-mode))
         (lisp-mode . (schemacs core lisp-mode))
         (lisp-data-mode . (schemacs core lisp-mode))
+        ;; The Groovy modes are `schemacs/external' - an outside package
+        ;; this tree carries, not part of the editor - and this is the
+        ;; `;;;###autoload' cookie that makes `C-x C-f x.groovy' find the
+        ;; mode, as Emacs's package autoloads do. `grails-mode' and
+        ;; `groovy-electric-mode' are minor modes with no file-name
+        ;; claim; a user's init imports their libraries, as it would
+        ;; `require' them.
+        (groovy-mode . (schemacs external groovy-modes groovy-mode))
         (text-mode . (schemacs textmodes text-mode))))
 
     (define (%autoload-mode mode)
@@ -4900,8 +5225,9 @@ i  -- to ignore the local variables list, and permanently mark these
         ;; global mode's `after-change-major-mode-hook' entry.
         #t))
 
-    (define *initial-major-mode*
-      (make-parameter 'lisp-interaction-mode))
+    (define-custom *initial-major-mode* 'lisp-interaction-mode
+      "Major mode command symbol to use for the initial `*scratch*' buffer."
+      :type 'function)
     ;; ^ GNU Emacs's `initial-major-mode' (`startup.el'): "Major mode
     ;; command to use for the `*scratch*' buffer."
 
@@ -5082,5 +5408,50 @@ have fast storage with limited space, such as a RAM disk."
                                        (if dir-flag #t #f)
                                        (or suffix "")
                                        text)))))
+
+    (define locate-dominating-stop-dir-regexp
+      "\\`\\(?:[\\/][\\/][^\\/]+[\\/]\\|/\\(?:net\\|afs\\|\\.\\.\\.\\)/\\)\\'"
+      ;; "Regexp of directory names that stop the search in
+      ;; `locate-dominating-file'.  Any directory whose name matches this
+      ;; regexp will be treated like a kind of root directory by
+      ;; `locate-dominating-file', which will stop its search when it
+      ;; bumps into it."  (`files.el:1254'.)
+      )
+
+    (define (locate-dominating-file file name)
+      ;; GNU Emacs's `locate-dominating-file' (`files.el:1264'):
+      ;; "Starting at FILE, look up directory hierarchy for directory
+      ;; containing NAME.  ...  Return the directory where we found NAME,
+      ;; or nil if not found."
+      ;;
+      ;; **Represent /home/luser/foo as ~/foo** so that we don't try to
+      ;; look for NAME in /home or in / (the C's comment).  NAME may be a
+      ;; string or a predicate of one argument; the predicate is called
+      ;; with every directory the walk examines, starting with FILE.
+      ;;--------------------------------------------------------------
+      (set! file (abbreviate-file-name (expand-file-name file)))
+      (when (and (not (directory-name-p file))
+                 (file-directory-p file))
+        (set! file (file-name-as-directory file)))
+      (let loop ((file file) (root #f))
+        (cond ((or root
+                   (not file)
+                   (string-match locate-dominating-stop-dir-regexp file))
+               (if root (file-name-as-directory root) #f))
+              (else
+               ;; `file-name-directory' is `file-name-directory-part' in
+               ;; this tree (`fileio.scm:374'), the spelling every other
+               ;; caller uses.
+               (let* ((file (file-name-directory-part file))
+                      (try (if (string? name)
+                               (file-exists-p (expand-file-name name file))
+                               (name file))))
+                 (cond (try (loop file file))
+                       ((equal? file (let ((next (file-name-directory-part
+                                                  (directory-file-name file))))
+                                       (set! file next)
+                                       next))
+                        (loop #f root))
+                       (else (loop file root))))))))
 
     ))

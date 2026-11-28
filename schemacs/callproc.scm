@@ -38,9 +38,11 @@
                 get-buffer with-current-buffer)
           (only (schemacs editfns) insert buffer-substring point-min
                 point-max delete-region widen)
-          (only (schemacs fileio) make-temp-file-internal))
+          (only (schemacs fileio) make-temp-file-internal)
+          (only (schemacs fns) identity mapconcat))
 
-  (export call-process call-process-region shell-file-name)
+  (export call-process call-process-region call-process-shell-command
+          shell-file-name shell-command-switch)
 
   (begin
 
@@ -123,6 +125,36 @@
         (cond (signal (string-append "signal " (number->string signal)))
               ((integer? exit) exit)
               (else #f))))))
+
+    (define shell-command-switch "-c"
+      ;; GNU Emacs's `shell-command-switch' (`simple.el:4358'): "Switch
+      ;; used to have the shell execute its command line argument."
+      ;; **Placement**: `simple.el' owns it, but its only reader here -
+      ;; `call-process-shell-command' - sits in this library (which
+      ;; `simple.scm' is above and cannot be imported by), so it is
+      ;; defined here and re-exported from `simple.scm'.
+      )
+
+    (define (call-process-shell-command command . args)
+      ;; GNU Emacs's `call-process-shell-command' (`subr.el:5071'):
+      ;; "Execute the shell command COMMAND synchronously in separate
+      ;; process. ..." Emacs's home for it is `subr.el', which is
+      ;; *below* this library and cannot call `call-process' - the
+      ;; tree's usual placement departure.
+      ;;
+      ;; The declared calling convention is
+      ;; `(command &optional infile buffer display)', with any further
+      ;; arguments concatenated to COMMAND (an old convention the C
+      ;; still honours).
+      ;;--------------------------------------------------------------
+      (let* ((infile (%callproc-opt args 0 #f))
+             (buffer (%callproc-opt args 1 #f))
+             (display (%callproc-opt args 2 #f))
+             (more (if (>= (length args) 3) (cdddr args) '())))
+        (call-process shell-file-name
+                      infile buffer display
+                      shell-command-switch
+                      (mapconcat identity (cons command more) " "))))
 
     (define shell-file-name
       ;; GNU Emacs's `shell-file-name' (`callproc.c`'s DEFVAR_LISP):

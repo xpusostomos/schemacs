@@ -77,6 +77,7 @@
           frame-old-selected-window set!frame-old-selected-window
           frame-number-of-windows set!frame-number-of-windows
           *frame-list*
+          *mark-window-redisplay-function*
           window-type?
           make<window>
           frame-selected-window frame-windows select-window
@@ -121,6 +122,7 @@
           window-pixel-height window-pixel-width
           window-pixel-left window-pixel-top window-size
           window-normal-size
+          window-set-parent-and-normal-sizes
           window-combination-limit set-window-combination-limit
           window-dedicated-p set-window-dedicated-p
           window-fringes set-window-fringes
@@ -189,7 +191,7 @@
   (export
    delete-other-windows
    delete-window
-   display-buffer
+   display-buffer *display-buffer-overriding-action*
    get-buffer-window
    get-buffer-window-list
    list-substitute
@@ -342,19 +344,43 @@
     ;; the work, and the window record already carries the columns for
     ;; it.
 
-    (define window-min-height
+    (define-custom window-min-height
       ;; The smallest a window may be made, in rows including its mode
       ;; line: GNU Emacs's `window-min-height'. Splitting a window into
       ;; pieces smaller than this signals an error rather than making a
       ;; window nothing can be read in.
       ;;--------------------------------------------------------------
-      4)
+      4
+      "The minimum total height, in lines, of any window.
+The value has to accommodate one text line, a mode and header
+line, a horizontal scroll bar and a bottom divider, if present.
+A value less than `window-safe-min-height' is ignored.  The value
+of this variable is honored when windows are resized or split.
 
-    (define window-min-width
+Applications should never rebind this variable.  To resize a
+window to a height less than the one specified here, an
+application should instead call `window-resize' with a non-nil
+IGNORE argument.  In order to have `split-window' make a window
+shorter, explicitly specify the SIZE argument of that function."
+      :type 'natnum :group 'windows :version "24.1")
+
+    (define-custom window-min-width
       ;; The narrowest a window may be made, in columns: GNU Emacs's
       ;; `window-min-width'.
       ;;--------------------------------------------------------------
-      10)
+      10
+      "The minimum total width, in columns, of any window.
+The value has to accommodate two text columns as well as margins,
+fringes, a scroll bar and a right divider, if present.  A value
+less than `window-safe-min-width' is ignored.  The value of this
+variable is honored when windows are resized or split.
+
+Applications should never rebind this variable.  To resize a
+window to a width less than the one specified here, an
+application should instead call `window-resize' with a non-nil
+IGNORE argument.  In order to have `split-window' make a window
+narrower, explicitly specify the SIZE argument of that function."
+      :type 'natnum :group 'windows :version "24.1")
 
     (define (window-position window windows)
       ;; Where WINDOW sits in the list WINDOWS, or #f when it is not
@@ -541,12 +567,29 @@
       ;; re-display of all windows of OBJECT" - mark them so the next
       ;; redisplay rebuilds them whether or not they look out of date.
       ;;
-      ;; **Nothing to mark here**: this redisplay redraws every window of
-      ;; every frame on every `render!`, so a window is always rebuilt on
-      ;; the next frame. `force-mode-line-update' (`xdisp.sld') is the
-      ;; same no-op for the same reason.
+      ;; **It has work to do now.** The comment here used to say the
+      ;; redisplay rebuilt every window on every frame - true before the
+      ;; row diff - and `wset_redisplay` was therefore a no-op. The skip
+      ;; reads each window's recorded matrix state, so a face or font
+      ;; change that leaves the text alone (a buffer's `text-scale-mode'
+      ;; remapping is the one that found this) has to mark the window, or
+      ;; the new size shows only after a resize. OBJECT is a window, a
+      ;; buffer, a frame, or nil for the selected frame's windows; any
+      ;; window showing the buffer, or on the frame, is marked.
       ;;--------------------------------------------------------------
-      #f)
+      (let ((object (if (pair? args) (car args) #f)))
+        (for-each
+         (lambda (frame)
+           (for-each
+            (lambda (w)
+              (when (or (not object)
+                        (eq? object frame)
+                        (eq? object w)
+                        (eq? object (window-buffer w)))
+                ((*mark-window-redisplay-function*) w)))
+            (window-list frame)))
+         (*frame-list*))
+        #f))
 
     (define (list-insert-after item new lst)
       ;; LST with NEW inserted directly after ITEM. The list spelling of
@@ -619,6 +662,7 @@
                   (set-window-new-pixel new size-pixels)
                   (window--resize-this-window window (- size-pixels) horizontal #f)
                   (%window-resize-apply-1 p horizontal)))
+              (window-set-parent-and-normal-sizes p)
               p)
             (begin
               ;; The ortho test above guarantees PARENT divides its
@@ -633,6 +677,7 @@
                (if before?
                    (list-insert-before window new (window-children parent))
                    (list-insert-after window new (window-children parent))))
+              (window-set-parent-and-normal-sizes parent)
               new))))
 
     (define (split-window window size . args)
@@ -695,8 +740,8 @@
                  (right (- width left)))
             (when (or (< left 1) (< right 1)
                       (and (not size)
-                           (or (< left window-min-width)
-                               (< right window-min-width))))
+                           (or (< left (window-min-width))
+                               (< right (window-min-width)))))
               (error "Size of new window too small"))
             (let ((top (window-top window))
                   (start (window-left window))
@@ -756,8 +801,8 @@
                  (lower (- height upper)))
             (when (or (< upper 1) (< lower 1)
                       (and (not size)
-                           (or (< upper window-min-height)
-                               (< lower window-min-height))))
+                           (or (< upper (window-min-height))
+                               (< lower (window-min-height)))))
               (error "Size of new window too small"))
             (let ((top (window-top window))
                   (left (window-left window))
@@ -909,6 +954,12 @@
                                 (inner (cdr rest) (cons (car rest) acc)))
                                (else (inner (cdr rest) acc))))))))))
 
+    ;; GNU Emacs's `display-buffer-overriding-action' (`window.el:8393'):
+    ;; "The action to override all other actions in `display-buffer'."
+    ;; Emacs `let'-binds it (`next-error-no-select'), so it is a
+    ;; parameter.
+    (define *display-buffer-overriding-action* (make-parameter #f))
+
     (define (display-buffer--inhibit-same-window? action)
       ;; Whether ACTION refuses the selected window. GNU Emacs's
       ;; `display-buffer' reads that two ways: a non-list ACTION means
@@ -983,7 +1034,8 @@
       ;; leaving the window's point at the beginning would put it back on
       ;; the titles.
       ;;--------------------------------------------------------------
-      (let* ((action (if (pair? args) (car args) #f))
+      (let* ((action (or (*display-buffer-overriding-action*)
+                         (if (pair? args) (car args) #f)))
              ;; "Handle the old form of the first argument:"
              ;; `(inhibit-same-window (and action (not (listp action))))'
              ;; - a non-list ACTION means "not this window", and is not
@@ -1044,7 +1096,7 @@
            (else
             (let* ((window (selected-window))
                    (height (window-height window)))
-              (if (< height (* 2 window-min-height))
+              (if (< height (* 2 (window-min-height)))
                   ;; no room to split: the selected window shows it, which
                   ;; is Emacs's `display-buffer-use-some-window' fallback
                   (begin
@@ -1273,18 +1325,73 @@ Return the buffer switched to."
       (set!%window-next-buffers window value)
       value)
 
-    (define *switch-to-visible-buffer* (make-parameter #t))
+    (define-custom *switch-to-visible-buffer* #t
+      "If non-nil, allow switching to an already visible buffer.
+If this variable is non-nil, `switch-to-prev-buffer' and
+`switch-to-next-buffer' may switch to an already visible buffer.
+If this variable is nil, `switch-to-prev-buffer' and
+`switch-to-next-buffer' always try to avoid switching to a buffer
+that is already visible in another window on the same frame."
+      :type 'boolean :group 'windows :version "24.1")
     ;; ^ GNU Emacs's `switch-to-visible-buffer` (`window.el:4685`): "If
     ;; this variable is non-nil, `switch-to-prev-buffer' and
     ;; `switch-to-next-buffer' may switch to a buffer that is visible in
     ;; some other window" - off, they skip such buffers.
 
-    (define *switch-to-prev-buffer-skip* (make-parameter #f))
+    (define-custom *switch-to-prev-buffer-skip* #f
+      "Buffers `switch-to-prev-buffer' should skip.
+If this variable is nil, `switch-to-prev-buffer' may switch to
+any buffer, including those already shown in other windows.
+
+If this variable is non-nil, `switch-to-prev-buffer' will refrain
+from switching to certain buffers according to the value of this
+variable:
+
+- `this' means do not switch to a buffer shown on the frame that
+  hosts the window `switch-to-prev-buffer' is acting upon.
+
+- `visible' means do not switch to a buffer shown on any visible
+  frame.
+
+- 0 (the number zero) means do not switch to a buffer shown on
+  any visible or iconified frame.
+
+- t means do not switch to a buffer shown on any live frame.
+
+If this option specifies a function, that function is called with
+three arguments - the WINDOW argument of `switch-to-prev-buffer',
+a buffer `switch-to-prev-buffer' intends to switch to and the
+BURY-OR-KILL argument of `switch-to-prev-buffer'.  If that
+function returns non-nil, `switch-to-prev-buffer' will not switch
+to that buffer.
+
+Since `switch-to-prev-buffer' is called by `bury-buffer',
+`replace-buffer-in-windows' and `quit-restore-window' among
+others, customizing this option may also affect the behavior of
+Emacs when a window is quit or a buffer gets buried or killed.
+
+The value of this option is consulted by `switch-to-next-buffer'
+as well.  In that case, if this option specifies a function, it
+will be called with the third argument nil.
+
+Under certain circumstances `switch-to-prev-buffer' may ignore
+this option, for example, when there is only one buffer left.
+
+Also see `switch-to-prev-buffer-skip-regexp'."
+      :type '(choice (const :tag "Never" nil) (const :tag "This frame" this) (const :tag "Visible frames" visible) (const :tag "Visible and iconified frames" 0) (const :tag "Any frame" t) (function :tag "Function")) :group 'windows :version "27.1")
     ;; ^ GNU Emacs's `switch-to-prev-buffer-skip` (`window.el:4699`): nil,
     ;; `t`, `visible`, `0`, or a function of WINDOW, BUFFER and
     ;; BURY-OR-KILL.
 
-    (define *switch-to-prev-buffer-skip-regexp* (make-parameter #f))
+    (define-custom *switch-to-prev-buffer-skip-regexp* #f
+      "Buffers that `switch-to-prev-buffer' and `switch-to-next-buffer' should skip.
+The value can either be a regexp or a list of regexps.  Buffers whose
+names match these regexps are skipped by `switch-to-prev-buffer'
+and `switch-to-next-buffer', unless there's no other buffer to
+switch to.
+
+Also see `switch-to-prev-buffer-skip'."
+      :type '(choice regexp (repeat regexp)) :group 'windows :version "29.1")
     ;; ^ GNU Emacs's `switch-to-prev-buffer-skip-regexp` (`:4749`): a
     ;; regexp, or a list of them, naming buffers never to switch to.
 
@@ -2503,7 +2610,7 @@ WINDOW defaults to the selected one. Return nil."
                          (selected-window)))
       ;; GNU Emacs's `split-window-below' checks this one itself,
       ;; because `split-window' would not.
-      (when (and size (< size 0) (< (- size) window-min-height))
+      (when (and size (< size 0) (< (- size) (window-min-height)))
         (error "Size of new window too small"))
       (split-window window-to-split size #f))
 
@@ -2516,7 +2623,7 @@ WINDOW defaults to the selected one. Return nil."
                          (selected-window)))
       ;; GNU Emacs's `split-window-right' checks this one itself,
       ;; because `split-window' would not.
-      (when (and size (< size 0) (< (- size) window-min-width))
+      (when (and size (< size 0) (< (- size) (window-min-width)))
         (error "Size of new window too small"))
       (split-window window-to-split size #t))
 
@@ -2980,7 +3087,7 @@ by this function.  This happens in an interactive call."
       ;; GNU Emacs's `window-min-pixel-height` (`window.el:467`).
       ;;--------------------------------------------------------------
       (let ((window (window--opt args 0)))
-        (* (max (if (window-minibuffer-p window) 1 window-min-height)
+        (* (max (if (window-minibuffer-p window) 1 (window-min-height))
                 window-safe-min-height)
            (frame-char-size window))))
 
@@ -2994,7 +3101,7 @@ by this function.  This happens in an interactive call."
       ;; GNU Emacs's `window-min-pixel-width` (`window.el:499`).
       ;;--------------------------------------------------------------
       (let ((window (window--opt args 0)))
-        (* (max window-min-width window-safe-min-width)
+        (* (max (window-min-width) window-safe-min-width)
            (frame-char-size window #t))))
 
     (define (window-safe-min-size . args)
@@ -3086,7 +3193,7 @@ by this function.  This happens in an interactive call."
                       (max (ceiling (/ pixel-width char-size))
                            (if (window--min-size-ignore-p window ignore)
                                0
-                               window-min-width)))))
+                               (window-min-width))))))
                (else
                 (let* ((char-size (frame-char-size window))
                        (rows (+ (window-safe-min-size window)
@@ -3106,7 +3213,7 @@ by this function.  This happens in an interactive call."
                       (max (ceiling (/ pixel-height char-size))
                            (if (window--min-size-ignore-p window ignore)
                                0
-                               window-min-height))))))))))
+                               (window-min-height)))))))))))
 
     (define (window-sizable window delta . args)
       ;; GNU Emacs's `window-sizable` (`window.el:1718`).

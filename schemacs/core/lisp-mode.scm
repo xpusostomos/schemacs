@@ -1282,7 +1282,9 @@
       ;;--------------------------------------------------------------
       (buffer-local-value (current-buffer) 'lisp-indent-offset #f))
 
-    (define lisp-body-indent 2)
+    (define-custom lisp-body-indent 2
+      "Number of columns to indent the second line of a `(def...)' form."
+      :type 'integer :group 'lisp)
     ;; ^ `lisp-body-indent' (`lisp-mode.el:1360'): "Number of columns to
     ;; indent the second line of a `(def...)' form."
 
@@ -1455,7 +1457,7 @@
         ;; function symbol."
         (goto-char containing-form-start)
         (set! containing-form-column (current-column))
-        (set! body-indent (+ lisp-body-indent containing-form-column))
+        (set! body-indent (+ (lisp-body-indent) containing-form-column))
         (forward-char 1)
         (forward-sexp 1)
         ;; "Now find the start of the last form."
@@ -1473,7 +1475,7 @@
             ;; "A distinguished form. If it is the first or second form
             ;; use double lisp-body-indent, else normal indent."
             (if (<= (- i count) 1)
-                (list (+ containing-form-column (* 2 lisp-body-indent))
+                (list (+ containing-form-column (* 2 (lisp-body-indent)))
                       containing-form-start)
                 (list normal-indent containing-form-start))
             ;; "A non-distinguished form. Use body-indent if there are no
@@ -1494,7 +1496,7 @@
       (if (> (point) (list-ref state 2))
           (begin
             (goto-char (list-ref state 1))
-            (+ lisp-body-indent (current-column)))
+            (+ (lisp-body-indent) (current-column)))
           #f))
 
     (define (lisp-comment-indent)
@@ -1873,7 +1875,12 @@ ENDPOS is encountered."
     ;;------------------------------------------------------------------
 
     (define lisp-data-mode-map (km:keymap '*lisp-data-mode-map*))
-    (define lisp-data-mode-hook '())
+    (define lisp-data-mode-hook (make-parameter '()))
+    ;; ^ `lisp-data-mode-hook', invented by `define-derived-mode' and
+    ;; handed in here as the other mode hooks are: a parameter (`add-hook`
+    ;; takes the hook object; `run-hooks` dereferences it), and not a
+    ;; `define-custom` because Emacs makes it a `defvar`, not a
+    ;; defcustom.
     (define lisp-mode-shared-map (km:keymap '*lisp-mode-shared-map*))
     ;; "C-M-q" #'indent-sexp (`lisp-mode.el:818'). Emacs's `emacs-lisp-mode'
     ;; rebinds it to `indent-pp-sexp', which is `indent-sexp' plus
@@ -1886,7 +1893,9 @@ ENDPOS is encountered."
     ;; below it, so the call comes through the seam it defines.
     (*calculate-lisp-indent-function* calculate-lisp-indent)
     (define lisp-mode-map (km:keymap '*lisp-mode-map*))
-    (define lisp-mode-hook '())
+    (define-custom lisp-mode-hook '()
+      "Hook run when entering Lisp mode."
+      :type 'hook :group 'lisp)
 
     (define-derived-mode (lisp-data-mode prog-mode "Lisp-Data"
                                          lisp-data-mode-map

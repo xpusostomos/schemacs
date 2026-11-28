@@ -16,24 +16,27 @@
 ;;-------------------------------------------------------------
 (import
  (scheme base)
- (only (guile) getenv)
+ (only (guile) getenv mkdir sort)
  (only (srfi 64) test-assert test-equal test-begin test-end)
  
  (only (schemacs buffer) buffer-local-value default-directory current-buffer allocate-buffer
-       get-buffer-create set-buffer set-buffer-local-value! major-mode)
+       get-buffer-create set-buffer set-buffer-local-value! major-mode
+       set!buffer-file-name with-current-buffer)
  (only (schemacs editfns) insert)
  (only (schemacs intervals) put)
  (only (schemacs window) window-normalize-buffer-to-switch-to)
  (only (schemacs frame) *current-frame* new-frame)
  (only (schemacs fileio)
        directory-file-name file-directory-p file-name-case-insensitive-p
-       file-name-directory-part)
+       file-name-directory-part file-name-nondirectory-part)
  (only (schemacs search) regexp-quote)
  (only (schemacs files)
        *abbreviated-home-dir* *directory-abbrev-alist*
        abbreviate-file-name cd cd-absolute cd-path set!cd-path
        directory-abbrev-apply file-name-completion-table
        parse-colon-path locate-file set-buffer-major-mode
+       get-file-buffer
+       file-expand-wildcards file-local-name
        ;; file-local variables
        hack-local-variables file-local-variables-alist
        set!file-local-variables-alist
@@ -360,4 +363,80 @@
     (test-equal "safe-local-variable-values applies without asking" "v"
                 (buffer-local-value b 'plist-test-variable #f))))
 
+
+;;----------------------------------------------------------------------
+;; `get-file-buffer` (`buffer.c`'s `Fget_file_buffer`, placed in this
+;; library because it opens with `expand-file-name`): the buffer whose
+;; `buffer-file-name` is the *expansion* of the argument.
+(test-equal "get-file-buffer finds the buffer visiting the expanded name"
+  #t
+  (with-current-buffer (get-buffer-create " *get-file-buffer*")
+    (set!buffer-file-name (current-buffer) "/tmp/get-file-buffer-test.txt")
+    (eq? (get-file-buffer "/tmp/get-file-buffer-test.txt") (current-buffer))))
+
+(test-equal "get-file-buffer expands its argument"
+  #t
+  (with-current-buffer (get-buffer-create " *get-file-buffer-2*")
+    (set!buffer-file-name (current-buffer) "/tmp/get-file-buffer-test.txt")
+    (eq? (get-file-buffer "/tmp/../tmp//get-file-buffer-test.txt")
+         (current-buffer))))
+
+(test-equal "and answers nil for a file nobody visits"
+  #f
+  (get-file-buffer "/tmp/no-such-file-is-visited.txt"))
+
 (test-end "schemacs_editor_files_local_variables")
+
+;;----------------------------------------------------------------------
+;; `file-expand-wildcards' and `file-local-name' (`files.el'), which
+;; compile.el's `compilation-find-file' reads.  Every expectation is
+;; Emacs 31.1's on the same directory (the README of `tools/' records
+;; the warning that `*-nondirectory' is this tree's spelling of
+;; `file-name-nondirectory').
+(test-begin "schemacs_editor_files_wildcards")
+
+(define wild-dir "/tmp/schemacs-files-wild-test/")
+(guard (e (else #f)) (mkdir wild-dir #o700))
+(for-each
+ (lambda (name)
+   (call-with-output-file (string-append wild-dir name)
+     (lambda (port) (display "" port))))
+ '("a.txt" "b.txt" "c.scm"))
+
+(define (names-of pattern)
+  ;; Sorted, because a directory's order is the filesystem's.
+  (sort (map file-name-nondirectory-part (file-expand-wildcards pattern))
+        string<?))
+
+(test-equal "a wildcard expands the names that match, and only those"
+            '("a.txt" "b.txt")
+            (names-of (string-append wild-dir "*.txt")))
+(test-equal "a question mark matches one character"
+            '("c.scm")
+            (names-of (string-append wild-dir "?.scm")))
+(test-equal "a bracket class matches one of its characters"
+            '("a.txt" "b.txt")
+            (names-of (string-append wild-dir "[ab].txt")))
+(test-equal "a pattern with no wildcard answers the file if it exists"
+            (list (string-append wild-dir "a.txt"))
+            (file-expand-wildcards (string-append wild-dir "a.txt")))
+(test-equal "and nil when it does not"
+            '()
+            (file-expand-wildcards (string-append wild-dir "nope.txt")))
+;; bug#15417: a pattern ending in "/" is the directory itself, not the
+;; names in it.
+(test-equal "a trailing slash answers the directory itself"
+            (list wild-dir)
+            (file-expand-wildcards wild-dir))
+(test-equal "an absolute pattern answers absolute names"
+            #t
+            (let ((name (car (file-expand-wildcards
+                              (string-append wild-dir "c.scm")))))
+              (and (char=? (string-ref name 0) #\/)
+                   (string=? (file-name-nondirectory-part name)
+                             "c.scm"))))
+(test-equal "file-local-name is the name itself when nothing is remote"
+            (list "/tmp/x.txt" "x.txt")
+            (list (file-local-name "/tmp/x.txt") (file-local-name "x.txt")))
+
+(test-end "schemacs_editor_files_wildcards")

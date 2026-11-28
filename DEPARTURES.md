@@ -19384,3 +19384,3026 @@ region)` third argument, the `unix-word`/`emacs-word` region values, and
 the "Read only text copied to kill ring" message. Named for a future
 pass; the read-only branch's observable behaviour (text in the ring,
 then the error) already matches.
+
+# `rx.el`, the sexp-to-regexp translator (2026-11-26)
+
+`schemacs/core/rx.scm` is `lisp/emacs-lisp/rx.el` whole - the
+translator, the `rx` macro, `rx-to-string`, `rx-define`,
+`rx-let-eval` and the `(pcase ... (rx ...))` pattern - ported for the
+Groovy modes, whose 40 `(rx ...)` forms are the reason it comes first.
+The differential (`tools/` has no copy yet; the forms and both dumps
+are described below) is **49 of 49 forms byte-identical to Emacs
+31.1's `(rx-to-string FORM t)`**, over Groovy's own forms plus rx's
+examples: alternation through `regexp-opt`, `[[:class:]]` sets, the
+complement/intersection interval arithmetic, counted repetitions,
+greedy and non-greedy operators, `syntax`/`category`, `\``/`\'`
+anchors, and the `rx--generate-alt` bracket-rewriting rules (`]`,
+`-`, `^` placement, the `,-` split).
+
+## Departures, and whether to fix them
+
+1. **`rx-let` is not carried.** Emacs expands it with
+   `macroexpand-all` over a `macroexpand-all-environment` entry that
+   the nested `rx` expansions read; Guile has no `macroexpand-all`, so
+   a local definition could not reach an `rx` inside BODY. Fixable only
+   with an expander of our own. `rx-let-eval` (the runtime path) IS
+   carried and emits Emacs's regexps (`(rx-let-eval '((xx "hi"))
+   (rx-to-string '(seq xx "!")))` is `"\\(?:hi!\\)"` on both sides).
+2. **`rx-define`'s compile-time half is emulated in the transformer.**
+   `eval-and-compile`'s compile-time evaluation does not exist in
+   Guile (top-level effects run at load), so the macro's transformer
+   performs the `put` as it expands - which is what makes a
+   `(rx user-name)` later in the SAME file work - and the emitted form
+   repeats it idempotently at load. Same observable behaviour.
+3. **Delayed `(literal EXPR)`/`(regexp EXPR)` are hygienic here.**
+   Emacs's macro splices the caller's forms into a generated `concat`;
+   this port scans the syntax, replaces each non-string argument with a
+   marker, translates, then splices the caller's syntax objects back.
+   The introduced names (`string-append` for Emacs's `concat`, and
+   `regexp-quote`) are emitted in THIS library's lexical context, so a
+   caller imports nothing to use `(literal x)` with a variable.
+4. **`eval` forms are evaluated in this library's module** (the
+   transformer's `(current-module)` / `rx-to-string`'s), where Emacs
+   evaluates them in the caller's obarray. `(eval (list 'seq "0-9"))`
+   works on both sides; `(eval (any "0-9"))` errors on both, with
+   different text. Named, not fixable without a caller-visible
+   environment.
+5. **A regexp string here cannot hold the raw-byte characters**
+   #x3FFF00..#x3FFFFF (Guile's `integer->char` stops at #x10FFFF), so
+   a pattern that needs them raises instead of matching. Emacs can emit
+   them two ways - a user's `(any "\x3fff00-\x3fffff")`, and the
+   complemented-range rule when a set's intervals span #x3FFF7F. The
+   `(not (any ...))` forms the Groovy modes use all take the `[^...]`
+   branch, which carries no raw bytes, so nothing in reach is affected.
+   **This is the tree's standing byte-character departure showing at
+   the pattern-string edge**, and closing it means representing a
+   pattern as code points rather than a string - an engine change, not
+   an rx one.
+6. **The pcase pattern's match procedures are closures made in
+   `rx.scm`**, where Emacs's expansion names `string-match` and
+   `match-string` and lets the obarray find them; a pcase pattern is
+   data, so a name would resolve at the use site and those live in
+   `(schemacs search)` here. The names left as symbols (`string?`,
+   `and`, `app`, `pred`, `quasiquote`) are `(scheme base)`'s. A use
+   site needs `(schemacs core rx)` loaded (it registers the
+   `pcase-macroexpander` property) and imports nothing from it.
+7. **The macro's expansion says `string-append` where Emacs says
+   `concat`** (`(scheme base)`'s, so it is portable to any caller);
+   anything that *reads* the expansion rather than running it sees the
+   difference.
+8. `make-obsolete-variable` on `rx-constituents` and the
+   `rx-submatch-n` obsolete alias are not carried (no variable
+   obsoletion here; the alias would pull `command.scm` in for a name
+   nothing calls). The obsolete `any` symbol translates silently to
+   `nonl` without the byte-compiler warning.
+9. `rx--builtin-forms`/`rx--builtin-symbols` are defined BEFORE
+   `rx--normalize-char-pattern` (Emacs forward-declares them with a
+   `defvar` inside the function); same values, no warning.
+
+## Two primitive bugs this port found, both fixed at the source
+
+* **`member-if` answered `()` where Emacs answers nil** (its
+  `(drop-while ...)` suffix when *every* element is dropped).
+  `()` is true, so `(any PRED LIST)` - the alias every `(any ...)`
+  boolean test uses, including rx's own - took "nothing found" for a
+  match: `rx--generate-alt` complemented a set it should not have.
+  `member-if` now answers `#f` for no match, which is Emacs's nil, and
+  keeps the suffix for a match. (`subr.el:1223`; callers in
+  font-lock, files, regex-emacs and window all test it as a boolean.)
+* **A `cond` with no matching clause in `rx--reduce-to-char-alt`**
+  answered the unspecified value where Emacs's cond answers nil, so
+  every non-character form looked like a character alternative. It has
+  an explicit `(else #f)` now, with a comment saying why. This is the
+  `when`/`cond`-in-value-position trap in its third spelling in this
+  tree.
+
+## Tests
+
+`test/core/rx-test.scm` (new, 60): the 49-form table (Emacs 31.1's
+answers verbatim), the macro with `literal`/`regexp` values, `rx-define`
+as an alias and with an argument list, `rx-let-eval`, and four pcase
+patterns. Wired into `tools/run-suites.py`. The full suite battery is
+green (all suites, `rx-test` 60) and `python3 tools/pty-check.py
+imports scratch` is 2/2. `schemacs/loadup.scm` carries `(schemacs core
+rx)` and `imports.scm` is regenerated (137 libraries, 5605 names).
+
+# The Groovy modes, and the four primitives they broke open (2026-11-26)
+
+`schemacs/external/groovy-modes/` is the third-party Groovy-Emacs-Modes
+package (https://github.com/Groovy-Emacs-Modes/groovy-emacs-modes,
+version 2.2), the first phase of Chris's order "port the parts that
+don't need comint, and then after that port comint.el, compile.el etc
+and inf-groovy". The package's own files are ported whole -
+`groovy-mode.el`, `groovy-electric.el` and `grails-mode.el` - in
+`schemacs/external/groovy-modes/`, one library per file, with each
+function in the upstream file's order and with its docstring.
+
+## The prerequisites, and where each lives
+
+- **`rx.el` is the whole file** - `(schemacs core rx)` - documented in
+  the section above; the Groovy keyword tables are `rx` forms
+  transcribed as written.
+- **`find-cmd.el` is the whole file** - `(schemacs find-cmd)`,
+  `schemacs/find-cmd.scm`. The upstream's `find-constituents` holds
+  *symbols* that the obarray resolves with `fboundp`/`funcall`; here
+  they are symbols resolved through `%find-functions`, a hash table
+  filled at the end of the file - the same stand-in `cc-mode` uses for
+  its language functions. A datum that is not a registered function
+  falls through `find-generic` to `find-form-to-string`.
+- **`s.el` and `dash.el` are SUBSETS** (`(schemacs external s)`,
+  `(schemacs external dash)`), each with its upstream URL and the list
+  of what is not carried: the seven string functions and three `-p`
+  aliases the Groovy modes call (`s-trim`, `s-split`, `s-starts-with?`,
+  `s-ends-with?`, `s-matches?`, `s-blank?`, `s-blank-str?`) and `->>`.
+  `s--truthy?` is written as `(if val #t #f)` with a comment: Elisp's
+  test is `(not (null val))` and *`null?` asks about the empty list*,
+  so the first version reported every failed match as a success.
+- **The shell-command family**, needed by `grails-list-project-files`
+  and reused by everything else: `shell-command`,
+  `read-shell-command`, `shell-command-switch`,
+  `call-process-shell-command`, `shell-command-to-string`,
+  `shell-command-buffer-name`, `shell-command-save-pos-or-erase`,
+  `minibuffer-local-shell-command-map` and the `*shell-command-*`
+  variables. Placement departures, all named where they are:
+  `shell-command-switch` and `call-process-shell-command` are
+  `simple.el`'s and `subr.el`'s but live in `callproc.scm` (the library
+  above them cannot be imported by `simple.scm`, which is below); the
+  `shell-command` *command* is in `minibuffer.scm` because it prompts.
+  **Not carried**: asynchronous mode (`&`) and the separate error
+  buffer - both need the process layer of phase 2 - and TAB
+  completion of file names in `read-shell-command`.
+- **`with-output-to-string`** (`subr.el`'s, in `editfns.scm` - a named
+  placement: it makes a buffer and reads it back, and `subr.scm` is
+  below both) with `standard-output`. The `standard-output` binding is
+  made with the *caller's* lexical context (`datum->syntax`), which is
+  what makes a body that imported it see the binding; the printing
+  primitives do not consult it, and every caller inserts instead.
+- **`locate-dominating-file`** and `locate-dominating-stop-dir-regexp`
+  (`files.el:1264`), in `files.scm`.
+- **`defsubst` and `eval-and-compile`** (`byte-run.el`) in
+  `core/byte-run.scm`. `defsubst` defines and records the inlining
+  marker (nothing reads it - no byte compiler); `eval-and-compile` is
+  its load-time half only, because Guile's compiler does not evaluate
+  top-level side effects, and the comment says which ported code would
+  need the other half.
+- **`string-to-char`** (`editfns.c:176`), `number->string`, and a fix
+  at the primitive: `member-if` answered `()` for "no match" where
+  Emacs answers nil (found through `rx`'s `(any ...)` use).
+
+## The Groovy modes: departures
+
+- **`groovy-font-lock-keywords` is defined after the search functions
+  it names** and its function-valued entries hold the *procedures*,
+  where Emacs's `defvar` holds symbols and the obarray resolves them.
+  The keyword variable is resolved through
+  `font-lock-register-keyword-variable!` with a thunk, so the mode
+  body's `add-to-list` of the assignment matcher stays visible. The
+  mode body's entry was transcribed with Emacs's quoted *symbol* at
+  first, and font-lock applied the symbol: "Wrong type to apply:
+  groovy-variable-assignment-search".
+- **`define-minor-mode` is given the keyword form** in
+  `groovy-electric.scm` where upstream writes the positional one, and
+  `grails-mode`'s `:keymap` - which Emacs accepts as a `(KEY . DEF)`
+  alist - is built into a real keymap with `kbd` and `define-key`
+  first.
+- **`groovy-electric-mode`'s variable half is
+  `groovy-electric-mode-variable`** (the accessor `define-minor-mode`
+  generates): in a Lisp-1 the bare name is the command.
+- **`anything` is not ported**, so `grails-show-project-files` cannot
+  show its list. The call is the seam `*grails-anything-function*`,
+  whose default signals a message naming the missing library; the
+  command's work before the call - finding the root, running `find`,
+  building the display names - runs, and the tests drive it.
+- **`file-name-directory`/`file-name-nondirectory` are
+  `file-name-directory-part`/`-nondirectory-part`** here (fileio's
+  names).
+- **Not carried**: `imenu-generic-expression` (no imenu),
+  `electric-indent-chars` (no `electric-indent-mode` - see below), the
+  abbrev entry, `groovy--remove-comments` was exported only so the
+  package's own test can call it, and `grails-mode`'s `defgroup`s.
+- **`electric-indent-mode` is not ported**, which is visible in
+  `groovy-electric`: with it on (Emacs's global default is t) typing a
+  brace in an indented line leaves the line reindented, and the
+  measured Emacs buffer is `"def foo() {\n    { }  \n}\n"` where this
+  tree gives `"def foo() {\n{ }  \n}\n"` - the same buffer Emacs
+  produces with the mode off. The electric test says so where it pins
+  the answer. This is the same named gap `cc-mode.scm` records.
+- **The catch handler.** `groovy--backwards-to-prev-code-line` uses
+  `(catch 'done ... (lambda (value) value))`, which is Elisp's shape;
+  Guile calls a `catch` handler with `(KEY . THROWN-VALUES)`, so the
+  one-argument handler raised "Wrong number of arguments" on the first
+  `throw`. It is `(lambda (key value) value)` now.
+- **`when`/`unless` in value position, five times**, all in matchers or
+  predicates whose answer is tested: `groovy-special-prop-search`,
+  `groovy-variable-assignment-search` and `groovy-declaration-search`
+  (the last returns `#f` from a failed search instead of the
+  unspecified value - a truthy answer there made font-lock's keyword
+  loop never advance, an infinite loop in `C-h`-free fontification),
+  the two interpolation matchers, and
+  `groovy--line-ends-with-incomplete-block-statement-p`, whose
+  every-line-"incomplete" truthiness indented every following line one
+  level deeper than Emacs. They are `when-e`/`unless-e` from
+  `(schemacs core syntax-macros)` - the tree's macros for exactly this
+  Elisp nil.
+- **Two structural paren errors, both balanced files**: the recursive
+  `(groovy-declaration-search limit)` was the `and`'s fourth conjunct
+  instead of the `or`'s second arm (so every match was undone by the
+  recursion's final `#f`), and the `(when (s-ends-with-p "<" ...))`
+  closed a form early. The parsed structure - each `cond`/`and`'s
+  clause and operand heads - is what named them; the reader and
+  compiler were happy.
+
+## The shared primitives this shook out
+
+Every one was a departure from `syntax.c`/`regex-emacs.c` found by
+running the Groovy modes against Emacs 31.1 face for face:
+
+1. **`syntax-propertize` rewound `syntax-propertize--done` after the
+   mode's function** (`syntax.scm`). The C binds the in-process
+   sentinel around the function *and* the `syntax-ppss--updated-cache`
+   flush that follows it (`syntax.el:455-466`); our `dynamic-wind`
+   restored the real limit before the flush, so
+   `syntax-ppss-flush-cache` - which does `(min BEG DONE)` unless the
+   sentinel is in place - put the limit back at the *chunk start*.
+   After that every character of the next parse re-ran the whole
+   propertizer: measured, `(syntax-ppss 20)` in a groovy buffer took
+   8.5 s, and the mode's fontification looped. The flush now runs
+   inside the sentinel extent, and the regression test asserts
+   `syntax-propertize--done` is the chunk end after a function that
+   calls `syntax-ppss` (test/syntax-test.scm).
+2. **`parse_sexp_propertize`'s closing `SETUP_SYNTAX_TABLE`**
+   (`syntax.c:480`) was missing its prime. The C re-runs the syntax
+   cache for CHARPOS after the mode's function writes the properties;
+   our `%setup-syntax-table` only resets, and the priming is lazy - by
+   the next character read - so the character whose property had just
+   been written was read from the syntax *table*. Groovy's shebang rule
+   puts `< b` on the buffer's first `#` and the parse never saw it, so
+   the whole shebang line lost its comment face. `%parse-sexp-propertize`
+   now primes for CHARPOS after the reset.
+3. **A string's `syntax-table` text properties were not read by the
+   regexp engine** (`regex-emacs.scm`). The C's
+   `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT` (`syntax.c:276`) sets
+   `gl_state.object` and `update_syntax_table` walks that object's
+   intervals, so `buffer-substring` - which copies properties - carries
+   a mode's propertization into a later `string-match`.
+   `%make-class-reader` now reads a string's own intervals for
+   `SYNTAX(c)`, with `gl_state`'s run cache (B_PROPERTY/E_PROPERTY), and
+   gates it on `parse-sexp-lookup-properties`, which is Emacs's own
+   condition (measured: the same propertized string matches with the
+   flag non-nil and does not with it nil). Without this,
+   `groovy--ends-with-comma-p` answered nil where Emacs answers 27: the
+   expression-end regexp's `\s|` arm matches a `/` carrying the
+   string-fence property groovy's propertizer wrote.
+4. **`[[:space:]]`-family classes inside a charset read the buffer
+   table**, not the position's `SYNTAX(c)`. `%execute-charset`'s class
+   chain takes the character's class now (`class-at`, which is the
+   string-aware reader) rather than a table, so a charset's syntax
+   classes are position-aware exactly as `execute_charset`'s
+   `SYNTAX (c)` is.
+
+The two `syntax.scm` fixes and the engine's string-property support are
+shared primitives: the full suite and pty batteries were run on them.
+
+## Verification
+
+- **Indentation: 51 of 51 cases identical.** The package's ert suite
+  has 51 `should-indent-to`/`should-preserve-indent` pairs; extracted
+  mechanically and run through both editors' `indent-region` (Emacs
+  31.1, `indent-tabs-mode` nil), Emacs reproduces every expected result
+  and this tree's output is byte-identical to Emacs's on all 51.
+- **Faces: two differentials, run for run identical.** A 590-byte
+  sample and a 647-line file built from every string literal in the
+  package's ert file, fontified with `font-lock-ensure` on both sides
+  and compared position by position: 388 and 4161 face runs, zero
+  differences.
+- **The transcribed suite** (`test/external/groovy-modes/groovy-mode-test.scm`,
+  115 tests): every ert test - the 51 indentation pairs, every
+  `with-highlighted-groovy` assertion, and `groovy--remove-comments` -
+  with `ert` spelled `srfi 64` and the two macros as procedures.
+  `groovy-electric-test.scm` (12) and `grails-mode-test.scm` (18) cover
+  the other two files; the displayable-name table and the project
+  listing are Emacs 31.1's own answers on the same tree.
+- Regression tests for the primitives: two in `test/syntax-test.scm`
+  (`schemacs_editor_propertize_sentinel`) and three in
+  `test/search-test.scm` (`search_string_syntax_properties`), all
+  Emacs-measured.
+
+## What is left
+
+- **Phase 2**: the asynchronous process layer (`process.c`:
+  `start-process`, filters and sentinels, `accept-process-output`),
+  `comint.el`, the part of `compile.el` it needs, then `inf-groovy.scm`.
+- `anything`, imenu and `electric-indent-mode` are the three things the
+  Groovy modes name and this tree does not have; each is a named gap
+  above rather than a stub that pretends.
+- `grails-jump-to-model`/`-controller`/`-view` are upstream TODOs
+  (their bodies only `message`); they are ported as they stand.
+
+# The rx pcase pattern could not be compiled, and the pcase-defmacro
+# limitation behind it (2026-11-27)
+
+Found by the compile sweep that follows every pass
+(`find schemacs -name '*.scm' | ... compile-file`): `test/core/rx-test.scm`
+and, at HEAD too, `test/core/pcase-test.scm` were the only two files
+the compiler refused. Both are now understood; one was fixed, one is a
+Guile/Elisp difference that is recorded rather than papered over.
+
+## `(pcase ... (rx ...))` crashed the compiler - fixed
+
+The `rx` pattern's expander built the match procedures as **closures**
+and put them in the pattern data, so the expansion contained procedure
+objects. Guile's compiler refuses a procedure as a *source constant* at
+every optimization level - `compile-file` dies in the CPS type pass
+with `unhandled constant #<procedure ...>` - so any library using an
+`(rx ...)` pattern could not be compiled, while the interpreted
+evaluator accepted it (which is why the suite was green).
+
+Measured before the fix: the failing prefix of `rx-test.scm` compiles
+up to the first `(pcase "abc" ((rx "a" (let x "b")) x) ...)` and fails
+on it; a minimal probe (`(define-macro (mk) (let ((p (lambda (x) x)))
+`(,p 41)))`) fails at `-O0` through `-O3`.
+
+Fixed by making the expansion pure data, which is also closer to
+Emacs's shape (Emacs's expansion names `string-match` and
+`match-string`): the matchers are now the exported procedures
+`rx--pcase-pred`, `rx--pcase-match-1` and `rx--pcase-match-n`, called
+with the regexp string as a constant - `(pred (rx--pcase-pred RE))`,
+`(app (rx--pcase-match-1 RE) ...)`. A pcase pattern is data, so those
+names resolve **at the use site**, and that is the departure this
+introduces: **a module using the `(rx ...)` pcase pattern must IMPORT
+`(schemacs core rx)`**, where Emacs needs only the load (its obarray is
+global). Everything else in the data is `(scheme base)`'s
+(`string?`, `and`, `app`, `pred`, `quasiquote`) or a constant. The
+single-variable arm's `(pred (lambda (v) (not (number? v))))` is now
+emitted as lambda *source* rather than a closure, for the same reason.
+
+`test/core/rx-test.scm`'s new row - "the expansion holds no procedures
+(it must compile)" - walks `pcase--macroexpand`'s answer and fails on
+any procedure anywhere in it; it is the regression test for the class.
+The file itself now compiles.
+
+## `pcase-defmacro` at top level is a runtime registration - recorded
+
+`test/core/pcase-test.scm` fails to compile at HEAD and still does,
+and it is not this tree's bug: the file defines a pattern macro with
+`pcase-defmacro` and uses it a few lines later. `pcase-defmacro`
+expands to `(begin (define NAME (lambda ...)) (register-pattern-macro!
+'NAME NAME))`, and Guile's compiler expands every top-level form
+without *executing* the earlier ones, so the registration has not
+happened when the later `pcase` form is expanded - "Unknown pcase
+pattern: (string-of 3)". Elisp's byte-compiler avoids this by
+evaluating `defmacro` forms as it goes; Guile has no equivalent for a
+form that registers at run time.
+
+It matters beyond test scripts: an Emacs library that defines a pattern
+macro and uses it in the same file cannot be compiled here as things
+stand. All the tree's pcase-pattern users define and use them in
+separate places, and the suite runner interprets its scripts
+(`--no-auto-compile` with a fresh cache), so nothing in the tree is
+affected today. A future port that needs one file to do both would have
+to either split the definition into its own library or make
+`pcase-defmacro` emit a `(eval-when (expand load eval) ...)` - which
+only helps expanders that are self-contained, because the expansion
+runs before the file's other top-level definitions. Named here so the
+next session does not re-diagnose it.
+
+# The process layer: `src/process.c`, the subprocess half (2026-11-27)
+
+Phase 2 of the Groovy work begins with the asynchronous process layer
+comint stands on. `schemacs/process.scm` is new: the process object,
+`make-process`/`start-process`, the filters and sentinels,
+`accept-process-output`, the wait loop and the send side. The
+synchronous `callproc.scm` is untouched.
+
+## The mechanism, and the two crashes that chose it
+
+Emacs forks and execs; here the first version used `primitive-fork` and
+**aborted the whole editor** - SIGABRT inside Guile's own `scm_fork`,
+from a `pthread_once`, whenever a Scheme `sigaction` handler had started
+Guile's signal-handling thread. Diagnosed from the core with gdb
+(`#6 scm_fork`). Guile's own `(ice-9 popen)` avoids the trap the same
+way: its spawner is a C primitive (`scm_piped_process`), not Scheme
+code after `fork`.
+
+So the spawn is the C's where the C can do it:
+
+* **A pipe process is `posix_spawn`** - Emacs's own preferred path
+  (`emacs_spawn`'s `USABLE_POSIX_SPAWN` branch) - with the C's
+  descriptors as `posix_spawn_file_actions_t` (dup2 stdin/stdout/stderr,
+  close the other ends, `addchdir_np` for the directory). Built and
+  called through `(system foreign)`.
+* **A pty process is `forkpty(3)`** - openpty, fork and `login_tty`
+  (setsid + `TIOCSCTTY` + the three descriptors) in C, which is
+  `emacs_spawn`'s pty branch. The child then calls libc `execv` with
+  argv/envp built before the fork; nothing else in Scheme.
+
+Two more measured facts went into it: `string->pointer` hands back
+GC-managed memory, and `free` on it corrupts the heap ("free(): invalid
+size" after about a hundred spawns) - so nothing is freed; and a pty
+has ONE descriptor for the child's stdin and stdout, so both `dup2`s
+must precede the close or the second one is `EBADF`.
+
+## Named departures
+
+* **Network, serial and datagram processes are not carried** - the half
+  of process.c that wants sockets and termios. `make-network-process`
+  and friends are absent rather than stubbed.
+* **`:stderr` is not carried**: a child's standard error is its
+  standard output (the `:stderr nil` behaviour, which is what comint
+  uses), via `adddup2`/`dup2` of the output descriptor onto 2.
+* **A mixed `:connection-type`** (a cons of `pty` and `pipe`) is an
+  error rather than a working setup; both directions are supported.
+* **`SIGCHLD` is a Scheme `sigaction` handler that only flags**, and in
+  practice it does not even do that usefully: a child dead for four
+  seconds still answered `run`. Guile delivers the handler on its own
+  thread, and the terminal's `select` did not end (measured in the live
+  editor). **The reaper is therefore a 0.2 s repeating timer**, armed
+  when the first process is created and cancelled when the last one is
+  gone; the command loop's read already wakes for the next timer
+  (`timer-next-delay`), runs `timer-check!`, and redisplays when a timer
+  ran. On a terminal Emacs's `pselect` is interrupted by the signal and
+  this is a departure in mechanism only - the reaping, the status
+  conversion and the sentinel are the C's.
+* **The exec-failure pipe is not carried.** The program is located
+  before the spawn (`%locate-program`, the `openp` call `make-process`
+  makes), a `posix_spawn` failure is reported from its return code, and
+  a `forkpty` child whose `execv` fails exits 127.
+* **The keyword plist is data.** Scheme's `:name` is not a
+  self-evaluating keyword (measured: unbound), so `make-process` is
+  called with quoted keywords; `start-process` and
+  `start-process-shell-command` are the ordinary spellings.
+* `process-contact`, `list-processes`, `process-attributes`,
+  `list-system-processes`, `set-process-window-size` and
+  `make-pipe-process` are not carried.
+
+## The redisplay the wait needed
+
+Emacs's read loop is a `pselect` over the keyboard *and* the process
+descriptors, runs the filters from that wait and then redisplays
+(`redisplay_preserve_echo_area`). The terminal's `read-input-event` now
+watches `(process-wait-descriptors)` beside the keyboard, reads what is
+ready, runs the sentinels, and redraws when anything moved. Getting the
+text actually *on screen* took one more rule, and it is the C's:
+
+**A window whose start is exactly `Z` cannot display a nonempty buffer
+from there.** `try_window` fails, `redisplay_window` sets
+`w->force_start` and reaches `recenter:`, which recentres on point. It
+is reachable in ordinary use: the default filter inserts with
+`insert-before-markers`, and a new, empty process buffer shown in a
+window has its start marker AT the insertion point - so the marker
+travels to the end with the text and the text is above the window.
+Measured on Emacs 31.1 the same case answers `(window-start)` 1 with the
+output on screen; ours answered `point-max` and drew blank rows until a
+key. `scroll-to-cursor!` now applies the rule (in `xdisp.scm`, with the
+C reference).
+
+## Verification
+
+* `test/process-test.scm` (31 tests): the object and accessors, the
+  sentinel messages ("finished\n", "exited abnormally with code 3\n"),
+  stderr mixed into stdout, a custom filter, `process-environment` and
+  `default-directory` reaching the child, a `process-send-string` round
+  trip through `cat`, `process-send-region`, eof, `delete-process`,
+  `signal-process`, and a pty child that sees a terminal. Every
+  expectation is Emacs 31.1's answer for the same program.
+* `tools/pty-check.py`'s **`process-output`**: a `sh` started from the
+  init file speaks two seconds later while the editor sits idle, and
+  both its output and the default sentinel's "Process live finished"
+  must appear with no keystroke. It **failed** with the read-loop
+  servicing removed, with the start-at-Z rule removed, and with the
+  poll timer removed - and passes with all three.
+
+## What comint needs next
+
+This layer, and only this layer, is what `comint.el` stands on: it uses
+`start-file-process` (→ `start-process` → `make-process`), `processp`,
+`process-status`, the filter and sentinel accessors,
+`set-process-coding-system`, `process-send-string`/`-region`, `delete-process`
+and `accept-process-output`. `process-environment` is honoured exactly
+(`clearenv` + `putenv` per entry in the pty child, the envp array in the
+spawned one), which `comint-exec-1` relies on for `TERM`.
+
+# `ring.el`, and `data.c`'s `mod` (2026-11-27)
+
+`schemacs/core/ring.scm` is `lisp/emacs-lisp/ring.el` whole, in the
+file's order, and `test/core/ring-test.scm` transcribes
+`test/lisp/emacs-lisp/ring-tests.el` and adds the functions that suite
+does not reach (every added expectation measured on Emacs 31.1). It
+exists because `comint.el` requires it: `comint-mode` makes
+`comint-input-ring` with `(make-ring comint-input-ring-size)` and
+`comint-read-input-ring`/`comint-insert-input` are all ring calls.
+
+## The representation
+
+Emacs's ring *is* `(cons HEAD (cons LENGTH VECTOR))`, and the port keeps
+that object rather than wrapping it in a record: every accessor takes
+the cons apart, `ring-p` is a structural test, and `ring-copy` shares
+the same shape. Two consequences:
+
+* **An unused vector slot is `#f`** where Emacs's is nil. Nothing reads
+  past `ring-length`, and `ring-remove` writes `#f` into the slot it
+  empties, so no caller can tell - but a REPL `(ring-copy r)` prints
+  `#f` where Emacs prints `nil`.
+* `(cl-deftype ring '(satisfies ring-p))` is a compile-time type alias
+  with no run-time behaviour; it is not carried.
+
+## Return values, measured
+
+The ert suite does not look at them, and the bodies are easy to get
+wrong:
+
+| call | Emacs 31.1 |
+|---|---|
+| `(ring-insert r item)` | the ITEM (`prog1` over `aset`) |
+| `(ring-insert-at-beginning r item)` | the new LENGTH (`setcar` answers the stored value) |
+| `(ring-remove r)` | the removed element |
+| `(ring-next r x)` (x absent) | error `Item is not in the ring: ‘x’` |
+
+`ring-insert` was written first as "the old element", which is the
+common Lisp reading of a ring insert; the measurement says otherwise,
+and the port now returns the item.
+
+**The error text keeps the backquote and the apostrophe** here
+("Item is not in the ring: `x'"); Emacs 31 renders `` `x' `` as curly
+quotes under `text-quoting-style`, which this tree's reporter does not
+do. That is the tree-wide quoting departure, not ring's.
+
+## `mod` (`data.c:3448`), which the ring needed
+
+`ring-index` and friends call `mod`; `(scheme base)` has no `mod` and
+Guile's toplevel one is not importable from a library, so the primitive
+was ported - into `schemacs/data.scm`, where `data.c` has it.
+
+* **Integer arm**: `integer_remainder (x, y, true)` is R7RS's `modulo`,
+  which the port uses.
+* **Float arm**: `floatfns.c:570`'s `fmod_float` is `fmod (f1, f2)` and
+  then the sign fix. **libm's `fmod` has no Scheme binding in this
+  Guile** (there is no `fmod`, `(ice-9 math)` does not exist, and
+  `remainder`/`modulo` refuse a flonum), so the port writes fmod out as
+  `x - trunc(x/y)*y`. That is fmod's definition and agrees with it
+  except in the last bits for very large magnitudes, where libm's is
+  exact - a named departure. The C's `y` of 0 gives a NaN; the written
+  form divides by zero (an infinity) and `truncate` raises - also
+  named. Measured agreement on the ordinary cases: `(mod -7.5 3)` 1.5,
+  `(mod 7.5 -3)` -1.5, matching Emacs.
+* `check_number_coerce_marker` is not carried - it needs `markerp`,
+  which is a library above `data.scm`; no caller here passes a marker.
+
+A Guile fact this cost: **`(scheme base)` does not export
+`exact->inexact`** in this Guile, though R7RS's table lists it - the
+compile said "possibly unbound" and the run raised. `data.scm` imports
+it from `(guile)` explicitly, beside `ash` and the hash accessors.
+
+# The primitives comint needed, and comint's first tranche (2026-11-27)
+
+`comint.el` is being ported in two tranches; this is the first, and the
+primitives it stands on came first. All the new shared functions are
+measured against Emacs 31.1 where an expectation exists.
+
+## New shared primitives
+
+* **`field-string`, `field-string-no-properties`** (`editfns.c:498`,
+  `:510`) in `editfns.scm`, and **`field-at-pos`** - `subr.el:4802` in
+  Emacs, placed in `editfns.scm` because `subr.scm` here is below
+  `field-beginning` (the `back-to-indentation` rule, named in the
+  source).
+* **`compare-buffer-substrings`** (`editfns.c:1752`) in `editfns.scm`,
+  with the C's swap-inverted-bounds, its BEGV/ZV validation, and the
+  *current* buffer's CANON table for folding. Measured
+  `(-4 0 -1)` on a fixture, identical to Emacs. `char_table_translate`
+  (the `character.h:592` inline) is now a shared
+  **`char-table-translate`** in `chartab.scm` - a placement note
+  against `character.h`, made because `char-table-ref` is what it is.
+* **`file-accessible-directory-p`** (`fileio.c:3259`) in
+  `fileio.scm`, the POSIX single-`access` arm (`DIR/./`), measured on
+  `/tmp`, a file, a missing name and the empty string.
+* **`mod`** (`data.c:3448`) in `data.scm`. The integer arm is R7RS
+  `modulo`; the float arm is `fmod_float` (`floatfns.c:570`) written
+  out as `x - trunc(x/y)*y` **because libm's `fmod` has no Scheme
+  binding in this Guile** - a named last-bits departure for very large
+  magnitudes, and a zero-divisor departure (Emacs answers NaN, this
+  raises).
+* **`scroll-margin` and `maximum-scroll-margin`** (`xdisp.c:38756`,
+  `:38762') as `define-custom`s in `xdisp.scm` - `cus-start` makes
+  them user options.
+* **`font-lock--remove-face-from-text-property`** (`font-lock.el:1433`)
+  in `font-lock.scm`.
+* **The process signal commands** (`process.c:7126'` and the five
+  DEFUNs at `:7273'-`:7360'): `interrupt-process`, `kill-process`,
+  `quit-process`, `stop-process`, `continue-process`,
+  `process-query-on-exit-flag`, `set-process-query-on-exit-flag`.
+  **Not carried**: `SIGNALS_VIA_CHARACTERS` - the arm that writes the
+  terminal's VINTR/VQUIT/VSUSP byte instead of calling `kill` (it needs
+  `tcgetattr`); the `kill` path is the C's own fallback and reaches the
+  same process group. `process-send-eof`'s PROCESS is optional now, as
+  the DEFUN's is (nil means the current buffer's process).
+* **`set-window-point` and `set-window-start`** (`window.c:2126`,
+  `:1914`) in `frame.scm`, over the `!` setters. `set-window-start`'s
+  NOFORCE is accepted and has no effect (this tree's `set-window-start!`
+  always raises the mode-line flag), and `set-window-point`'s
+  `Fgoto_char` arm does not reproduce the out-of-range signal.
+* **`start-file-process`** (`simple.el:5293') in `process.scm` - a
+  placement departure: `simple.scm` is above this library (it imports
+  `keyboard`, which imports `process`), so a definition there would
+  close the cycle. The file-name-handler arm has nothing to find here.
+* **`version.scm`** (new, `version.el`'s data): `emacs-version` "31.1"
+  and the two numerals. The `emacs-version` *command*, the build
+  variables, and the Lisp-1 name collision with the variable are named
+  in the file.
+* **`international/mule-conf.scm`** (new): only
+  `password-word-equivalents` and `password-colon-equivalents`, the two
+  variables `comint-password-prompt-regexp` is built from. The rest of
+  `mule-conf.el` is the charset/coding-system definitions, which live
+  in `charset.scm`/`coding.scm` here.
+
+## `comint.scm`, tranche 1
+
+The variables and buffer-local accessor pairs, the faces' names,
+`comint-mode`, `comint-check-proc`, `make-comint-in-buffer`,
+`make-comint`, `comint-exec`, `comint-exec-1`, `comint-term-environment`,
+`comint-nonblank-p`, the input-history ring (read, add, search,
+previous/next input and matching), `comint-output-filter` with carriage
+motion and prompt highlighting, the scrolling-on-output functions, the
+prompt helpers, the simple senders, the output and subjob commands, and
+the keymap's portable bindings.
+
+Named as not yet in, with the reason each waits: **`comint-send-input`
+and its dependants** (the AUTOEXPAND branch is the history expansion,
+so they are one piece), the prompt matching motions (their field-based
+arms were not read and are not guessed at), `comint-write-output`
+(`write-region`), `comint-send-invisible` (`read-passwd`), the
+completion cluster (`completion-at-point`), the history isearch, the
+redirect subsystem, `comint-osc-process-output` (ansi-osc),
+`comint-fontify-input-mode` (indirect buffers), `comint-get-source`,
+`comint-run` (its interactive spec prompts; a seam when the minibuffer
+library has one), and the `follow-mode` arm.
+
+Representation notes:
+
+* **Hooks are plain list variables**, as `cc-mode.scm` spells mode
+  hooks: `run-hooks`/`run-mode-hooks` take the list, and a parameter
+  would be applied rather than run.
+* **`add-hook` takes the hook parameter object**, not a symbol:
+  `(add-hook *pre-command-hook* f)`. The mode adds its pre-command
+  entry globally and the function guards on `derived-mode-p`, since
+  this tree's `add-hook` has no LOCAL arm.
+* **`*comint-output-filter-functions*`'s default is installed at the
+  end of the file**, because its Emacs value names a procedure defined
+  later.
+* **`file-name-directory` is `file-name-directory-part` here**
+  (`fileio.scm`'s spelling of `Ffile_name_directory`); the two comint
+  call sites use it.
+* **Docstrings are abridged** to Emacs's first sentence or two.
+* `comint-mode`'s body omits Emacs's `make-local-variable` calls (the
+  accessors read the buffer's slot first) and the three pieces named
+  above (`text-conversion-style`, the `filter-buffer-substring-function`
+  `add-function`, the `completion-at-point-functions` local hook).
+* `comint-truncate-buffer`'s `forward-line` argument is the C's
+  negative count; `comint-delete-output` builds its replacement text
+  with a local `replacement` `let` because `set!` answers the
+  unspecified value.
+
+**The paren lesson of this pass, again**: a file can be *balanced* and
+still have a body closed one level too high - the reader accepted it,
+the compiler reported a "form that failed to match any pattern" whose
+head was a list of `define`s, and the tell was dumping the parsed
+`define-library`'s clause list: `(length lib)` showed 5 while some of
+the file's forms were not among `begin`'s children. Fixing the missing
+close inside `comint-output-filter`'s prompt-highlighting `let` (the
+one place the count was off) put all 167 forms back inside
+`(begin`, and the spurious extra `)` that had balanced it could then be
+removed.
+
+# comint tranche 2: `comint-send-input` and the argument machinery (2026-11-27)
+
+`comint-send-input`, `comint-replace-by-expanded-history` (with
+`-before-point`), `comint-magic-space`, `comint-within-quotes`,
+`comint-how-many-region`, `comint-args`, `comint-delim-arg`,
+`comint-arguments`, `comint-update-fence`, `comint-send-eof`,
+`comint-skip-input` and `comint-delchar-or-maybe-eof` are in, and the
+keymap binds RET, C-d and C-c C-d - the keys Emacs's map gives them.
+
+## `string-to-number` (`data.c:3092`), which `comint-args` needs
+
+`data.c`'s DEFUN over `lread.c`'s `string_to_number`: leading spaces and
+tabs skipped, the longest valid prefix taken, 0 when there is none, base
+2..16 as an integer-only parse. **The prefix scanners are written out**
+because the C delegates to `strtol`/`strtod`; every edge case was
+measured on Emacs 31.1 and pinned in the function's comment: `"12abc"`
+12, `" 12"` 12, `"1e3"` 1000.0, `"1e"` 1 (an exponent needs digits),
+`"1."` 1 (a trailing dot with no fraction digits does not make a float),
+`"+.5"` 0.5, `"abc"` 0, `"0x10"` 0, `"12"` base 16 = 18, `"ff"` base 16
+= 255, `".e3"` 0.
+
+## `validate_region` coerces markers now (`buffer.c`)
+
+`comint-send-input` passes the process marker to `buffer-substring`, as
+Emacs's does, and the C's `validate_region` coerces it
+(`CHECK_FIXNUM_COERCE_MARKER`). This tree's `validate-region` had a
+comment saying no caller passed a marker and that the coercion could
+not be written there anyway (the marker library is above it); it now
+does the coercion through `*check-fixnum-coerce-marker-function*`, the
+seam `marker.scm` installs, and the comment says why the moment came.
+`compare-buffer-substrings` grew the same coercion for its START/END.
+
+## Two bugs the pty check found, both in the output path
+
+1. **`comint-last-output-start` must be moved, not replaced.**
+   `comint-output-filter` is `(set-marker comint-last-output-start
+   (point))` in Emacs; the first version wrote `set!` with the number,
+   so the marker `comint-mode` made was gone and the next `set-marker`
+   on the slot was called with a number. The unit suite did not see it
+   because headless the first output arrives *after* `comint-send-input`
+   has already re-set the marker; in a terminal the shell prompt arrives
+   during the idle read, before any input.
+2. **`comint-carriage-motion` gets a marker for START** - Emacs's
+   arithmetic coerces it, Scheme's `>` refuses it. It converts START and
+   END at entry now. The symptom in the terminal was the *first* prompt's
+   output raising "Wrong type argument in position 1: #<<marker ...>"
+   from the process read path, where the command loop's guard does not
+   reach and the only sign is the echo area.
+
+## Departures, all named in the source
+
+* **The completion-at-point dry run is carried** (2026-11-27): the
+  expansion is Emacs's two functions, `comint-replace-by-expanded-history`
+  answering the thunk `comint-c-a-p-replace-by-expanded-history` builds.
+  The dry run is what makes the command do nothing when
+  `comint-input-autoexpand` is nil - measured on Emacs 31.1, and the
+  reason it was written the other way first. `completion-at-point` is
+  still not ported, so the c-a-p function has no caller of its own
+  beyond the command.
+* **`ding` is `dispnew.c`'s and is ported**; a reference that cannot be
+  found says "Not found" and rings, as Emacs does.
+* `comint-arguments`' `w32-shell-dos-semantics` arm is not carried (no
+  w32); backslash escapes are always literal-ish, as on POSIX.
+* `comint-magic-space` calls `(self-insert-command arg)` - Emacs's
+  `(self-insert-command (prefix-numeric-value arg))`; this tree's
+  `self-insert-command` takes its character from `*last-command-event*`
+  when it is not given one, which is what the command passes here.
+* Emacs's `(interactive nil comint-mode)` on `comint-send-input` is
+  `(interactive '())` here; its two optional arguments are a rest list.
+
+## The marker coercions comint needed (`textprop.c`, 2026-11-27)
+
+`comint-previous-input` (M-p) after a command had run answered garbage:
+the history string landed before the shell's prompt and point ended
+inside it. The cause was not comint. **Every text-property entry point
+that takes a position accepts a marker, and this tree's did not** - so
+the output filter raised partway, `process.c`'s filter wrapper reported
+"error in process filter: Wrong type argument in position 2: #<<marker
+...>>" to `*Messages*`, and the filter's remaining work (marking the
+prompt `rear-nonsticky`, remembering `comint-last-prompt`) never ran.
+The visible damage: `get-pos-property` at the prompt's end answered
+`output` instead of nil, `field-beginning` went back to the prompt's
+start, and `comint-get-old-input-default` left point there.
+
+The C has two spellings, and each is now ported where the C has it:
+
+| C | here | coerces |
+|---|---|---|
+| `CHECK_FIXNUM_COERCE_MARKER` in `validate_interval_range` (`textprop.c:136`) | `%check-fixnum-coerce-marker` in `validate-interval-range` | `add-`/`put-`/`remove-`/`set-text-properties`, `text-property-any`/`-not-all` |
+| `CHECK_FIXNUM_COERCE_MARKER` in the property walks (`textprop.c:818`, `:905`, `:974`, `:1041`, ...) | same helper in all eight `next-`/`previous-` `-property-change` functions, position *and* limit | `next-single-property-change`, `previous-single-property-change`, `next-property-change`, `previous-property-change`, and the four char-property walks |
+| `fix_position` (`buffer.c:147`) at `textprop.c:614` for the getters | `%fix-position` in `get-text-property`/`get-char-property` (and `text-properties-at`) | a marker from *any* buffer, no current-buffer test |
+| `CHECK_FIXNUM_COERCE_MARKER (position)` (`editfns.c:288`) | `fix-position` at the top of `get-pos-property` | |
+| Elisp's `(< start end)` over the two ends | `fix-position` in `font-lock--add-text-property` | `comint-snapshot-last-prompt` (`comint.el:2131`) passes the two markers of `comint-last-prompt` |
+| `CHECK_FIXNUM_COERCE_MARKER` in `delete-region`/`put-text-property` (`comint-carriage-motion`'s `delete-end`) | `marker-position` where `delete-end` is compared and passed | |
+
+Measured on Emacs 31.1 and pinned in `test/textprop-test.scm`'s
+`schemacs_editor_textprop` group (six new rows): with `p` on 2..4 of
+`abcdef`, `(put-text-property M2 M4 'p 'x)` answers nil and reads back
+`x`; `(add-text-properties M2 M4 '(q y))` answers `t`;
+`(next-single-property-change M2 'p nil 6)` is 4,
+`(previous-single-property-change M4 'p)` is 2, a marker *limit* works;
+`(get-char-property M2 'p)` is `x` and `(get-pos-property M2 'p)` nil;
+`(text-property-not-all M2 6 'p 'x)` is 4.
+
+**The lesson is about swallowing, not about markers**: an error inside a
+process filter is caught by `process.c`'s `condition-case` and only
+*reported* - so a half-run filter looks like a command that quietly did
+something odd, three libraries away. The old C-p probe would have looked
+correct against an empty buffer; only a buffer with a real prompt (with
+`field` and `rear-nonsticky` properties) could show it.
+
+## Verification
+
+* `test/comint-test.scm` (22): the argument rows, measured on Emacs
+  31.1; `comint-within-quotes`; `comint-args`; and a real `/bin/sh`
+  comint buffer - make-comint, the mode, the process, `comint-send-input`
+  with the pty's echo, the history ring, `comint-previous-input` (the C-p
+  retrieval now runs at the real prompt, after output has moved the
+  process mark and the `field`/`rear-nonsticky` properties exist - the
+  case that found the missing marker coercions), and `!!` expansion with
+  `comint-input-autoexpand` set to `input`. The shell-derived waits
+  (`CMU-42`) are computed by `/bin/sh`, so the typed text cannot satisfy
+  them. Registered in `tools/run-suites.py`.
+* `tools/pty-check.py`'s **`comint`**: the init makes a `/bin/sh`
+  comint buffer and shows it; RET sends `echo PTC-$((6*7))` and the
+  check waits for `PTC-42`, which only the shell can produce (the first
+  version asserted the typed text and was hollow). **Seen failing** with
+  the RET binding removed (RET then inserts a newline through the global
+  map and no output arrives).
+* `ring` 82, `loadup` 16, `imports.scm` regenerated and compiled; the
+  editor starts (pty `scratch` passes).
+
+## A forced window start at Z is honoured (2026-11-27)
+
+`display-window!`'s "a start at Z is not a start" rule (added with the
+process layer, for a process buffer whose `window-start` marker had
+travelled to the end) recentred **every** start at `point-max`,
+including one Lisp had just asked for with `set-window-start`. Emacs
+does not: measured on 31.1 in a real terminal,
+
+    (set-window-start (selected-window) (point-max))
+    (sit-for 0)
+    (window-start)                      => 501   (= point-max)
+
+with point either at the beginning or at `point-max` itself. `w->force_start`
+is checked before the "start is not a start" failure, and a forced start
+is laid out as asked.
+
+The departure cost the mouse drag its scroll: `mouse-scroll-subr`
+(`mouse.el:1708`) sets the start to point each step and stops when
+`vertical-motion` at that start answers 0. With the rule, the `sit-for`
+at the end of the step that put the start at `point-max` recentred it
+back to `point-max - body/2`; the next step scrolled forward again, and
+the loop bounced **446 -> 491 -> 446** for ever - the whole drag hung
+with no error, in `mouse-test`'s "held past the bottom, it scrolls to
+the end of the buffer".
+
+The fix is the C's precedence: the recentre branch now runs only when
+`(window-force-start? window)` is false. A start that drifted to Z
+without a `set-window-start` (the process-output case the rule exists
+for) still recentres; a forced start is honoured, Z or not.
+
+**The lesson**: a rule that patches one reachable state must be
+conditioned the way the C conditions it, not on the state alone - the
+C's `force_start` check is a page above the `try_window` failure, and
+reading only the failure is what produced a rule that fought
+`set-window-start`'s own caller. `mouse-test`'s scroll test is the
+regression; `tools/pty-check.py`'s `process-output` and `comint` checks
+(alone) still pass, which is the other side of the same rule.
+
+## comint's source-file helpers, and `get-file-buffer` (2026-11-27)
+
+`comint-source-default`, `comint-check-source`, `comint-extract-string`
+and `comint-get-source` (`comint.el:3068'-`:3160'`) are in, verified
+against Emacs 31.1: a string at point is `"bar"`, no string is nil, the
+previous `(DIR . FILE)` pair is used when the buffer is not a source
+buffer, and with nothing remembered the answer is the default directory
+alone. `test/comint-test.scm` pins them (40).
+
+**One placement departure, forced by the import graph**:
+`get-file-buffer` is `buffer.c`'s (`Fget_file_buffer`), but it opens
+with `Fexpand_file_name`, which is `fileio.scm`'s and above
+`buffer.scm` - the same seam that put `locate-file-internal` in
+`fileio.scm`. It lives in `files.scm` beside `find-buffer-visiting`, and
+the C's exact-expansion rule is pinned in `test/files-test.scm`
+(`/tmp/../tmp//name` finds the buffer). `comint-check-source` is its
+caller: a source-file command asks whether the file is being visited and
+modified before loading it.
+
+## compile.el: the parser, the runner and the navigation (2026-11-27)
+
+`lisp/progmodes/compile.el` is ported into
+`schemacs/progmodes/compile.scm`, both tranches: the error-regexp data
+and the parser (`compile.el:45-1930`), the loc/file-structure machinery
+(`:3479-3543`), the process runner (`compile`, `compilation-start`, the
+sentinel, the filter and the exit handler), the mode and its maps, the
+shell/minor modes, and the navigation commands (`compilation-next-error`,
+`compilation-next-file`, `compile-goto-error`, `next-error-function`,
+`compilation-goto-locus`, `compilation-find-file`).
+
+**The parser's gate is a differential**: 186 cases from Emacs 31.1's own
+`compile-tests--test-regexps-data`, run through `compilation-parse-errors`
+in a fresh buffer each, comparing the `compilation-message`'s location
+(col, line, file, end-col, type, rule) - 186/186 identical, pinned in
+`test/progmodes/compile-test.scm` (1314 assertions).  The end-to-end
+gate is `tools/pty-check.py`'s `compile`: `M-x compile`, a script that
+prints `errf.txt:2: error: boom`, the parsed line, `n` and RET visiting
+line 2.
+
+### Representation departures (the tree's conventions, not Emacs's)
+
+- **`compilation--message` is a record** with the `cl-defstruct`'s
+  accessor names.  `compilation--file-struct` and the loc are the C
+  macro's conses (`(FILE-SPEC FORMATS . LOC-TREE)`, locs
+  `(COL LINE FILE-STRUCT MARKER TIMESTAMP . VISITED)`) because
+  `compilation-assq` rewrites them in place.  The loc-tree's anchor is
+  the FACT that `compilation--file-struct->loc-tree` is `(cdr fs)`, not
+  a separate field: `compilation-assq` inserts line and column entries
+  into the same spine, exactly as Emacs's macro does.
+- **`compilation--make-file-struct` normalizes FORMATS to a list.**
+  Emacs's FORMATS field is `apply`ed over (`compilation-find-file`'s
+  rest argument), so a nil there is the empty list; this tree's nil is
+  either `'()` or `#f`, and the parser hands over the latter for a rule
+  with no explicit format list.  Storing `#f` made
+  `(apply compilation-find-file ... formats)` raise `Apply to non-list:
+  #f` at the first `next-error`.
+- **The buffer-local-capable variables** - `compilation-locs`,
+  `compilation-error-screen-columns`, `compilation-first-column`,
+  `compilation-directory`, `compilation-environment`, `-search-path`,
+  `-arguments`, `-current-error`, `-messages-start`, `-parsed`,
+  `-highlight-regexp`, `-auto-jump-to-next`, `-previous-directory-cache`
+  and the three `compilation-num-*-found` - are a **global parameter
+  plus a `(name)`/`(set!name v)` accessor pair** reading the buffer's
+  slot.  `compilation-locs` is a hash table, as Emacs's is.
+- **`compilation-mode-font-lock-keywords` is split into two names**: the
+  data variable keeps the name and the function is
+  `compilation-mode-font-lock-keywords-function`, registered through
+  `font-lock-register-keyword-variable!`.  Emacs has one symbol that is
+  both a variable and a function; a Lisp-1 cannot, and
+  `font-lock-eval-keywords` prefers the function (`fboundp` before
+  `boundp`).
+- **The HIGHLIGHT faces are expressions, and they are evaluated as
+  data.**  Five alist rules carry a form instead of a face name:
+  `compilation-face '(3)` twice, the omake rule's
+  `(progn (compilation--flush-file-structure (match-string 1)) nil)`,
+  the makepp rule's nested `save-match-data`/`compilation-parse-errors`
+  (with a backquoted sub-rule whose type is computed by `,(cond ...)`),
+  and javac's `current-column` function symbol for the column.
+  `%compilation-eval-face` is the `(eval (car extra-item))` those stand
+  for: it recognises the forms Emacs's own data uses and signals on
+  anything else - Emacs's "Don't know how to handle face" arm.  A
+  Scheme port cannot `eval` a Lisp form, and there is no general
+  evaluator for these data.
+- **`compilation-loop` is `%compilation-loop-up`/`-down`** (its forward
+  and backward arms), answering `(PT N LAST MSG)`.  Emacs's macro
+  splices a `while` with `setq`s into the caller; a Scheme procedure can
+  only answer the four values.  `MSG` is last because it is the message
+  the caller must not lose when the loop ends.
+
+### Placement departures, each forced by the import graph
+
+- **`start-file-process-shell-command`** is `subr.el:5063`'s but lives
+  in `process.scm`: `subr.scm` is below the process layer, and
+  `compilation-start` needs it.
+- **`read-shell-command`** is `simple.el:4398`'s but lives in
+  `minibuffer.scm` (it prompts; the `goto-line` rule).  It was already
+  there; `compile.scm` imports it from minibuffer.
+- **`next-error-follow-minor-mode`** and its post-command hook are
+  `simple.el:512`'s but live in `compile.scm`: the hook reads
+  `compilation-context-lines` and `compilation-current-error`, and
+  `simple.scm` is below the library that owns them.
+- **`recenter-top-bottom`** is `window.el:10868`'s but lives in
+  `simple.scm`: it reads `this-command`/`last-command`, which are that
+  library's.  `C-l` is bound to it at the end of `simple.scm`
+  (`window.el:10902`'s binding, overriding the `recenter` binding
+  `frame.scm` makes for window.c's own command, which Emacs binds to no
+  key).  The `next-error` keys (`C-x \``, `M-g n`, `M-g M-n`, `M-g p`,
+  `M-g M-p`) are bound there too, flat, because the lookup does not
+  descend into a submap.
+- **`get-file-buffer`** is `buffer.c`'s (`Fget_file_buffer`) but lives
+  in `files.scm` beside `find-buffer-visiting`: it opens with
+  `Fexpand_file_name`.  (It landed with the comint pass and is named
+  there too.)
+
+### Primitive changes made for this port
+
+- **`set-window-point` now coerces a marker.**  `window.c:1903`'s
+  docstring says POS is "a number or marker"; the C's selected-window
+  arm reaches `Fgoto_char` (which does `CHECK_FIXNUM_COERCE_MARKER`)
+  and the other arm `set_marker_restricted` (which coerces too).  Ours
+  passed the marker to the buffer's point writer, whose integer check
+  raised "text editor index must be set with an integer" - the first
+  RET on a compilation line, from `compilation-set-window`'s
+  `(set-window-point w mk)` with `mk` a marker.
+- **`display-buffer` consults `display-buffer-overriding-action`**
+  (`window.el`'s defvar): `next-error` and `recenter-current-error`
+  bind it to `'(nil (inhibit-same-window . t))`, which is how Emacs
+  stops the source file replacing the compilation window.
+- **`delete-dups`** (`subr.el:921`) is ported; `compilation-directory`
+  and the transform alist walk use it (both arms: `equal` and a
+  custom `:test`).
+- **`command-line-normalize-file-name`** (`startup.el:3160`) is ported
+  and exported; the parser calls it on every parsed file name.
+- **`dired-other-window` takes its optional SWITCHES** again
+  (`dired.el`); `compile-goto-error`'s directory branch passes them.
+- **`read-shell-command` is exported from `minibuffer.scm`**;
+  `next-error-move-function` and its setter are exported from
+  `simple.scm` (the navigation calls it).
+
+### Named gaps (also listed in the library header)
+
+**This list was closed the same day** - see "compile.el's departures
+closed: the UI half, and one Guile miscompilation" and "The last mile of
+the compile.el pass" below, which supersede it.  What still stands:
+
+- `selective-display`'s **renderer** half: the variable is a per-buffer
+  slot, `compilation-beginning-of-line` is the C's own function arm for
+  arm (a 36-row differential), and the redisplay does not yet stop a
+  line at ^M (it owns `find_newline`'s selective ends and the ellipsis).
+- `compilation-set-overlay-arrow` is still a stub: its feature is a
+  `((margin left-margin) "=>")` display spec in a two-column margin, and
+  this renderer draws neither display margins nor fringe bitmaps.
+- `define-compilation-mode`'s `compilation-XXX` variable aliasing is
+  Emacs's `intern-soft`/`boundp` over the obarray; no derived
+  compilation mode exists here yet.
+- The w32 arms are not ported, per the standing rule.
+
+### Translation hazards this pass hit, for the next porter
+
+The classes are the tree's usual ones, but each cost a run here:
+`'()` is true (`compilation-assq`'s nil tests, `(if (cdr file) ...)`),
+`(car nil)`/`(cdr nil)` are errors (the loc tree's nil-safe readers
+`%c-car`/`%c-cdr`/`%c-cadr`/`%c-cddr`), a `when`/`unless`/`cond` used
+as a value answers the *unspecified* value when it does not fire (the
+directory lookup, `compilation--file-known-p`), `set!` in value
+position answers the unspecified value where Elisp's `setq` answers the
+new value, Elisp's `if` takes any number of else forms (several C arms
+needed a `begin`), a parameter read as a variable is a procedure (two
+`simple.scm` seams called the parameter object with arguments - that
+was `Wrong number of arguments to #<procedure ... () | (x)>`), and
+**the error templates are Guile's `~a`, not Emacs's `%s`**: every
+`message`/`error`/`user-error` this file signals was translated, because
+Guile's `format` prints a literal `%s` where Emacs's would substitute
+(and this tree's `error` builds its message with the `~` dialect).
+
+# compile.el's departures closed: the UI half, and one Guile
+# miscompilation (2026-11-27)
+
+Chris: "can you fix the departures and continue?"  This closes every
+named gap in `schemacs/progmodes/compile.scm`'s header that does not
+need a redisplay feature the tree has not built.  The parser and runner
+bugs fixed first (the two `%compilation-loop-*` helpers' `msg`
+recursion, `compilation--update-markers`'s wrong walk, the file-struct
+FORMATS normalization, and `set-window-point`'s marker coercion -
+`window.c`'s "a number or marker") are recorded in AGENTS.md's handoff;
+this is what was ported around them.
+
+## The mode line's `%s`, and the variable registry it needed
+
+`compilation-mode-line-errors` is `(:eval (format ...))` in Emacs, and
+the `%s` construct is `mode-line-process`.  Ported as the C has them:
+
+- **`%s`** (`xdisp.c:29824`) asks the frame's selected window's buffer
+  for a process and prints its status, or "no process".  The process
+  layer is below `xdisp.scm`, so it arrives through the parameter
+  `*mode-line-process-status-function*`, which `process.scm` installs at
+  load.  `%s` sits in the construct table with `%l`/`%c`, and
+  `mode-line-mode-name` inserts `mode-line-process`'s formatted value
+  after the mode name, as `bindings.el:609` does.
+- **A construct's symbol is evaluated through a registry.**  `format-
+  mode-line` can hold `(SYMBOL THEN ELSE)` and the `:eval` form names a
+  *plain variable* of `compile.scm`, which has no buffer slot and no
+  `define-custom` reader.  `register-mode-line-variable!` is that
+  registry - one entry per variable, a thunk - consulted by
+  `mode-line-symbol-value` after the buffer slots and the custom
+  readers.  `compile.scm` registers `compilation-mode-line-errors`.
+  (Departure: Emacs reads `symbol-value` over its obarray; this is the
+  tree's no-universal-registry rule, one registry per kind.)
+
+## The toolbar, the Skip submenu, and `copy-keymap`
+
+- **`copy-keymap`** (`keymap.c:1018`) is ported whole - `copy_keymap_1`
+  and `copy_keymap_item`, with the C's recursion guard, the deep copy of
+  subkeymaps and of the parent, and the leading cells of a menu item
+  copied.  `compilation-mode-tool-bar-map` is `copy-keymap` of
+  `tool-bar-map` plus `define-key-after`, exactly `compile.el:2494`.
+- The four images are Emacs 31.1's own (`cancel`, `refresh`, and their
+  `.pbm` fallbacks), copied from GITE into `schemacs/etc/images/`.
+- **`customize-set-variable` and `custom-quote`** (`cus-edit.el:1046`,
+  the file's first tranche - `schemacs/cus-edit.scm`) are what the
+  "Skip Less Important Messages" items are lambdas over:
+  `(customize-set-variable 'compilation-skip-threshold N)`.  The items
+  are `:radio` and their states are `(= (*compilation-skip-threshold*)
+  N)` forms evaluated by `menu-item-eval-property`.  With them the
+  submenu is Emacs's three entries.
+- `menu-bar-separator` was registered in `menu-bar.scm`; the toolbar
+  test finds it as `'()` (`subr.el:7700`'s old-style `("--")`), the
+  known answer.
+
+## `compilation-hidden-output`, and the `invisible` property
+
+The abbreviating path needed three real ports, in this order:
+
+1. **`string-lines`** (`subr.el:7940`) and **`string-search`**
+   (`fns.c:6583`) in `subr.scm`/`fns.scm`.
+2. **`invisible-p`** (`xdisp.c`) and **`text-prop-means-invisible`**
+   (`textprop.c`'s `TEXT_PROP_MEANS_INVISIBLE`, in `textprop.scm`) over
+   `buffer-invisibility-spec`, read as the buffer slot (default `t`).
+   `add-to-invisibility-spec`/`remove-from-invisibility-spec`
+   (`subr.el:6509`, `:6524`) are in `simple.scm` - a named placement,
+   they write a buffer-local slot and `buffer.scm` is below that
+   library, the same seam `buffer-narrowed-p` takes.
+3. **The renderer hides the run.**  `line-display-texts` (`indentc.scm`)
+   asks `text-prop-means-invisible` after the `display` property (the
+   C's order, `handle_invisible_prop` at `xdisp.c:5206`): a run with no
+   replacement contributes zero columns, and a spec whose element has a
+   non-nil cdr shows `"..."` once at the start of the run.  That is what
+   `compilation--insert-abbreviated-line`'s `buttonize-region` then
+   makes clickable; **`schemacs/button.scm`** carries the button.el
+   subset it needs (`buttonize-region`, the `button` text properties,
+   `push-button`, the `button` face), whose callback removes the
+   properties - Emacs's `(lambda (button) (remove-text-properties
+   ...))`.
+
+`compilation--hide-output` inserts with the C's property list -
+`(list 'invisible #t 'rear-nonsticky #t)` - and the buffer's
+`buffer-invisibility-spec` defaults to `t`, so the region is hidden with
+no setup of its own.
+
+## `format-seconds`, and the one departure it carries
+
+`compilation--format-seconds` wrote its one format by hand.  The real
+`format-seconds` (`time-date.el:269`) is now in
+`schemacs/calendar/time-date.scm`, a partial time-date.el carrying only
+it, with `time-add` (`timefns.c`) added beside `time-subtract`.  The
+port is the C's `%s`/`%S`/`%z`/`%x`/`%%` and width/precision walk,
+`disassemble-time`-style unit math included, and every row of its test
+was measured on Emacs 31.1 first.  **Departure**: Emacs converts its
+arguments to the float `(TICKS . HZ)` form and back, so
+`(format-seconds "%s" 5)` answers the string `"5"` via floats; this port
+keeps an integer argument's integer arithmetic (the answers agree for
+every value a caller uses, and the test pins the float input too).
+
+## The remaining named gaps, sized
+
+- **`selective-display`** (the variable is `buffer.c:5475`).  The
+  *Lisp* half is now exact: `compilation-beginning-of-line`
+  (`compile.el:1578`) is the C's three-line function, arm for arm, and
+  a 36-row differential over `"aa\rbb\rcc\ndd"` (six start positions ×
+  six N, both values of the variable) is identical to Emacs 31.1.  What
+  remains is the **renderer's** half: `find_newline`'s selective line
+  ends and the `^M` ellipsis (`selective-display-ellipses`).  That is a
+  redisplay pass of its own (every row walk and the two front ends);
+  the feature is off by default and nothing here sets it.
+- **`compilation-set-overlay-arrow`** (`compile.el:3225`).  Its feature
+  is a `((margin left-margin) "=>")` display spec in a two-column left
+  margin (`compilation--dummy-string`, `--set-up-margin`).  This
+  renderer draws neither display margins nor fringe bitmaps:
+  `window-fringes` answers a terminal's `(0 0 #f #f)` on both front
+  ends, and `window-margins` stores a width the row builder never
+  shifts for.  Porting it means: left/right margin geometry through
+  `window-body-width`, every row walk, `posn-at-x-y`, the cursor and
+  both backends; and `((margin AREA) STRING)` in the display-property
+  machinery.  A pass of its own, and with the default
+  `compilation-context-lines` nil Emacs draws no arrow either, so the
+  default path matches.  The navigation still sets
+  `overlay-arrow-position`.
+- **`define-compilation-mode`'s variable aliasing** (`compile.el:2555`)
+  is `intern-soft`/`boundp` over the obarray.  This tree has no
+  obarray (the deliberate no-universal-registry rule) and no derived
+  compilation mode is ported, so there is nothing to alias; a derived
+  mode's port must name its variables explicitly, or the tree grows a
+  `boundp` registry first.
+- The w32 arms are not ported, per the standing rule.
+
+## The Guile 3.0.11 miscompilation this pass hit
+
+`(format "%d" 1.5)` raised "Format specifier doesn't match argument
+type" although the source accepts a float (`editfns.c:3843` truncates
+toward zero).  The code was right and the *compiler* was wrong:
+
+    (define (p arg) (if (integer? arg) 'i (if (inexact? arg) 'x 'o)))
+    (write (p 1.5))
+
+compiled at Guile 3.0.11's **default optimization level** raises
+`inexact?: Wrong type argument ... 1.5`; the same file at `-O0`, at
+`-O1`, and interpreted answers `x`.  A `cond` whose first test is
+`(and (integer? arg) (exact? arg))` takes its `else` arm for every
+float.  This is the third compiler defect this tree has worked around
+(`regex-emacs.scm`'s `(set! main-loop main-loop)`, `cc-cmds.scm`'s
+`#:optimization-level 1`).
+
+The safe shape, which is what `%format-one` now uses, is to ask the
+*guarding* predicate first and bind the result of the second:
+
+    (if (not (number? arg))
+        E
+        (let ((ex (exact? arg)))
+          (if ex
+              (if (integer? arg) I (error ...))
+              (inexact->exact (truncate arg))))))
+
+It is correct at -O0, -O1, -O2 and interpreted.  **Any ported numeric
+predicate chain should be checked in a compiled build**, not only under
+the interpreter or `run-suites.py` (which compiles nothing).
+
+## Verification
+
+- The parser differential is unchanged (186/186; `compile-test`
+  1340 assertions at this point, 1348 after the last-mile group).
+- New unit groups: `files-test` 55 (`file-expand-wildcards`'s wildcard,
+  question mark, class, missing-file, trailing-slash bug#15417 and
+  absolute-name rows; `file-local-name`), `fns-test` 50
+  (`string-search`), `subr-test` 124 (`string-lines`, `ensure-list`),
+  `keymap-test` 110 (`copy-keymap`: bindings, recursive subkeymap,
+  parent, and both directions of independence), `indentc-test` 19 (the
+  invisible run and the ellipsis), `simple-test` 20 (the two spec
+  commands against Emacs's measured `(foo t)` / `(bar foo t)` / `(bar
+  t)`), and the two new suites `calendar/time-date-test` 19 and
+  `cus-edit-test` 12, now registered in `tools/run-suites.py`.
+
+# The last mile of the compile.el pass: a mode variable that was never
+# set, a #f keyword list, and `inf-groovy` (2026-11-27, later)
+
+Four things fell out of finishing the pass and starting the next
+milestone; the first two are bugs of this tree that only a caller could
+find.
+
+## `compilation-shell-minor-mode` could never be switched off
+
+`compilation-shell-minor-mode` and `compilation-minor-mode` were
+hand-written `define-command`s (the comment said the `compilation-XXX`
+aliasing was the reason).  Their bodies ran `compilation-setup` but
+**never set the mode variable**: the slot stayed `#f`, so `'toggle`
+always took the enable branch, the mode could not be turned off
+interactively, and neither the ` Shell-Compile`/` Compilation` lighters
+nor the modes' own keymaps existed.
+
+They are `define-minor-mode`s now, with Emacs's docstrings, lighters and
+bodies (`(if (compilation-shell-minor-mode-variable) (compilation-setup
+#t) (compilation--unsetup))`), and the getters are exported.  **A named
+ordering departure**: `define-minor-mode` asks its module for
+`MODE-map` as the definition form runs, and a Scheme keymap binding does
+not exist until its `define` has - so the two modes are defined *after*
+`compilation-minor-mode-map`/`compilation-shell-minor-mode-map`, where
+Emacs defines them before.  `compile-test`'s `minor_modes` group pins
+the variable, the return value, the lighter, the key resolving only
+while on, and that `'toggle` now switches off.
+
+## `font-lock-remove-keywords` over #f
+
+`font-lock-add-keywords` calls `font-lock-remove-keywords` to avoid
+duplicates.  In a buffer with no font-lock defaults the keyword list is
+**`#f`**, and Emacs's `dolist` over nil runs zero times where this
+port's `loop` tested `null?` and then `(car #f)` - "Wrong type argument
+... expecting pair: #f".  The first `compilation-shell-minor-mode` in a
+plain buffer is what ran it.  The walk starts from
+`(or (font-lock-keywords) '())` now, and `font-lock-test`'s
+`no_defaults` group is the regression: add a keyword in a buffer with
+no defaults, turn the mode on, and the keyword must highlight.
+
+## `comint-check-source` called an unimported `y-or-n-p`
+
+Porting inf-groovy's `groovy-load-file` reaches it: the save-first
+question raised `Unbound variable: y-or-n-p` (the missing-import class,
+found by the compiler's "possibly unbound" warning).  `y-or-n-p` is
+`files.scm`'s here and is imported now.  The comint buffer-local
+accessors/setters the library needs (`comint-prompt-regexp`,
+`comint-input-filter`, `comint-get-old-input`, `comint-process-echoes`,
+`comint-eol-on-send`, `comint-use-prompt-regexp`) are exported; only
+the parameters had been.
+
+## `inf-groovy`, the Groovy modes' phase 2
+
+`schemacs/external/groovy-modes/inf-groovy.scm` is upstream's
+`inf-groovy.el` (Groovy-Emacs-Modes) whole: the two options, the prompt
+patterns, the mode and its map, `inf-groovy-keys`, `run-groovy`, the
+send/switch/load commands, the input filter and old-input reader, and
+the `compilation-shell-minor-mode`/error-regexp setup.  Three spellings
+are named in its header: buffer-locals are written with their setters;
+`read-string` in `run-groovy`'s interactive form is
+`read-from-minibuffer` (`(scheme base)`'s own `read-string` shadows the
+prompt reader in an importing library); and the keymaps are filled at
+the end, after the commands they bind.
+
+**`groovy-mode-hook` is a parameter now** (`*groovy-mode-hook*`, with
+the mode passing `(*groovy-mode-hook*)` to `define-derived-mode`), as
+`compilation-mode-hook` already was: `add-hook` takes the hook object,
+and inf-groovy's `eval-after-load` equivalent is an `add-hook`.
+
+`run-groovy` and `inferior-groovy-mode` are in `command.scm`'s
+`%command-autoloads`.  **Named departure**: Emacs's third autoload,
+`inf-groovy-keys`, is added to the hook as an autoloadable *symbol*; a
+hook here holds procedures, so the library must be loaded before the
+keys appear - `M-x run-groovy` does that, and until then a
+`groovy-mode` buffer has no inf-groovy keys.
+
+`test/external/groovy-modes/inf-groovy-test.scm` (19) pins the three
+pure helpers against the functions read out of upstream and evaluated
+in Emacs 31.1, the buffer state `inferior-groovy-mode` leaves, the two
+keymaps, and the hook entry.
+
+## Verification
+
+The whole tree compiles (`cc-cmds.scm` at `#:optimization-level 1`);
+`schemacs/imports.scm` is regenerated and compiled; **121 suites pass**
+(`compile-test` 1348, `font-lock-test` 21, `inf-groovy-test` 19,
+`comint-test` 40, `groovy-mode-test` 115).
+
+**The pty battery on the final tree did not finish, and that is a
+resource fact, not a result.**  Its run was stopped by the background
+task supervisor because the system was critically low on memory (the
+killed process left no output at all).  The last *complete* battery was
+**115/115** on the tree before the last-mile changes; the checks those
+changes touch are covered by the suites listed above, and the new
+`inf-groovy` pty check has **not been run**.  Run
+`python3 tools/pty-check.py` alone on a machine with memory free.
+
+# `kill-whole-line`, the visible-line movers, and comint's read-only
+# prompt kills (2026-11-27, later still)
+
+Four of comint's named gaps closed by porting what they stand on,
+bottom up.  None of it needs the renderer.
+
+## `invisible-p` moved down into `textprop.scm`
+
+`simple.el`'s `forward-visible-line`/`end-of-visible-line` call
+`invisible-p`, whose Emacs home is `xdisp.c` - and `xdisp.scm` is
+*above* `simple.scm`.  Everything the function reads is
+`textprop.c`'s (`get-char-property` and `text-prop-means-invisible`),
+so it lives in `textprop.scm` now and `xdisp.scm` imports and
+re-exports it; every other caller is unchanged.  **A named placement
+departure**, the same seam-motivated move `%minor-mode-alist*` and
+`back-to-indentation` made, and it is what lets the movers exist at
+all.
+
+## `forward-visible-line`, `end-of-visible-line`, `kill-whole-line`
+
+`simple.el:6887`, `:6941` and `:6824`, clause for clause, including
+`kill-whole-line`'s two-step kill (the text before point and the text
+after it become one ring entry through the `last-command` trick) and its
+`let` of `kill-read-only-ok` - a `parameterize` here.  **One named
+departure**: Emacs's `condition-case` names the error symbols
+`beginning-of-buffer`/`end-of-buffer`; this tree has one error type and
+its bounds errors are the ones `cmds.scm`'s `%move-point` makes with
+the messages those symbols carry, so the catch tests the message and
+re-raises anything else.
+
+The binding is `bindings.el:1409`'s `[C-S-backspace]` - the event
+*symbol*, because `(kbd "C-S-backspace")` is an error in Emacs too
+("C-S- must prefix a single character").
+
+Measured rows in `test/simple-test.scm` (`kill_whole_line` 8,
+`visible_lines` 3): mid-line and line-start kills forward and backward,
+arg 0, end of buffer, the end-of-buffer signal on a final empty line,
+and the two movers with an `invisible` newline and an invisible run -
+every answer Emacs 31.1's on the same text and point.
+
+## comint's read-only prompt commands
+
+- **`comint-kill-whole-line`** (`comint.el:2992`) and
+  **`comint-kill-region`** (`:3006`), with `inhibit-read-only` and
+  `inhibit-field-text-motion` bound, and `comint-update-fence` where
+  Emacs calls it.  `comint-kill-region`'s front-sticky test is ported
+  with `listp`'s nil-is-a-list reading spelled out (`(or (not X)
+  (list? X))`).  **Departure**: Emacs's interactive specs are
+  `(interactive "p" comint-mode)` / `("r" comint-mode)`; the MODES
+  argument only filters M-x completion (`read-extended-command-predicate`),
+  not execution, and it is not carried.
+- **`comint-proc-query`** (`:3186`), line for line.
+
+`test/comint-test.scm` pins both kill commands against Emacs 31.1's
+buffer/point/ring answers, and runs `comint-proc-query` against the
+`/bin/sh` the suite already starts (its answer must appear in the
+process buffer, and the input ring must be untouched).
+
+The comint header's not-carried list is corrected: `comint-get-source`/
+`-check-source` had been ported earlier and were still listed, and the
+three commands above are gone from it.  What remains is named with what
+each waits for - `comint-write-output` (`write-region`),
+`comint-read-noecho`/`-send-invisible` (`read-passwd`), the completion
+cluster (`completion-at-point`), history isearch, redirect, OSC,
+fontify-input (indirect buffers), indent-input, `comint-run` (the
+`read-string` seam **and** `read-from-string` for its prefix-switches
+arm), and follow-mode.
+
+## Verification
+
+The whole tree compiles; `imports.scm` is regenerated and compiled
+(the three new simple exports, the three comint commands, and
+`textprop`'s `invisible-p`).  The affected suites pass:
+`textprop-test` 51, `simple-test` 32, `comint-test` 48,
+`indentc-test` 19, `font-lock-test` 21, `compile-test` 1348,
+`loadup-test` 16, `pgtk-test` 133.  **The full suite battery was run on this
+settled tree: 121 suites, exit 0** (`simple-test` 32, `comint-test` 48
+among them).  The pty battery remains unrun - the machine's memory
+pressure stopped the last attempt, and nothing here runs at a terminal;
+it is still owed on a machine with memory free.
+
+# The Groovy fontification crash: `font-lock-extend-region-functions`
+# is buffer-local (2026-11-27, crash report)
+
+Chris pasted a backtrace from the Gtk editor: opening
+`ItemController.groovy` died in `build-row!` -> jit-lock ->
+`groovy-declaration-search` -> `%re-search`, with
+"Invalid search bound (wrong side of point)" at buffer position 1503.
+
+## The departure
+
+`font-lock-extend-region-functions` is **`defvar-local`** in GNU Emacs
+(`font-lock.el:1141`): each buffer has its own value, initialised from
+the global default.  `c-font-lock-init` removes
+`font-lock-extend-region-wholelines` from it (`cc-mode.el:2809`, for
+Emacs bug #19669), and in Emacs that `setq` makes a *buffer-local*
+value - C buffers extend their fontification region to whole lines by
+their own rules, every other buffer keeps the default list.
+
+This tree kept the variable as one **global parameter**, and cc-mode's
+port set it globally (its comment even said "the list is global").  So
+opening any C/C++/Java buffer removed whole-line extension from *every*
+buffer in the session.  A Groovy buffer fontified afterwards was handed
+a mid-line region end (jit-lock's 1500-character chunk ends inside a
+long declaration line, at 1501); `groovy-declaration-search`'s
+`var-match` search uses `line-end-position` as its bound, so it moved
+point past 1501, and the following comma search with the region's
+(end = 1501) bound then raised the error.  Reproduced headlessly:
+
+    (c-mode in some buffer)                ; removes wholelines globally
+    (font-lock-fontify-region 1 1501)      ; in ItemController.groovy
+    => "Invalid search bound (wrong side of point)", point 1503
+
+## The fix
+
+`font-lock-extend-region-functions` is the tree's **buffer-local
+accessor pair** now (`font-lock-extend-region-functions` /
+`set!font-lock-extend-region-functions!`, over
+`font-lock-buffer-local`), exactly as `font-lock-keywords` and the four
+`defvar-local`s beside it are.  The extend loop and the jit-lock
+after-change pre-enlarge read the accessor; the global parameter is the
+default every buffer starts from; `c-font-lock-init` writes the
+accessor, so its `delq` is that buffer's alone.  Nothing else in the
+tree set the variable.
+
+Verified: after the fix a C buffer's list lacks wholelines, a fresh
+buffer's still has it, and the Groovy file fontifies 1..1501 with no
+error.  `cc-mode-test`'s `extend_region_local` group pins both the
+buffer-local rule and the end-to-end crash - a Groovy buffer with a
+declaration line crossing the limit must fontify after a C buffer has
+run (it answers #f, the caught error, without the fix; measured).
+
+All 121 suites pass.  **A running editor keeps the old code** -
+restart it to pick the fix up.
+
+# The password commands: `read-passwd`, `comint-send-invisible`, and a C-u
+# that could not be rebound (2026-11-27)
+
+The comint gap list named `comint-read-noecho`/`comint-send-invisible` as
+waiting on `read-passwd`.  Both are in, and `read-passwd` is ported from
+its real home - the end of `lisp/auth-source.el` - as a new library
+`schemacs/auth-source.scm`.  Under it, two shared departures were found
+and fixed, and one of them made the feature impossible until it was.
+
+## What is where
+
+| Emacs | here |
+|---|---|
+| `auth-source.el:2597-2662` - the two icons, `read-passwd--hide-password`, `read-passwd-toggle-visibility` | `schemacs/auth-source.scm` |
+| `auth-source.el:2664-2701` - `read-passwd-map`, `read-passwd--mini-buffers`, `read-passwd-mode` | same |
+| `auth-source.el:2703-2780` - `read-passwd` | same |
+| `comint.el:2550-2629` - `comint-read-noecho`, `comint-password-function`, `comint-send-invisible`, `send-invisible`, `comint--prompt-recursion-depth`, `comint-watch-for-password-prompt` | `schemacs/comint.scm`, at the file's own position |
+| `subr-x.el:178-260` - `string-limit` | `schemacs/core/subr-x.scm` (new) |
+
+**The auth-source backends are not carried**: `auth-source-search`, the
+netrc parser, the Secrets/Keyring and plstore backends and
+`authinfo-mode` each bring a subsystem (D-Bus, EPG, a file format) and
+none is on a path this editor can reach.  The file header names them
+rather than porting stubs.
+
+## `string-limit`, and the one branch composition blocks
+
+`comint-watch-for-password-prompt` truncates the filter's text with
+`(string-limit STRING 256 t)` - the last 256 characters of it.  The new
+`(schemacs core subr-x)` carries the char-based arm of `string-limit`
+exactly (`(<= len length)`, `(substring (- len length))` for END,
+`(substring 0 length)` otherwise, with `natnump`'s error).
+
+**The CODING-SYSTEM arm is not carried** and signals, naming its
+blocker.  That arm binary-searches over `string-glyph-split`'s glyphs so
+the cut never lands inside a multi-byte character or a composed cluster,
+and `string-glyph-split` asks `find-composition-internal`
+(`composite.c`), which is not ported - composition is not carried at
+all.  Returning a byte-count-limited answer without it would be wrong
+exactly at a character boundary, which is the case the arm exists for.
+
+## The departures inside `read-passwd`
+
+1. **Three `setq-local`s have no buffer-local half to write.**
+   `post-self-insert-hook`, `select-active-regions` and
+   `inhibit-modification-hooks` are parameters here, so they are bound
+   with `parameterize` around the read; the effect during the read is
+   the buffer-local one.  `(setq-local buffer-undo-list t)` is
+   `buffer-disable-undo` on the prompt buffer - the undo list is the
+   engine's field and that is the C's `bset_undo_list (buf, Qt)`.
+2. **`enable-recursive-minibuffers`, `overriding-text-conversion-style`
+   and `inhibit--record-char` are not variables here** (there is no
+   guard on recursive minibuffers, no Gtk text-conversion machinery and
+   no last-strokes record), so their lines are not written.
+3. **The icons' image and emoji forms cannot be shown** (the icons
+   library has no image support), so the `symbol` forms - 👁 and ⦵ - are
+   what appear, exactly what Emacs on a text terminal shows.
+4. **`(:eval read-passwd--mode-line-icon)` holds a thunk**, because this
+   tree's mode-line `:eval` takes a procedure; it is a *named*
+   procedure (`%read-passwd-mode-line-icon`) rather than a fresh
+   closure, because the `member` test that removes the entry compares
+   with `equal?` and two closures are never `equal?`.
+5. **`read-string` cannot be imported into a library.**
+   `(scheme base)` exports Guile's `read-string`, and it wins the
+   import even with `(except (scheme base) read-string)` (measured when
+   the interactive `s` code was ported).  Emacs's `read-string` is
+   `read-from-minibuffer` with no keymap and the same arguments, so its
+   body is written out in `read-passwd`.
+6. **The mode-line entry needed the default format to carry it.**  This
+   tree's `*mode-line-format*` had never carried Emacs's
+   `(global-mode-string (" " global-mode-string))` element
+   (`bindings.el`), so there was nowhere for the icon to appear on the
+   mode line.  It is there now, after `mode-line-modes`' position, and
+   `global-mode-string` is read through `register-mode-line-variable!`
+   (it is a plain parameter, and a construct cannot name a plain
+   define).
+7. **`(buffer-name)` is nil in Emacs only for a killed buffer**, and
+   `comint-send-invisible`'s "(In buffer %s)" and "Buffer %s has no
+   process" rely on `%s` of a *buffer* printing its name (`princ`,
+   `print.c:1895`).  This tree's `%s` delegate printed the record
+   printer's `#<buffer NAME>` (which is `prin1`'s form).  `%s` of a
+   buffer is its name now (and `#<killed buffer>` for a dead one), in
+   `editfns.scm`'s `%object->string`.
+
+## The C-u that could not be rebound
+
+`read-passwd-map` binds C-u to `delete-minibuffer-contents`
+(bug#12570).  It could not work, and the reason was a real departure:
+**the keyboard layer consumed C-u before any keymap lookup**.
+
+`dispatch-key-event` called `(update-prefix! key)` for every event, and
+that function's first clause is `(eqv? key (event-convert-list '(control
+#\u)))` - so C-u became a prefix argument whatever the active maps said,
+and a buffer or minor mode that binds C-u was unreachable.  In Emacs the
+*binding* decides: `universal-argument` is a command bound in
+`global-map` (`simple.el:5568`), and `read_key_sequence` runs whatever
+the lookup finds.
+
+The fix restores Emacs's rule in three pieces:
+
+* `universal-argument` exists as a command (it did not - its body had
+  been folded into `update-prefix!`), bound to C-u in `*default-keymap*`
+  with Emacs's docstring; its body increments the tree's prefix counter,
+  which is what `update-prefix!`-based `pending-uarg` reads.
+* `dispatch-key-event` consumes C-u as a prefix **only when C-u's
+  binding is that command**.  A buffer's map (read-passwd's) or a
+  minor-mode map that binds C-u therefore wins and runs.
+* C-u is consumed only when **no chord is in progress**.  A C-u that is
+  the *second* event of a chord belongs to the chord's prefix map, so
+  `C-x C-u` is `upcase-region` again - it had been swallowed as a
+  second prefix C-u, and no test drove that chord until one was added.
+
+The digits after a consumed C-u are still `update-prefix!`'s, which is
+this tree's spelling of `universal-argument-map` being a transient map:
+a transient map outranks the buffer's, so digits are captured in both.
+
+Verification: `test/auth-source-test.scm`'s C-u row clears the password;
+`tty-editor-test.scm`'s prefix group gained the C-x C-u row ("abc" with
+the whole buffer selected upcases to "ABC"), and the existing prefix rows
+(`C-u a` -> four a's, `C-u 3 a`, `C-u C-u`) all pass.
+
+## `comint`'s password commands
+
+`comint-read-noecho` is a defun plus `(make-obsolete 'comint-read-noecho
+'read-passwd "28.1")` (Emacs's `(declare (obsolete ...))`), and
+`send-invisible` is `(define-obsolete-function-alias
+send-invisible comint-send-invisible "27.1")`.
+
+`comint-password-function` is the tree's buffer-local accessor pair.
+
+`comint-watch-for-password-prompt` is clause for clause: the
+`string-replace "\r"`, `string-limit ... t`, `string-match` with
+`case-fold-search` bound, `string-trim`, the suffix space, and a
+`run-at-time 0` callback that prompts out of the filter so the filter is
+not paused while a password is typed.  `comint--prompt-recursion-depth`
+is a parameter because the callback `let`-binds it and a nested timer
+has to see the binding.
+
+**`comint-output-filter-functions`' default now carries it** - Emacs's
+list less `ansi-color-process-output` (ansi-color is not ported), and
+the `comint-mode` end-of-file assignment was updated to match.
+
+**`comint-mode`'s `pre-command-hook` is local now.**  The port had a
+comment saying this tree's `add-hook` had no LOCAL arm and used the
+global hook; the LOCAL arm exists (buffer slot keyed by the hook
+parameter), so the registration is Emacs's own
+`(add-hook 'pre-command-hook #'comint-preinput-scroll-to-bottom t t)`.
+
+## Tests
+
+* `test/auth-source-test.scm` (new, 18): the read; C-u; TAB; the map's
+  bindings and RET through the parent; the mask character (`*` and a
+  `read-hide-char` override); the hint on every hidden character; the
+  show and conceal icons in `read-passwd--mode-line-icon`; the mode-line
+  entry appearing during the read and gone after; CONFIRM's two reads;
+  the mode's buffer list; and "No active minibuffer".  The read-state
+  rows are recorded by a post-command probe while the prompt is up.
+* `test/comint-test.scm` 58 (was 48): the obsoletion record,
+  `comint-read-noecho` through `read-passwd`, the buffer-local password
+  function, `comint-send-invisible` against a `stty -echo` shell,
+  the password-function path (a canary key proves no read happened), and
+  `comint-watch-for-password-prompt` end to end: the shell's prompt arms
+  the timer, `timer-check!` runs it, the scripted password is sent, and
+  the shell prints it back.  The direct tests disable the watching
+  filter, because its timer's read would otherwise take the keys
+  scripted for the direct call.
+* `test/apps/tty-editor-test.scm`: the C-x C-u chord row (379 passes).
+* All suites pass (`auth-source-test` 18, `comint-test` 58,
+  `tty-editor-test` 379, `simple-test` 32, `command-test` 79,
+  `loadup-test` 16).  The pty battery was not run in this pass.
+
+**A running editor keeps the code it started with** - restart before
+looking at any of this.
+
+# The whole of auth-source, and the primitives under it (2026-11-27)
+
+Chris: "fully port auth-source", then "don't port gpg".  `schemacs/
+auth-source.scm` is now `auth-source.el` upstream of the sections named
+below, in the file's order: the variables and the backend class, the
+parser and the search, the cache, the read-passwd backend, the netrc
+backend, the JSON backend, `auth-source-user-and-password`,
+`authinfo-mode`, and the `read-passwd` section the tree already had.
+`test/auth-source-netrc-test.scm` is 35 assertions, each expectation
+Emacs 31.1's own for the same fixture except the two the file names as
+this port's shape.
+
+## What is not carried, and why
+
+* **GPG/EPG** - the user's call.  The functions that would decrypt or
+  create `gpg:` tokens are not defined; a `gpg:` token in a netrc file is
+  still *read*, and calling its secret function signals that EPG is not
+  ported rather than returning ciphertext as a password.  The GnuTLS arm
+  of `auth-source--obfuscate`/`--deobfuscate` is likewise not carried;
+  the C's non-GnuTLS branch is, and is what an Emacs built without GnuTLS
+  runs.
+* **The Secrets API backend** - it needs D-Bus and `secrets.el`.
+  `secrets-enabled` is defined as `#f`, which is exactly the branch
+  Emacs takes on a machine where `(require 'secrets)` fails, so the
+  parser declines and `auth-source-backend-parse` makes the `ignore`
+  backend.
+* **The plstore backend** - it needs `plstore.el`, base64 and EPG.  A
+  `.plist` source still parses to a backend of type `plstore`, whose
+  search and create functions signal the gap.
+* **`reveal-mode`** - so `authinfo-mode` does not turn the password
+  hiding on: `authinfo--hide-passwords` is ported, but its overlays
+  would never be revealed.  `authinfo--toggle-display` is ported too.
+* **The bookmark hook** (`with-eval-after-load 'bookmark`) - bookmark.el
+  is not ported.
+* `auth-source-pass` (a separate package).
+
+## Representation departures
+
+* **EIEIO is a record.**  `<auth-source-backend>` has the class's slots
+  and initforms; `auth-source-backend` is its keyword constructor and
+  `slot-value`/`oset` are private procedures over it, so the call sites
+  read as Emacs's.  `make-instance 'auth-source-backend` is spelled
+  `auth-source-backend`.
+* **Keywords are quoted symbols.**  There is no self-evaluating `:host`;
+  every call site writes `':host' and the plists compare with `eq?`.
+* **`cl-defun`'s `&key` is a plist.**  The search family takes
+  `&rest spec` and reads keys with `plist-get`, whose first-occurrence
+  rule is CL's; `&allow-other-keys` is the default because unknown keys
+  are never read.
+* `cl-assert` is an explicit check with the C's message; `cl-dolist`/
+  `cl-return` are `let/ec`; `cl-case` is `case`; `cl-loop` is a named
+  let.
+* **`auth-source-backends` is a procedure**, not a macro; it reads the
+  `*auth-sources*` parameter, so Emacs's `let` around a caller is a
+  `parameterize`.
+* `auth-source-ignored-keys` became `*auth-source-ignored-keys*`, a
+  parameter, because `auth-source-macos-keychain-search` `let`-binds it
+  around `auth-source-search-spec`.
+* `auth-source--symbol-keyword` keeps its bug-for-bug `format ":%s"`.
+
+## The primitives the port stands on (each in its Emacs file)
+
+* `seq-union` and `seq-contains-p` (`core/seq.scm`, seq.el).
+* `run-hook-wrapped` (`eval.scm`, eval.c).
+* `file-name-extension` (`files.scm`, files.el:5659).
+* `maphash` (`fns.scm`, fns.c).
+* `user-login-name` (`editfns.scm`, editfns.c:1115) - the *variable* of
+  that name is not carried; a Lisp-1 cannot hold both, and the function
+  caches in a private variable as the C's `Vuser_login_name` does.
+* `password-cache.scm` (password-cache.el whole).  `password-read`
+  reaches `read-passwd` through `*read-passwd-function*`, installed by
+  `auth-source.scm`; the two libraries would otherwise be a cycle.
+* `md5` (`fns.scm`, fns.c:6381) and `net/rfc2104.scm` (`lisp/net/
+  rfc2104.el` whole).  **`md5` accepts a bytevector** as well as a
+  string, because `rfc2104-hash` must hash raw bytes and a Scheme string
+  has no unibyte form; the string arm encodes UTF-8.  `md5`'s
+  CODING-SYSTEM argument and buffer arm are not carried (`fns.scm` is
+  below `coding.scm`); a non-nil coding system signals.
+* `json.scm` - json.el's **read half only**, over Guile's `(json)`:
+  objects become alists with symbol keys in file order, arrays vectors,
+  `false` `:json-false`, `null` nil.  The encoder, the other
+  `json-object-type`/`json-array-type` values, the element-read hooks
+  and the `json-error` conditions are not carried.
+* `print.scm` (print.c's four printers and the two string forms).
+  **The object printer is Guile's `write`/`display`**, the departure
+  `%S`/`%s` has carried since the format port; `princ` of a buffer is
+  its name.  `standard-output` is `*standard-output*` here - a
+  parameter, as the convention requires of a `let`-bound variable - and
+  its default is `t` (the echo area).  The echo area is a seam
+  (`*print-echo-function*`) installed by `editfns.scm`.  Not carried:
+  `print-length`/`print-level`, the `#<...>` forms, `print-circle`,
+  `print-gensym`, the escape switches and `print`'s first-newline rule.
+* `with-output-to-temp-buffer` and `internal-temp-output-buffer-show`
+  (`help.scm` - placement departures: they need `display-buffer` and
+  `run-hooks`, and `subr.scm` is below both).  The
+  `window-combination-limit` rebinding, `minibuffer-scroll-window` and
+  `make-frame-visible` are not carried.
+* `*temp-buffer-setup-hook*`, `*temp-buffer-show-hook*` and
+  `temp-buffer-show-function` (`subr.scm`), and `help-mode-setup`/
+  `help-mode-finish` plus the two hook additions (`help-mode.scm` -
+  `help.el` is below it here).  **`help-mode-finish`'s xrefs half is
+  not carried**: `help-make-xrefs` is not ported.
+* `write-region` (`files.scm` - a placement departure, the same one
+  `insert-file-contents` took).  START/END/string, APPEND, VISIT (t,
+  string, and the quiet non-visit values), `coding-system-for-write`,
+  the file-name alist and `buffer-file-coding-system`, the modtime
+  record, "Wrote %s" and the VISIT bookkeeping are ported.
+  **Not carried**: the annotation hooks, locking, the numeric APPEND,
+  `MUSTBENEW`'s `excl`/confirmation, backups, and the "Updated"/"Added
+  to" wordings (they need the numeric APPEND).  `with-temp-file` now
+  calls it, as Emacs does.
+
+## Bugs the port found, and where
+
+* **`set!` in a test position.**  `(while (set! x (f)))` and
+  `(when (set! x (f)))` never stop: Scheme's `set!` answers the
+  unspecified value, which is true.  Affected the netrc token walk
+  (infinite loop), `auth-source-netrc-parse`, `auth-source-netrc-
+  normalize` and `auth-source-backend-parse-parameters`.
+* **`'()` is true.**  `(or <empty> fallback)` in `auth-source-backends`
+  suppressed the read-passwd fallback; `(not found)` in the create path
+  never fired; `(not require)` in the check dropped default entries.
+  `%nil?` is the local spelling used.
+* **`(length string)` is a list-only `length` in Guile**; Emacs's
+  accepts sequences.  Two sites now use fns' `%length`.
+* `(char-after)` at end of buffer is `#f`, and `(char=? #f #\#)`
+  signals; the netrc comment scan uses `eqv?`.
+* `#\)` as a *character literal* swallowed the closing paren, and
+  `?y` (Emacs's character) is a *symbol* in Scheme.  The saver's
+  choices are `#\y #\n #\N #\e #\?` and its `case` compares characters.
+* `(vector->list #u32(...))` refuses a uniform vector; the octal decoder
+  uses `u32vector->list`.
+* `auth-source-specmatchp`'s answer was inverted: Emacs's
+  `(not (eq <dolist> 'no))` is a `let/ec` that answers `'no`, not `#t`,
+  at the escape.
+
+## `auth-source-netrc-saver`'s `N` answer
+
+It sets `*auth-source-save-behavior*` for the session and says so:
+`customize-save-variable` needs the custom-file writer, which this tree
+does not have.  The option itself, and the saver's other answers, are
+Emacs's.
+
+## Verification
+
+All suites pass (`auth-source-netrc-test` 35, `auth-source-test` 21,
+`comint-test` 58, `editfns-test` 81, `subr-test` 124, `help-test` 50,
+`loadup-test` 16, and the rest of the battery).  The pty battery was not
+run in this pass.
+
+# The electric modes, the imenu menu bar, list keymaps and defgroup (2026-11-27)
+
+Three ports Chris asked for, in the order they were taken: `electric.el`
+finished, `imenu.el`'s menu-bar half, and `custom.el`'s group half. The
+Customize *UI* (widget library, `cus-edit.el`) is the one still open; its
+recon map is in this session's notes and the file header says so.
+
+## Keymaps: the `(keymap TITLE . ALIST)` list form
+
+Emacs keymaps are lists or vectors; this tree's are records. Its keymap
+layer learned the *list* form now (`keymap.c`):
+
+* `access-keymap`'s pair branch is `access_keymap_1`'s loop over the
+  list's elements: `(EVENT . DEF)` conses compared with `eqv?`, embedded
+  keymaps searched, a `t` default remembered, and prefix answers
+  accumulated into `(keymap PREFIX...)`; the improper tail is searched
+  as the parent (the C's `tail = get_keymap (tail, 0, true)`). The
+  prompt string element is skipped, as in the C.
+* `map-keymap`/`map-keymap-internal` walk list keymaps in order and
+  return/stop at the embedded parent, as `map_keymap_internal` does.
+* `keymap-prompt` finds the first string element or the prompt of the
+  first keymap element; `keymap-parent` the first `KEYMAPP` element or
+  the tail; `set-keymap-parent` replaces/appends the improper tail.
+* **A char-table element inside a list keymap is not walked** (the C
+  calls `map_char_table`); a list keymap this tree builds has none, and
+  `(schemacs keymap)` does not import the char-table library.
+
+**Emacs's list keymaps can be keyed by any object** - `imenu.el` keys
+duplicate-allowed menu entries by the name *string* - and this tree's
+event model is integers and symbols. The imenu port therefore keys those
+entries by an uninterned symbol (`gensym`) instead (see below), a named
+departure, rather than widening the event model in a pass about menus.
+
+## imenu.el's menu-bar half
+
+Ported: `imenu--create-keymap`, `imenu--mouse-menu`,
+`imenu-add-to-menubar`, `imenu-add-menubar-index`, `imenu-update-menubar`,
+`imenu--menubar-select`, and `imenu-choose-buffer-index`'s mouse branch
+(the `last-nonmenu-event` test, including Emacs's `listp` quirk that a
+nil last event counts as mouse-triggered). `imenu--menubar-keymap` is a
+**real list keymap** `(keymap "Imenu" ...)`, because the update uses
+`set-cdr!` over the new menu exactly as Emacs does.
+
+Departures, named in the file:
+
+* **An entry's DEF is a procedure where Emacs splices a `(lambda ...)`
+  form** - the tree's usual replacement of evaluated lambda data with a
+  closure. The entry is the dotted `(KEY NAME . PROC)` that
+  `parse_menu_item`'s old format reads as `(STRING . DEF)`.
+* **The key is a symbol**, as above (Emacs uses the name string).
+* `imenu--parentify-index-alist` (Eglot's `..` entries) is not carried:
+  nothing here produces Eglot text properties.
+* `imenu-flatten`'s `annotation`/`group` values still need completion
+  metadata this tree's `completing-read` does not carry; the prefix form
+  works. `imenu--completion-buffer` still has no `thing-at-point` default.
+
+**A bug fixed while porting it**: the `imenu` command's cond tested
+`(pair? (cddr item))` where Emacs's pcase simply fails to match a dotted
+`(NAME . POS)`; `(cddr "("alpha" . marker))` raised "expecting pair", so
+every generic-expression item failed once reached through the menu. The
+test is now `(and (pair? (cdr item)) (pair? (cddr item)))`, which is
+pcase's ordering.
+
+## electric.el
+
+`electric-layout-mode`/`-local` and `electric-quote-mode`/`-local` are
+in, with their defcustoms, the inhibit-functions hook, the layout rules
+and the `electricity` defgroup. Verified against `emacs -Q --batch` on
+six typed-key cases: layout rules (`after`/`before`/`around`), quote
+rewriting in a paragraph, consecutive single quotes, fundamental mode
+(left alone), a C comment, and electric indentation in c-mode - all
+identical.
+
+Departures and notable shapes:
+
+* **`electric-indent-chars` is a parameter + buffer-local pair** now
+  (`(electric-indent-chars)`/`set!electric-indent-chars`): Emacs's is a
+  plain `defvar`, but major modes `setq-local` it (groovy-mode appends
+  its braces, cc-mode its own), so the reader must consult the buffer.
+* **`electric-layout-allow-duplicate-newlines` is a parameter** - the
+  convention's test is whether ported Elisp `let`-binds it, and
+  `electric-pair--insert` does. `elec-pair.scm` now binds it to t around
+  its insert, and installs two seams `electric.scm` cannot fill from
+  below: `*electric-pair-text-pairs-function*` and
+  `*electric-pair-newline-binder*` (the latter lets the layout's
+  `newline` bind `electric-pair-open-newline-between-pairs` off).
+* **Not carried**: `Electric-command-loop` (needs a frame-taking
+  `command-execute`; this tree's is the loop's `dispatch-action`) and
+  `Electric-pop-up-window` (`fit-window-to-buffer` /
+  `window-text-pixel-size`); the `yank` advice (advice.el); the two
+  `define-widget` forms (widget library, Customize tranche). Each is
+  named in the file header with its blocker.
+
+**The trap this pass paid for, and the shape it was pointing at**:
+`electric-layout-rules` was first a plain variable only *read* by the
+library, and Guile's compiler folds such a top-level definition to a
+constant - a user's `setq` (or a probe's `set!`) was invisible in the
+compiled build and every rule vanished. The self-assignment (`(set! x
+x)`) patched the symptom; the shape was wrong. **A user-configurable
+variable is a `define-custom`** (a parameter) here, not a plain define:
+that is what makes it settable at run time, gives it a docstring and a
+Customize type, and removes the fold trap. Done for the three this pass
+introduced that a user is meant to set - `*electric-layout-rules*`
+(with buffer-local accessors, because major modes `setq-local` it),
+`*electric-layout-allow-in-comment-or-string*` and
+`*electric-indent-functions-without-reindent*`. Emacs leaves all three
+as `defvar`s (the first carries its own "TODO: Make this a defcustom?"),
+so `custom-variable-p` now answers t for them where Emacs says nil - a
+named category departure taken on Chris's instruction.
+
+`electric-indent-chars` stays a parameter + buffer-local pair and not a
+define-custom: it is the major modes' extension point (Emacs: "major
+modes should usually set this variable"), not a user option.
+
+**The backlog this exposed**: the tree's own rule - anything ported from
+a `.el` file's `defcustom` should be a `define-custom` - had never been
+audited (the earlier pass covered C variables via `cus-start.el` only).
+A script over the mirrored files finds **134** Emacs `defcustom`s that
+this tree defines as a plain variable, parameter or accessor instead of
+a `define-custom`. About twenty are mode hooks generated by
+`define-derived-mode`/`define-minor-mode` (which cannot emit a
+define-custom - `easy-mmode.scm`'s note), and those need a decision;
+the rest are ordinary options (`kill-ring-max`, `search-highlight`,
+`dired-listing-switches`, `completion-styles`, ...). They are still
+settable where they are parameters, but they carry no custom metadata
+and are not user options as far as the tree's own rule goes. Converting
+them is its own pass: it touches readers, exports and tests across many
+libraries. The audit is reproducible: collect every `^\(defcustom` from
+the Emacs file mirrored by each `schemacs/**/*.scm` and subtract the
+names declared by `define-custom`.
+
+## custom.el's group half
+
+`custom-declare-group`, the `defgroup` macro and `custom-group-of-mode`
+are ported (`custom.el:501`-`:587`). A group records its members
+(`(OPTION WIDGET)` entries in the existing registry), its documentation,
+its own membership in its parent (`custom-group`), its `:prefix`, and
+runs `custom-declare-variable-hook` (Emacs's `custom-define-hook`).
+`defgroup` is a `syntax-case` macro that keeps the keyword as syntax and
+its value as an expression, as `define-custom` does; the clauses are
+passed as `(KEYWORD VALUE)` lists for that reason.
+
+Departure: Emacs keys the "current group" entry by `load-file-name`; this
+tree has no per-file load variable, so the key is `#f`, which makes a
+group the current one for the declarations that follow it - Emacs's
+behaviour within one file, and `custom-current-group`'s existing model.
+
+**The Customize UI is still not carried**: `customize-group`,
+`customize-option`, `custom-buffer-create`, the widget library
+(`widget.el` + `wid-edit.el`, ~4,500 lines) and `cus-edit.el` (~6,300)
+with `cus-face.el`/`cus-theme.el`. That is the next tranche; the widget
+library is its primitive and must come first.
+
+`defgroup` calls are now in `electric.scm` (`electricity`) and the
+groovy package (`groovy`, `groovy-electric`); the stale "defgroup is not
+ported" notes in those files are corrected. `grails-mode.el` has no
+defgroup upstream, and the port's note claiming one was removed.
+
+## A pre-existing bug found under the electric tests
+
+`paren.scm`'s `blink-paren-open-paren-line-string` computed the
+`font-lock-ensure` end as `(cdr (last-pair regions))` - the spine's tail,
+which is `()` for a one-region context. Emacs's `simple.el:9742` is
+`(cdar (last regions))`, the cdr of the *car* of the last region. The
+port then raised "Wrong type argument ... ()" on the first `(` typed in
+any buffer where the matching paren was off screen. Fixed; a c-mode
+buffer typing parens is the reproducer.
+
+## Verification
+
+`test/electric-test.scm` 32 + 8 (the six typed-key cases and the
+buffer-local electric chars); `test/imenu-test.scm` 13 + 14 (the menu
+shape, the update rule measured on Emacs - an edit alone does not rescan
+a cached index, a flush plus a further edit does - and leaf selection);
+`test/custom-test.scm` 35 (the group members, doc, parent and mode-name
+resolution); `groovy-mode-test.scm` 120 (the two installations and the
+index); `groovy-electric-test.scm` 12 (one expectation updated: with
+electric-indent now on, the brace is reindented to column 4, which the
+old comment had predicted for Emacs). The full suite battery is green
+(exit 0), and `tools/pty-check.py imports scratch c-menu` is 3/3 - the
+last of those is the keymap-list and menu-bar regression check.
+
+# Every Emacs `defcustom` this tree defines is a `define-custom`
+# (2026-11-28)
+
+Chris's rule - everything user configurable is a `define-custom` - was
+already applied to the C variables (`cus-start.el`, 2026-11-22) and to
+the Lisp `defcustom`s of the files being actively worked on, but a scan
+of the mirrored `.el` sources found **134 Emacs `defcustom`s still
+defined some other way**.  All are converted.  The gate is
+`python3 tools/defcustom-audit.py`, which scans `$GITE/emacs/lisp` for
+`defcustom` names and this tree for definitions and exits 1 when an
+Emacs user option is a bare parameter, a plain variable, a hard-coded
+buffer-local accessor, or is defined twice.
+
+## What was converted
+
+- **105 `(define *name* (make-parameter VALUE))`** declarations now
+  `define-custom` with Emacs's docstring, `:type`, `:group` and
+  `:version`.  The read syntax `(*name*)` is unchanged, so no reader
+  changed.  Docstrings and metadata were read out of GITE's own
+  `defcustom` forms in Emacs (`(read)` of the form, `(nth 3)` and the
+  keyword plist), the method the charset and xterm tables used.
+- **29 plain definitions**, now parameters and their readers updated:
+  15 major-mode hooks plus `comint-exec-hook`, the three
+  `Buffer-menu-*-width` variables, `*tty-menu-open-use-tmm*`,
+  `*query-replace-from-to-separator*`, `lisp-body-indent`,
+  `insert-pair-alist`, `minibuffer-default-prompt-format`,
+  `inhibit-startup-screen`, `window-min-height`, `window-min-width`
+  and the two `mouse-buffer-menu-*` sizes.
+- **1 extra duplicate**, found by the audit on the converted tree and
+  not counted in the 134: `elisp-mode.scm` had a plain
+  `emacs-lisp-mode-hook` (the live one) and a dead starred
+  `*emacs-lisp-mode-hook*` define-custom.  Only the bare-name
+  define-custom remains.
+- The 27 buffer-local accessor-backed variables were already
+  define-custom-backed; they are reported as done rather than converted
+  again.
+- **Six hooks that Emacs `defvar`s (not defcustoms)** - the four
+  `define-derived-mode`-generated ones (`special-mode-hook`,
+  `messages-buffer-mode-hook`, `lisp-data-mode-hook`,
+  `authinfo-mode-hook`) and the Groovy package's two
+  (`inferior-groovy-mode-hook`, `inf-groovy-load-hook`) - were plain
+  lists. They are now `make-parameter`s, because a hook is a parameter
+  here (`add-hook` takes the hook object), but **not** `define-custom`s:
+  measured on Emacs 31.1, `(custom-variable-p 'special-mode-hook)` is
+  nil, so making them customizable would be the departure.
+
+## `defcustom` evaluates its `:type` value
+
+Emacs's `defcustom` is a macro that evaluates each keyword value at
+declaration time, so `(defcustom completion-styles ... :type
+completion--styles-type)` stores the *list* the variable holds, not the
+symbol (measured: `(get 'completion-styles 'custom-type)` is the
+`(repeat ...)` form).  The one bare-symbol type in this set was replaced
+with its evaluated value; a `:type '(...)` form is already quoted and is
+copied as data.
+
+## Elisp symbol escapes in type data
+
+Elisp's `prin1` spells the symbol `text/plain;charset=utf-8` as
+`text/plain\;charset=utf-8`; Guile has no backslash escape in an
+identifier (`'a\;b` is a reader error: the `;` starts a comment and the
+form runs to EOF).  The tree's spelling is Guile's own
+`#{text/plain;charset=utf-8}#`, as `select.scm` already used - so the
+type data uses that.  This is the second place the same symbol forced a
+spelling decision (the first is the export list).
+
+## `run-hooks` dereferences a parameter now (a host-language adaptation)
+
+Emacs's `run-hooks` is handed a *symbol* and reads its value.  This tree
+hands the hook's value - and `define-derived-mode`'s `(run-mode-hooks
+HOOK)` hands the **parameter object**, because the mode's HOOK argument
+is a binding, not a value.  `run-hooks` treated any procedure as a
+single-function hook, called the parameter with no arguments and
+discarded the result, so user additions to a mode hook never ran;
+`dired`'s `(run-mode-hooks *dired-mode-hook*)` was dead the same way,
+and so was `emacs-lisp-mode-hook` after an earlier pass had made it a
+define-custom.
+
+`run-hooks`, `run-hook-with-args`, `run-hook-with-args-until-success`,
+`run-hook-with-args-until-failure` and `run-hook-wrapped` now test
+`parameter?` and read the value through `hook-value` (which also merges
+the buffer-local half).  A single-function hook value is still a
+procedure and still called; a parameter is distinguished by
+`parameter?`, which Guile exports from `(guile)`.  `hook-value` had to
+be imported into `subr.scm` from `buffer.scm` (the direction is
+`subr -> buffer`), and `eval.scm` imports it for `run-hook-wrapped`.
+
+## Names: the interface keeps its name
+
+Every existing name was kept.  A user option whose Emacs name is the
+interface is an *unstarred* parameter: `MODE-hook` (the `define-minor-mode`
+exception in AGENTS.md, now extended to `define-derived-mode` hooks),
+`inhibit-startup-screen`, `minibuffer-default-prompt-format`,
+`lisp-body-indent`, `insert-pair-alist`, `window-min-height`,
+`window-min-width`, `text-scale-mode-step` and
+`global-text-scale-adjust-*` (the last three pre-existing).  All are
+read by calling them and set by calling them with an argument:
+`(inhibit-startup-screen #t)`.  A `set!` of one now shadows the import
+rather than setting the option - the init-file recipe in AGENTS.md, the
+pty harness and `test/startup-test.scm` are updated.
+
+## The scan for bare reads, and two silent breakages
+
+Converting a plain variable to a parameter leaves every *bare read* of
+it compiling: a parameter is a procedure, so `(if *x* ...)` is merely
+always true (a silent wrong answer), and `(< size window-min-width)`
+raises only when that line runs. The compiler sees nothing, and a suite
+that does not execute the path sees nothing either.
+
+A targeted scan of every converted plain name (occurrences not preceded
+by `(` and not in an import/export or a `define-derived-mode` argument)
+found two:
+
+- `replace.scm` ended its occur section with
+  `(set! occur-mode-hook (list turn-on-font-lock))`. A `set!` of an
+  imported parameter shadows the binding; it does not set the option,
+  and the default Emacs's defcustom holds was silently never installed.
+  It is `(occur-mode-hook (list turn-on-font-lock))` now.
+- `cmacexp.scm` passed `window-min-height` as a number to
+  `enlarge-window`'s arithmetic; it is `(window-min-height)`.
+
+**After any plain-to-parameter conversion, grep for the name without
+parentheses and for `set!` of it.**
+
+## The audit tool's first version was falsely green
+
+`tools/defcustom-audit.py` computes `TREE` from its own path as
+`tools/..`, and its "skip test and tools directories" test was a
+substring match - every path under `/home/chris/GIT/schemacs/tools/..`
+contains `/tools`, so it skipped the whole tree and reported "every
+Emacs defcustom this tree defines is a define-custom" over zero
+definitions. It is `os.path.dirname(os.path.dirname(os.path.abspath(
+__file__)))` now, and the skip compares the first path component of the
+relative path. A checker that finds nothing must be told apart from a
+checker that was not run: the tool prints its row count when asked, and
+the synthetic-definition check is what caught it.
+
+## Not changed, named
+
+- `define-minor-mode`'s generated `MODE-hook` is a parameter but is not
+  `custom-declare-variable`d.  Emacs's macro `defvar`s it too, so this
+  is Emacs's own shape, not a gap.
+- `:safe`, `:risky`, `:set`, `:initialize`, `:options`, `:tag` and
+  `:package-version` are not emitted.  `define-custom` accepts them;
+  none of the 134's behaviour depends on them here (no Customize UI yet
+  reads them), and emitting `:set` forms would name Emacs functions this
+  tree does not have.
+- The Customize UI is still absent (`widget.el`, `wid-edit.el`,
+  `cus-edit.el`); `custom-variable-p`, `custom-variable-names`,
+  `describe-variable` and M-: now see all 134.
+
+## Verification
+
+All converted libraries compile with no new warnings (the tree-wide
+sweep).  The full suite battery is exit 0 with no failures and no
+DID NOT RUN; the directly affected suites were also run by hand
+(`cc-mode-test` 181, `window-state-test` 65, `comint-test` 58,
+`files-test` 55, `help-test` 50, `mouse-test` 84, `simple-test` 32,
+`lisp-mode-test` 42, `cl-indent-test` 28, `startup-test` 17,
+`minibuffer-test` 12, ...).  A smoke test drives real mode hooks:
+`(add-hook text-mode-hook f)` then `(text-mode)` runs f, and
+`prog-mode-hook` runs through `emacs-lisp-mode`; both are pinned in the
+test suites.  The full pty battery is **116/116**, run alone on the
+compiled tree.  `imports.scm` needs no regeneration.
+
+# Per-face fonts in the Gtk backend, stages 1 and 2 (2026-11-28)
+
+`plans/PER-FACE-FONTS.md`'s first two steps are in: the display interface
+can be asked a face's font metrics and a text's pixel advance, and a Gtk
+run is drawn in its face's own Pango font, on the row's baseline, with
+the row's height as its background. The plan's stage 1 is `face-metrics`
+answering per face plus `face-text-width`; stage 2 is the token/drawing
+half. What is here is the C each rule was taken from, the departures
+introduced, and what remains for stages 3-7.
+
+## Stage 1: the measurements
+
+- `pgtk.scm` builds a `PangoFontDescription` from the face's
+  `:family`, `:weight`, `:slant`, `:width` and `:height`, with the same
+  three `:height` cases as `merge_face_heights`: a float scales the
+  frame's absolute default, a number is tenths of a point through
+  `POINT_TO_PIXEL`, and no height at all is the frame's own. This is
+  `font_load_for_lface` as far as Pango can express it; the fontset,
+  `:foundry`, and Emacs's per-glyph font selection are not carried.
+- The description is made with the setters, not from a description
+  string: a family name may contain spaces, which Pango's string
+  parser cannot distinguish from the style words that follow.
+- `face-metrics` (the method `row-metrics` asks per face run) opens the
+  face's font once and caches `(ascent . descent)` by the request;
+  `face-text-width` measures through one shared layout and caches
+  `(text . request) -> pixels`. `%face-font-record` keeps the
+  description, ascent, descent and underline thickness.
+- **A request that is exactly the frame's own font is the frame's.**
+  `%face-font-key` answers #f when the face names no font attribute, and
+  a request equal to `(%frame-font-key)` is normalized to #f in
+  `realize-face-token`, `face-metrics` and `%face-text-width`. Without
+  the second rule the `default` face's realized `:height` (113 tenths,
+  which is the frame's 15px) would make the frame's own appearance a
+  non-zero token, and the redisplay's `extend-fill-token` identity -
+  token 0 is the frame's face - is what depends on it. Emacs gives the
+  default face a `struct font` too; the identity here is a display
+  contract, not a claim that the font is absent.
+- The tty and test displays answer the cell model: ascent/descent from
+  their row and `display-text-width × column-width` for an advance.
+  That is Emacs's terminal answer (a terminal face has attributes, not
+  a font).
+
+## Stage 2: the drawing
+
+- `realize-face-token`'s key gains a fifth component, the font request
+  (or #f), so two faces that agree on colours but not fonts are two
+  tokens, as they are two `struct face`s in Emacs.
+- `pgtk-show-text!` takes the run's `PangoFontDescription` and sets it
+  on the shared layout before every draw. It always sets one - the
+  frame's when the run names none - because the layout is shared: a run
+  that inherited the previous run's face font would draw in it.
+- `write-glyphs!` passes the row's `glyph-row-ascent` and
+  `glyph-row-height` into `%pgtk-write-run`: the baseline is row top +
+  ascent for every run on the row, and the background rectangle is the
+  row's height. This is `s->y = row->y;
+  s->ybase = s->y + row->ascent; s->height = row->height`
+  (`xdisp.c:30792-30794`) - the C's glyph string carries the row's
+  height, not its font's, so a short run on a tall row is backgrounded
+  across the whole row.
+- The underline's position is the run font's
+  `(descent + 1) / 2`, clamped to the row by the C's two sanity checks
+  (`pgtkterm.c:2688-2723`).
+- **The underline's thickness is one pixel, not the font's**, because
+  that is the C's default: `pgtk_draw_glyph_string` uses
+  `font->underline_thickness` only when `underline-line-scaling-flag`
+  is non-nil, and that flag is false (`xdisp.c:39322`). The flag is
+  ported as a plain variable in `dispnew.scm` - a named placement
+  departure, because the backend reads it and `pgtk.scm` cannot import
+  `xdisp.scm` - with the self-assignment that keeps Guile's compiler
+  from folding it. The plan's "thickness from the face's font" was the
+  scaled branch only; the C's default branch is the one drawn.
+- **The font-provided underline position is not carried**, as before:
+  `x-use-underline-position-properties` is true in Emacs, so a font
+  whose `underline_position` is non-negative would place the rule
+  there; Pango's `pango_font_metrics_get_underline_position` is not
+  read. The `(descent + 1) / 2` rule is the C's fallback branch.
+- **A fragment row is given the frame's metrics.** `write-run!` (xdisp)
+  draws mode-line segments, overlay strings and special glyphs through a
+  synthesized row; it now fills that row's ascent/height from
+  `(face-metrics display #f)` rather than the `0 1` placeholder that
+  made a run unplaceable. A fragment whose *face* has a different font -
+  a themed mode line with `:height` - draws its glyphs in that font but
+  on the frame font's baseline and row height until the mode line's
+  layout is row-built; that is stage 5's geometry, not a per-token rule.
+- `clear-realized-face-cache!` is `clear_face_cache`'s realization half
+  (`xfaces.c`): it drops a display's realized faces. `pgtk-realize-font!`
+  calls it with the layout drop, because a face that says `(:height
+  1.5)` has the same merged attributes before and after the frame font
+  changes but names a different font at the new default size. Without
+  it the old token, and the old size, would be reused for ever. Emacs
+  does the same with `clear_face_cache` when a frame's font changes.
+
+## Stage 3: the frame font is the frame's again
+
+`pgtk-ensure-font!` now opens the frame's font from the `default` face's
+**own** `:height` (`face-attribute 'default ':height`), not from the
+face merged through the selected window's buffer. That merge is
+`realize_default_face` for a buffer's faces; a *frame's* font is
+`set_lface_from_font`'s (`xfaces.c:2221`), and Emacs realizes a
+`text-scale-mode` remapping per window's rows, never by reopening the
+frame's font.
+
+So a scaled buffer's lines are taller inside a frame whose cell, mode
+lines and neighbouring windows are unchanged; switching buffers no
+longer resizes the frame and switching back no longer shrinks it. The
+old departure is gone from `pgtk-ensure-font!`'s comment, and the test
+that pinned it ("row metrics are the drawn font's, unscaled and scaled"
+and the `ink-rows-scaled` family) is replaced by a two-window check in
+one frame: the scaled window's matrix row is taller than the frame's
+line, its neighbour's row is exactly the frame's line, and the frame's
+cell does not move.
+
+The global commands still move the frame font, as they should:
+`global-text-scale-adjust` sets the `default` face's own `:height`, and
+a `set-face-attribute` on `'default` is `set-frame-font`'s face side -
+both reach `pgtk-ensure-font!` through the face's own attribute and
+reopen the font, resize behaviour and all. That part's tests are
+unchanged.
+
+### What stages 4-7 still own
+
+Named here so the gap notes do not read as fidelity:
+
+- stage 4: `line-texts-rows` and the slice walk still count cells;
+  wrapping, hscroll and the row's x offsets are cell arithmetic.
+  `face-text-width` exists and is unused by the layout.
+- stage 5: glyph x positions/widths, `write-glyphs!`'s x, the cursor
+  and the mouse are still cell columns. The cursor's glyph redraw
+  (`draw-window-cursor!`/`erase-window-cursor!`) uses the frame font
+  and `*font-ascent*` whatever the cell's face font is; a scaled
+  character under the cursor is drawn in the frame font until this
+  step.
+- stage 6: `string-pixel-width` and `tab-bar-auto-width` still measure
+  in cells.
+- stage 7: the global-font notes left in `pgtk.scm` and the remaining
+  old tests' expectations are still there; the plan says what they
+  become.
+
+## Tests
+
+- `test/ui/gtk/pgtk-test.scm`'s `schemacs_pgtk_face_fonts` group grows
+  from 5 to 9: the default face measures the frame's font, a scaled
+  face's metrics are taller, the default face advances by two cells, a
+  scaled face and a serif family advance differently - plus stage 2's
+  four: a scaled `g` in a line makes its matrix row taller than the
+  frame's line; the row's height is the scaled font's ascent plus
+  descent; and, read off the rendered pixels, the scaled glyph's ink
+  reaches above **and below** the normal `g` beside it, which is a
+  shared baseline (both hang from the row's top plus its ascent, with
+  the scaled font's deeper descent). The pixel checks were seen passing
+  only after the description and baseline wiring: with the old
+  frame-font draw the scaled run's ink is the frame font's and the
+  ascent test had nothing to find.
+- Stage 3's four checks replace the two that pinned the frame-scaling
+  departure: `text-scale` leaves the frame's cell alone; an unscaled
+  window's row is the frame's own line; the scaled window's row is
+  taller than that line and taller in height, in the same frame.
+- The full suite battery passes on the settled tree (exit 0; pgtk-test
+  144 after stage 3). `schemacs/imports.scm` is regenerated for the new
+  exports (`face-text-width`, `clear-realized-face-cache!`,
+  `underline-line-scaling-flag`) and compiled.
+
+# Per-face fonts, stages 4-5: the pixel geometry (2026-11-28)
+
+The layout and the drawing now measure in one unit: the display's own
+horizontal unit - **pixels on Gtk, character cells on a terminal** - which
+is exactly Emacs's split (`glyph->pixel_width` is pixels on a window
+system and columns on a tty). `face-text-width` answers in that unit, so
+a column's advance is its glyph's `text_extents` in its face's font.
+
+## The layout
+
+- `indentc.scm` gained `*line-text-measure*`, `*line-unit-width*` and the
+  seam `*line-measure-function*` (installed by `xdisp.scm`). The seam
+  exists because measuring a buffer column needs the faces, and the face
+  machinery is above `indentc`; Emacs's `init_iterator` knows the faces
+  because it *is* the redisplay.
+- `%line-pixel-measure` builds one measurement per line: it walks the
+  line's face runs (`line-face-runs` now carries the run's merged
+  attributes as a fourth element), caches each column's advance, and
+  measures a tab at its actual column every time (a tab's advance depends
+  on where it starts). `texts-width` uses the bound measure when there is
+  one and the cell rule otherwise, so mode-line strings and the
+  command-time column functions (`current-column`, which is columns, not
+  pixels) are unchanged.
+- Row breaking compares pixel sums: the width passed to `line-texts-rows`
+  is converted with `*line-unit-width*` and the right truncation marker
+  reserves one *unit*, not one cell. `hscroll-line-slice` converts its
+  hscroll and width (columns) to units before comparing the line's
+  offsets.
+- `line-slice-glyphs` computes each glyph's `pixel_width` from its face
+  (`face-text-width` on the glyph string) instead of a cell count; the
+  same for the overlay-string walk. The newline's space and the fill
+  glyphs are one unit wide.
+- `line-texts-offsets` and friends therefore answer display units when a
+  measure is bound and cells otherwise - which is the same function
+  serving two emulations: the row layout (pixels) and `current-column`
+  (columns), as Emacs has two walks for two questions.
+
+## The drawing and the positions
+
+- `glyph-pixel-width` is the face font's advance, so `write-glyphs!`'s x
+  and run widths are pixels; the Gtk backend's `right` edge, background
+  rectangles, stretch fill, `%pgtk-write-run` and `clear-end-of-line!`
+  all work in those units. A run is `((STRING . WIDTH) ...)`, and a
+  zero-width glyph (a combining mark) joins the previous cluster.
+- `write-run!` (mode-line/echo/overlay fragments) converts its cell
+  column to units and gives its synthesized row the frame's metrics;
+  `fill-line-end-row!` converts its cell rectangle likewise.
+- The cursor's x is `w->cursor.x`: the line's pixel offset under the
+  measurement, less its row's start and the hscroll; the Gtk cursor
+  draws at that pixel.
+- The Gtk front end now hands `posn-at-x-y` **pixels** (button events,
+  motion reports and the queried pointer), and `column-width`/
+  `line-height` answer `FRAME_COLUMN_WIDTH`/`FRAME_LINE_HEIGHT` in
+  pixels, so `posn-at-x-y`'s window/row/column arithmetic is the C's.
+- **`screen-size` was two units.** The test display answered pixels, the
+  Gtk display answered cells, and only the cell case was checked because
+  `column-width` was 1. It is **pixels** now on every display (Gtk
+  answers its allocation); `display-pixel-width`/`-height` return it
+  directly, and `display-rows-cols` divides by the cell as documented.
+  A frame came out one row tall when the two disagreed - the first
+  thing a real Gtk frame did.
+
+## The two bugs this pass found, both from the user's C-x C-=
+
+1. **The mode line scaled with the buffer.** `face->attribute` merged
+   every named face onto `(merge-face-ref 'default ...)`, which applies
+   the buffer's `face-remapping-alist`; Emacs's `realize_named_face`
+   uses `get_lface_attributes_no_remap` for that base and applies the
+   remapping only to the face actually being looked up (buffer text's
+   `default`). The base now passes the pending-face guard, so a scaled
+   buffer's mode line keeps its own font. A pixel check renders one
+   frame before and after `text-scale-increase` and asserts the mode
+   line's ink starts on the same row.
+2. **Nothing refreshed until a resize.** `force-window-update` was
+   written as a no-op because "every window is rebuilt on every
+   `render!`" - true before the row diff, false after it. A face
+   remapping changes no text, so no window looked out of date; only the
+   mode line (re-formatted each redisplay) changed. It now marks the
+   windows of the object (buffer, frame, window, or all) through
+   `*mark-window-redisplay-function*`, which is Emacs's `wset_redisplay`.
+
+## Still not carried in this area
+
+- **`posn-at-x-y`'s text hit test is still cell rows/columns**
+  (`buffer-posn-from-coords`, the mode-line string's char position): a
+  click maps through the cell grid, not through the glyph advances, so a
+  scaled or proportional line's hit test is off. `posn-at-point` gives
+  pixel x/y now (`column-width` answers pixels), so the posn it builds is
+  right; the mapping back to a buffer position is the gap.
+- Images, fringes, margins, composition and bidi are unchanged.
+- `string-pixel-width` and `tab-bar-auto-width` still measure in cells
+  (stage 6), and the old global-font notes in `pgtk.scm` stand until
+  stage 7 removes them.
+
+## Tests
+
+- `pgtk-test.scm` is 148: the pixel advance check (a scaled glyph's
+  advance moves the next glyph past where the cell grid would put it) and
+  the two scale checks above. The direct `write-glyphs!` clip test now
+  builds its glyph one *unit* wide, and the mouse-glyph test expects the
+  cell in pixels.
+- Full suite battery: exit 0 (run after the pixel geometry, again after
+  the scale fixes). `imports.scm` regenerated and compiled.
+
+# Tall rows, the desired matrix, and `x_new_font` (2026-11-28, second pass)
+
+Chris's report on buffer-local `text-scale-mode` (C-x C-=), and what each
+part turned out to be. The unit pass is the section above; these are the
+C rules that were still missing once rows could be taller than a frame
+line.
+
+## The lines that "stayed small" were never cleared
+
+`display-window!` built only the rows the scaled text reached and left
+the desired matrix's remaining slots as the *previous* redisplay had
+enabled them. A taller row keeps the walk from reaching the bottom
+slots, so those slots still said "enabled, blank, y = index *
+FRAME_LINE_HEIGHT" - and `update-window!` dutifully drew them, blanking
+strips across the scaled rows above and never clearing the pixels below.
+Two C rules were missing:
+
+1. **`redisplay_window` clears the desired matrix** before a
+   from-scratch layout (`clear_glyph_matrix (w->desired_matrix)`).
+   `display-window!` does now, so every slot this redisplay does not
+   reach is disabled.
+2. **A disabled glyph row has no `y`.** Emacs does not blank a disabled
+   matrix row by its index: the rows above it may be taller than a frame
+   line, so `index * FRAME_LINE_HEIGHT` is not where it would be. The
+   frame update clears the fixed-height frame rows no window row covered.
+   This renderer has no frame matrix, so `update-window!` clears the
+   physical area from the last laid-out row's bottom to the window's text
+   bottom once (`blank-uncovered-window-area!`), in the default face.
+
+The regression is the pixel check "no blank strip is painted across a
+scaled row": a 60-line buffer scaled by three steps has ink at
+y=260, where the disabled-row blanking used to paint.
+
+## `x_new_font` uses the **new** cell
+
+`pgtk-ensure-font!` asked for `FRAME_COLS * OLD_COLUMN_WIDTH` with a
+comment claiming that was the C. The C is
+
+```c
+adjust_frame_size (f, FRAME_COLS (f) * FRAME_COLUMN_WIDTH (f),
+                   FRAME_LINES (f) * FRAME_LINE_HEIGHT (f),
+                   3, false, Qfont);      /* xterm.c:27145 */
+```
+
+with the fields already set to the **new** font's average width and
+line height (`:27119`, `:27121`). The old-cell request is the frame's
+existing pixels, so `global-text-scale-adjust-resizes-frames` could
+never grow the frame to keep its columns, and the row count and the
+request disagreed on every step. It is the new cell now.
+
+## The split ratio: a named remaining departure
+
+`resize-frame-windows!` scales children in **cells**, recomputing each
+child's share from the heights it currently has. Emacs resizes by a
+*pixel delta* through `resize_root_window`, and each child carries a
+`w->normal_lines`/`normal_cols` fraction set at split time
+(`window.c:5182-5205`) and preserved across resizes - which is why its
+mode lines barely move when the font changes. This tree has no normal
+sizes, so repeated rounding can accumulate; the per-resize arithmetic
+is stable in a direct two-window test, but the C's model is the fix if
+drift is still seen. Also fixed here: `resize-frame-windows!` gave the
+root rectangle `top = 0, height = frame_height - 1`, ignoring
+`FRAME_TOP_MARGIN`, where the C sets `r->top_line = FRAME_TOP_MARGIN`
+(`window.c:5076`) and subtracts it from the height.
+
+## Still named
+
+- The window tree is row-quantized; Emacs's is pixel-quantized. Normal
+  sizes are the structural gap above.
+- `posn-at-x-y`'s text hit test maps through cells (the previous
+  section's gap).
+- Stage 6/7 of the plan.
+
+## The matrix is sized by the smallest font (2026-11-28, third pass)
+
+Chris, after the tall-row fixes: *"as I reduce font size ... the number
+of lines it it shrinking stays constant, therefore the percentage of the
+screen it resizes gets less and less. In other words, the smaller the
+font size gets, the more lines should become visible and the more lines
+get shrunk down."* He was describing `required_matrix_height`.
+
+### The C
+
+    int ch_height = max (FRAME_SMALLEST_FONT_HEIGHT (f), 1);
+    int window_pixel_height = window_box_height (w) + eabs (w->vscroll);
+    return (((window_pixel_height + ch_height - 1)
+             / ch_height) * w->nrows_scale_factor
+            + 2      /* one partially visible line at top and bottom */
+            + 3);    /* tab, header and mode line */
+
+(`dispnew.c:1758`.) A terminal's matrix is `WINDOW_TOTAL_LINES` (`:1783`).
+
+- **`smallest-font-height`** is a new display generic (`dispnew.scm`),
+  the port of `FRAME_SMALLEST_FONT_HEIGHT` (`frame.h:1830`). `frame.h`
+  reaches it through `FRAME_DISPLAY_INFO (f)->smallest_font_height`, a
+  value `font.c:2985-3015` lowers whenever a font opens that is shorter
+  than it, setting `f->fonts_changed`. The pgtk method scans the
+  display's face-font table (realized faces are the only fonts opened
+  here) and answers the shortest ascent+descent, or the frame cell when
+  none is shorter.
+- **`%required-matrix-rows`** (`xdisp.scm`) is that formula, with the
+  body's pixel height as body rows × `FRAME_LINE_HEIGHT` and
+  `nrows_scale_factor` 1. On a terminal it answers
+  `window-body-height`, which is `WINDOW_TOTAL_LINES` in this tree.
+- **The render loop sizes the matrix by it** and gives `display-window!`
+  a row bound of the matrix's capacity. The pixel bound is still
+  `window_text_bottom_y`, so the extra rows are capacity, not an
+  extension of the window.
+- **A smaller font realized during the layout causes one relayout** -
+  the analogue of `fonts_changed` (set by `font.c` when the smallest
+  height drops) and `need_larger_matrices`/`adjust_frame_glyphs`
+  (`xdisp.c:21610`, `:17489`): after the first `display-window!`, if
+  `%required-matrix-rows` now exceeds the matrix, the matrices are
+  enlarged and the window laid out again once.
+
+Before this, the matrix and the layout were bounded by the frame's line
+count, so a scaled-down buffer built exactly that many (now short) rows,
+filled only the top of the window, and left the rest as the previous,
+larger font's pixels - the "constant number of lines shrinking" and the
+"slivers between lines" Chris saw.
+
+### The three rules around it
+
+- **`recenter-window-on-cursor!` is passed `window-body-height`, not the
+  matrix capacity.** Emacs centres over `window_box_height / 2` pixels,
+  which `move_it_vertically_backward` turns into body lines; the spare
+  matrix rows are not display space.
+- **The measurement seam carries its buffer.** `%call-with-line-measure`
+  (`indentc.scm`) now takes ED, the buffer TEXTS came from, and passes it
+  to the display factory. `vertical-motion` measures the *current*
+  buffer with the window only for geometry (`tab-line-auto-hscroll` is
+  the caller that relies on it), while the run walk was built against
+  `(window-buffer window)`; the scratch buffer's longer line then raised
+  "Args out of range" at `attrs-at-buffer-position`. Emacs's iterator
+  has `current_buffer`'s characters and the window's geometry, which is
+  the same split.
+- **A line with no display measures by cells.** `%line-pixel-measure`
+  answers `#f` when neither the window's frame nor `current-display` has
+  an output device, so `texts-width`'s cell rule applies; asking a `#f`
+  display for `display-cell-size` raised "No applicable method" from
+  `mouse-test` and `scroll-bar-test`.
+
+### Departures named
+
+- `smallest-font-height` is recomputed from the fonts currently
+  realized, and `clear-realized-face-cache!` (a frame font change) can
+  therefore make it *rise* again; Emacs lowers its per-display value and
+  does not raise it while the display lives (closing a font only
+  decrements `n_fonts`). The practical effect is a smaller matrix after
+  a frame font change, which the next relayout grows again. The table it
+  scans (`*face-font-table*`) is also process-wide where Emacs's value is
+  per display - an editor has one Gtk display, so only a test process
+  that makes several sees the difference, and it inflates capacity
+  rather than changing what is drawn.
+- The matrix's `+3` carries tab/header/mode-line rows Emacs has in the
+  same matrix; this tree's matrix is text rows only, so the three slots
+  are spare capacity. The arithmetic is the C's.
+- `w->nrows_scale_factor` is not carried (it is 1 in an unscaled frame).
+- **`text-scale-max-amount`'s test expectation was double-scaled.**
+  `screen-size` is in pixels now, so an 80x24 display with a 9x20 cell
+  is 720 pixels wide and the maximum is `log(720/9)/log(1.2)` = 24.0;
+  the suite's comment had multiplied the pixel width by the cell again
+  (6480/9 = 720 columns, 36.1). The test now pins 24.0, which is
+  `display-pixel-width`'s frame-width departure applied coherently.
+- `face-remap-test`/`faces-test` expectations were brought up to date
+  for stage 4's four-element `line-face-runs` (`(FROM TO TOKEN ATTRS)`)
+  and for the pixel `screen-size`; no code changed for those.
+
+Gates: pgtk-test 153 (four new checks: matrix rows above the frame's
+line count, more text rows than before the shrink, capacity room, and
+the text reaching the window's bottom; three of the four were seen
+failing with the rule reverted, the fourth fails only with the layout
+bound reverted too), face-remap 17, faces 44, mouse 84, scroll-bar 68,
+tab-line 36, full suite battery exit 0, `imports.scm` regenerated and
+compiled, the touched libraries compile clean. The pty battery is still
+owed (memory pressure killed the last attempt).
+
+## Scaled rows: the tail clear and the special glyphs (2026-11-28,
+## fourth pass)
+
+Chris's follow-up: *"the \ backslash marker does not zoom"*, *"when a
+line does wrap, it descends into madness, and the space from the
+wrapped line to the end of the screen isn't redrawn"*, and *"thin
+slivers ... as if you're clearing to the end of the line, but at the
+wrong zoom level, leaving half a line still there."* Two redisplay
+paths still used the *frame's* metrics for a row that was drawn in a
+scaled face.
+
+### The tail clear was frame-high
+
+`draw-glyph-row!` clears the cells past the row's text with
+`clear_end_of_line`, and `clear-end-of-line-row!` synthesizes its row
+from `face-metrics display #f` - the frame font's height. A
+`text-scale-mode` row is taller than `FRAME_LINE_HEIGHT`, so the clear
+covered only the top of the row's rectangle and the previous frame's
+line showed through the bottom of the tail: the "half a line" sliver,
+on every short line.
+
+`clear-end-of-line-row!` and `fill-line-end-row!` take optional
+METRICS now, and `draw-glyph-row!` passes the row's own
+`(ascent . height - ascent)`. The C's `gui_clear_end_of_line` fills to
+the window's right edge for the row's whole rectangle. Measured in the
+new pixel check: without the metrics the old line's ink is still at
+y=51-54 of a 29-pixel row; with them the tail is the row's background.
+`blank-uncovered-window-area!` still steps in frame cells - it paints
+a region no row covers, and contiguous frame-high bands cover it
+whatever the rows above were scaled to.
+
+### `$` and `\` are the *remapped* default face, at the cut point
+
+`produce_special_glyphs` (`xdisp.c:23971`, GITE) begins
+
+    int face_id = lookup_basic_face (it->w, it->f, DEFAULT_FACE_ID);
+
+and `lookup_basic_face` applies the buffer's `face-remapping-alist` -
+so in a `text-scale-mode` buffer the special glyph is the *scaled*
+default face, not the frame's. `draw-special-glyph!` takes the
+`(face->attribute 'default)` token, which is the remapped one, and now
+measures the glyph with `face-text-width` in that token.
+
+It also uses the row's metrics and follows the text:
+
+- **The baseline and background are the row's**, as
+  `pgtk_draw_glyph_string` sets `s->ybase = row->y + row->ascent` and
+  `s->height = row->height`. The old synthesized frame row drew a
+  scaled glyph into a 20-pixel box.
+- **A continued row fills from the text's end to the window's edge with
+  `\` glyphs**, in the face's advance - `display_line`'s word-wrap
+  branch does exactly that (`xdisp.c:26411`), and a char-boundary break
+  leaves less than one advance, so it shows one glyph as a terminal
+  does. The old code put one marker in the last frame cell whatever
+  the font: a scaled `\` wider than a cell was clipped to a sliver, and
+  the gap a word wrap left stayed empty. The pixel check inks the gap
+  at x=620-700 at scale 2 and fails with a last-cell marker.
+- **A truncated `$` is drawn at the point the text was cut**, not in
+  the last cell (`x_before` in `display_line`), and the left `$` of an
+  hscrolled row at the window's first cell. That left-`$` test had
+  compared the row's *pixel* x with the body's *cell* column, so a
+  window not starting at column 0 drew a `$` on every hscrolled-looking
+  row; it is now `(* body-left unit)`.
+
+`build-row!`'s `limit` no longer reserves one frame cell for the marker;
+the row's text is drawn to the window edge and the special glyph
+overflows and clips, which is what the C does. The layout still wraps at
+one cell short of the edge (`line-texts-rows`' usable width), so the
+common case has room for the first `\`; that is the existing
+cell-model stand-in, named here.
+
+### Drawing is under the window's buffer
+
+`update-window!` now binds `(window-buffer window)` around the blank
+and draw calls. The default face's token is the *buffer's* - its
+`face-remapping-alist` is what a scaled buffer changes - and a split
+whose other buffer was at a different scale cleared this window's tails
+in the wrong face. Emacs realizes faces per buffer for the same reason.
+
+### Tests
+
+`pgtk-test.scm` 159: `schemacs_pgtk_scaled_rows` (3) is the tail clear,
+the marker filling a word-wrap gap, and the marker's ink reaching below
+the frame row height; the tail check was seen failing with the metrics
+removed and the gap check with a last-cell marker.
+`schemacs_pgtk_matrix_diff` (3) pins `update_text_area`'s whole-line
+rule through `matrix-diff-rows` (an unchanged row is skipped; a row at
+a new y or x is not) - the diff already compared geometry via
+`row-equal?`, so this is a rule test rather than a fix.
+
+Full suite battery exit 0; the touched libraries compile clean.
+
+## Fringes (2026-11-28, fifth pass)
+
+Chris, on the `\` fill: *"real emacs as some small gutters on both left
+and right side of the screen and when a line continues it puts a special
+glyph that looks like a little curved arrow both at the end of the
+truncated line and the beginning of the continued line. That glyph does
+not occupy real estate that regular text can occupy, it's a gutter. The
+glyph itself doesn't zoom, but it is centred vertically no matter how
+much you zoom. What we've got is a bunch of `\\\\\\` which is a mess."*
+The backslash fill was standing in for a display feature: fringes.
+
+### The C
+
+- **The fringes are pixels, not columns**, but their *total* is booked
+  in columns: `FRAME_FRINGE_COLS` is
+  `(left_fringe_width + right_fringe_width + unit - 1) / unit`
+  (`frame.c:5896`), and `window_body_width` subtracts the fringe pixels
+  before dividing by `FRAME_COLUMN_WIDTH` (`window.c:1095`). The default
+  is 8 pixels each on a graphical frame (`fringe.el:164`); a terminal's
+  `frame_dimension` answers 0 (`frame.h:1590`).
+- **The text area ends before the fringe.** `window_box_width (TEXT_AREA)`
+  subtracts `WINDOW_FRINGES_WIDTH` (`xdisp.c:1279`), and
+  `init_iterator` subtracts the continuation glyph's width from
+  `last_visible_x` **only when the window has no right fringe**
+  (`xdisp.c:3508`): with a fringe, the marker is a bitmap, not text.
+- **The bitmaps are `right-curly-arrow` on a continued row, and
+  `left-curly-arrow` on the row that continues it** (`fringe.c:1245`,
+  `:1290`, `fringe.el:65`); truncation is `left-arrow`/`right-arrow`.
+  They are 8x8, one byte a row, the high bit leftmost, and
+  `draw_fringe_bitmap_1` centres them in the row's height
+  (`(row->height - h) / 2`, `fringe.c:632`) and in the fringe's width.
+  The fringe face's background fills the gutter; the bitmap is drawn in
+  its foreground.
+- **`window-fringes` returns `(LEFT RIGHT OUTSIDE-MARGINS PERSISTENT)`**
+  (`window.c:8639`), and `set-window-fringes` stores window parameters.
+
+### What landed
+
+- `frame.scm`: `frame-left/right-fringe-width` (`left-fringe`/
+  `right-fringe` frame parameters, default 8 on a window-system frame, 0
+  on a terminal), `window-left/right-fringe-width` (window parameter
+  override), `window-fringe-cols`/`window-left-fringe-cols`/
+  `window-right-fringe-cols`, and the real `window-fringes` /
+  `set-window-fringes`. `window-body-left` adds the left fringe's
+  columns and `window-body-width` subtracts the total.
+- `faces.scm`: the `fringe` defface (`faces.el:2941`, `grey95`/`grey10`
+  by background mode).
+- `glyph.scm`: `glyph-row-continuation-line?`, the port of
+  `MATRIX_ROW_CONTINUATION_LINE_P` (`dispextern.h:1300`) - true when the
+  row starts part-way into its line (`build-row!` passed a non-zero
+  FROM).
+- `dispnew.scm`: `draw-fringe!` and `clear-frame-margins!` generics.
+- `xdisp.scm`: the four bitmaps (`fringe.c:136`, `:151`, `:190`, `:202`),
+  `draw-row-fringes!` (`draw_row_fringe_bitmaps`, `fringe.c:891`), no
+  text `$`/`\` when the matching fringe exists, `posn-at-x-y`'s
+  `left-fringe`/`right-fringe` areas, and the tab/mode-line string
+  positions measured from the window's left edge (those lines span the
+  fringes).
+- `indexc.scm`: `line-texts-rows` takes a RESERVE flag; the layout
+  reserves a marker cell only when there is no right fringe. A
+  horizontally scrolled window with a left fringe gives up no cell and
+  shows a left-arrow bitmap instead of `$`.
+- `pgtk.scm`: `draw-fringe!` paints the fringe face's background over
+  the row and draws the bitmap 8x8 centred; `clear-frame-margins!`.
+
+### Departures
+
+- **(Superseded 2026-11-28: the gutters are pixels now.) The gutters
+  were whole frame columns.** This was true while a window rectangle
+  was a column grid: Emacs's fringes are 8 pixels in an allocation
+  whose width need not be a multiple of the cell, and the old renderer
+  booked them by whole columns (8+8 on a 9-pixel cell was one column
+  each), so text started a column in rather than 8 pixels in. The
+  pixel-geometry pass made `window-box-left` and `window-box-width`
+  exact pixel arithmetic, and the redisplay uses them; a fringe 8
+  pixels wide stays 8 pixels wide at any font size.
+  `window-fringe-cols` / `window-body-left` remain as column-only
+  helpers (the terminal front end's grid, tests, the window API) and
+  are no longer what places text on a graphical frame.
+- **A frame's allocation can be larger than its whole-cell rectangle**
+  (a size not a multiple of `FRAME_LINE_HEIGHT`, or a frame size that
+  lags a font change). Emacs's allocation *is* its pixel size; this
+  renderer's rows stop at the cell grid, so `clear-frame-margins!`
+  paints the band outside it with the frame background, and a graphical
+  frame is now cleared whole when it is garbaged. That band is where the
+  previous zoom's rows survived - the "line or two at the bottom". It is
+  a host compensation, not a C behaviour.
+- `fringe-mode`, `set-fringe-style`, display margins and
+  `fringes-outside-margins` beyond storing the flag, user fringe
+  bitmaps (`define-fringe-bitmap`), fringe cursors, `empty-line`/
+  overlay-arrow bitmaps, and `set-window-buffer`'s reset of
+  non-persistent fringes are not carried.
+- The terminal keeps the text `$`/`\` glyphs: a tty has no fringes, and
+  Emacs on a tty draws them in the last cell (`xdisp.c:26689`).
+- The fringe bitmap is drawn in *logical* pixels, so a HiDPI surface
+  scales it with the rest (Emacs's fringe bitmaps are in device pixels
+  after the scale factor). The visible size is the same.
+
+### Tests
+
+`pgtk-test.scm` 170: `schemacs_pgtk_fringes` (11) - the 8-pixel
+defaults and `(8 8 #f #f)`, body columns and body-left with fringes,
+the continued row's right-curly and the continuation row's left-curly
+bitmaps in their gutters, no text glyph in the left gutter, the gutter
+background being the fringe face's, and the bitmap not zooming (still
+8 scanlines) and staying centred when the row grows to 29 pixels.
+`scroll-bar-test.scm` sets both fringes to 0 in its frame defaults:
+its arithmetic is about the bar's columns, not the fringe's.
+Full suite battery exit 0 (`pgtk-test` 170, `tty-editor` 379,
+`scroll-bar` 68); `imports.scm` regenerated and compiled.
+
+# The window's geometry is pixels now (2026-11-28)
+
+The cell model was the root of the fringe and resize cycles: a window
+rectangle was an integer row/column count, so every fringe was rounded
+up to a whole column and every resize rounded to a whole row before the
+next pass re-derived its share from the rounded result. The window now
+carries GNU Emacs's own fields and derives the cell view from them.
+
+## What the record holds
+
+`struct window` (`window.h`) fields, added to `<window>`:
+
+| field | Emacs | meaning |
+|---|---|---|
+| `%window-pixel-left` | `w->pixel_left` | left edge, frame pixels |
+| `%window-pixel-top` | `w->pixel_top` | top edge, frame pixels |
+| `%window-pixel-width` | `w->pixel_width` | total pixel width |
+| `%window-pixel-height` | `w->pixel_height` | total pixel height |
+| `%window-normal-lines` | `w->normal_lines` | share of the parent, 0..1 |
+| `%window-normal-cols` | `w->normal_cols` | share of the parent, 0..1 |
+
+The existing cell fields are the C's `left_col`, `top_line`,
+`total_cols` and `total_lines`, and are *derived*:
+
+    window-left   = pixel-left   / FRAME_COLUMN_WIDTH
+    window-top    = pixel-top    / FRAME_LINE_HEIGHT
+    window-width  = pixel-width  / FRAME_COLUMN_WIDTH
+    window-height = pixel-height / FRAME_LINE_HEIGHT
+
+A cell setter writes both views; the exact pixel setters
+(`set-window-pixel-left!` and its three siblings) write the pixel and
+derive the cell count. A window built by the old cell-based constructor
+has `#f` in its pixel fields until something writes one, and the pixel
+accessors derive it from the cells, so no caller had to change.
+
+## `window_resize_apply`
+
+`%window-resize-apply-1` is now `window_resize_apply` (`window.c:4815`)
+clause for clause: it stores the pixel size the resize engine computed
+(not a rounded cell count), sets `total_cols`/`total_lines` by
+division, assigns the stored `new_normal` when it is a number, and walks
+the children assigning each one's `pixel_left`/`pixel_top` from the
+edge and recursing. The resize fuzz (`tools/window-resize-fuzz.scm`,
+300 random trees, both axes, ±1/±2) is **0 failures**; before this
+change it was 1508.
+
+`window-normal-size` (`window.c:947`) answers the stored field when
+there is one, and falls back to the old derivation for a window that
+has not been through an apply. This is what makes a window remember its
+share after being shrunk to its minimum.
+
+## The box is pixels, the fringes are pixels
+
+`window_box_left`, `window_box_width`, `window_box_top` and
+`window_box_height` are ports of `window_box`/`window_box_width`/
+`window_box_height` (`xdisp.c:1214`, `:1279`, `:1291`):
+
+- left = pixel-left + left scroll-bar area + left fringe;
+- width = pixel-width - scroll-bar area - right divider - both fringes;
+- top = pixel-top + tab line height;
+- height = pixel-height - mode line - tab line - header line.
+
+`window-body-width` is `window_box_width / FRAME_COLUMN_WIDTH`, as
+`window.c:1095` does; a fringe narrower than a cell no longer costs a
+whole column. `window-body-left` remains as a *column* convenience
+(the scroll-bar tests and the terminal backend use it) but is no
+longer where the redisplay starts text: `xdisp.scm` lays every row out
+at `window-box-left`, in pixels.
+
+The redisplay's row x, box width, tail clear, special glyphs, cursor x,
+`posn-at-x-y`'s fringe hit test, the Gtk text clip and the vertical
+border all use those box pixels. The fringe gutter is exactly the frame
+parameter's pixels: an 8-pixel fringe is 8 pixels at every font size.
+
+Measured live on a broadway Gtk frame (`pgtk-write-screenshot!`):
+
+| frame cell | box left | box width | body columns |
+|---|---|---|---|
+| 9 x 20 | 8 | 706 | 78 (right bar 16) |
+| 11 x 26 | 8 | 870 | 79 (right bar 16) |
+
+The pixel scan across the left edge shows the fringe background in
+pixels 0-7, the bitmap in 6-7 where an arrow is, and text ink from
+pixel 8 / 10 onwards - text never occupies the gutter, and the gutter
+does not grow with the font.
+
+## What is still a departure, named
+
+- **A split and a frame construction still assign cell rectangles.**
+  Their pixel fields are then the cells times the frame unit, which is
+  what Emacs itself computes for a non-pixelwise split (`window.el`
+  rounds the pixel size to the character size), but a PIXELWISE SIZE is
+  still rounded to cells at `split-window`'s edge. The pixel fields are
+  authoritative once a resize apply or an exact setter writes them; a
+  pixelwise split's exact pixel size is the remaining split departure.
+  `window_set_parent_and_normal_sizes` (`window.c:5161`) **is** ported
+  now and runs at the end of a split, so a fresh split stores the
+  children's normal shares instead of deriving them.
+- **`fill-frame-remainder!`** (formerly `clear-frame-margins!`) paints
+  the part of the Gtk allocation outside the frame's whole-cell
+  rectangle. Emacs has no such band because its glyph matrix covers the
+  frame's pixels; this renderer's rows are a cell grid and a window
+  allocation is not always a multiple of the line height. It is named
+  as host compensation, not as an Emacs function.
+- **The fringe machinery is not the whole of `fringe.el`/`fringe.c`.**
+  The four standard bitmaps and the `fringe` face are here; `fringe-mode`,
+  the styles, `define-fringe-bitmap`, user bitmaps, indicator and cursor
+  alists, margins, `fringes-outside-margins`, continuation/truncation
+  cursor bitmaps and redisplay's fringe indicator table are not.
+- **The Gtk backend still draws fringe bitmaps in logical pixels.**
+  Emacs's are device pixels after the scale factor; the visible size is
+  the same, but a bitmap is not as sharp on a HiDPI surface as Emacs's.
+
+## The measured-text departures, closed (2026-11-28, later)
+
+The per-face-font pass left four measured-text callers assuming cells.
+They are fixed:
+
+- **`string-pixel-width`** (`subr-x.el:389`) now measures through the
+  display's faces. It inserts the string - text properties and all -
+  into a temp buffer and walks each line with the same run/advance
+  measurement the row builder uses (`%display-line-texts-width`). A
+  `:height 1.5` or `:family "serif"` run changes the answer, which is
+  what `tab-bar-auto-width` and the tab line need. The optional BUFFER
+  argument is still not used for the default face; the current buffer's
+  remapping is.
+- **`posn-at-x-y`** walks the current matrix row's glyph advances
+  (`%buffer-posn-from-pixels`), so a click in a scaled or proportional
+  row lands on the character under the pointer. `posn-at-point` and
+  `pos-visible`'s position path use `%window-position-pixel-coords` for
+  the same reason. A row's glyphs are one per buffer column for text;
+  an overlay-string glyph has no buffer column, and a click in one
+  answers by glyph index - still named.
+- **The edge marker's width** is the default face's `\` advance for a
+  wrapped window and its `$` advance for a truncated one
+  (`*line-reserve-width*`, installed by `xdisp.scm`), not one frame
+  cell, when there is no fringe. A text-scaled buffer now reserves the
+  width it actually draws.
+- **A `display` property string and an overlay string** are measured
+  and drawn with their own `face` text properties merged onto the face
+  at their position (`%text-advance`, `%string-face-runs`,
+  `%push-overlay-string!`), as `string_width` and `display_string` do.
+
+Tests: `pgtk-test.scm` 182 - a tall glyph's hit test answers position 1
+where the cell division answered 2, `posn-at-point`'s x is the tall
+glyph's advance, and a `:height 1.5` string measures wider than the
+plain one.
+
+## The mode line sat on the last text row (2026-11-28)
+
+Reducing the font from very large to small corrupted the last line.
+`render-window-mode-line!` positioned the mode line at
+`(window-top + window-height - 1) * line_height`, a **row index**. A
+window's pixel allocation is not always a whole number of lines: 479
+pixels at 20-pixel lines is 23 whole rows and a 19-pixel remainder, and
+`(top + 23 - 1) * 20 = 440` is one remainder above the true mode line
+top of `479 - 20 = 459`. The mode line therefore painted over the last
+text row.
+
+It is `window-pixel-top + window-pixel-height - line_height` now, and
+the tab line is `window-pixel-top`. `window-to-frame-pixel-y` and the
+mode/tab posn hit tests use the pixel box too. The regression is
+`schemacs_pgtk_window_pixels`' mode-line check: a 479-pixel window's
+recorded mode line y must be 459.
+
+## Normal sizes on a split, and `pos-visible`'s pixels (2026-11-28)
+
+- `window-set-parent-and-normal-sizes` (`window.c:5161`) is ported and
+  called at the end of both split paths. A freshly split child stores
+  the share `pixel_size / parent_pixel_size`, the last one taking the
+  remainder, as the C does. The old `window-normal-size` fallback now
+  covers only windows built before the function ran.
+- `pos-visible-in-window-p`'s geometry uses the matrix row's own
+  `y`/`height`/`ascent` and `%window-position-pixel-coords` for x, when
+  the position is in the current matrix. The row-index-times-frame-cell
+  arithmetic remains only as the pre-matrix fallback. `last-visible-y`
+  is the pixel box height plus the tab line, not a row count.
+- Still open from the pixel list: a PIXELWISE split still rounds SIZE
+  to cells, and the full `fringe.el`/`fringe.c` bitmap registry
+  (`fringe-mode`, user bitmaps, the indicator/cursor alists, margins)
+  is not ported. The four standard bitmaps used by continuation and
+  truncation are.
+
+## The continuation marker's cell, and the fill through
+## `last_visible_x` (2026-11-28)
+
+The pty battery's only red check after the pixel geometry work was
+`continuation`: a 100-`X` line wrapped correctly (79 `X`, then 21 on
+the next row) but the first row's last cell was a **space** where
+Emacs draws `\`. The wrapping was never in doubt; the special glyph
+was.
+
+### The C
+
+`init_iterator` measures both edge glyphs (`xdisp.c:3427-3459`) and,
+when there is no right fringe, reduces `last_visible_x` by the one the
+line's wrap mode uses (`:3509-3518`):
+
+```c
+  if (WINDOW_RIGHT_FRINGE_WIDTH (it->w) == 0)
+    {
+      if (it->line_wrap == TRUNCATE)
+        it->last_visible_x -= it->truncation_pixel_width;
+      else
+        it->last_visible_x -= it->continuation_pixel_width;
+    }
+```
+
+`extend_face_to_end_of_line` then fills **through** that position,
+inclusive (`:24813`):
+
+```c
+  while (it->current_x <= it->last_visible_x)
+    PRODUCE_GLYPHS (it);
+```
+
+So an ordinary short or blank row still has a glyph in the window's
+last cell, while a row that appends a continuation or truncation glyph
+has that glyph there and the fill begins only after it.
+
+### The departure
+
+The row slice already used the reduced width, but `build-row!` was
+handed the **full box width** as both its text capacity and its fill
+bound. It therefore appended one fill-space at the marker's column,
+and `draw-glyph-row!`'s continuation loop started at the row's end -
+already the window edge - so `(< x limit)` was false and nothing was
+drawn. On a terminal the screen showed 79 `X` and a space; on a
+no-fringe GUI frame the same thing happened with pixels.
+
+### The fix
+
+`display-window!` now keeps the two widths apart, as the C does:
+
+- `row-width` is `last_visible_x - first_visible_x`: the box width less
+  the right-edge reserve (`right-reserve`, zero when a right fringe
+  draws the marker) and, for an hscrolled line drawn one cell in, its
+  left truncation glyph's cell;
+- `fill-width` is `row-width + right-reserve` for an ordinary row - the
+  C's inclusive fill reaching the last cell - and `row-width` for a
+  continued or truncated one, whose last cell belongs to the marker.
+
+`build-row!` takes `fill-width` as its own argument (the call had only
+ever passed a single width, so the old `row-width` parameter was always
+0; it stays 0, because `fill_line_p` has no reader here). The
+truncation predicate compares `line-texts-width` with
+`hscroll + width - right-reserve`, not with the left marker's room -
+the left glyph overwrites a cell, it does not extend the line.
+`draw-glyph-row!` measures `$` and `\` separately, starts the
+continuation run at the text's own end, and places a truncation `$` at
+`limit - truncation-width`. `%window-reserve-width` returns the `$`
+advance for a truncated window and the `\` advance for a wrapped one,
+so the slice and the row agree.
+
+The row's glyphs still do not contain the special glyph - it is drawn
+over the row, which is this renderer's existing model - so a continued
+row's `used` is one less than Emacs's. The screen answer is the same,
+and the blank/short row test's 80 glyphs are preserved by the ordinary
+`fill-width`.
+
+Tests: `tools/pty-check.py`'s `continuation` (red before, green
+after), `hscroll` and `wide-columns`; all 123 suites pass, and the full
+pty battery is **116/116**.

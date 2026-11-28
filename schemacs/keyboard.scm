@@ -23,6 +23,7 @@
   ;; See LAYOUT-PLAN.txt for the rule this library is a step of.
 
   (import
+ (only (schemacs custom) define-custom)
  (only (schemacs undo) *point-before-last-command-or-undo* *buffer-before-last-command-or-undo*)
     (scheme base)
     (scheme char)
@@ -135,6 +136,7 @@
           *last-command* *this-command* *real-this-command*
           *select-active-regions*
           deactivate-mark clear-prefix! delete-char pending-uarg
+          universal-argument
           place-undo-boundary!
           undo undo-redo update-prefix!)
     ;; `message` is the C's `message3`, which logs before it displays:
@@ -1261,11 +1263,20 @@
                     (next (loop next))
                     (else #f))))))))
 
+    (define %control-u-key
+      ;; The `C-u` event, computed once: GNU Emacs's `(aref (kbd "C-u")
+      ;; 0)`, which `event-convert-list` spells here. The prefix reader
+      ;; asks whether a key *is* C-u on every event, so this is not
+      ;; built per keystroke.
+      ;;--------------------------------------------------------------
+      (event-convert-list '(control #\u)))
+
     (define (dispatch-key-1 frame key position silent?)
       ;; Dispatch one key *event* through the modal keymap lookup. The
       ;; modal lookup state persists across events while a chord
-      ;; (such as C-x C-c) is being entered. C-u and digits are
-      ;; consumed as prefix arguments before the keymap lookup; the
+      ;; (such as C-x C-c) is being entered. A C-u whose *binding* is
+      ;; `universal-argument` - and digits while a prefix is being read -
+      ;; are consumed as prefix arguments before the keymap lookup; the
       ;; pending prefix is left alone for the rest of the chord and is
       ;; consumed by `dispatch-action' when a command finally runs.
       ;;
@@ -1300,7 +1311,26 @@
                           key)))
       (if (dispatch-special-event frame key)
           #t
-          (if (update-prefix! key)
+          ;; **C-u is consumed as a prefix only when C-u's *binding* is
+          ;; `universal-argument`** - Emacs's rule, "the binding decides
+          ;; which command runs" (`read_key_sequence` looks the event up
+          ;; and runs what it finds; `universal-argument` is bound in
+          ;; `global-map`). A buffer or minor mode that binds C-u to
+          ;; something else must win: `read-passwd-map` binds it to
+          ;; `delete-minibuffer-contents` (bug#12570). The digits after a
+          ;; consumed C-u are `universal-argument-map`'s, and
+          ;; `update-prefix!` keeps reading those whichever map is
+          ;; current - a transient map outranks the buffer's - so only
+          ;; the first C-u asks the maps.
+          ;;
+          ;; The chord guard: a C-u that is the *second* event of a
+          ;; chord belongs to the chord's prefix map (C-x C-u is
+          ;; `upcase-region`), and `update-prefix!`'s own digit branch
+          ;; has the same guard for the same reason.
+          (if (and (not (frame-keymap-state frame))
+                   (or (not (eqv? key %control-u-key))
+                       (eq? (key-binding (vector key)) universal-argument))
+                   (update-prefix! key))
           ;; C-u or a prefix digit was consumed. It is a command in
           ;; its own right, so like any other command it breaks a run
           ;; of consecutive kills - by *being* the last command, which
@@ -2601,12 +2631,15 @@
     ;; same wall `abort-recursive-edit' is the other side of.
     ;;------------------------------------------------------------------
 
-    (define *read-quoted-char-radix*
+    (define-custom *read-quoted-char-radix*
       ;; GNU Emacs's `read-quoted-char-radix' (simple.el): "Radix for
       ;; `quoted-insert' and other uses of `read-quoted-char'.
       ;; Supported radix values are 8, 10 and 16."
       ;;--------------------------------------------------------------
-      (make-parameter 8))
+       8
+      "Radix for \\[quoted-insert] and other uses of `read-quoted-char'.
+Supported radix values are 8, 10 and 16."
+      :type '(choice (const 8) (const 10) (const 16)) :group 'editing-basics)
 
     (define (read-quoted-char . args)
       ;; GNU Emacs's `read-quoted-char' (simple.el:986): "Like

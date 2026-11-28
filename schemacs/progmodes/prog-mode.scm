@@ -71,7 +71,9 @@
       ;;--------------------------------------------------------------
       (km:keymap '*prog-mode-map*))
 
-    (define prog-mode-hook '())
+    (define-custom prog-mode-hook '()
+      "Normal hook run when entering programming modes."
+      :type 'hook)
     ;; ^ GNU Emacs's `prog-mode-hook', made by `define-derived-mode'.
 
     (define prog-mode-syntax-table

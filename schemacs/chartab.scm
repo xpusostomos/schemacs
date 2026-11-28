@@ -61,7 +61,7 @@
    optimize-char-table
    map-char-table
    ;; the C's internal functions, which `syntax.sld' is the caller of
-   char-table-ref char-table-set
+   char-table-ref char-table-translate char-table-set
    char-table-ref-and-range char-table-set-range
    copy-char-table
    ;; the tree's own names, for code that has to walk it
@@ -265,6 +265,24 @@
                   (char-table-ref (%char-table-parent table) c)
                   default))
             val)))
+
+    (define (char-table-translate table c)
+      ;; `char_table_translate' (`character.h:592'): "Translate a
+      ;; character C through TABLE. A value that is not a character
+      ;; means C itself." The C is the `TRANSLATE' macro's body:
+      ;; `(v = CHAR_TABLE_REF (t, c)), CHARACTERP (v) ? v : c'.
+      ;;
+      ;; **A placement note**: the C has this inline in `character.h',
+      ;; not in `chartab.c'; it is here because `char-table-ref' is
+      ;; what it is made of and this library is the char-table file.
+      ;; `regex-emacs.scm` reads its own `%translate-code' for the hot
+      ;; loop (the C's `TRANSLATE' inlines there too); the two agree.
+      ;;--------------------------------------------------------------
+      (let ((v (char-table-ref table c)))
+        ;; CHARACTERP is an integer in this tree's data model: a
+        ;; character in a buffer *is* a code point (`buffer-text-ref`),
+        ;; which is what `%translate-code` tests with `integer?`.
+        (if (integer? v) v c)))
 
     (define (char-table-ref-simple table idx c from to default is-subtable)
       ;; `char_table_ref_simple' (`chartab.c:252'). FROM and TO are a

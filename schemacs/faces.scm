@@ -35,6 +35,7 @@
   ;; See FACES-PLAN.txt for the plan this library is a step of.
 
   (import
+    (only (schemacs custom) define-custom)
     (scheme base)
     (scheme char)
     ;; `(inexact->exact (truncate ...))' for a relative `:height' resolved
@@ -494,7 +495,7 @@
       ;;--------------------------------------------------------------
       (> (*display-color-cells*) 2))
 
-    (define *frame-background-mode*
+    (define-custom *frame-background-mode*
       ;; GNU Emacs's `frame-background-mode': `light' or `dark', or #f
       ;; when it is not known - in which case a `(background dark)'
       ;; branch does not match either way, which is what Emacs does until
@@ -507,7 +508,16 @@
       ;; `frame--current-background-mode''s computed answer is what it
       ;; falls through to.
       ;;--------------------------------------------------------------
-      (make-parameter #f))
+       #f
+      "The brightness of the background.
+Set this to the symbol `dark' if your background color is dark,
+`light' if your background is light, or nil (automatic by default)
+if you want Emacs to examine the brightness for you.
+
+If you change this without using customize, you should use
+`frame-set-background-mode' to update existing frames;
+e.g. (mapc \\='frame-set-background-mode (frame-list))."
+      :type '(choice (const dark) (const light) (const :tag "automatic" nil)) :group 'faces)
 
     ;; **The Emacs name of this parameter, for theme data.** A theme file
     ;; is written in Emacs's names, and this tree's dynamically bound
@@ -1270,6 +1280,10 @@ Note: Other faces cannot inherit from the cursor face.")
 
     (defface 'mouse '((#t #f))
           "Basic face for the mouse color under X.")
+
+    (defface 'fringe
+          '((((class color) (background light)) :background "grey95") (((class color) (background dark)) :background "grey10") (#t :background "gray"))
+          "Basic face for the fringes to the left and right of windows under X.")
 
     (defface 'minibuffer-prompt
           '((((background dark)) :foreground "cyan") (((type pc)) :foreground "magenta") (#t :foreground "medium blue"))

@@ -25,12 +25,14 @@
   (import
     (scheme base)
     (scheme char)
-    (only (scheme cxr) caddr cdddr)
-    (only (guile) sort format)
+    (only (scheme cxr) caadr caddr cdadr cdddr)
+    (only (guile) sort format gensym)
     (only (schemacs timefns) float-time)
     (only (schemacs buffer)
           current-buffer buffer-local-value set-buffer-local-value!
-          local-variable-p buffer-name *case-fold-search*)
+          local-variable-p buffer-name *case-fold-search*
+          current-local-map use-local-map mode-name
+          buffer-chars-modified-tick)
     (only (schemacs data) default-value)
     (only (schemacs editfns)
           point point-min point-max goto-char save-excursion
@@ -46,8 +48,15 @@
     (only (schemacs marker)
           copy-marker markerp marker-position set-marker)
     (only (schemacs fns) nth)
-    (only (schemacs subr) delq run-hooks nthcdr)
+    (only (schemacs subr) delq run-hooks nthcdr add-hook remq intern)
     (only (schemacs simple) push-mark)
+    (only (schemacs keymap)
+          make-sparse-keymap define-key lookup-key set-keymap-parent keymapp)
+    (only (schemacs frame) frame? select-window)
+    (only (schemacs subr) event-start posn-window)
+    (only (schemacs keyboard) *last-nonmenu-event*)
+    (only (schemacs menu-bar) popup-menu)
+    (only (schemacs xdisp) format-mode-line *menu-bar-update-hook*)
     (only (schemacs command) define-command)
     (only (schemacs minibuffer) completing-read format-prompt make<history>)
     (only (schemacs core lisp) beginning-of-defun)
@@ -76,6 +85,13 @@
    imenu--rescan-item imenu--history-list
    imenu--subalist-p imenu-unavailable-error
    imenu--sort-by-name imenu--sort-by-position imenu--relative-position
+   imenu--create-keymap imenu--mouse-menu
+   imenu-add-to-menubar imenu-add-menubar-index
+   imenu-update-menubar imenu--menubar-select
+   imenu--menubar-keymap set!imenu--menubar-keymap!
+   imenu-menubar-modified-tick set!imenu-menubar-modified-tick!
+   *imenu--menubar-keymap* *imenu-menubar-modified-tick*
+   imenu--last-menubar-index-alist
    imenu--split imenu--split-menu imenu--split-submenus
    imenu--truncate-items imenu--make-index-alist imenu--cleanup
    imenu--in-alist imenu-default-create-index-function
@@ -616,24 +632,215 @@
 
     (define (imenu-choose-buffer-index . rest)
       ;; `imenu.el:896`: "Let the user select from a buffer index and
-      ;; return the chosen index." The mouse menu is not carried; this
-      ;; tree always uses the completion path.
+      ;; return the chosen index."
+      ;;
+      ;; The mouse-triggered test is Emacs's `(listp last-nonmenu-event)'
+      ;; - and `listp` is true for *nil* too, which is Emacs's own
+      ;; behaviour: with no last event at all (a batch call) the popup
+      ;; path is taken. A keyboard invocation leaves an integer event
+      ;; there, so `mouse-triggered` is false.
+      ;;
+      ;; `imenu--parentify-index-alist` (Eglot's non-leaf ".." entries)
+      ;; is not carried; it exists only for indexes whose names carry
+      ;; Eglot text properties, and nothing here produces one.
       ;;--------------------------------------------------------------
       (let ((prompt (and (pair? rest) (car rest)))
             (alist (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+            (mouse-triggered (let ((e (*last-nonmenu-event*)))
+                               (or (not e) (pair? e))))
             (result #t))
+        ;; If selected by mouse, see to that the window where the mouse
+        ;; really is selected.
+        (when (and mouse-triggered
+                   (not (equal? (*last-nonmenu-event*) '(menu-bar))))
+          (let ((window (posn-window (event-start (*last-nonmenu-event*)))))
+            (or (frame? window) (not window) (select-window window))))
+        ;; Create a list for this buffer only when needed.
         (let loop ()
           (when (eq? result #t)
             (let ((index-alist (if alist alist (imenu--make-index-alist))))
               (when (*imenu-flatten*)
                 (set! index-alist (imenu--flatten-index-alist index-alist #t)))
-              (set! result (imenu--completion-buffer index-alist prompt))
+              (set! result
+                    (if (and (*imenu-use-popup-menu*)
+                             (or (eq? (*imenu-use-popup-menu*) #t)
+                                 mouse-triggered))
+                        (imenu--mouse-menu index-alist
+                                           (*last-nonmenu-event*))
+                        (imenu--completion-buffer index-alist prompt)))
               (when (equal? result imenu--rescan-item)
                 (imenu--cleanup)
-                (set!imenu--index-alist #f)
                 (set! result #t)
+                (set!imenu--index-alist #f)
                 (loop)))))
         result))
+
+
+    ;;----------------------------------------------------------------
+    ;; The menu-bar and mouse menus (`imenu.el:517', `:823', `:948').
+    ;;----------------------------------------------------------------
+
+    (define *imenu--menubar-keymap* (make-parameter #f))
+    ;; ^ `imenu--menubar-keymap' is `defvar-local' (`imenu.el:947') -
+    ;; the per-buffer keymap the menu bar's `[menu-bar index]' item
+    ;; binds. **It is a *list* keymap** - `(keymap "Imenu" ...)' -
+    ;; because `imenu-update-menubar' rebuilds it with `setcdr' over the
+    ;; new menu, exactly as Emacs does; this tree's `(keymap ...)' lists
+    ;; are real keymaps (`access-keymap' and `map-keymap' walk them).
+
+    (define (imenu--menubar-keymap)
+      (buffer-local-value (current-buffer) *imenu--menubar-keymap*
+                          (*imenu--menubar-keymap*)))
+
+    (define (set!imenu--menubar-keymap! value)
+      (set-buffer-local-value! (current-buffer) *imenu--menubar-keymap* value))
+
+    (define *imenu-menubar-modified-tick* (make-parameter 0))
+    ;; ^ `(defvar-local imenu-menubar-modified-tick 0)' (`imenu.el:966').
+
+    (define (imenu-menubar-modified-tick)
+      (buffer-local-value (current-buffer) *imenu-menubar-modified-tick*
+                          (*imenu-menubar-modified-tick*)))
+
+    (define (set!imenu-menubar-modified-tick! value)
+      (set-buffer-local-value! (current-buffer)
+                               *imenu-menubar-modified-tick* value))
+
+    (define imenu--last-menubar-index-alist #f)
+    ;; ^ `(defvar imenu--last-menubar-index-alist nil)' (`imenu.el:946').
+    ;; A plain variable: it is `setq`-ed and compared, never `let`-bound.
+
+    (define (imenu--create-keymap title alist . rest)
+      ;; GNU Emacs's `imenu--create-keymap' (`imenu.el:517'): the keymap
+      ;; for the menu from TITLE and ALIST.
+      ;;
+      ;; Emacs builds each entry as `(KEY NAME lambda () (interactive)
+      ;; ...)' - the lambda spliced in as a *form* - and the menu code
+      ;; runs the form through `commandp'. This tree has no evaluated
+      ;; lambda data, so the same slot holds the **procedure**, and the
+      ;; entry is the dotted `(KEY NAME . PROC)' that
+      ;; `parse_menu_item''s old format reads as `(STRING . DEF)'
+      ;; (`keyboard.c:8930'). That is the tree's usual replacement of a
+      ;; generated `(lambda ...)' with a closure, and it keeps the
+      ;; keymap's shape: a list keymap of `(EVENT NAME . DEF)' entries,
+      ;; where a submenu's DEF is the nested list keymap.
+      ;;
+      ;; **The KEY is a symbol here where Emacs uses the name *string*.**
+      ;; Emacs keys a duplicate-allowed item by its name string - an
+      ;; object its keymap alists compare with `EQ` - because two items
+      ;; may share a label. This tree's events are integers and symbols,
+      ;; so an uninterned symbol per item (`gensym') carries the same
+      ;; uniqueness, and `intern` is the non-duplicate case's own key. A
+      ;; named departure; nothing reads the key but the menu.
+      ;;--------------------------------------------------------------
+      (let ((cmd (and (pair? rest) (car rest))))
+        (cons 'keymap
+              (cons title
+                    (map (lambda (item)
+                           (let ((name (car item)))
+                             (cons (if (*imenu-allow-duplicate-menu-items*)
+                                       (gensym name)
+                                       (intern name))
+                                   (cons name
+                                         (if (imenu--subalist-p item)
+                                             (imenu--create-keymap
+                                              name (cdr item) cmd)
+                                             (lambda ()
+                                               (if cmd (cmd item) item)))))))
+                         (remq #f alist))))))
+
+    (define (imenu--mouse-menu index-alist event . rest)
+      ;; GNU Emacs's `imenu--mouse-menu' (`imenu.el:823'): "Let the user
+      ;; select from a buffer index from a mouse menu."
+      ;;--------------------------------------------------------------
+      (let* ((index-alist (imenu--split-submenus index-alist))
+             (menu (imenu--split-menu
+                    index-alist
+                    (or (and (pair? rest) (car rest)) (buffer-name))))
+             (map (imenu--create-keymap
+                   (car menu)
+                   (cdr (if (and (null? (cddr menu))
+                                 (string? (caadr menu))
+                                 (pair? (cdadr menu)))
+                            (cadr menu)
+                            menu)))))
+        (popup-menu map event)))
+
+    (define (imenu-add-to-menubar name)
+      ;; GNU Emacs's `imenu-add-to-menubar' (`imenu.el:948'): "Add an
+      ;; `imenu' entry to the menu bar for the current buffer. NAME is a
+      ;; string used to name the menu bar item."
+      ;;--------------------------------------------------------------
+      (if (or (and (imenu-prev-index-position-function)
+                   (imenu-extract-index-name-function))
+              (imenu-generic-expression)
+              (not (eq? (imenu-create-index-function)
+                        imenu-default-create-index-function)))
+          (unless (and (current-local-map)
+                       (keymapp (lookup-key (current-local-map)
+                                            (vector 'menu-bar 'index))))
+            (let ((newmap (make-sparse-keymap)))
+              (set-keymap-parent newmap (current-local-map))
+              (set! imenu--last-menubar-index-alist #f)
+              (set!imenu--menubar-keymap! (list 'keymap "Imenu"))
+              (define-key newmap (vector 'menu-bar 'index)
+                          (list 'menu-item name (imenu--menubar-keymap)))
+              (use-local-map newmap)
+              (add-hook *menu-bar-update-hook* imenu-update-menubar)))
+          (imenu-unavailable-error "The mode `~a' does not support Imenu"
+                                   (format-mode-line (mode-name)))))
+
+    (define-command (imenu-add-menubar-index)
+      "Add an Imenu \"Index\" entry on the menu bar for the current buffer.
+
+A trivial interface to `imenu-add-to-menubar' suitable for use in a hook."
+      (interactive)
+      (imenu-add-to-menubar "Index"))
+
+    (define (imenu-update-menubar)
+      ;; GNU Emacs's `imenu-update-menubar' (`imenu.el:982'): recompute
+      ;; the bar's menu when the buffer has changed.
+      ;;--------------------------------------------------------------
+      (when (and (current-local-map)
+                 (imenu--menubar-keymap)
+                 (not (= (buffer-chars-modified-tick)
+                         (imenu-menubar-modified-tick))))
+        (set!imenu-menubar-modified-tick! (buffer-chars-modified-tick))
+        (let ((index-alist (imenu--make-index-alist #t)))
+          ;; Don't bother updating if the index-alist has not changed
+          ;; since the last time we did it.
+          (unless (equal? index-alist imenu--last-menubar-index-alist)
+            (set! imenu--last-menubar-index-alist index-alist)
+            (set! index-alist (imenu--split-submenus index-alist))
+            (let* ((menu (imenu--split-menu index-alist (buffer-name)))
+                   (menu1 (imenu--create-keymap
+                           (car menu)
+                           (cdr (if (and (null? (cddr menu))
+                                         (string? (caadr menu))
+                                         (pair? (cdadr menu)))
+                                    (cadr menu)
+                                    menu))
+                           imenu--menubar-select)))
+              (set-cdr! (imenu--menubar-keymap) (cdr menu1))))))
+      #f)
+
+    (define (imenu--menubar-select item)
+      ;; GNU Emacs's `imenu--menubar-select' (`imenu.el:1005'): "Use
+      ;; Imenu to select the function or variable named in this menu
+      ;; ITEM."
+      ;;--------------------------------------------------------------
+      (if (equal? item imenu--rescan-item)
+          (begin
+            (imenu--cleanup)
+            ;; Make sure imenu-update-menubar redoes everything.
+            (set!imenu-menubar-modified-tick! -1)
+            (set!imenu--index-alist #f)
+            (set! imenu--last-menubar-index-alist #f)
+            (imenu-update-menubar)
+            #t)
+          (begin
+            (imenu item)
+            #f)))
 
     (define (imenu--flatten-index-alist index-alist . rest)
       ;; `imenu.el:839`: flatten a nested alist, concatenating names when
@@ -685,8 +892,12 @@
           (set! index-item (imenu--assoc index-item (imenu--make-index-alist))))
         (cond
          ((not index-item) #f)
-         ((pair? (cddr index-item))
-          ;; `(,name ,pos ,fn . ,args)'.
+         ;; `(,name ,pos ,fn . ,args)'. **The second test is what makes
+         ;; the dotted `(NAME . POS)' arm reachable**: `(cddr item)' on
+         ;; `("alpha" . #<marker>)' used to raise "expecting pair"
+         ;; instead of failing its test, and the menu's own entries are
+         ;; exactly that shape.
+         ((and (pair? (cdr index-item)) (pair? (cddr index-item)))
           (let ((name (car index-item))
                 (pos (cadr index-item))
                 (fn (caddr index-item))
@@ -695,7 +906,7 @@
             (apply fn name pos args)
             (run-hooks (*imenu-after-jump-hook*)))
           #f)
-         ((pair? (cdr index-item))
+         ((pair? index-item)
           ;; `(,name . ,pos)'.
           (imenu (list (car index-item) (cdr index-item)
                        imenu-default-goto-function)))

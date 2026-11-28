@@ -44,9 +44,43 @@
     (only (schemacs command) define-alias))
 
   (export make-obsolete define-obsolete-function-alias
+          defsubst eval-and-compile
           byte-run--constant-obsolete-warning)
 
   (begin
+
+    (define-syntax defsubst
+      ;; GNU Emacs's `defsubst' (`byte-run.el:525'): "Define an inline
+      ;; function. The syntax is just like that of `defun'."
+      ;;
+      ;; The C expands to `(prog1 (defun NAME ARGLIST BODY)
+      ;; (eval-and-compile ... (put ',name 'byte-optimizer
+      ;; 'byte-compile-inline-expand)))' - the definition plus the
+      ;; inlining marker. There is no byte compiler here, so the marker
+      ;; is written for fidelity and nothing reads it; the definition is
+      ;; the `define' the tree spells a defun with.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ name arglist body ...)
+         (begin
+           (define (name . arglist) body ...)
+           (put 'name 'byte-optimizer 'byte-compile-inline-expand)))))
+
+    (define-syntax eval-and-compile
+      ;; GNU Emacs's `eval-and-compile' (`byte-run.el:701'): "Like
+      ;; `progn', but evaluates the body at compile time and at load
+      ;; time."
+      ;;
+      ;; **The compile-time half is not carried**, and cannot be: Guile's
+      ;; compiler does not evaluate top-level side effects, so the body
+      ;; runs when the library loads - which is Emacs's load-time half.
+      ;; Nothing ported so far relies on the compile-time half;
+      ;; `rx-define` needs it (a later `(rx user-name)` in the same file
+      ;; is expanded before the `put` would run) and does its `put` in
+      ;; the macro transformer instead - see `rx.scm`.
+      ;;--------------------------------------------------------------
+      (syntax-rules ()
+        ((_ body ...) (begin body ...))))
 
     (define (byte-run--constant-obsolete-warning obsolete-name)
       ;; GNU Emacs's `byte-run--constant-obsolete-warning'

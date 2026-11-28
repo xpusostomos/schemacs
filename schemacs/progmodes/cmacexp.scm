@@ -199,7 +199,7 @@ For use inside Lisp programs, see also `c-macro-expansion'."
               (select-window (get-buffer-window (current-buffer)))
               (set! minheight (if alreadythere
                                   (window-total-height)
-                                  window-min-height))
+                                  (window-min-height)))
               (set! maxheight (quotient (frame-height (selected-frame)) 2))
               (enlarge-window (- (min maxheight
                                       (max minheight

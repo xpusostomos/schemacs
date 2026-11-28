@@ -108,6 +108,10 @@
    *coding-category-priority* *coding-categories-bound*
    ;; Converting
    decode-coding-string encode-coding-string
+   ;; The byte-stream form (`decode_coding' over a file's or a
+   ;; process's bytes) - `coding.c' has one decoder, and both callers
+   ;; use it.
+   decode-coding-bytes
    )
 
   (begin
@@ -859,6 +863,46 @@
                         (loop (+ i len)
                               (cons (char->integer (string-ref piece 0)) out))
                         (try (- len 1)))))))))))
+
+
+    (define (decode-coding-bytes bytes coding)
+      ;; BYTES through CODING: the code points out, with the coding
+      ;; system's end-of-line conversion applied - GNU Emacs's
+      ;; `decode_coding', which `after-insert-file-set-coding' runs over
+      ;; what `insert-file-contents' put in the buffer.
+      ;;
+      ;; The answer is a *list of code points* rather than a string, and
+      ;; it has to be: a byte the coding system cannot decode becomes a
+      ;; byte character, and `#x3FFFE9' is above Guile's `#x10FFFF', so
+      ;; there is no string that holds it.
+      ;;
+      ;; **The byte order mark is consumed here**, as the C's
+      ;; `decode_coding' consumes it for a `-with-signature' coding system:
+      ;; it is a signature on the byte stream and not text, so it is not in
+      ;; the buffer and cannot come back out of it. Guile's ports do this
+      ;; themselves for UTF-8, but *not* for the explicit-endian codecs -
+      ;; measured, `"UTF-16LE"' on `FF FE 41 00' answers `(65279 65)'
+      ;; where `"UTF-16"' answers `(65)' - so it is done at the byte level
+      ;; here for every coding system that carries one.
+      ;;--------------------------------------------------------------
+      (let* ((mark (coding-system-bom coding))
+             (n (if mark (bytevector-length mark) 0))
+             (bytes (if (and mark
+                             (>= (bytevector-length bytes) n)
+                             (equal? (bytevector-copy bytes 0 n) mark))
+                        ;; `mark' is the signature the coding system declares,
+                        ;; so a match *is* the mark - no search, and no
+                        ;; stripping of a U+FEFF that is really text.
+                        (bytevector-copy bytes n (bytevector-length bytes))
+                        bytes)))
+        (call-with-port (open-input-bytevector bytes)
+            (lambda (port)
+              (coding-setup-port! port coding)
+              (let loop ((acc '()))
+                (let ((c (coding-read-char port coding)))
+                  (if (eof-object? c)
+                      (decode-eol (reverse acc) coding)
+                      (loop (cons c acc)))))))))
 
     (define (encode-coding-string string coding)
       ;; GNU Emacs's `encode-coding-string': STRING is the buffer's

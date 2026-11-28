@@ -1042,7 +1042,7 @@ corresponding to the new buffer shown in the window."
                             *mouse-buffer-menu-mode-groups*))
               (if (and (pair? event)
                        (display-popup-menus-p)
-                       (not *tty-menu-open-use-tmm*))
+                       (not (*tty-menu-open-use-tmm*)))
                   (mouse-buffer-menu event) ; "like (buffer-menu-open)"
                   ;; "tty menu doesn't support mouse clicks, so use tmm" -
                   ;; and `tmm-prompt` is not ported; see the header.

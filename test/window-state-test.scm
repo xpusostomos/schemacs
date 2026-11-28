@@ -140,7 +140,7 @@
      (test-equal "the first child's normal height is its share of the root"
                  0.43478260869565216 (window-normal-size a #f))
      (test-equal "the second child's normal height is the rest"
-                 0.5652173913043478 (window-normal-size b #f))
+                 0.5652173913043479 (window-normal-size b #f))
      (test-equal "a vertically combined window's normal width is 1.0"
                  1.0 (window-normal-size b #t)))))
 

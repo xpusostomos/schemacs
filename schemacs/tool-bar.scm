@@ -153,7 +153,11 @@ the tool bar."
              (modify-all-frames-parameters
               (list (cons 'tool-bar-position value)))))
 
-    (define *tool-bar-always-show-default* (make-parameter #f))
+    (define-custom *tool-bar-always-show-default* #f
+      "If non-nil, `tool-bar-mode' only shows the default tool bar.
+This works well when also using `global-window-tool-bar-mode' to
+display buffer-specific tool bars."
+      :type 'boolean :group 'frames :version "30.1")
     ;; ^ GNU Emacs's `tool-bar-always-show-default` (a defcustom, "If
     ;; non-nil, `tool-bar-mode' only shows the default tool bar."). With
     ;; one tool-bar map here the two arms name the same map; it is

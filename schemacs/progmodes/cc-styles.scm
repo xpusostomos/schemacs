@@ -54,7 +54,7 @@
           paragraph-start set!paragraph-start
           paragraph-separate set!paragraph-separate
           paragraph-ignore-fill-prefix set!paragraph-ignore-fill-prefix
-          *page-delimiter*)
+          page-delimiter)
     (only (schemacs textmodes fill)
           fill-column
           adaptive-fill-mode set!adaptive-fill-mode
@@ -420,11 +420,11 @@ variables."
     (set!paragraph-start
      (concat blank-or-comment-line-prefix
              (%c-langvar 'c-paragraph-start)
-             "\\|" (*page-delimiter*)))
+             "\\|" (page-delimiter)))
     (set!paragraph-separate
      (concat blank-or-comment-line-prefix
              (%c-langvar 'c-paragraph-separate)
-             "\\|" (*page-delimiter*)))
+             "\\|" (page-delimiter)))
     (set!paragraph-ignore-fill-prefix #t)
     (set!adaptive-fill-mode #t)
     (set!adaptive-fill-regexp

@@ -10,6 +10,7 @@
 
 (import (scheme base)
         (only (srfi 64) test-assert test-equal test-begin test-end)
+        (only (schemacs custom) custom-variable-p)
         (only (schemacs buffer)
               current-buffer with-current-buffer
               get-buffer get-buffer-create %kill-buffer erase-buffer
@@ -25,9 +26,10 @@
               occur occur-1 occur-mode occur-mode-goto-occurrence
               occur-next occur-prev occur-rename-buffer
               occur--targets-start occur-mode--find-occurrences
-              occur-revert-arguments isearch-occur
+              occur-revert-arguments isearch-occur occur-mode-hook
               *list-matching-lines-default-context-lines*
               *list-matching-lines-jump-to-current-line*)
+        (only (schemacs font-core) turn-on-font-lock)
         (only (schemacs textprop) get-text-property)
         (only (schemacs marker) marker-position marker-buffer)
         (only (schemacs isearch) isearch-string
@@ -283,3 +285,25 @@
                    (list (car lines) (cadr lines) (caddr lines)))))))
 
 (test-end "schemacs_editor_occur")
+
+;;----------------------------------------------------------------------
+;; `occur-mode-hook` is a define-custom parameter (replace.el:1643)
+;;----------------------------------------------------------------------
+;; Emacs declares it a defcustom with `(turn-on-font-lock)' as its
+;; default; here the default is set by calling the parameter (a `set!'
+;; would shadow the imported binding and change nothing).
+
+(test-begin "schemacs_editor_occur_hook")
+
+(test-assert "occur-mode-hook is a parameter"
+             (procedure? occur-mode-hook))
+
+(test-equal "its default is the one function Emacs's defcustom names"
+  (list turn-on-font-lock)
+  (occur-mode-hook))
+
+(test-equal "and it is a define-custom"
+  #t
+  (custom-variable-p 'occur-mode-hook))
+
+(test-end "schemacs_editor_occur_hook")

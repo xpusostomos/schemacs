@@ -394,3 +394,19 @@
           (proper-list-p x))))
 
 (test-end "schemacs_editor_fns")
+;;------------------------------------------------------------------
+;; `string-search' (`fns.c:6583') - case-sensitive, properties ignored,
+;; a zero-based index or nil.  Measured on Emacs 31.1.
+(test-begin "schemacs_editor_fns_string_search")
+(test-equal "the first occurrence" 1 (string-search "b" "abc"))
+(test-equal "a multi-character needle" 1 (string-search "bc" "abc"))
+(test-equal "nil when absent" #f (string-search "z" "abc"))
+(test-equal "an empty needle matches at the start" 0 (string-search "" "abc"))
+(test-equal "START-POS is zero-based" 2 (string-search "c" "abc" 2))
+(test-equal "a start past the only occurrence answers nil"
+            #f (string-search "a" "abc" 1))
+(test-equal "the empty needle at the end" 3 (string-search "" "abc" 3))
+(test-equal "a start out of range signals"
+            #t
+            (guard (e (#t #t)) (string-search "a" "abc" 4) #f))
+(test-end "schemacs_editor_fns_string_search")

@@ -17,7 +17,7 @@
 ;; chosen from it was wrong. Reading the rendered pixels is what sees it.
 ;;-------------------------------------------------------------
 (import
- (only (schemacs editfns) insert)
+ (only (schemacs editfns) insert propertize)
  (scheme base)
  (scheme char)
  (only (guile) setvbuf delete-file getpid)
@@ -53,6 +53,7 @@
  ;; graphic-only, so a windowed display is the only place it runs.
  (prefix (only (schemacs face-remap)
                global-text-scale-adjust text-scale-increase
+               text-scale-decrease
                text-scale-mode-amount face-remapping-alist)
          scale:)
  (prefix (schemacs xfaces) x:)
@@ -63,12 +64,20 @@
                <test-display> test-display-glyphs) td:)
  ;; A run drawn by hand at a place only a taller row could put it - the
  ;; text-area clip's check below.
- (only (schemacs glyph) make-glyph make-glyph-row)
+ (only (schemacs glyph) make-glyph make-glyph-row
+       glyph-row-ascent glyph-row-height glyph-row-y
+       glyph-row-enabled? glyph-row-displays-text?
+       glyph-row-continued? glyph-row-continuation-line?
+       glyph-row-glyphs glyph-row-used glyph-row-x glyph-pixel-width
+       set-glyph-row-enabled!)
+ (only (schemacs matrix) glyph-matrix-rows window-desired-matrix
+       window-current-matrix make-glyph-matrix matrix-diff-rows)
  (prefix (schemacs window) window:)
  
  (only (schemacs buffer) buffer-local-value set-buffer-local-value!
        %mark-marker with-current-buffer
- set-point allocate-buffer buffer-pt)
+ set-point allocate-buffer buffer-pt get-buffer-create
+ set!buffer-word-wrap buffer-word-wrap)
  ;; the mark's read and write are marker.c's now, on the buffer's own
  ;; slot; `text-editor-mark`/`set!text-editor-mark` are gone.
  (only (schemacs marker) marker-position set-marker)
@@ -114,7 +123,9 @@
 ;; a *row* of its text area, which is `frame-top-margin`'s one difference
 ;; between the two - so the frames here are made with the bar turned off.
 (fr:*default-frame-alist*
- (cons '(menu-bar-lines . 0) (fr:*default-frame-alist*)))
+ (cons '(left-fringe . 0)
+       (cons '(right-fringe . 0)
+             (cons '(menu-bar-lines . 0) (fr:*default-frame-alist*)))))
 
 (define (new-display)
   (let ((d (make pt:<pgtk-display>)))
@@ -714,76 +725,67 @@
           (fr:frame-inhibit-resize? #f #t 'font))))
 
 ;;------------------------------------------------------------------
-;; `text-scale-adjust` - the buffer-local scaling, in pixels
+;; `text-scale-adjust` - the buffer-local scaling, in its own window
 ;;
 ;; Emacs's `text-scale-mode` does not touch the `default` face's own
 ;; `:height`; it puts a *relative* one in the buffer's
 ;; `face-remapping-alist`, and the display merges that when it realizes
-;; the face. This is the check that the merge reaches the pixels.
-;;
-;; **The departure it pins is the renderer's**: one grid per display, so
-;; a buffer's scale is the frame's scale. Emacs gives every glyph row its
-;; own height and leaves other windows alone; `pgtk-ensure-font!` says so
-;; where it merges the face.
+;; the face. Stage 3 of `plans/PER-FACE-FONTS.md`: the frame's font comes
+;; from the `default` face's own attributes, and the scaling is the row's
+;; - so a scaled buffer's lines are taller while the frame's grid, its
+;; neighbour's lines and its cell stay the size they were.
 ;;------------------------------------------------------------------
 
-(define (ink-rows-scaled steps)
-  ;; The glyph's height in pixels with the buffer's text scaled by STEPS.
+(define (scaled-window-rows)
+  ;; A frame with two windows: the selected one on a buffer scaled by
+  ;; three steps, the other on an unscaled one. Answers
+  ;; (CELL-BEFORE CELL-AFTER FRAME-ASCENT UPPER-ASCENT LOWER-ASCENT
+  ;;  UPPER-HEIGHT LOWER-HEIGHT).
   (let* ((d (new-display))
-         (ed (allocate-buffer)))
-    (with-current-buffer ed (insert "M"))
-    (let ((frame (fr:new-frame ed 24 80)))
-      (with-current-buffer ed
-        (scale:text-scale-increase steps)
-        (parameterize ((fr:*current-frame* frame))
-          (xd:render! frame))
-        (let ((rows (ink-rows d)))
-          ;; back to the face's own size, and the frame measured again
-          (scale:text-scale-increase 0)
-          (parameterize ((fr:*current-frame* frame))
-            (xd:render! frame))
-          rows)))))
+         (scaled (allocate-buffer))
+         (plain (allocate-buffer)))
+    (with-current-buffer scaled (insert "M"))
+    (with-current-buffer plain (insert "M"))
+    (let* ((frame (fr:new-frame scaled 24 80))
+           (cell-before (pt:pgtk-cell-size)))
+      (parameterize ((fr:*current-frame* frame))
+        (window:split-window-below 5 (fr:frame-selected-window frame))
+        (let* ((windows (fr:window-list frame #f))
+               (upper (car windows))
+               (lower (cadr windows)))
+          (fr:set-window-buffer! lower plain)
+          (with-current-buffer scaled (scale:text-scale-increase 3))
+          (xd:render! frame)
+          (let* ((cell-after (pt:pgtk-cell-size))
+                 (frame-metrics (dn:face-metrics d #f))
+                 (upper-row (vector-ref
+                             (glyph-matrix-rows
+                              (window-desired-matrix upper)) 0))
+                 (lower-row (vector-ref
+                             (glyph-matrix-rows
+                              (window-desired-matrix lower)) 0))
+                 (answer (list cell-before cell-after
+                               (car frame-metrics)
+                               (glyph-row-ascent upper-row)
+                               (glyph-row-ascent lower-row)
+                               (glyph-row-height upper-row)
+                               (glyph-row-height lower-row))))
+            (with-current-buffer scaled (scale:text-scale-increase 0))
+            answer))))))
 
-(define unscaled-ink (ink-rows-scaled 0))
-(define scaled-ink (ink-rows-scaled 3))
+(define scaled-windows (scaled-window-rows))
 
-(test-assert "text-scale-increase draws a larger glyph"
-  (> scaled-ink unscaled-ink))
+(test-equal "text-scale leaves the frame's cell alone"
+  (list-ref scaled-windows 0) (list-ref scaled-windows 1))
 
-;;------------------------------------------------------------------
-;; **A row is as tall as the font the frame draws.**
-;;
-;; The renderer has one font per frame (`pgtk-ensure-font!` says so, and
-;; why), and it draws every run at that size. A row's metrics therefore
-;; have to come from the *frame's* font, not from the face's own
-;; `:height`: measuring per face gave 21-pixel rows in an unscaled window
-;; of a frame whose font had been scaled to 60 by the window next door,
-;; and the 60-pixel glyphs were then drawn on 21-pixel rows - on top of
-;; each other. Measured with `C-x C-+` in a split frame.
-;;
-;; The test is the invariant that disagreement violates: the metrics a
-;; row is laid out with are the cell the text is drawn in.
-;;------------------------------------------------------------------
+(test-equal "the unscaled window's row is the frame's own line"
+  (list-ref scaled-windows 2) (list-ref scaled-windows 4))
 
-(define (metrics-match-cell steps)
-  (let* ((d (new-display))
-         (ed (allocate-buffer)))
-    (with-current-buffer ed (insert "M"))
-    (let ((frame (fr:new-frame ed 24 80)))
-      (with-current-buffer ed
-        (scale:text-scale-increase steps)
-        (parameterize ((fr:*current-frame* frame))
-          (xd:render! frame))
-        (let ((m (dn:face-metrics d #f))
-              (cell (dn:display-cell-size d)))
-          (scale:text-scale-increase 0)
-          (parameterize ((fr:*current-frame* frame))
-            (xd:render! frame))
-          (= (+ (car m) (cdr m)) (cdr cell)))))))
+(test-assert "the scaled window's row is taller than the frame's line"
+  (> (list-ref scaled-windows 3) (list-ref scaled-windows 2)))
 
-(test-equal "row metrics are the drawn font's, unscaled and scaled"
-  '(#t #t)
-  (list (metrics-match-cell 0) (metrics-match-cell 3)))
+(test-assert "and so is its height, in the same frame"
+  (> (list-ref scaled-windows 5) (list-ref scaled-windows 6)))
 
 ;;------------------------------------------------------------------
 ;; A character the monospace face has no glyph for is drawn with the
@@ -1356,8 +1358,11 @@
 
 (define (movement-report! d column row)
   ;; One Gtk motion report, through the front end's own entry point.
+  ;; The entry point takes the position in *pixels*, as `posn-at-x-y`
+  ;; does now; COLUMN and ROW are the cell the test is talking about.
   ;;--------------------------------------------------------------
-  (pt:note-mouse-movement d column row))
+  (let ((cell (pt:pgtk-cell-size)))
+    (pt:note-mouse-movement d (* column (car cell)) (* row (cdr cell)))))
 
 (let* ((d (new-display))
        (f (fr:new-frame-on d (allocate-buffer) 24 80)))
@@ -1375,7 +1380,7 @@
       #t (movement-report! d 3 5))))
 
 (test-equal "the glyph a report is compared against is its cell"
-  (list 7 9 1 1)
+  (list 7 9 (car (pt:pgtk-cell-size)) (cdr (pt:pgtk-cell-size)))
   (let ((d (new-display)))
     (parameterize ((fr:*current-frame* (fr:new-frame-on d (allocate-buffer) 24 80)))
       (xd:remember-mouse-glyph (fr:*current-frame*) 7 9))))
@@ -1816,8 +1821,11 @@
                   ch))
        (y (- bottom 5))
        (token (xd:face->attribute 'region))
-       (g (make-glyph "X" token 1 'char #f 0))
-       (row (make-glyph-row (vector g) 1 0 y 1 1 1 0 0)))
+       ;; **A glyph's pixel width is in display units now** - pixels on
+       ;; this display - so the cell is borrowed from the font rather
+       ;; than the old `1'.
+       (g (make-glyph "X" token (car (pt:pgtk-cell-size)) 'char #f 0))
+       (row (make-glyph-row (vector g) 1 0 y 1 1 1 0 0 #f)))
   (parameterize ((fr:*current-frame* frame))
     (xd:render! frame))
   (dn:clear-frame-area! d)
@@ -1896,3 +1904,688 @@
   (test-assert "no widget before the bar is built"
                (not (pt:pgtk-menubar-widget-at d 239))))
 (test-end "schemacs_pgtk_bar_patch")
+
+;;----------------------------------------------------------------------
+;; Stage 1 of `plans/PER-FACE-FONTS.md`: the measurement interface
+;;----------------------------------------------------------------------
+;; GNU Emacs opens a font per realized face (`font_load_for_lface`,
+;; `xfaces.c`) and reads the glyph advance, ascent and descent from it.
+;; This display now answers the same two questions per face:
+;; `face-metrics` from the face's font, and `face-text-width` from Pango's
+;; layout of the text in it. The row layout still counts cells (stage 4)
+;; and the drawing still uses the frame font (stage 2), so these are
+;; measurement checks, not pixel checks.
+
+(test-begin "schemacs_pgtk_face_fonts")
+
+(define face-font-display (new-display))
+(define face-font-default
+  (x:merge-face-ref 'default (x:face-attributes-empty)))
+(define face-font-scaled
+  (x:merge-face-ref '(:height 1.5) face-font-default))
+(define face-font-serif
+  (x:merge-face-ref '(:family "serif") face-font-default))
+
+(test-equal "the default face measures the frame's realized font"
+  (dn:face-metrics face-font-display #f)
+  (dn:face-metrics face-font-display face-font-default))
+
+(test-assert "a face with a larger :height has a taller font"
+  (> (car (dn:face-metrics face-font-display face-font-scaled))
+     (car (dn:face-metrics face-font-display face-font-default))))
+
+(test-equal "the default face advances by the cell"
+  (* 2 (car (pt:pgtk-cell-size)))
+  (dn:face-text-width face-font-display face-font-default "MM"))
+
+(test-assert "a scaled face advances further for the same text"
+  (> (dn:face-text-width face-font-display face-font-scaled "MM")
+     (dn:face-text-width face-font-display face-font-default "MM")))
+
+;; A proportional family measures differently from the monospace default;
+;; where the family is missing Pango falls back to a font of its own, so
+;; this is an inequality rather than a number.
+(test-assert "a face's :family reaches Pango"
+  (not (= (dn:face-text-width face-font-display face-font-serif "MM")
+          (dn:face-text-width face-font-display face-font-default "MM"))))
+
+;;------------------------------------------------------------------
+;; Stage 2: the face's font is what the run is drawn in
+;;
+;; `plans/PER-FACE-FONTS.md`'s second step. A run's glyphs come from the
+;; run's own font, every run of a row sits on the row's baseline, and the
+;; row is as tall as its tallest face. Two checks: the row's metrics, and
+;; the ink itself - a `:height 1.5` face's glyph reaches higher above the
+;; baseline than the normal one beside it, which cell-counting could not
+;; produce, the cell height being the frame's.
+;;------------------------------------------------------------------
+
+(define face-font-tall (x:merge-face-ref '(:height 1.5) face-font-default))
+
+(define (render-tall-face)
+  ;; "g  g" with the first `g` at 1.5x, point after the newline so the
+  ;; cursor is on neither glyph. Answers (DISPLAY FRAME).
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed
+      (insert "g  g\n")
+      (put-text-property 1 2 'face '(:height 1.5)))
+    (set-point ed 6)
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame))
+        (xd:render! frame))
+      (list d frame))))
+
+(define tall-render (render-tall-face))
+(define tall-display (car tall-render))
+(define tall-frame (cadr tall-render))
+
+(define (tallest-row frame)
+  ;; The desired matrix row whose ascent is greater than the frame's own -
+  ;; the row the scaled glyph is on. #f if there is none.
+  (let* ((window (fr:frame-selected-window frame))
+         (matrix (window-desired-matrix window))
+         (rows (and matrix (glyph-matrix-rows matrix)))
+         (frame-ascent (car (dn:face-metrics (fr:frame-output frame) #f))))
+    (and rows
+         (let loop ((i 0) (found #f))
+           (if (>= i (vector-length rows))
+               found
+               (let ((row (vector-ref rows i)))
+                 (loop (+ i 1)
+                       (if (and row
+                                (> (glyph-row-ascent row) frame-ascent))
+                           row
+                           found))))))))
+
+(define tall-row (tallest-row tall-frame))
+
+(test-assert "a scaled face makes its row taller than the frame's line"
+  (and tall-row
+       (> (glyph-row-ascent tall-row)
+          (car (dn:face-metrics tall-display #f)))))
+
+;; `compute_line_metrics`: ascent is the greatest ascent, height is that
+;; plus the greatest descent - which for this row is the scaled face's
+;; own.
+(test-equal "the row's height is the scaled font's ascent plus descent"
+  (+ (car (dn:face-metrics tall-display face-font-tall))
+     (cdr (dn:face-metrics tall-display face-font-tall)))
+  (glyph-row-height tall-row))
+
+;; The ink. `cell-w` columns starting at cell 0 hold the scaled `g`; the
+;; one in cell 3 is the frame's size. MAX-Y is generous: the scaled row
+;; is 30-odd pixels, not 20.
+(define (ink-extent pix x0 width max-y)
+  ;; (TOP . BOTTOM) of the pixel rows in [0, MAX-Y) with ink in the
+  ;; columns [X0, X0+WIDTH), or #f.
+  (let loop ((y 0) (top #f) (bottom #f))
+    (if (>= y max-y)
+        (and top (cons top bottom))
+        (let x-loop ((x x0) (inked #f))
+          (cond ((>= x (+ x0 width))
+                 (loop (+ y 1)
+                       (if inked (or top y) top)
+                       (if inked y bottom)))
+                ((not (equal? (pix x y) white)) (x-loop (+ x 1) #t))
+                (else (x-loop (+ x 1) inked)))))))
+
+(define tall-shot (shot-of tall-display))
+(define tall-ink (ink-extent tall-shot 0 cell-w 80))
+(define normal-ink (ink-extent tall-shot (* 3 cell-w) cell-w 80))
+
+(test-assert "the scaled glyph reaches above the normal one on its row"
+  (and tall-ink normal-ink (< (car tall-ink) (car normal-ink))))
+
+;; A descender is where a shared baseline shows: the scaled `g`'s ink
+;; goes below the normal one's, because both hang from the same baseline
+;; and the scaled font's descent is the deeper.
+(test-assert "and below it, so the two hang from the row's baseline"
+  (and tall-ink normal-ink (> (cdr tall-ink) (cdr normal-ink))))
+
+;; And the *horizontal* advance is the face font's: the normal glyph after
+;; a scaled one starts where the scaled glyph's advance left off, not at
+;; the next cell of a frame grid. With the tall `M' at column 0 and three
+;; spaces, the normal `M' begins at the tall glyph's advance plus three
+;; cells - past x=36, where a cell grid would have put column 4.
+(define (render-advance)
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed
+      (insert "M   M\n")
+      (put-text-property 1 2 'face '(:height 1.5)))
+    (set-point ed 6)
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame)
+                     (fr:*frame-focus* #f))
+        (xd:render! frame)))
+    d))
+
+(define advance-shot (shot-of (render-advance)))
+
+(test-equal "a scaled glyph's advance moves the next glyph past its cell"
+  white
+  (advance-shot (+ (* 4 cell-w) 1) (+ (quotient cell-h 2) 5)))
+
+(test-assert "and the next glyph is drawn where that advance left it"
+  (not (equal? white
+              (advance-shot
+               (+ (dn:face-text-width tall-display face-font-tall "M")
+                  (* 3 cell-w) 2)
+               (+ (quotient cell-h 2) 5)))))
+
+;; **The mode line does not scale with the buffer.** GNU Emacs's
+;; `realize_named_face` merges every named face onto the *unremapped*
+;; `default` (`get_lface_attributes_no_remap`); `text-scale-mode`'s
+;; remapping applies to buffer text, which is why C-x C-= changes the
+;; text and leaves the mode line alone. Merging the remapped default as
+;; the base scaled the mode line too - and, with a pixel layout, drew it
+;; outside its row and across the frame.
+(define (scale-mode-line-shots)
+  ;; (TEXT-TOP-BEFORE TEXT-TOP-AFTER MODE-TOP-BEFORE MODE-TOP-AFTER),
+  ;; each the first inked pixel row of its band in a screenshot of the
+  ;; same frame before and after three text-scale steps.
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed (insert "MMMM\n"))
+    (set-point ed 1)
+    (let* ((frame (fr:new-frame ed 24 80))
+           (cells-y (cdr (pt:pgtk-cell-size)))
+           (mode-top-y (* (- (fr:frame-height frame) 1) cells-y))
+           (top-of
+            (lambda (pix y0 y1)
+              (let yloop ((y y0))
+                (cond ((>= y y1) #f)
+                      ((let xloop ((x 0))
+                         (cond ((>= x (car (pt:pgtk-cell-size))) #f)
+                               ((equal? (pix x y) white) (xloop (+ x 1)))
+                               (else #t)))
+                       y)
+                      (else (yloop (+ y 1))))))))
+      (parameterize ((fr:*current-frame* frame))
+        (xd:render! frame))
+      (let* ((before (shot-of d))
+             (text-before (ink-extent before 0 (* 20 cell-w) (* 2 cells-y)))
+             (mode-before (top-of before mode-top-y
+                                  (* (fr:frame-height frame) cells-y))))
+        (with-current-buffer ed (scale:text-scale-increase 3))
+        (parameterize ((fr:*current-frame* frame))
+          (xd:render! frame))
+        (let* ((after (shot-of d))
+               (text-after (ink-extent after 0 (* 20 cell-w) (* 2 cells-y)))
+               (mode-after (top-of after mode-top-y
+                                   (* (fr:frame-height frame) cells-y))))
+          (with-current-buffer ed (scale:text-scale-increase 0))
+          (list text-before text-after mode-before mode-after))))))
+
+(define scale-shots (scale-mode-line-shots))
+
+(test-assert "text-scale-increase redraws the buffer text without a resize"
+  (and (car scale-shots) (cadr scale-shots)
+       (> (- (cdr (cadr scale-shots)) (car (cadr scale-shots)))
+          (- (cdr (car scale-shots)) (car (car scale-shots))))))
+
+(test-equal "and the mode line keeps its own font"
+  (list-ref scale-shots 2) (list-ref scale-shots 3))
+
+;; **A taller row leaves disabled matrix rows underneath it.** They have
+;; no y, so blanking each at `index * FRAME_LINE_HEIGHT` painted strips
+;; across the scaled rows - the last lines "stayed small" because the
+;; strips wiped them and the tail below them was never cleared. The area
+;; below the last laid-out row is cleared once, from its bottom.
+(define (scaled-long-shot)
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed
+      (let loop ((i 0))
+        (when (< i 60) (insert "line\n") (loop (+ i 1)))))
+    (set-point ed 1)
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+      (with-current-buffer ed (scale:text-scale-increase 3))
+      (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+      (let ((pix (shot-of d)))
+        (with-current-buffer ed (scale:text-scale-increase 0))
+        pix))))
+
+(define long-scaled (scaled-long-shot))
+
+(test-assert "no blank strip is painted across a scaled row"
+  ;; y=260 is where a disabled row's index-derived cell row begins. With
+  ;; 26-pixel ascent rows it is inside the 8th scaled line's glyph band;
+  ;; a blank strip there is the bug.
+  (let loop ((x 0))
+    (cond ((>= x (* 4 cell-w)) #f)
+          ((not (equal? (long-scaled x 260) white)) #t)
+          (else (loop (+ x 1))))))
+
+;; **Shrinking the font shows more lines.** `required_matrix_height`
+;; sizes the glyph matrix by the *shortest* font the display has opened,
+;; so a buffer scaled down has more rows than the frame has lines - the
+;; lines that become visible are the point of the smaller font. Sizing
+;; the matrix at the body's line count built only that many rows, so the
+;; bottom of the window kept the previous, larger font's pixels.
+(define (scaled-down-rows)
+  ;; (BODY-HEIGHT TEXT-ROWS-BEFORE TEXT-ROWS-AFTER MATRIX-ROWS-AFTER
+  ;;  LAST-TEXT-ROW-BOTTOM PIXEL-BOTTOM)
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed
+      (let loop ((i 0))
+        (when (< i 60) (insert "line
+") (loop (+ i 1)))))
+    (set-point ed 1)
+    (let* ((frame (fr:new-frame ed 24 80))
+           (window (fr:frame-selected-window frame))
+           (cell-h (cdr (pt:pgtk-cell-size)))
+           (body (fr:window-body-height window))
+           (text-rows
+            (lambda ()
+              ;; (TEXT-ROWS . BOTTOM), over the desired matrix.
+              (let* ((m (window-desired-matrix window))
+                     (rows (glyph-matrix-rows m)))
+                (let loop ((i 0) (n 0) (bottom 0))
+                  (if (>= i (vector-length rows))
+                      (cons n bottom)
+                      (let ((row (vector-ref rows i)))
+                        (if (and row (glyph-row-enabled? row)
+                                 (glyph-row-displays-text? row))
+                            (loop (+ i 1) (+ n 1)
+                                  (max bottom (+ (glyph-row-y row)
+                                                 (glyph-row-height row))))
+                            (loop (+ i 1) n bottom)))))))))
+      (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+      (let ((before (car (text-rows))))
+        (with-current-buffer ed (scale:text-scale-decrease 3))
+        (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+        (let* ((after (text-rows))
+               (m (window-desired-matrix window))
+               (rows (glyph-matrix-rows m)))
+          (with-current-buffer ed (scale:text-scale-increase 0))
+          (list body before (car after) (vector-length rows)
+                (cdr after) (* body cell-h)))))))
+
+(define down-rows (scaled-down-rows))
+
+(test-assert "a smaller font builds more lines than the frame has rows"
+  (> (caddr down-rows) (car down-rows)))
+
+(test-assert "and more than it built at the larger font"
+  (> (caddr down-rows) (cadr down-rows)))
+
+(test-assert "the matrix has room for them - required_matrix_height"
+  (> (list-ref down-rows 3) (car down-rows)))
+
+(test-assert "and the text reaches the bottom of the window"
+  (>= (list-ref down-rows 4) (- (list-ref down-rows 5) cell-h)))
+
+(test-end "schemacs_pgtk_face_fonts")
+
+;;------------------------------------------------------------------
+;; `update_text_area`'s whole-line rule
+;;
+;; "If rows are at different X or Y, or rows have different height, or
+;; the current row is marked invalid, write the entire line"
+;; (`dispnew.c:4746`). With `text-scale-mode` a row's own glyphs and
+;; height can be unchanged while the rows above it grew or shrank, which
+;; moves it; comparing only the hash left the screen's copy of that line
+;; at the old y - the thin lines left behind at a previous zoom level.
+;;------------------------------------------------------------------
+
+(test-begin "schemacs_pgtk_matrix_diff")
+
+(define (diff-row x y)
+  (let ((row (make-glyph-row (vector) 0 x y 1 15 20 x x #f)))
+    (set-glyph-row-enabled! row #t)
+    row))
+
+(define (diff-of cx cy dx dy)
+  (matrix-diff-rows (make-glyph-matrix (vector (diff-row cx cy)) 1 1)
+                    (make-glyph-matrix (vector (diff-row dx dy)) 1 1)))
+
+(test-equal "an unchanged row is not redrawn" '() (diff-of 0 0 0 0))
+
+(test-equal "a row at a new y is redrawn"
+  '(0) (diff-of 0 20 0 60))
+
+(test-equal "and so is one at a new x"
+  '(0) (diff-of 0 20 9 20))
+
+(test-end "schemacs_pgtk_matrix_diff")
+
+;;------------------------------------------------------------------
+;; A scaled row's tail, and its continuation marker
+;;
+;; Two pixel checks for the departure that made `text-scale-mode`
+;; "descend into madness" on a wrapped line:
+;;
+;;  * `clear_end_of_line` clears the *row's* rectangle. Clearing only
+;;    `FRAME_LINE_HEIGHT` pixels of a 29-pixel row left the bottom of the
+;;    old line underneath - "cleared to the end of the line, but at the
+;;    wrong zoom level, leaving half a line still there".
+;;  * `display_line` cuts the text where the next character would cross
+;;    `last_visible_x` and puts continuation glyphs there, in the default
+;;    face's own font. A marker pinned to the last frame cell is clipped
+;;    to a sliver once the face's font is larger than a cell, and the gap
+;;    the word wrap left is not filled.
+;;------------------------------------------------------------------
+
+(test-begin "schemacs_pgtk_scaled_rows")
+
+(define (tail-clear-render)
+  ;; A long line, then a short one, so the short one's tail has old
+  ;; frame-sized text underneath it when the buffer is scaled.
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed
+      (insert (make-string 60 #\M)) (insert "\n")
+      (insert "MM\n")
+      (let loop ((i 0))
+        (when (< i 30)
+          (insert (make-string 60 #\M)) (insert "\n")
+          (loop (+ i 1)))))
+    (set-point ed 1)
+    (let* ((frame (fr:new-frame ed 24 80))
+           (window (fr:frame-selected-window frame)))
+      (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+      (with-current-buffer ed (scale:text-scale-increase 2))
+      (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+      (let* ((rows (glyph-matrix-rows (window-desired-matrix window)))
+             (row (vector-ref rows 1))
+             (pix (shot-of d)))
+        (with-current-buffer ed (scale:text-scale-increase 0))
+        (list pix (glyph-row-y row) (glyph-row-height row))))))
+
+(define tail-clear (tail-clear-render))
+
+(test-assert "a scaled row's tail is cleared to its own bottom"
+  ;; The second scaled row starts at y=29 and is 29 pixels tall; its
+  ;; pixel at y=53 was the previous frame's text under a 20-pixel clear.
+  (equal? white
+          ((car tail-clear) (* 20 cell-w)
+           (+ (cadr tail-clear) (caddr tail-clear) -5))))
+
+(define (marker-render)
+  ;; A word-wrapped line whose break leaves a wide gap: 50 `a's then a
+  ;; space, so the continuation run has to fill from where the text
+  ;; stopped to the window's edge.
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed
+      (set!buffer-word-wrap ed #t)
+      ;; 40 `a's end well before x=620, so the gap the wrap leaves is
+      ;; empty of text - anything inked there is the marker's.
+      (insert (make-string 40 #\a))
+      (insert " ")
+      (insert (make-string 50 #\b)))
+    (set-point ed 1)
+    (let ((frame (fr:new-frame ed 24 80)))
+      (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+      (with-current-buffer ed (scale:text-scale-increase 2))
+      (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+      (let ((pix (shot-of d)))
+        (with-current-buffer ed (scale:text-scale-increase 0))
+        pix))))
+
+(define marker-pix (marker-render))
+
+(test-assert "the continuation run fills a wrapped row's gap"
+  (let loop ((x 620))
+    (cond ((>= x 700) #f)
+          ((not (equal? (marker-pix x 15) white)) #t)
+          (else (loop (+ x 1))))))
+
+(test-assert "and the marker is drawn in the row's scaled font"
+  ;; The gap is empty of text, so ink there is the marker's. Its lowest
+  ;; stroke is below the frame's own row height (20), which a
+  ;; frame-metric marker never reaches.
+  (let loop ((x 620) (lowest -1))
+    (if (>= x 700)
+        (> lowest cell-h)
+        (loop (+ x 1)
+              (let y-loop ((y 0) (low lowest))
+                (if (>= y (* 2 cell-h))
+                    low
+                    (y-loop (+ y 1)
+                            (if (equal? (marker-pix x y) white)
+                                low
+                                (max low y)))))))))
+
+(test-end "schemacs_pgtk_scaled_rows")
+
+;;------------------------------------------------------------------
+;; Fringes
+;;
+;; GNU Emacs gives a graphical frame an 8-pixel fringe on each side
+;; (`fringe.el:164`), outside the text area: a wrapped line's
+;; continuation is a curved-arrow bitmap in the right fringe at the end
+;; of the continued row and in the left fringe at the start of the row
+;; that continues it (`fringe.c:1245`, `:1290`), never text glyphs. The
+;; bitmap is 8x8 and vertically centred in the row
+;; (`draw_fringe_bitmap_1`, `fringe.c:632`), so it does not zoom with
+;; the text.
+;;------------------------------------------------------------------
+
+(test-begin "schemacs_pgtk_fringes")
+
+(define (fringed-frame)
+  ;; A frame with the default 8-pixel fringes, on a 200-column line that
+  ;; wraps once. Answers (DISPLAY FRAME PIX).
+  (let* ((d (new-display))
+         (ed (allocate-buffer)))
+    (with-current-buffer ed
+      (insert (make-string 200 #\W)))
+    (set-point ed 1)
+    (let ((frame (fr:new-frame ed 24 80)))
+      (fr:set-frame-parameter frame 'left-fringe 8)
+      (fr:set-frame-parameter frame 'right-fringe 8)
+      (parameterize ((fr:*current-frame* frame)) (xd:render! frame))
+      (list d frame (shot-of d)))))
+
+(define fringed (fringed-frame))
+(define fringed-display (car fringed))
+(define fringed-frame (cadr fringed))
+(define fringed-pix (caddr fringed))
+(define fringed-window (fr:frame-selected-window fringed-frame))
+
+(test-equal "a graphical frame's fringes are 8 pixels each"
+  '(8 8 #f #f) (fr:window-fringes fringed-window))
+
+;; `window_box_width` (`xdisp.c:1279`) is pixels: the window's pixel
+;; width less both fringes. The body's *columns* are that divided by
+;; the cell - 704/9 = 78 here - and the text starts 8 pixels in, which
+;; is not a whole column.
+(test-equal "the fringes come out of the box in pixels"
+  (- (fr:window-pixel-width fringed-window) 16)
+  (fr:window-box-width fringed-window))
+(test-equal "and the text starts eight pixels in"
+  (+ (fr:window-pixel-left fringed-window) 8)
+  (fr:window-box-left fringed-window))
+(test-equal "the body's columns are the box divided by the cell"
+  (quotient (- (fr:window-pixel-width fringed-window) 16) 9)
+  (fr:window-body-width fringed-window))
+
+(define fringed-rows
+  (glyph-matrix-rows (window-desired-matrix fringed-window)))
+
+(define (row-of index) (vector-ref fringed-rows index))
+
+(test-assert "the wrapped line's first row continues"
+  (and (row-of 0) (glyph-row-continued? (row-of 0))))
+(test-assert "and the row below it is a continuation line"
+  (and (row-of 1) (glyph-row-continuation-line? (row-of 1))))
+
+(define (dark? colour)
+  (and colour (< (+ (car colour) (cadr colour) (caddr colour)) 240)))
+
+(define (ink-in-box? pix x0 y0 x1 y1)
+  ;; Whether any pixel in [X0,X1) x [Y0,Y1) is dark.
+  (let loop ((y y0))
+    (cond ((>= y y1) #f)
+          ((let x-loop ((x x0))
+             (cond ((>= x x1) #f)
+                   ((dark? (pix x y)) #t)
+                   (else (x-loop (+ x 1)))))
+           #t)
+          (else (loop (+ y 1))))))
+
+(define (ink-rows-in-box pix x0 x1 y0 y1)
+  ;; How many of the pixel rows [Y0,Y1) have a dark pixel in [X0,X1).
+  (let loop ((y y0) (n 0))
+    (if (>= y y1)
+        n
+        (loop (+ y 1)
+              (if (let x-loop ((x x0))
+                    (cond ((>= x x1) #f)
+                          ((dark? (pix x y)) #t)
+                          (else (x-loop (+ x 1)))))
+                  (+ n 1)
+                  n)))))
+
+;; The right fringe of the first row: a curly arrow, 8x8, centred in
+;; the 20-pixel row - y 6..14.
+(define right-fringe-x (* (- (fr:window-width fringed-window) 1) cell-w))
+(test-assert "the continued row's right fringe carries an arrow"
+  (ink-in-box? fringed-pix right-fringe-x 6 (+ right-fringe-x cell-w) 14))
+
+(test-assert "the fringe is a gutter, not white text background"
+  (not (equal? white
+              (fringed-pix (+ right-fringe-x 3) 1))))
+
+;; The second row's left fringe carries the other arrow.
+(test-assert "the continuation row's left fringe carries an arrow"
+  (ink-in-box? fringed-pix 0 26 cell-w 34))
+
+(test-assert "no text glyph is drawn in the left gutter"
+  (not (ink-in-box? fringed-pix 0 0 (1- cell-w) 20)))
+
+;; Scaling the text does not scale the arrow: the row is 29 pixels tall,
+;; but the bitmap is still 8 (four to six dark scanlines for these
+;; arrows) and it is centred in that row.
+(define (fringed-scaled-shot)
+  (with-current-buffer (fr:window-buffer fringed-window)
+    (scale:text-scale-increase 2))
+  (parameterize ((fr:*current-frame* fringed-frame))
+    (xd:render! fringed-frame))
+  (let* ((rows (glyph-matrix-rows (window-desired-matrix fringed-window)))
+         (row0 (vector-ref rows 0))
+         (shot (shot-of fringed-display)))
+    (with-current-buffer (fr:window-buffer fringed-window)
+      (scale:text-scale-increase 0))
+    (list shot (glyph-row-y row0) (glyph-row-height row0))))
+
+(define fringed-scaled (fringed-scaled-shot))
+(define fringed-scaled-pix (car fringed-scaled))
+(define fringed-scaled-y (cadr fringed-scaled))
+(define fringed-scaled-h (caddr fringed-scaled))
+(define fringe-arrow-columns
+  (list right-fringe-x (+ right-fringe-x cell-w)))
+
+(test-assert "the fringe arrow does not zoom"
+  (let ((n (ink-rows-in-box fringed-scaled-pix
+                            (car fringe-arrow-columns)
+                            (cadr fringe-arrow-columns)
+                            fringed-scaled-y
+                            (+ fringed-scaled-y fringed-scaled-h))))
+    (and (<= n 8) (> n 3))))
+
+(test-assert "and it is centred vertically in the taller row"
+  (let* ((mid (+ fringed-scaled-y
+                 (quotient fringed-scaled-h 2)))
+         (n (ink-rows-in-box fringed-scaled-pix
+                             (car fringe-arrow-columns)
+                             (cadr fringe-arrow-columns)
+                             (- mid 6) (+ mid 6))))
+    (> n 3)))
+
+(test-end "schemacs_pgtk_fringes")
+
+;; `window_resize_apply` (`window.c:4815`) stores the *pixel* size the
+;; engine computed and derives `total_cols` from it by division. Before
+;; this the tree rounded every level to whole cells, so a frame resize
+;; redistributed its rounding error on each pass - the split drift. 719
+;; pixels is not a multiple of this display's 9-pixel cell: the window
+;; must keep 719 and floor to 79 columns.
+(test-begin "schemacs_pgtk_window_pixels")
+(let* ((ed (get-buffer-create "pixel-geometry"))
+       (frame (fr:new-frame ed 24 80))
+       (root (fr:frame-root-window frame)))
+  (fr:set-window-new-pixel root 719)
+  (fr:set-window-new-normal root 0.5)
+  (fr:%window-resize-apply-1 root #t)
+  (test-equal "the pixel size the engine set is kept exactly"
+    719 (fr:window-pixel-width root))
+  (test-equal "the column count is that divided by the cell"
+    79 (fr:window-width root))
+  (test-equal "and the normal size is stored, not re-derived"
+    0.5 (fr:window-normal-size root #t)))
+;; A window 479 pixels tall with 20-pixel lines is 23 whole lines and a
+;; 19-pixel remainder. The mode line is at pixel 459 (bottom less one
+;; line), not at `(top + 23 - 1) * 20 = 440`, which is a whole remainder
+;; too high and paints over the last text row - the corruption seen
+;; after zooming down from a large font.
+(let* ((ed (get-buffer-create "mode-line-pixels"))
+       (frame (fr:new-frame ed 24 80))
+       (root (fr:frame-root-window frame)))
+  (fr:set-window-new-pixel root 479)
+  (fr:%window-resize-apply-1 root #f)
+  (parameterize ((fr:*current-frame* frame))
+    (xd:render! frame))
+  (let* ((w (fr:frame-selected-window frame))
+         (record (fr:window-last-mode-line w)))
+    (test-equal "the mode line begins at the pixel bottom less one line"
+      (- (+ (fr:window-pixel-top w) (fr:window-pixel-height w))
+         (fr:frame-char-height frame))
+      (caddr record))))
+(test-end "schemacs_pgtk_window_pixels")
+
+;; `string-pixel-width` (`subr-x.el:389`) measures through the display
+;; iterator, so the face a string carries - a tab caption's bold face, a
+;; `:height 1.5` run - changes the answer. The old cell product could not
+;; see either.
+(test-begin "schemacs_pgtk_string_pixel_width")
+(let* ((plain (propertize "abc"))
+       (scaled (propertize "abc" 'face '(:height 1.5))))
+  (test-assert "a string measures wider than zero"
+    (> (xd:string-pixel-width plain) 0))
+  (test-assert "a scaled face measures wider than the plain one"
+    (> (xd:string-pixel-width scaled)
+       (xd:string-pixel-width plain)))
+  (test-equal "newlines take the widest line"
+    (max (xd:string-pixel-width "abc")
+         (xd:string-pixel-width "abcdef"))
+    (xd:string-pixel-width "abc\nabcdef")))
+(test-end "schemacs_pgtk_string_pixel_width")
+
+;; `buffer_posn_from_coords` walks the row's glyphs (`xdisp.c:17110`);
+;; a click's position is the character whose advance contains the
+;; pointer, not `x / frame-cell-width`. With a `:height 2.0` face the
+;; first glyph is 27 pixels wide, so a click 10 pixels in is character
+;; 1, where the cell division (10/9) answered character 2.
+(test-begin "schemacs_pgtk_posn_pixels")
+(let* ((ed (get-buffer-create "posn-pixels"))
+       (frame (fr:new-frame ed 24 80)))
+  (with-current-buffer ed
+    (insert "aaa")
+    (put-text-property 1 4 'face '(:height 2.0)))
+  (parameterize ((fr:*current-frame* frame))
+    (xd:render! frame)
+    (let* ((w (fr:frame-selected-window frame))
+           (row (vector-ref (glyph-matrix-rows (window-current-matrix w)) 0))
+         (glyphs (glyph-row-glyphs row))
+         (w0 (glyph-pixel-width (vector-ref glyphs 0)))
+         (first-x (+ (glyph-row-x row) 10)))
+    (test-assert "a tall first glyph is wider than a frame cell"
+      (> w0 (fr:frame-char-width frame)))
+    (test-equal "a click inside the first tall glyph is position 1"
+      1 (cadr (xd:posn-at-x-y first-x (+ (glyph-row-y row) 2) frame)))
+    (test-equal "a click inside the second glyph is position 2"
+      2 (cadr (xd:posn-at-x-y (+ (glyph-row-x row) w0 5)
+                              (+ (glyph-row-y row) 2) frame)))
+    (test-equal "posn-at-point's x is the first glyph's own advance"
+      (+ (glyph-row-x row) w0)
+      (car (caddr (xd:posn-at-point 2 w))))
+    (test-equal "pos-visible's X is the tall first glyph's advance"
+      w0
+      (car (xd:pos-visible-in-window-p 2 w #t))))))
+(test-end "schemacs_pgtk_posn_pixels")

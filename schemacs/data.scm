@@ -13,11 +13,16 @@
 
   (import
     (scheme base)
+    (scheme char)
     ;; The global value table is a Guile hash table, as the coding system
     ;; registry is - `hashq-get-handle` is the one that tells a stored
     ;; nil from an absent entry, which `hashq-ref` cannot.
     (only (guile) ash logand logior lognot logxor logcount
-          hashq-get-handle hashq-set! make-hash-table)
+          hashq-get-handle hashq-set! make-hash-table
+          ;; `(scheme base)` does not export `exact->inexact` in this
+          ;; Guile (measured: "Unbound variable" at run time), though
+          ;; R7RS's table lists it; `(guile)` binds it.
+          exact->inexact inexact->exact)
     (only (schemacs buffer)
           buffer-local-value set-buffer-local-value! current-buffer)
     ;; `aref`'s char-table arm - `CHAR_TABLE_REF` (`char_table_ref`).
@@ -25,11 +30,12 @@
     )
 
   (export
-   natnump
+   natnump number-to-string
    make-local-variable
    default-value set-default default-boundp
    keywordp
    /=
+   mod string-to-number
    aref aset
    ;; `alloc.c''s `make-bool-vector' and `bool-vector', and `data.c''s
    ;; predicates and bitwise operations. See "Bool vectors" below.
@@ -51,6 +57,20 @@
       ;;--------------------------------------------------------------
       (and (integer? object) (<= 0 object)))
 
+    (define (number-to-string number)
+      ;; GNU Emacs's `number-to-string' (`data.c:3067'): "Return the
+      ;; decimal representation of NUMBER as a string. Uses a minus sign
+      ;; if negative. NUMBER may be an integer or a floating point
+      ;; number."
+      ;;
+      ;; The C prints an integer itself and a float with `%g'-like
+      ;; formatting; Guile's `number->string' is the decimal spelling of
+      ;; both, and for the floats that reach here (times) it is the same
+      ;; text Emacs produces. `subr.el''s `int-to-string' alias is not
+      ;; carried - nothing here calls it.
+      ;;--------------------------------------------------------------
+      (number->string number))
+
     (define (/= num1 num2)
       ;; GNU Emacs's `/= ` (`data.c:2919'): "Return t if first arg is not
       ;; equal to second arg. Both must be numbers or markers." The C is
@@ -59,6 +79,133 @@
       ;; a marker argument is not carried - nothing here passes one, and
       ;; the coercion needs `markerp', which is a library above this one.
       (not (= num1 num2)))
+
+    (define (%fmod x y)
+      ;; `floatfns.c:570' `fmod_float`'s body: `fmod (f1, f2)`, then
+      ;; "If the `remainder' comes out with the wrong sign, fix it."
+      ;;
+      ;; libm's `fmod` has no Scheme binding in this Guile (there is no
+      ;; `fmod', `(ice-9 math)' does not exist, and R7RS's `remainder'
+      ;; refuses a flonum), so it is the truncating remainder written
+      ;; out: `x - trunc(x/y)*y`. That is fmod's definition and agrees
+      ;; with it except in the last bits of very large magnitudes,
+      ;; where libm's is exact and this is not - named in DEPARTURES.md.
+      ;; The C's `y` of 0 gives a NaN; `(/ x 0.0)` here is an infinity
+      ;; and `truncate` raises, the zero-divisor departure.
+      ;;--------------------------------------------------------------
+      (let ((r (- x (* y (truncate (/ x y))))))
+        (if (if (< y 0) (> r 0) (< r 0)) (+ r y) r)))
+
+    (define (mod x y)
+      ;; GNU Emacs's `mod` (`data.c:3448'): "Return X modulo Y. The
+      ;; result falls between zero (inclusive) and Y (exclusive). Both X
+      ;; and Y must be numbers or markers."
+      ;;
+      ;; The C's integer arm is `integer_remainder (x, y, true)` - the
+      ;; flooring kind, so `(mod -1 3)` is 2 and `(mod 1 -3)` is -2 -
+      ;; and R7RS's `modulo` is that same arm. A flonum on either side
+      ;; takes `fmod_float` (`floatfns.c:570'), below. The marker
+      ;; coercion (`check_number_coerce_marker`) is not carried, for
+      ;; `/= `'s reason: it needs `markerp', which is above this
+      ;; library.
+      ;;--------------------------------------------------------------
+      (if (or (inexact? x) (inexact? y))
+          (%fmod (exact->inexact x) (exact->inexact y))
+          (modulo x y)))
+
+    (define (%scan-digits string i len)
+      ;; The run of decimal digits in STRING starting at I, as the index
+      ;; of the first non-digit (`string_to_number`'s `strtol` scan).
+      ;;--------------------------------------------------------------
+      (let loop ((j i))
+        (if (and (< j len) (char-numeric? (string-ref string j)))
+            (loop (+ j 1))
+            j)))
+
+    (define (string-to-number string . base-arg)
+      ;; GNU Emacs's `string-to-number` (`data.c:3092'): "Parse STRING as
+      ;; a decimal number and return the number. Ignore leading spaces
+      ;; and tabs, and all trailing chars. Return 0 if STRING cannot be
+      ;; parsed as an integer or floating point number. If BASE,
+      ;; interpret STRING as a number in that base. ... If the base used
+      ;; is not 10, STRING is always parsed as an integer."
+      ;;
+      ;; The C delegates to `string_to_number` (`lread.c`), a
+      ;; `strtol`-style scan (any base) and a `strtod`-style one (base
+      ;; 10). The prefix scans here are that contract written out. Every
+      ;; expectation was measured on Emacs 31.1: "12abc" 12, " 12" 12,
+      ;; "1e3" 1000.0, "1e" 1 (the exponent needs digits), "1." 1 (a
+      ;; trailing dot with no fraction digits does not make it a float),
+      ;; "+.5" 0.5, "abc" 0, "12" base 16 is 18, "ff" base 16 is 255.
+      ;;--------------------------------------------------------------
+      (let* ((base (if (pair? base-arg) (car base-arg) 10))
+             (len (string-length string)))
+        (unless (and (integer? base) (<= 2 base) (<= base 16))
+          (error "Args out of range: ~s" base))
+        (let loop ((i 0))
+          (if (and (< i len) (memv (string-ref string i) '(#\space #\tab)))
+              (loop (+ i 1))
+              (let* ((start i)
+                     (sign? (and (< i len)
+                                 (memv (string-ref string i) '(#\+ #\-))))
+                     (i (if sign? (+ i 1) i)))
+                (define (build end) (substring string start end))
+                (define (value->number end float?)
+                  (let ((v (string->number (build end))))
+                    (cond ((not v) 0)
+                          (float? (exact->inexact v))
+                          ((inexact? v) (inexact->exact v))
+                          (else v))))
+                (cond
+                 ((>= i len) 0)
+                 ((= base 10)
+                  (let* ((j (%scan-digits string i len))
+                         (dot? (and (< j len) (char=? (string-ref string j) #\.)))
+                         (k (if dot? (%scan-digits string (+ j 1) len) j))
+                         (frac? (and dot? (> k (+ j 1))))
+                         (int? (> j i)))
+                    (cond
+                     ((or int? frac?)
+                      (let* ((e (if (and (< k len)
+                                         (memv (string-ref string k) '(#\e #\E)))
+                                    (let* ((p (if (and (< (+ k 1) len)
+                                                       (memv (string-ref string (+ k 1))
+                                                             '(#\+ #\-)))
+                                                  (+ k 2)
+                                                  (+ k 1)))
+                                           (q (%scan-digits string p len)))
+                                      (if (> q p) q k))
+                                    k))
+                             (expt? (> e k))
+                             (end (cond ((and expt? (not frac?) (not int?)) i)
+                                        (expt? e)
+                                        (frac? k)
+                                        (else j))))
+                        ;; A dot with no fraction digits is not part of
+                        ;; the number unless an exponent follows; the
+                        ;; prefix then has none, so "1." reads as 1.
+                        (value->number (if (and dot? (not frac?) (not expt?)) j end)
+                                       (or frac? expt?))))
+                     (else 0))))
+                 (else
+                  ;; Any other base: an integer only, digits valid in
+                  ;; BASE, and 0 when there is none.
+                  (let* ((digit-value
+                          (lambda (ch)
+                            (cond ((char-numeric? ch) (- (char->integer ch)
+                                                         (char->integer #\0)))
+                                  ((char-alphabetic? ch)
+                                   (+ 10 (- (char->integer (char-downcase ch))
+                                            (char->integer #\a))))
+                                  (else 99))))
+                         (v (let next ((j i) (acc 0))
+                              (if (and (< j len)
+                                       (< (digit-value (string-ref string j)) base))
+                                  (next (+ j 1)
+                                        (+ (* acc base)
+                                           (digit-value (string-ref string j))))
+                                  (cons j acc)))))
+                    (if (> (car v) i) (cdr v) 0)))))))))
 
     (define (keywordp object)
       ;; GNU Emacs's `keywordp' (`data.c:207'): "Return t if OBJECT is a

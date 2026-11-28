@@ -28,6 +28,7 @@
   ;; cannot draw is unreachable in both.
 
   (import
+    (only (schemacs custom) define-custom)
     (scheme base)
     (scheme char)
     (only (guile) string-contains)
@@ -159,7 +160,7 @@
     ;; A file that merely *mentions* `coding:' in a comment is decoded by
     ;; one and not the other, and Emacs's rule is the one to copy.
 
-    (define *auto-coding-regexp-alist*
+    (define-custom *auto-coding-regexp-alist*
       ;; GNU Emacs's `auto-coding-regexp-alist' (`mule.el'): "Alist of
       ;; regexp patterns matching a byte sequence at the beginning of a
       ;; file vs coding system." Its five entries are Emacs 31.1's own,
@@ -172,7 +173,7 @@
       ;; carry, so that entry is here as data and does not resolve -
       ;; `set-auto-coding' is what finds that out, as in Emacs.
       ;;--------------------------------------------------------------
-      (make-parameter
+
        (list
         (cons "\\`BABYL OPTIONS:[ \t]*-\\*-[ \t]*rmail[ \t]*-\\*-"
               'no-conversion)
@@ -195,7 +196,15 @@
         ;; the translator - glibc cannot be handed a NUL in a pattern (see
         ;; `%without-nul') - which leaves `;ELC' plus the 0x14, still a
         ;; prefix of the magic number and so still matching.
-        (cons "\\`;ELC\x14\0\0\0" 'emacs-mule))))
+        (cons "\\`;ELC\x14\0\0\0" 'emacs-mule))
+      "Alist of patterns vs corresponding coding systems.
+Each element looks like (REGEXP . CODING-SYSTEM).
+A file whose first bytes match REGEXP is decoded by CODING-SYSTEM on reading.
+
+The settings in this alist take priority over `coding:' tags
+in the file (see the function `set-auto-coding')
+and the contents of `file-coding-system-alist'."
+      :type '(repeat (cons (regexp :tag "Regexp") (symbol :tag "Coding system"))) :group 'files)
 
     (define (auto-coding-regexp-alist-lookup text)
       ;; GNU Emacs's `auto-coding-regexp-alist-lookup' (`mule.el:1866'):
@@ -219,7 +228,15 @@
                (cdar alist))
               (else (loop (cdr alist))))))
 
-    (define *auto-coding-alist* (make-parameter '()))
+    (define-custom *auto-coding-alist* '()
+      "Alist of filename patterns vs corresponding coding systems.
+Each element looks like (REGEXP . CODING-SYSTEM).
+A file whose name matches REGEXP is decoded by CODING-SYSTEM on reading.
+
+The settings in this alist take priority over `coding:' tags
+in the file (see the function `set-auto-coding')
+and the contents of `file-coding-system-alist'."
+      :type '(repeat (cons (regexp :tag "File name regexp") (symbol :tag "Coding system"))) :group 'files :version "24.1")
     ;; ^ GNU Emacs's `auto-coding-alist': "Alist of filename patterns vs
     ;; coding systems. The value of `auto-coding-function' should match
     ;; names against this." Its default entries are for compressed files;

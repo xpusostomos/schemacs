@@ -255,7 +255,12 @@
   (let ((ed (allocate-buffer)))
     (with-current-buffer ed (insert "abcdef"))
     (let ((runs (runs-for ed 1 6)))
-      (list (length runs) runs))))
+      ;; A run is `(FROM TO TOKEN ATTRS)' - the attrs are the merged face
+      ;; the renderer measures with (stage 4's addition), so the identity
+      ;; of the run is its first three elements.
+      (list (length runs)
+            (map (lambda (run) (list (car run) (cadr run) (caddr run)))
+                 runs)))))
 
 ;; A face on the middle of a line cuts it into three runs, and each run
 ;; carries the attribute number for its face - bold, on this display.
@@ -351,7 +356,9 @@
 ;; Inactive and empty regions do not change the default face. (An empty
 ;; overlay has no characters, so `overlays-at` never reports it; its two
 ;; boundaries can still split a run, which paints nothing.)
-(test-equal '((0 6 0)) (region-runs "abcdef" 2 5 #f))
+(test-equal '((0 6 0))
+  (map (lambda (run) (list (car run) (cadr run) (caddr run)))
+       (region-runs "abcdef" 2 5 #f)))
 (test-equal '(0 0) (map caddr (region-runs "abcdef" 2 2 #t)))
 
 ;; **The `window` property is what keeps a region out of the other
@@ -578,3 +585,28 @@
     (f:face-attribute 'fc-empty ':weight)))
 
 (test-end "schemacs_editor_faces_copy")
+
+;;----------------------------------------------------------------------
+;; `face-text-width` on a display with no font
+;;----------------------------------------------------------------------
+;; The measurement interface's second question (see
+;; `plans/PER-FACE-FONTS.md`, stage 1). A test display and a terminal
+;; keep the cell model: display cells times the display's column width.
+;; The Gtk display's per-face answer is in `test/ui/gtk/pgtk-test.scm`.
+
+(test-begin "schemacs_editor_faces_text_width")
+
+(let ((d (make <test-display>)))
+  (test-equal "two characters are two cells wide"
+    2 (dn:face-text-width d #f "MM"))
+  (test-equal "a wide character is two cells"
+    2 (dn:face-text-width d #f "あ"))
+  (test-assert "a tab expands to more than one space"
+             (> (dn:face-text-width d #f "\t")
+                (dn:face-text-width d #f " "))))
+
+(let ((d (make <test-display> #:column-width 2)))
+  (test-equal "the column width scales the answer"
+    4 (dn:face-text-width d #f "MM")))
+
+(test-end "schemacs_editor_faces_text_width")

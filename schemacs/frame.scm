@@ -64,7 +64,7 @@
            ;; the frame's menu bar is recomputed from - see the note on
            ;; `update-mode-lines` in dispnew.
            set-update-mode-lines!)
-    (only (schemacs marker) build-marker marker-position set-marker make-marker)
+    (only (schemacs marker) build-marker markerp marker-position set-marker make-marker)
     
     ;; `*current-buffer*' is the C global `current_buffer', which this
     ;; library writes (`select-window') and re-exports; its definition is
@@ -297,7 +297,7 @@
    %window-end-valid? set!%window-end-valid?
    %window-base-line-number set!%window-base-line-number
    %window-base-line-pos set!%window-base-line-pos
-   set-window-start!
+   set-window-start! set-window-start
    ;; `w->force_start`: set by `set-window-start!`, read and cleared by
    ;; the redisplay (`xdisp.c:20746`).
    window-force-start? set-window-force-start?!
@@ -311,7 +311,7 @@
    resize-frame-windows!
    recenter
    suspend-frame
-   set-window-point!
+   set-window-point! set-window-point
    sync-frame-size!
    ;; `change_frame_size` and `do_pending_window_change` (`dispnew.c`),
    ;; and the frame field a deferred change waits in.
@@ -364,6 +364,18 @@
    %window-suspend-auto-hscroll? set!%window-suspend-auto-hscroll?
    %window-old-point set!%window-old-point
    window-body-width
+   ;; `window_box'/'window_box_width'/'window_box_height'
+   ;; (`xdisp.c:1214', `:1279', `:1291'): the text area in pixels.
+   window-box-left window-box-width window-box-top window-box-height
+   ;; The exact pixel setters `window_resize_apply' needs (`window.c`).
+   set-window-pixel-left! set-window-pixel-top!
+   set-window-pixel-width! set-window-pixel-height!
+   ;; The fringes: `f->left_fringe_width`/`right_fringe_width`, the
+   ;; `FRAME_FRINGE_COLS` booking, and `window-fringes`.
+   frame-left-fringe-width frame-right-fringe-width
+   window-left-fringe-width window-right-fringe-width
+   window-fringe-cols window-left-fringe-cols window-right-fringe-cols
+   window-fringes
    ;; Where the text area begins and what the scroll bar takes from it -
    ;; `WINDOW_BOX_LEFT_EDGE_X` and the `WINDOW_*_SCROLL_BAR_*` macros.
    window-body-left
@@ -394,6 +406,7 @@
    window-total-height window-total-width window-pixel-height window-pixel-width
    window-left-column window-top-line window-pixel-left window-pixel-top
    window-size window-normal-size
+   window-set-parent-and-normal-sizes
    window-combination-limit set-window-combination-limit
    window-dedicated-p set-window-dedicated-p
    ;; A terminal's answers to the window-system decorations: no fringes
@@ -454,7 +467,7 @@
     ;; its sibling.
 
     (define-record-type <window>
-      (make<window>
+      (%make-window
        frame
        buffer point start start-at-line-beg
        end-pos end-vpos end-valid base-line-number base-line-pos
@@ -468,7 +481,9 @@
        last-tab-line
        change-stamp old-buffer
        old-pixel-width old-pixel-height
-       old-body-pixel-width old-body-pixel-height)
+       old-body-pixel-width old-body-pixel-height
+       %pixel-left %pixel-top %pixel-width %pixel-height
+       %normal-lines %normal-cols)
       window-type?
       (frame     window-frame       set!window-frame)
       ;; ^ The frame this window is on: GNU Emacs's `w->frame', the first
@@ -543,15 +558,17 @@
       ;; ^ Where that line begins. GNU Emacs's `w->base_line_pos',
       ;; where 0 means "no base line" and -1 means "do not display the
       ;; line number as long as this window shows this buffer".
-      (top       window-top         set!window-top)
-      ;; ^ The zero-based screen row of the window's first row.
-      (height    window-height      set!window-height)
+      (top       window-top         set!%window-top)
+      ;; ^ The zero-based screen row of the window's first row. Derived
+      ;; from `w->pixel_top` by `FRAME_LINE_HEIGHT`, as the C derives
+      ;; `top_line`; the pixel field is the authority.
+      (height    window-height      set!%window-height)
       ;; ^ The window's height in screen rows, including the row its
       ;; mode line is drawn on, as Emacs's `window-total-height' does.
       ;; `WINDOW-BODY-HEIGHT' is what the text gets.
-      (left      window-left        set!window-left)
+      (left      window-left        set!%window-left)
       ;; ^ The zero-based screen column of the window's first column.
-      (width     window-width       set!window-width)
+      (width     window-width       set!%window-width)
       ;; ^ The window's width in screen columns.
       (parent    window-parent      set!window-parent)
       ;; ^ The window holding this one, or false when the frame does.
@@ -664,7 +681,110 @@
       ;; the window had for it and the window's point in it, as markers
       ;; so that they follow edits. `record-window-buffer` (`window.el`)
       ;; fills them.
+      ;; ^ GNU Emacs's `w->pixel_left`, `pixel_top`, `pixel_width` and
+      ;; `pixel_height` (`window.h`): the authoritative geometry. The
+      ;; four cell fields above are derived from these by the frame's
+      ;; character size, exactly as `left_col`/`top_line`/`total_cols`/
+      ;; `total_lines` are in the C. **A `#f` here means "derive from
+      ;; the cell field"**, which is how a window made by the older
+      ;; constructor still answers correctly; every setter below fills
+      ;; both representations.
+      (%pixel-left  %window-pixel-left  set!%window-pixel-left)
+      (%pixel-top   %window-pixel-top   set!%window-pixel-top)
+      (%pixel-width %window-pixel-width set!%window-pixel-width)
+      (%pixel-height %window-pixel-height set!%window-pixel-height)
+      ;; ^ GNU Emacs's `w->normal_lines` and `w->normal_cols`: the
+      ;; window's share of its parent, 0 < N <= 1. Stored, because a
+      ;; window shrunk to its minimum has to remember the share it can
+      ;; grow back to; deriving it from the current geometry loses that
+      ;; (the split drift this file used to have).
+      (%normal-lines %window-normal-lines set!%window-normal-lines)
+      (%normal-cols  %window-normal-cols  set!%window-normal-cols)
       )
+
+    ;; The constructor the rest of the tree calls. It keeps the old
+    ;; cell-based signature - a caller names the row and column rectangle
+    ;; it is making - and leaves the pixel fields `#f', which the
+    ;; accessors below derive from the cells. The exact pixel setters
+    ;; fill them when a resize engine or a split computes in pixels, and
+    ;; from then on the pixels are the authority (`window_resize_apply`,
+    ;; `window.c:4815').
+    (define (make<window> frame buffer point start start-at-line-beg
+                          end-pos end-vpos end-valid base-line-number base-line-pos
+                          top height left width parent children
+                          hscroll min-hscroll suspend-auto-hscroll? old-point
+                          prev-buffers next-buffers
+                          last-buffer last-modified last-overlay-modified last-start
+                          last-width last-height last-hscroll last-point last-mark
+                          last-mode-line parameters last-tab-line
+                          change-stamp old-buffer
+                          old-pixel-width old-pixel-height
+                          old-body-pixel-width old-body-pixel-height)
+      (%make-window frame buffer point start start-at-line-beg
+                    end-pos end-vpos end-valid base-line-number base-line-pos
+                    top height left width parent children
+                    hscroll min-hscroll suspend-auto-hscroll? old-point
+                    prev-buffers next-buffers
+                    last-buffer last-modified last-overlay-modified last-start
+                    last-width last-height last-hscroll last-point last-mark
+                    last-mode-line parameters last-tab-line
+                    change-stamp old-buffer
+                    old-pixel-width old-pixel-height
+                    old-body-pixel-width old-body-pixel-height
+                    #f #f #f #f #f #f))
+
+    ;;----------------------------------------------------------------
+    ;; The geometry pair: pixels are `struct window''s authority, cells
+    ;; are its `total_cols'/`total_lines'/`left_col'/`top_line'
+    ;; (`window.h'). Every setter writes both so no reader can see a
+    ;; window whose two views disagree.
+    ;;----------------------------------------------------------------
+    (define (window-cell-width window)
+      (max 1 (frame-char-width (window-frame window))))
+    (define (window-cell-height window)
+      (max 1 (frame-char-height (window-frame window))))
+
+    (define (set!window-left window value)
+      (set!%window-left window value)
+      (set!%window-pixel-left window (* value (window-cell-width window))))
+    (define (set!window-top window value)
+      (set!%window-top window value)
+      (set!%window-pixel-top window (* value (window-cell-height window))))
+    (define (set!window-width window value)
+      (set!%window-width window value)
+      (set!%window-pixel-width window (* value (window-cell-width window))))
+    (define (set!window-height window value)
+      (set!%window-height window value)
+      (set!%window-pixel-height window (* value (window-cell-height window))))
+
+    ;; The exact pixel setters `window_resize_apply' and the box queries
+    ;; use. The C keeps `total_cols = pixel_width / unit' and
+    ;; `left_col = pixel_left / unit'; these do the same.
+    (define (set-window-pixel-left! window value)
+      (set!%window-pixel-left window value)
+      (set!%window-left window (quotient value (window-cell-width window))))
+    (define (set-window-pixel-top! window value)
+      (set!%window-pixel-top window value)
+      (set!%window-top window (quotient value (window-cell-height window))))
+    (define (set-window-pixel-width! window value)
+      (set!%window-pixel-width window value)
+      (set!%window-width window (quotient value (window-cell-width window))))
+    (define (set-window-pixel-height! window value)
+      (set!%window-pixel-height window value)
+      (set!%window-height window (quotient value (window-cell-height window))))
+
+    (define (window-pixel-left-of window)
+      (or (%window-pixel-left window)
+          (* (window-left window) (window-cell-width window))))
+    (define (window-pixel-top-of window)
+      (or (%window-pixel-top window)
+          (* (window-top window) (window-cell-height window))))
+    (define (window-pixel-width-of window)
+      (or (%window-pixel-width window)
+          (* (window-width window) (window-cell-width window))))
+    (define (window-pixel-height-of window)
+      (or (%window-pixel-height window)
+          (* (window-height window) (window-cell-height window))))
 
     (define (window-internal? window)
       ;; Whether WINDOW is an internal window rather than one showing a
@@ -770,11 +890,30 @@
       ;; Make point in WINDOW be at INDEX: GNU Emacs's
       ;; `set-window-point', which moves point itself when the window is
       ;; the selected one.
+      ;;
+      ;; POS is "a number or marker" (the DEFUN's docstring): the C's
+      ;; selected-window arm reaches `Fgoto_char', which does
+      ;; `CHECK_FIXNUM_COERCE_MARKER', and `set_marker_restricted'
+      ;; coerces on the other arm.  Ours reads the marker out here so
+      ;; both arms get the integer the buffer's point writer requires.
       ;;--------------------------------------------------------------
-      (set-marker (%window-point window) index (window-buffer window))
-      (when (eq? window (selected-window))
-        (set-point (window-buffer window) index))
-      index)
+      (let ((index (if (markerp index) (marker-position index) index)))
+        (set-marker (%window-point window) index (window-buffer window))
+        (when (eq? window (selected-window))
+          (set-point (window-buffer window) index))
+        index))
+
+    (define (set-window-point window position)
+      ;; GNU Emacs's `set-window-point` (`window.c:2126'): "Make
+      ;; POSITION the value of point in WINDOW." The DEFUN's body is
+      ;; `Fgoto_char' when WINDOW is the selected one and
+      ;; `set_marker_restricted_both' otherwise, and it answers nil;
+      ;; `set-window-point!` is that body. The `Fgoto_char` arm's
+      ;; out-of-range signalling is not reproduced - it matters only to
+      ;; a caller that passes a position outside the restriction.
+      ;;--------------------------------------------------------------
+      (set-window-point! window position)
+      #f)
 
     (define (mouse-position)
       ;; GNU Emacs's `mouse-position' (`frame.c'): "Return a list
@@ -986,12 +1125,108 @@
       ;;--------------------------------------------------------------
       (if (window-wants-tab-line window) 1 0))
 
-    (define (window-body-height window)
-      ;; The rows of the window available to text: everything above its
-      ;; mode line, and below its tab line. GNU Emacs's
-      ;; `window-body-height'.
+    ;;----------------------------------------------------------------
+    ;; Fringes
+    ;;
+    ;; GNU Emacs's `f->left_fringe_width`/`right_fringe_width`
+    ;; (`frame.h:628`), the frame parameters `left-fringe' and
+    ;; `right-fringe', and `FRAME_FRINGE_COLS` (`frame.h:1577`) - the
+    ;; total width in canonical character units, rounded up, which is
+    ;; what comes out of a window's column count.
+    ;;
+    ;; The default is 8 pixels on each side of a graphical frame
+    ;; (`fringe.el:164`); a text terminal has no fringes (`frame_dimension`
+    ;; answers 0 when there is no window system, `frame.h:1590`).
+    ;;----------------------------------------------------------------
+
+    (define (%fringe-parameter frame name)
+      (let ((pair (assq name (frame-parameters-alist frame))))
+        (and pair
+             (integer? (cdr pair))
+             (abs (cdr pair)))))
+
+    (define (frame-left-fringe-width frame)
+      ;; `FRAME_LEFT_FRINGE_WIDTH` (`frame.h:1596`). The parameter is the
+      ;; frame's `left-fringe', and `gui_set_left_fringe'
+      ;; (`frame.c:5884`) takes its absolute value and answers 8 for
+      ;; anything that is not an integer.
       ;;--------------------------------------------------------------
-      (max 1 (- (window-height window) 1 (window-tab-line-height window))))
+      (let ((display (frame-output frame)))
+        (if (not (and display (window-system-display? display)))
+            0
+            (or (%fringe-parameter frame 'left-fringe) 8))))
+
+    (define (frame-right-fringe-width frame)
+      ;; `FRAME_RIGHT_FRINGE_WIDTH`; `gui_set_right_fringe` is the same
+      ;; rule as its left sibling.
+      ;;--------------------------------------------------------------
+      (let ((display (frame-output frame)))
+        (if (not (and display (window-system-display? display)))
+            0
+            (or (%fringe-parameter frame 'right-fringe) 8))))
+
+    (define (window-left-fringe-width window)
+      ;; A window's own fringes - `window-fringes`' LEFT - defaulting to
+      ;; the frame's. `set-window-fringes` stores them in the window
+      ;; parameters of those names, as `window.el` does.
+      ;;--------------------------------------------------------------
+      (let ((value (window-parameter window 'left-fringe)))
+        (if (integer? value)
+            (abs value)
+            (frame-left-fringe-width (window-frame window)))))
+
+    (define (window-right-fringe-width window)
+      ;; `window-fringes`' RIGHT.
+      ;;--------------------------------------------------------------
+      (let ((value (window-parameter window 'right-fringe)))
+        (if (integer? value)
+            (abs value)
+            (frame-right-fringe-width (window-frame window)))))
+
+    (define (window-fringe-cols window)
+      ;; `FRAME_FRINGE_COLS`' booking for one window: the total fringe
+      ;; width rounded up to whole frame columns, since this tree's
+      ;; window rectangles are column grids. 0 when there are no
+      ;; fringes.
+      ;;--------------------------------------------------------------
+      (let ((total (+ (window-left-fringe-width window)
+                      (window-right-fringe-width window))))
+        (if (zero? total)
+            0
+            (let ((unit (max 1 (frame-char-width (window-frame window)))))
+              (quotient (+ total unit -1) unit)))))
+
+    (define (window-left-fringe-cols window)
+      ;; How many of `window-fringe-cols`' columns the left fringe
+      ;; occupies. Emacs keeps the fringes in pixels and books only
+      ;; their total in columns; a column grid has to assign them, and
+      ;; the left one takes as many whole columns as it needs, the rest
+      ;; belonging to the right. With the 8/8 default and a 9-pixel cell
+      ;; that is one column each.
+      ;;--------------------------------------------------------------
+      (let ((left (window-left-fringe-width window))
+            (cols (window-fringe-cols window)))
+        (if (zero? left)
+            0
+            (let ((unit (max 1 (frame-char-width (window-frame window)))))
+              (min cols (quotient (+ left unit -1) unit))))))
+
+    (define (window-right-fringe-cols window)
+      ;; The rest of `window-fringe-cols` - see the left sibling.
+      ;;--------------------------------------------------------------
+      (- (window-fringe-cols window) (window-left-fringe-cols window)))
+
+    (define (window-body-height window)
+      ;; The rows of the window available to text: GNU Emacs's
+      ;; `window-body-height' (`window.c:1125') is `window_box_height'
+      ;; divided by the frame's line height. It is derived from the
+      ;; pixel box, not from a row count, so a window whose allocation
+      ;; is not a whole number of rows gives up the partial row exactly
+      ;; as Emacs does - and a minibuffer window, which has no mode
+      ;; line, is not charged for one.
+      ;;--------------------------------------------------------------
+      (quotient (window-box-height window)
+                (window-cell-height window)))
 
     (define (window-body-top window)
       ;; The frame row WINDOW's text starts on - `window-top` plus the
@@ -1119,12 +1354,82 @@
           0))
 
     (define (window-body-left window)
-      ;; The frame column where WINDOW's text begins: the window's left
-      ;; edge plus a left scroll bar - `WINDOW_BOX_LEFT_EDGE_X` is the
-      ;; left edge, and `window_box`'s TEXT_AREA starts after the bar and
-      ;; the margins. There are no fringes or margins here.
+      ;; The frame column of the window's text box: the window's left
+      ;; edge plus a left scroll bar. **This is a column, and a column
+      ;; is not where the text starts** once a fringe is narrower than a
+      ;; cell; `window-box-left' is the pixel answer and is what the
+      ;; redisplay uses. GNU Emacs has no `window-body-left' at all -
+      ;; its `window_box_left' is pixels - so this remains only for the
+      ;; column arithmetic the scroll bars and the tests do.
       ;;--------------------------------------------------------------
-      (+ (window-left window) (window-left-scroll-bar-cols window)))
+      (+ (window-left window)
+         (window-left-scroll-bar-cols window)))
+
+    (define (frame-graphical? frame)
+      (let ((display (frame-output frame)))
+        (and display (window-system-display? display) #t)))
+
+    (define (window-right-divider-pixels window)
+      ;; `WINDOW_RIGHT_DIVIDER_WIDTH` (`window.h:707`): a window that is
+      ;; not rightmost loses the frame's right divider. A toolkit frame
+      ;; has none by default (`right-divider-width' is 0), and the
+      ;; terminal's `|' column is drawn over the window's last cell - so
+      ;; it takes one pixel from the box here, which is what keeps text
+      ;; out of it.
+      ;;--------------------------------------------------------------
+      (cond ((not (window-right-border? window)) 0)
+            ((frame-graphical? (window-frame window)) 0)
+            (else 1)))
+
+    (define (window-box-left window)
+      ;; GNU Emacs's `window_box_left' (`xdisp.c:1410`) for TEXT_AREA:
+      ;; the window's pixel left, plus its left scroll bar, plus its
+      ;; left fringe (this tree has no margins).
+      ;;--------------------------------------------------------------
+      (+ (window-pixel-left-of window)
+         (if (eq? (window-vertical-scroll-bar-type window) 'left)
+             (window-config-scroll-bar-width window)
+             0)
+         (window-left-fringe-width window)))
+
+    (define (window-box-width window)
+      ;; GNU Emacs's `window_box_width' (`xdisp.c:1279`) for TEXT_AREA:
+      ;; the window's pixel width less its scroll bar area, its right
+      ;; divider and its fringes. **Pixels, not columns** - the reason a
+      ;; text-scaled buffer's 8-pixel fringe stays 8 pixels instead of
+      ;; growing to a whole character cell.
+      ;;--------------------------------------------------------------
+      (max 0
+           (- (window-pixel-width-of window)
+              (if (window-vertical-scroll-bar-type window)
+                  (window-config-scroll-bar-width window)
+                  0)
+              (window-right-divider-pixels window)
+              (window-left-fringe-width window)
+              (window-right-fringe-width window))))
+
+    (define (window-box-top window)
+      ;; GNU Emacs's `window_box' (`xdisp.c:1214') for TEXT_AREA: the
+      ;; window's pixel top plus its tab line's height.
+      ;;--------------------------------------------------------------
+      (+ (window-pixel-top-of window)
+         (* (window-tab-line-height window)
+            (window-cell-height window))))
+
+    (define (window-box-height window)
+      ;; GNU Emacs's `window_box_height' (`xdisp.c:1291'): the window's
+      ;; pixel height less the bottom divider and scroll bar, the mode
+      ;; line, the tab line and the header line. A minibuffer window has
+      ;; no mode line (`WINDOW_WANTS_MODELINE_P` is false for
+      ;; `MINI_WINDOW_P`).
+      ;;--------------------------------------------------------------
+      (max 0
+           (- (window-pixel-height-of window)
+              (if (window-wants-mode-line window)
+                  (window-cell-height window)
+                  0)
+              (* (window-tab-line-height window)
+                 (window-cell-height window)))))
 
     (define (%frame-total-scroll-bar-cols frame)
       ;; Every bar column in FRAME's window tree - what this tree's
@@ -1139,20 +1444,14 @@
 
     (define (window-body-width window)
       ;; The columns of the window available to text: GNU Emacs's
-      ;; `window-body-width' (`window.c:1095`), which is the window's
-      ;; width less its vertical scroll bar, the vertical border when it
-      ;; has a window to its right, and the margins and fringes.
-      ;;
-      ;; **The bar comes out of the window's own width here.** Emacs's
-      ;; window pixel width already includes the bar, so its body is
-      ;; `pixel_width - scroll_bar_area_width`; this tree's window
-      ;; rectangle is the grid the window owns, so the same subtraction
-      ;; is what leaves the text.
+      ;; `window-body-width' (`window.c:1095'): `window_box_width' for
+      ;; the text area, divided by the frame's column width. The box
+      ;; arithmetic is in pixels - that is what makes an 8-pixel fringe
+      ;; cost the columns it actually costs rather than a rounded-up
+      ;; whole column.
       ;;--------------------------------------------------------------
-      (let ((width (window-width window)))
-        (- width
-           (window-scroll-bar-cols window)
-           (if (window-right-border? window) 1 0))))
+      (quotient (window-box-width window)
+                (window-cell-width window)))
 
     (define (window-edges window)
       ;; The window's rectangle as (LEFT TOP RIGHT BOTTOM), Emacs's
@@ -1281,6 +1580,19 @@
       (set-window-force-start?! window #t)
       (set-update-mode-lines! #t)
       position)
+
+    (define (set-window-start window position . noforce-arg)
+      ;; GNU Emacs's `set-window-start` (`window.c:1914'): "Display
+      ;; starting at POSITION in WINDOW. ... NOFORCE non-nil means
+      ;; don't force redisplay of this window."
+      ;;
+      ;; **NOFORCE is accepted and has no effect**: the C uses it to skip
+      ;; `wset_update_mode_line`, and `set-window-start!` always sets
+      ;; that flag (see its comment). A caller that needs the flag left
+      ;; alone must use the internal pair - none here does.
+      ;;--------------------------------------------------------------
+      (set-window-start! window position)
+      #f)
 
     (define (window-force-start? window)
       ;; GNU Emacs's `w->force_start` (`window.h`): "Set to mean that
@@ -1712,7 +2024,35 @@
     ;; default values for the parameters of all frames you create."
     ;; A frame's parameters start from this.
 
-    (define *initial-frame-alist* (make-parameter '()))
+    (define-custom *initial-frame-alist* '()
+      "Alist of parameters for the initial window-system (a.k.a. \"GUI\") frame.
+You can set this in your init file; for example,
+
+ (setq initial-frame-alist
+       \\='((top . 1) (left . 1) (width . 80) (height . 55)))
+
+Parameters specified here supersede the values given in
+`default-frame-alist'.
+
+If the value calls for a frame without a minibuffer, and you have
+not created a minibuffer frame on your own, a minibuffer frame is
+created according to `minibuffer-frame-alist'.
+
+Emacs reads your main init file after creating the initial frame,
+so setting it there won't have the expected effect.  Instead, you
+can set it in `early-init-file'.
+
+If you're using X, and you want (for instance) to have different
+geometries on different displays, you need to use this three-step
+process:
+
+* Specify X resources to give the geometry you want.
+* Set `default-frame-alist' to override these options so that they
+  don't affect subsequent frames.
+* Set `initial-frame-alist' in your normal init file in a way
+  that matches the X resources, to override what you put in
+  `default-frame-alist'."
+      :type '(repeat (cons :format "%v" (symbol :tag "Parameter" :completions ("alpha" "alpha-background" "auto-hide-function" "auto-lower" "auto-raise" "background-color" "background-mode" "border-color" "border-width" "bottom-divider-width" "bottom-visible" "buffer-list" "buffer-predicate" "child-frame-border-width" "cursor-color" "cursor-type" "delete-before" "display" "display-type" "drag-internal-border" "drag-with-header-line" "drag-with-mode-line" "drag-with-tab-line" "explicit-name" "fit-frame-to-buffer-margins" "fit-frame-to-buffer-sizes" "font" "font-backend" "foreground-color" "fullscreen" "fullscreen-restore" "height" "horizontal-scroll-bars" "icon-left" "icon-name" "icon-top" "icon-type" "inhibit-double-buffering" "internal-border-width" "keep-ratio" "left" "left-fringe" "line-spacing" "menu-bar-lines" "min-height" "min-width" "minibuffer" "minibuffer-exit" "mouse-color" "mouse-wheel-frame" "name" "no-accept-focus" "no-focus-on-map" "no-other-frame" "no-special-glyphs" "ns-appearance" "ns-transparent-titlebar" "outer-window-id" "override-redirect" "parent-frame" "right-fringe" "right-divider-width" "screen-gamma" "scroll-bar-background" "scroll-bar-foreground" "scroll-bar-height" "scroll-bar-width" "shaded" "skip-taskbar" "snap-width" "sticky" "tab-bar-lines" "title" "tool-bar-lines" "tool-bar-position" "top" "top-visible" "tty-color-mode" "undecorated" "unspittable" "use-frame-synchronization" "user-position" "user-size" "vertical-scroll-bars" "visibility" "wait-for-wm" "width" "z-group")) (sexp :tag "Value" :complete frame--complete-parameter-value))) :group 'frames)
 
     (define default-frame-scroll-bars 'right)
     ;; ^ GNU Emacs's `default-frame-scroll-bars` (`frame.c:7557`): "Default
@@ -1982,6 +2322,13 @@
               (set! alist (store-in-alist alist 'tab-bar-lines 0))
               (set! alist (store-in-alist alist 'tool-bar-lines
                                           (%frame-tool-bar-lines frame)))
+              ;; `FRAME_LEFT_FRINGE_WIDTH`/`FRAME_RIGHT_FRINGE_WIDTH`
+              ;; (`frame.h:1595`): the stored parameter, or the 8-pixel
+              ;; default `gui_set_left_fringe` gives a graphical frame.
+              (set! alist (store-in-alist alist 'left-fringe
+                                          (frame-left-fringe-width frame)))
+              (set! alist (store-in-alist alist 'right-fringe
+                                          (frame-right-fringe-width frame)))
               ;; `FRAME_TOOL_BAR_POSITION` (`pgtkfns.c:1544`,
               ;; `:3421`): the stored parameter, and `top` when there
               ;; is none (`tool-bar-position`'s default).
@@ -2022,6 +2369,10 @@
                    (%frame-vertical-scroll-bar-type frame))
                   ((eq? parameter 'scroll-bar-width)
                    (%frame-config-scroll-bar-width frame))
+                  ((eq? parameter 'left-fringe)
+                   (frame-left-fringe-width frame))
+                  ((eq? parameter 'right-fringe)
+                   (frame-right-fringe-width frame))
                   (else
                    (let ((all (assq parameter (frame-parameters frame))))
                      (and all (cdr all))))))))))
@@ -2607,9 +2958,17 @@
     ;; ^ on, as Emacs has it interactively: its `:init-value' is
     ;; `(not (or noninteractive no-blinking-cursor ...))'
 
-    (define *blink-cursor-delay* (make-parameter 0.5))
-    (define *blink-cursor-interval* (make-parameter 0.5))
-    (define *blink-cursor-blinks* (make-parameter 10))
+    (define-custom *blink-cursor-delay* 0.5
+      "Seconds of idle time before the first blink of the cursor.
+Values smaller than 0.2 sec are treated as 0.2 sec."
+      :type 'number :group 'cursor)
+    (define-custom *blink-cursor-interval* 0.5
+      "Length of cursor blink interval in seconds."
+      :type 'number :group 'cursor)
+    (define-custom *blink-cursor-blinks* 10
+      "How many times to blink before using a solid cursor on NS, X, and MS-Windows.
+Use 0 or negative value to blink forever."
+      :type 'integer :group 'cursor :version "24.4")
 
     (define blink-cursor-idle-timer #f)
     ;; ^ started after `blink-cursor-delay' seconds of idleness
@@ -2828,7 +3187,7 @@
       (let ((w (selected-window)))
         (and w (window-buffer w))))
 
-    (define *tty-select-active-regions*
+    (define-custom *tty-select-active-regions*
       ;; GNU Emacs's `tty-select-active-regions' (frame.el:2759): "If
       ;; non-nil, active regions automatically set the primary selection
       ;; on text terminals, if the terminal supports this" - the OSC 52
@@ -2836,7 +3195,13 @@
       ;; Emacs's is; xterm.sld's version handler turns the terminal's
       ;; parameter on.
       ;;--------------------------------------------------------------
-      (make-parameter #f))
+       #f
+      "If non-nil, update PRIMARY window-system selection on text-mode frames.
+On a text-mode terminal that supports setSelection command, if
+this variable is non-nil, Emacs will set the PRIMARY selection
+from the active region, according to `select-active-regions'.
+This is currently supported only on xterm."
+      :type 'boolean :group 'frames :version "29.1")
 
     (define (display-selections-p . args)
       ;; GNU Emacs's `display-selections-p' (frame.el:2770): whether
@@ -2915,8 +3280,9 @@
       ;;--------------------------------------------------------------
       (let ((display (%display-of args)))
         (if display
-            (* (cdr (screen-size display))
-               (cdr (display-cell-size display)))
+            ;; `screen-size` is pixels now (a terminal's pixels are its
+            ;; cells; a Gtk display's are its allocation).
+            (cdr (screen-size display))
             1)))
 
     (define (display-pixel-width . args)
@@ -2925,8 +3291,7 @@
       ;;--------------------------------------------------------------
       (let ((display (%display-of args)))
         (if display
-            (* (car (screen-size display))
-               (car (display-cell-size display)))
+            (car (screen-size display))
             1)))
 
     (define (display-rows-cols display)
@@ -3512,7 +3877,13 @@
       ;;--------------------------------------------------------------
       (and (memq (*window-system*) '(x w32 ns pgtk)) #t))
 
-    (define *tty-menu-open-use-tmm* #f)
+    (define-custom *tty-menu-open-use-tmm* #f
+      "If non-nil, \\[menu-bar-open] on a TTY will invoke `tmm-menubar'.
+
+If nil, \\[menu-bar-open] will drop down the menu corresponding to the
+first (leftmost) menu-bar item; you can select other items by typing
+\\[forward-char], \\[backward-char], \\[right-char] and \\[left-char]."
+      :type '(choice (const :tag "F10 drops down TTY menus" nil) (const :tag "F10 invokes tmm-menubar" t)) :group 'display :version "24.4")
     ;; ^ GNU Emacs's `tty-menu-open-use-tmm` (`menu-bar.el:2798'): "If
     ;; non-nil, \\[menu-bar-open] on a TTY will invoke `tmm-menubar'."
     ;; A *variable* in `menu-bar.el`'s file, placed here because
@@ -3676,7 +4047,8 @@
       (set-update-mode-lines! #t)
       (let ((margin (frame-top-margin frame)))
         (scale-window! (car (frame-windows frame))
-                       0 0 old-width (max 1 (- old-height 1))
+                       margin 0 old-width
+                       (max 1 (- old-height margin 1))
                        margin 0 new-width
                        (max 1 (- new-height margin 1))))
       ;; **The minibuffer window is the frame's last row, so a resize
@@ -3747,15 +4119,16 @@
              ;; `display-cell-size' and not `column-width', which answers
              ;; in this redisplay's own unit (1 for a windowed display).
              ;;
-             ;; **`screen-size' answers in the redisplay's unit**, so the
-             ;; native size in real pixels is that times the cell; the two
-             ;; are converted in one place rather than mixed.
+             ;; **`screen-size' answers in real pixels** - a terminal's
+             ;; pixels are its cells, a Gtk display's are the window's
+             ;; allocation - so the native size needs no conversion; the
+             ;; cell is used for the text columns and lines.
              (cell (display-cell-size display))
              (unit-width (max 1 (car cell)))
              (unit-height (max 1 (cdr cell)))
              (size (screen-size display))
-             (old-native-width (* (car size) unit-width))
-             (old-native-height (* (cdr size) unit-height))
+             (old-native-width (car size))
+             (old-native-height (cdr size))
              (old-text-width (* (frame-width frame) unit-width))
              (old-text-height (* (frame-height frame) unit-height)))
         (if (= inhibit 5)
@@ -4575,31 +4948,28 @@
 
     (define (window-pixel-height . args)
       ;; GNU Emacs's `window-pixel-height` (`window.c:821`): "Return the
-      ;; height of window WINDOW in pixels" - `w->pixel_height`, which
-      ;; this tree does not store, because it is exactly the row count
-      ;; times the frame's character height.
+      ;; height of window WINDOW in pixels" - `w->pixel_height`. Stored
+      ;; on the window now, because the resize engine can leave it not a
+      ;; whole multiple of the frame's line height; a window made by the
+      ;; cell-based constructor derives it from `window-height'.
       ;;--------------------------------------------------------------
-      (let ((window (%decode-valid-window (%opt args 0))))
-        (* (window-height window) (frame-char-height (window-frame window)))))
+      (window-pixel-height-of (%decode-valid-window (%opt args 0))))
 
     (define (window-pixel-width . args)
       ;; GNU Emacs's `window-pixel-width` (`window.c:808`).
       ;;--------------------------------------------------------------
-      (let ((window (%decode-valid-window (%opt args 0))))
-        (* (window-width window) (frame-char-width (window-frame window)))))
+      (window-pixel-width-of (%decode-valid-window (%opt args 0))))
 
     (define (window-pixel-left . args)
       ;; GNU Emacs's `window-pixel-left` (`window.c:1001`): the pixel
       ;; column of the window's left edge.
       ;;--------------------------------------------------------------
-      (let ((window (%decode-valid-window (%opt args 0))))
-        (* (window-left window) (frame-char-width (window-frame window)))))
+      (window-pixel-left-of (%decode-valid-window (%opt args 0))))
 
     (define (window-pixel-top . args)
       ;; GNU Emacs's `window-pixel-top` (`window.c:1009`).
       ;;--------------------------------------------------------------
-      (let ((window (%decode-valid-window (%opt args 0))))
-        (* (window-top window) (frame-char-height (window-frame window)))))
+      (window-pixel-top-of (%decode-valid-window (%opt args 0))))
 
     (define (window-left-column . args)
       ;; GNU Emacs's `window-left-column` (`window.c`): the column of the
@@ -4625,24 +4995,67 @@
             (if pixelwise (window-pixel-width window) (window-total-width window))
             (if pixelwise (window-pixel-height window) (window-total-height window)))))
 
+    (define (window-set-parent-and-normal-sizes parent)
+      ;; GNU Emacs's `window_set_parent_and_normal_sizes`
+      ;; (`window.c:5161'): give every child of PARENT its parent and its
+      ;; normal share, computed from the pixel sizes that are already in
+      ;; place. Called when a combination changes structure without a
+      ;; resize - a split, a combine, an uncombine - so the share is
+      ;; stored rather than re-derived from the current geometry. The
+      ;; last child takes the remainder, which is what makes the shares
+      ;; of a combination sum to 1.0 exactly.
+      ;;--------------------------------------------------------------
+      (let* ((children (window-children parent))
+             (stacked (and (pair? children) (window-stacked? parent)))
+             (pixels (if stacked
+                         (window-pixel-height-of parent)
+                         (window-pixel-width-of parent))))
+        (let loop ((rest children) (remainder 1.0))
+          (when (pair? rest)
+            (let* ((child (car rest))
+                   (last? (null? (cdr rest)))
+                   (share (if last?
+                              remainder
+                              (if (or (not pixels) (= pixels 0))
+                                  0.0
+                                  (/ (exact->inexact
+                                      (if stacked
+                                          (window-pixel-height-of child)
+                                          (window-pixel-width-of child)))
+                                     (exact->inexact pixels))))))
+              (set!window-parent child parent)
+              (if stacked
+                  (begin
+                    (set!%window-normal-cols child 1.0)
+                    (set!%window-normal-lines child share))
+                  (begin
+                    (set!%window-normal-lines child 1.0)
+                    (set!%window-normal-cols child share)))
+              (loop (cdr rest)
+                    (if last? remainder (- remainder share))))))))
+
     (define (window-normal-size window horizontal)
       ;; GNU Emacs's `window-normal-size` (`window.c:947`): WINDOW's
       ;; share of its parent, 0 < N <= 1, along HORIZONTAL's axis. The C
-      ;; stores the fraction in `w->normal_lines`/`w->normal_cols` so a
-      ;; window shrunk to its minimum remembers its share; those are
-      ;; derived here from the current geometry, which is the same
-      ;; number whenever the window is at its normal size - the only
-      ;; state a state is saved or restored in.
-      ;;
-      ;; "The normal height of a frame's root window or a window that is
-      ;; horizontally combined ... is 1.0": a window not part of a
-      ;; combination along this axis spans its parent wholly.
+      ;; returns `w->normal_lines'/`w->normal_cols' outright; they are
+      ;; set when a combination is made (`window_set_parent_and_normal_
+      ;; sizes`, `window.c:5161') and by `window_resize_apply'
+      ;; (`:4856'), and a window made by this tree's cell-based
+      ;; constructor has no stored value yet, so that case derives it
+      ;; from the geometry - the number the C's initial 1.0 and the
+      ;; split assignment agree with while the window is at its normal
+      ;; size.
       ;;--------------------------------------------------------------
-      (let ((parent (window-parent window)))
-        (if (or (not parent) (not (window-combined-p window horizontal)))
-            1.0
-            (/ (exact->inexact (if horizontal (window-width window) (window-height window)))
-               (if horizontal (window-width parent) (window-height parent))))))
+      (let ((stored (if horizontal
+                        (%window-normal-cols window)
+                        (%window-normal-lines window)))
+            (parent (window-parent window)))
+        (cond
+         ((number? stored) stored)
+         ((or (not parent) (not (window-combined-p window horizontal))) 1.0)
+         (else
+          (/ (exact->inexact (if horizontal (window-width window) (window-height window)))
+             (if horizontal (window-width parent) (window-height parent)))))))
 
     (define (window-combination-limit window)
       ;; GNU Emacs's `window-combination-limit` (`window.c:731`): "Return
@@ -4677,20 +5090,48 @@
     (define (window-fringes . args)
       ;; GNU Emacs's `window-fringes` (`window.c:8639`): "(LEFT-WIDTH
       ;; RIGHT-WIDTH OUTSIDE-MARGINS PERSISTENT)". Emacs on a terminal
-      ;; answers `(0 0 nil nil)` - there are no fringes to draw - and so
-      ;; does this tree on both front ends, which have no fringes.
+      ;; answers `(0 0 nil nil)` - there are no fringes to draw - and
+      ;; this tree answers the same there, because a tty's display is not
+      ;; a window system (`frame.h:1590`).
       ;;--------------------------------------------------------------
-      (%decode-live-window (%opt args 0))
-      (list 0 0 #f #f))
+      (let ((window (%decode-live-window (%opt args 0))))
+        (list (window-left-fringe-width window)
+              (window-right-fringe-width window)
+              (and (window-parameter window 'fringes-outside-margins) #t)
+              (and (window-parameter window 'fringes-persistent) #t))))
 
     (define (set-window-fringes window left-width . args)
-      ;; GNU Emacs's `set-window-fringes` (`window.c`). `set_window_fringes`
-      ;; is a no-op on a frame that is not a window system ("Do nothing
-      ;; on a tty"); this tree has no fringes on either front end, so it
-      ;; is a no-op everywhere.
+      ;; GNU Emacs's `set-window-fringes` (`window.c:8605`): the widths
+      ;; are window parameters, nil meaning the frame's default. A
+      ;; terminal is a no-op ("Do nothing on a tty"). The fourth and
+      ;; fifth arguments - fringes outside margins, and persistence
+      ;; across `set-window-buffer` - are stored for `window-fringes` to
+      ;; report; this tree has no margins, and no buffer-local fringe
+      ;; widths for persistence to protect.
       ;;--------------------------------------------------------------
-      (%decode-live-window window)
-      #f)
+      (let* ((window (%decode-live-window window))
+             (right-width (%opt args 0))
+             (outside (%opt args 1))
+             (persistent (%opt args 2))
+             (display (frame-output (window-frame window))))
+        (if (not (and display (window-system-display? display)))
+            #f
+            (begin
+              (set-window-parameter window 'left-fringe
+                                    (and (integer? left-width)
+                                         (abs left-width)))
+              (set-window-parameter window 'right-fringe
+                                    (and (integer? right-width)
+                                         (abs right-width)))
+              (set-window-parameter window 'fringes-outside-margins
+                                    (and outside #t))
+              (set-window-parameter window 'fringes-persistent
+                                    (and persistent #t))
+              ;; The text area's columns changed, so every row must be
+              ;; built again - Emacs's `apply_window_adjustment` and the
+              ;; `SET_FRAME_GARBAGED` its frame handlers do.
+              (set-frame-garbaged! (window-frame window) #t)
+              #t))))
 
     (define (window-margins . args)
       ;; GNU Emacs's `window-margins` (`window.c:8520`): "(LEFT-WIDTH .
@@ -4948,37 +5389,62 @@
       ;; the engine computed, and walk the tree assigning each child its
       ;; start position along the axis being applied and its own size.
       ;;
+      ;; **The pixel size is the one the engine computed.** The old port
+      ;; rounded it to whole cells at every level (`quotient`), so a
+      ;; frame resize distributed the rounding error differently on each
+      ;; pass and the split drifted. The C stores the pixel size and
+      ;; derives `total_cols`/`total_lines` from it; this does the same.
+      ;;
       ;; It also sets `FRAME_WINDOW_CHANGE` (`:4896`): "a resize is a
       ;; window change even when the tree is the same shape". The C guards
       ;; it with `!WINDOW_PSEUDO_P`, and this tree has no pseudo window to
       ;; guard against.
       ;;--------------------------------------------------------------
       (set!frame-window-change (window-frame window) #t)
-      (let* ((frame (window-frame window))
-             (unit (if horizontal (frame-char-width frame) (frame-char-height frame)))
-             (children (window-children window)))
+      (let* ((unit (if horizontal (window-cell-width window)
+                       (window-cell-height window)))
+             (children (window-children window))
+             (normal (window-new-normal window)))
         (if horizontal
-            (set!window-width window (quotient (window-new-pixel window) unit))
-            (set!window-height window (quotient (window-new-pixel window) unit)))
+            (begin
+              (set-window-pixel-width! window (window-new-pixel window))
+              (when (number? normal)
+                (set!%window-normal-cols window normal)))
+            (begin
+              (set-window-pixel-height! window (window-new-pixel window))
+              (when (number? normal)
+                (set!%window-normal-lines window normal))))
         (let ((stacked (and (pair? children) (window-stacked? window)))
-              (edge (if horizontal (window-left window) (window-top window))))
+              (edge (if horizontal (window-pixel-left-of window)
+                        (window-pixel-top-of window))))
           (let loop ((rest children))
             (when (pair? rest)
               (let ((child (car rest)))
                 (if horizontal
-                    (set!window-left child edge)
-                    (set!window-top child edge))
+                    (begin
+                      (set!%window-pixel-left child edge)
+                      (set!%window-left child (quotient edge unit)))
+                    (begin
+                      (set!%window-pixel-top child edge)
+                      (set!%window-top child (quotient edge unit))))
                 (%window-resize-apply-1 child horizontal)
                 ;; "Edge" advances only along the combination's own axis.
                 (when (if stacked (not horizontal) horizontal)
                   (set! edge (+ edge (if horizontal
-                                         (window-width child)
-                                         (window-height child)))))
+                                         (window-pixel-width-of child)
+                                         (window-pixel-height-of child)))))
                 (loop (cdr rest))))))))
 
     (define (%window-resize-apply-total-1 window horizontal)
       ;; `window_resize_apply_total` (`window.c:4905`): the same walk as
       ;; above, but from the total sizes rather than the pixel ones.
+      ;;
+      ;; The C writes only `total_cols`/`total_lines` here and leaves the
+      ;; pixel fields alone; this tree's cell fields are derived from the
+      ;; pixels, so the total setter writes both. That keeps every reader
+      ;; - the renderer included - looking at a consistent window, and
+      ;; the next `window-resize-apply` overwrites both with the exact
+      ;; pixel sizes anyway.
       ;;--------------------------------------------------------------
       (let* ((children (window-children window))
              (stacked (and (pair? children) (window-stacked? window)))

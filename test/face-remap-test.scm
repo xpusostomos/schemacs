@@ -206,18 +206,22 @@
 ;; `text-scale-min-amount' is "when the resulting pixel-height of
 ;; characters will become smaller than 1 pixel" - `log(1/20)/log(1.2)`
 ;; for this display's 20-pixel line, which is about -16.4. The maximum is
-;; bounded by the display's width in *characters* - `log(6480/9)/log(1.2)`
-;; for 6480 pixels of 9-pixel cells, which is about 36.1.
+;; bounded by the display's width in *characters* - `log(720/9)/log(1.2)`
+;; for this frame's 720 pixels of 9-pixel cells (80 columns), which is
+;; about 24.0.
 ;;
 ;; Both are the C's arithmetic: `(log (/ 1.0 (frame-char-height))
 ;; text-scale-mode-step)` and `(log (/ (min (display-pixel-width) #xffff)
-;; (frame-char-width)) text-scale-mode-step)`.
+;; (frame-char-width)) text-scale-mode-step)`. `display-pixel-width` is
+;; this tree's departure - the frame's width, not the monitor's - and
+;; `screen-size` is in pixels, so the frame's 80 columns of 9-pixel cells
+;; are 720 pixels and the ratio to one cell is 80.
 ;;------------------------------------------------------------------
 
 (test-assert (and (< (r:text-scale-min-amount) -16)
                   (> (r:text-scale-min-amount) -17)))
-(test-assert (and (> (r:text-scale-max-amount) 35)
-                  (< (r:text-scale-max-amount) 37)))
+(test-assert (and (> (r:text-scale-max-amount) 23)
+                  (< (r:text-scale-max-amount) 25)))
 
 ;;------------------------------------------------------------------
 ;; A scaled face reaches the *row*, not just the glyphs

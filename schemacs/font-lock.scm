@@ -49,6 +49,7 @@
   ;; buffers, dired's among them - and Emacs has always bound it here.
 
   (import
+ (only (schemacs custom) define-custom)
  (only (schemacs insdel) *after-change-functions*)
     ;; the just-in-time fontification `font-lock-mode` uses by default -
     ;; `jit-lock.el`, which is below this library.
@@ -76,7 +77,7 @@
     (only (schemacs editfns)
           forward-line goto-char line-beginning-position
           line-end-position point point-marker point-max point-min bolp
-          save-excursion)
+          save-excursion fix-position)
     (only (schemacs search)
           match-beginning match-end re-search-forward save-match-data
           looking-at looking-back)
@@ -92,7 +93,8 @@
     ;; `with-silent-modifications` is `subr.el`'s, and font-lock wraps its
     ;; two fontifying entry points in it as `font-lock.el` does - see the
     ;; note in this library's header for why it is not optional.
-    (only (schemacs subr) with-silent-modifications)
+    (only (schemacs subr) with-silent-modifications remq)
+    (only (schemacs data) keywordp)
     ;; the hook `font-lock-mode' hangs its incremental fontification on:
     ;; `after-change-functions' is `buffer.c''s, and the engine holds it
     
@@ -134,6 +136,7 @@
    font-lock-add-keywords
    font-lock-after-change-function
    font-lock-append-text-property
+   font-lock--remove-face-from-text-property
    font-lock-apply-highlight
    font-lock-choose-keywords
    font-lock-compile-keyword
@@ -173,6 +176,7 @@
    font-lock-set-defaults-done?
    font-lock-specified-p
    font-lock-extend-region-wholelines font-lock-extend-region-multiline
+   font-lock-extend-region-functions set!font-lock-extend-region-functions!
    font-lock-unfontify-buffer
    font-lock-unfontify-region
    font-lock-value-in-major-mode
@@ -483,7 +487,18 @@
     ;; ^ GNU Emacs's `font-lock-extra-managed-props': "Additional text
     ;; properties managed by font-lock."
 
-    (define *font-lock-maximum-decoration* (make-parameter #t))
+    (define-custom *font-lock-maximum-decoration* #t
+      "Maximum decoration level for fontification.
+If nil, use the default decoration (typically the minimum available).
+If t, use the maximum decoration available.
+If a number, use that level of decoration (or if not available the maximum).
+The higher the number, the more decoration is done.
+If a list, each element should be a cons pair of the form (MAJOR-MODE . LEVEL),
+where MAJOR-MODE is a symbol or t (meaning the default).  For example:
+ ((c-mode . t) (c++-mode . 2) (t . 1))
+means use the maximum decoration available for buffers in C mode, level 2
+decoration for buffers in C++ mode, and level 1 decoration otherwise."
+      :type '(choice (const :tag "default" nil) (const :tag "maximum" t) (integer :tag "level" 1) (repeat :menu-tag "mode specific" :tag "mode specific" :value ((t . t)) (cons :tag "Instance" (radio :tag "Mode" (const :tag "all" t) (symbol :tag "name")) (radio :tag "Decoration" (const :tag "default" nil) (const :tag "maximum" t) (integer :tag "level" 1))))) :group 'font-lock)
     ;; ^ GNU Emacs's `font-lock-maximum-decoration', whose default is `t'
     ;; - "the maximum decoration" - read by
     ;; `font-lock-value-in-major-mode' and `font-lock-choose-keywords'.
@@ -566,6 +581,20 @@
     (define (font-lock-keywords) (font-lock-buffer-local *font-lock-keywords*))
     (define (set!font-lock-keywords! value)
       (set!font-lock-buffer-local! *font-lock-keywords* value))
+
+    (define (font-lock-extend-region-functions)
+      (font-lock-buffer-local *font-lock-extend-region-functions*))
+    (define (set!font-lock-extend-region-functions! value)
+      (set!font-lock-buffer-local! *font-lock-extend-region-functions* value))
+    ;; ^ **`defvar-local` in Emacs** (`font-lock.el:1141'): every buffer
+    ;; has its own value, initialised from the one global default.  This
+    ;; was a bare parameter, so `c-font-lock-init`'s `delq` of
+    ;; `font-lock-extend-region-wholelines` (`cc-mode.el:2809') removed
+    ;; it from *every* buffer in the session - and a later fontification
+    ;; of a Groovy buffer passed a mid-line region end to its matcher,
+    ;; whose own search to `line-end-position` then ran past the bound
+    ;; ("Invalid search bound (wrong side of point)").  Measured; the
+    ;; `font_lock_region_local` group in `font-lock-test.scm` pins it.
 
     (define (font-lock-mode-on?) (font-lock-buffer-local *font-lock-mode*))
     (define (set!font-lock-mode! value)
@@ -663,9 +692,17 @@
       ;; `BUF_BEG' and BEG is 1, the tree's origin here. There used to be
       ;; a `(- ... 1)' on each; it belonged to the tree's old zero-based
       ;; numbering and moved every property one character left.
+      ;;
+      ;; **They may be markers.** Elisp's `(< start end)` coerces one and
+      ;; the text-property functions do too, so Emacs's `(let ((start
+      ;; start)) ... (< start end))` accepts them; `comint-snapshot-
+      ;; last-prompt` (`comint.el:2131`) passes the two ends of
+      ;; `comint-last-prompt`, which are markers.
       (let ((val (if (and (pair? value) (not (keyword? (car value))))
                      value
-                     (list value))))
+                     (list value)))
+            (start (fix-position start))
+            (end (fix-position end)))
         (let loop ((start start))
           (when (< start end)
             (let* ((next (next-single-property-change start prop object end))
@@ -711,6 +748,39 @@
       ;;--------------------------------------------------------------
       (font-lock--add-text-property start end prop value
                                     (if (pair? args) (car args) #f) #t))
+
+    (define (font-lock--remove-face-from-text-property start end prop value . args)
+      ;; GNU Emacs's `font-lock--remove-face-from-text-property`
+      ;; (`font-lock.el:1433'): "Remove a specific property value from
+      ;; text from START to END. Arguments PROP and VALUE specify the
+      ;; property and value to remove. The resulting property values are
+      ;; not `eq' to VALUE nor lists containing VALUE. Optional argument
+      ;; OBJECT is the string or buffer containing the text."
+      ;;
+      ;; This is what `comint-output-filter` un-highlights an old prompt
+      ;; with (it must not remove the whole `font-lock-face' run, only
+      ;; the value it added).
+      ;;--------------------------------------------------------------
+      (let ((object (if (pair? args) (car args) #f)))
+        (let loop ((start (text-property-not-all start end prop #f object)))
+          (when start
+            (let* ((next (next-single-property-change start prop object end))
+                   (prev (get-text-property start prop object)))
+              (cond ((or (not (pair? prev))
+                         (keywordp (car prev))
+                         (eq? (car prev) 'foreground-color)
+                         (eq? (car prev) 'background-color))
+                     (when (eq? value prev)
+                       (remove-list-of-text-properties start next (list prop) object)))
+                    ((memq value prev)
+                     (let ((new (remq value prev)))
+                       (cond ((null? new)
+                              (remove-list-of-text-properties start next (list prop) object))
+                             ((= (length new) 1)
+                              (put-text-property start next prop (car new) object))
+                             (else
+                              (put-text-property start next prop new object))))))
+              (loop (text-property-not-all next end prop #f object)))))))
 
     (define (font-lock-fillin-text-property start end prop value . args)
       ;; GNU Emacs's `font-lock-fillin-text-property': "PROP and VALUE
@@ -1197,7 +1267,7 @@
               ;; the guard - which stops the restart when a function
               ;; returned true at the *start* of a pass - the loop never
               ;; ends. Measured: the dired suite hung on it.
-              (let ((whole (*font-lock-extend-region-functions*)))
+              (let ((whole (font-lock-extend-region-functions)))
                 (let loop ((funs whole))
                   (when (pair? funs)
                     (let ((next (if (or (not ((car funs)))
@@ -1376,7 +1446,15 @@
             (let ((was-compiled (eq? (car-safe (font-lock-keywords)) #t)))
               (when was-compiled
                 (set!font-lock-keywords! (cadr (font-lock-keywords))))
-              (let ((kept (let loop ((rest (font-lock-keywords)) (acc '()))
+              ;; **`font-lock-keywords` is #f, not '()', in a buffer
+              ;; with no defaults** (`font-lock-set-defaults` leaves it
+              ;; unset), and Emacs's `dolist` over nil runs zero times
+              ;; where `(car #f)` raises.  Measured: the first
+              ;; `compilation-shell-minor-mode` in a plain buffer did
+              ;; exactly that, because `font-lock-add-keywords` calls
+              ;; this to avoid duplicates.
+              (let ((kept (let loop ((rest (or (font-lock-keywords) '()))
+                                     (acc '()))
                             (cond ((null? rest) (reverse acc))
                                   ((member (car rest) keywords)
                                    (loop (cdr rest) acc))
@@ -1685,7 +1763,7 @@
           ;; `font-lock-default-fontify-region` will do, so as to avoid
           ;; double-redisplay."
           (when (memq font-lock-extend-region-wholelines
-                      (*font-lock-extend-region-functions*))
+                      (font-lock-extend-region-functions))
             (goto-char beg)
             (set! beg (min (*jit-lock-start*) (line-beginning-position)))
             (goto-char end)

@@ -13,22 +13,30 @@
  (only (schemacs character) kbd)
  (only (schemacs command) call-interactively)
  (only (schemacs editfns)
-       insert point point-max goto-char buffer-substring-no-properties)
+       insert point point-max goto-char buffer-string
+       buffer-substring-no-properties)
  (only (schemacs fileio) delete-file-internal)
- (only (schemacs cmds) *post-self-insert-hook*)
+ (only (schemacs cmds) *post-self-insert-hook* self-insert-command)
+ (only (schemacs command) *last-command-event*)
+ (only (schemacs progmodes cc-mode) c-mode)
+ (only (schemacs textmodes text-mode) text-mode)
  (only (schemacs files)
        save-buffer *before-save-hook* *after-save-hook*
        *require-final-newline*)
  (only (schemacs indent) indent-relative)
  (only (schemacs keyboard) key-binding)
  (only (schemacs simple)
-       insert-newline newline-and-indent *real-this-command*)
+       insert-newline newline-and-indent *real-this-command*
+       *blink-matching-paren*)
  (only (schemacs subr) add-hook remove-hook)
  (only (schemacs electric)
-       *electric-indent-actions* electric-indent-chars
+       *electric-indent-actions* electric-indent-chars set!electric-indent-chars
+       *electric-layout-rules* electric-layout-rules set!electric-layout-rules
+       electric-layout-mode electric-layout-mode-value
+       electric-quote-mode
        *electric-indent-functions*
        electric-indent-inhibit set!electric-indent-inhibit
-       electric-indent-functions-without-reindent
+       *electric-indent-functions-without-reindent*
        electric-indent-can-reindent-p
        electric-indent--activate-indent-actions
        electric-indent-save-hook
@@ -66,7 +74,7 @@
             #t (eq? (key-binding (kbd "C-j"))
                     electric-newline-and-maybe-indent))
 (test-equal "newline is the only electric character by default"
-            (list 10) electric-indent-chars)
+            (list 10) (electric-indent-chars))
 
 ;;----------------------------------------------------------------------
 ;; What a typed newline does under each setting (Emacs's answers)
@@ -153,7 +161,7 @@
   (test-equal "and the four line-up style functions are refused" #f
               (electric-indent-can-reindent-p))
   (test-equal "the list holds procedures" #t
-              (eq? (car electric-indent-functions-without-reindent)
+              (eq? (car (*electric-indent-functions-without-reindent*))
                    indent-relative)))
 
 ;;----------------------------------------------------------------------
@@ -229,3 +237,121 @@
       (test-equal "a save does" #t called))))
 
 (test-end "schemacs_editor_electric")
+
+
+;;----------------------------------------------------------------------
+;; The other two modes (`electric.el:422`, `:575`).
+;; Every expectation below is `emacs -Q --batch`'s output for the same
+;; typed keys - `self-insert-command` with `last-command-event` bound,
+;; which is what a keystroke does.
+;;----------------------------------------------------------------------
+
+(test-begin "schemacs_editor_electric_modes")
+
+;; The group above's `fresh` holds "  abc" on purpose; these cases all
+;; start from an empty buffer, as the Emacs measurements did.
+(define (empty-buffer)
+  (let ((b (allocate-buffer)))
+    (set-buffer b)
+    b))
+
+(define (type-text text)
+  (for-each (lambda (c)
+              (parameterize ((*last-command-event* (char->integer c)))
+                (self-insert-command 1)))
+            (string->list text)))
+
+;; Emacs: typing "a{b!c}d" with rules `{ after', `} before', `! around'
+;; answers "a{\nb\n!\nc\n}d".
+(let ((b (empty-buffer)))
+  (*electric-layout-rules* '((123 . after) (125 . before) (33 . around)))
+  (electric-layout-mode 1)
+  (dynamic-wind
+   (lambda () #f)
+   (lambda ()
+     (type-text "a{b!c}d")
+     (test-equal "electric-layout-mode inserts the rule's newlines"
+                 "a{\nb\n!\nc\n}d"
+                 (buffer-string)))
+   (lambda ()
+     (electric-layout-mode -1)
+     (*electric-layout-rules* #f))))
+
+;; Emacs: text-mode, "a `b' c" -> "a ‘b’ c".
+(let ((b (empty-buffer)))
+  (text-mode)
+  (electric-quote-mode 1)
+  (dynamic-wind
+   (lambda () #f)
+   (lambda ()
+     (type-text "a `b' c")
+     (test-equal "electric-quote-mode requotes in a paragraph"
+                 "a ‘b’ c"
+                 (buffer-string)))
+   (lambda () (electric-quote-mode -1))))
+
+;; Emacs: "``x''" -> "“x”".
+(let ((b (empty-buffer)))
+  (text-mode)
+  (electric-quote-mode 1)
+  (dynamic-wind
+   (lambda () #f)
+   (lambda ()
+     (type-text "``x''")
+     (test-equal "consecutive single quotes become a double quote"
+                 "“x”"
+                 (buffer-string)))
+   (lambda () (electric-quote-mode -1))))
+
+;; Emacs: fundamental-mode (no comment syntax) leaves them alone.
+(let ((b (empty-buffer)))
+  (electric-quote-mode 1)
+  (dynamic-wind
+   (lambda () #f)
+   (lambda ()
+     (type-text "a `b'")
+     (test-equal "outside text and comments the quotes stay"
+                 "a `b'"
+                 (buffer-string)))
+   (lambda () (electric-quote-mode -1))))
+
+;; Emacs: inside a C comment they are requoted.
+(let ((b (empty-buffer)))
+  (c-mode)
+  (electric-quote-mode 1)
+  (dynamic-wind
+   (lambda () #f)
+   (lambda ()
+     (parameterize ((*blink-matching-paren* #f))
+       (type-text "/* a `b' */"))
+     (test-equal "inside a comment they are requoted"
+                 "/* a ‘b’ */"
+                 (buffer-string)))
+   (lambda () (electric-quote-mode -1))))
+
+;; Emacs: c-mode with electric-indent-mode, "if (x) {" + newline + "yyy"
+;; answers "if (x) {\n  yyy".
+(let ((b (empty-buffer)))
+  (c-mode)
+  (electric-indent-mode 1)
+  (parameterize ((*blink-matching-paren* #f))
+    (type-text "if (x) {\nyyy"))
+  (test-equal "electric-indent-mode indents the new line in c-mode"
+              "if (x) {\n  yyy"
+              (buffer-string)))
+
+;; The buffer-local half of `electric-indent-chars`: a mode appends its
+;; own characters (groovy-mode's `{}():;,[]'), and the reader sees them
+;; in that buffer only.
+(let ((b (empty-buffer)))
+  (set!electric-indent-chars
+   (cons (char->integer #\{) (electric-indent-chars)))
+  (test-equal "set!electric-indent-chars extends this buffer's list"
+              (cons (char->integer #\{) (list 10))
+              (electric-indent-chars))
+  (let ((other (fresh)))
+    (test-equal "and another buffer still sees the default"
+                (list 10)
+                (electric-indent-chars))))
+
+(test-end "schemacs_editor_electric_modes")

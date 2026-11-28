@@ -63,7 +63,7 @@
             (rename-file %rename-file)
             (copy-file %copy-file))
     (only (guile)
-          R_OK W_OK X_OK
+          R_OK W_OK X_OK F_OK
           access? chmod delete-file getenv getpwnam lstat mkdir readlink rmdir
           stat stat:mode stat:type stat:mtime stat:mtimensec stat:size
           ;; `make-temp-file-internal` (`fileio.c:771`): the fd and
@@ -108,7 +108,7 @@
    directory-file-name
    directory-name-p
    expand-file-name
-   file-directory-p
+   file-directory-p file-accessible-directory-p
    file-exists-p
    file-name-case-insensitive-p
    file-name-directory-part
@@ -613,6 +613,31 @@
           (let ((name (expand-file-name filename)))
             (guard (e (#t #f))
               (eq? 'directory (stat:type (stat name)))))))
+
+    (define (file-accessible-directory-p filename)
+      ;; GNU Emacs's `file-accessible-directory-p` (`fileio.c:3259'):
+      ;; "Return t if FILENAME names a directory you can open. This
+      ;; means that FILENAME must specify the name of a directory, and
+      ;; the directory must allow you to open files in it. If this isn't
+      ;; the case, return nil."
+      ;;
+      ;; The POSIX arm, as the C's comment explains it: append `/.' to
+      ;; the name (and only `.` to a name already ending in `/`, so `/`
+      ;; and `//` are the directory itself) and make one `access` call -
+      ;; which tests both that it is a directory and that it can be
+      ;; opened, in one system call. The empty string is the C's first
+      ;; special case and answers nil.
+      ;;--------------------------------------------------------------
+      (let* ((absname (expand-file-name filename))
+             (len (string-length absname)))
+        (if (= len 0)
+            (access? "" F_OK)
+            (let ((dir (string-append
+                        absname
+                        (if (char=? (string-ref absname (- len 1)) #\/)
+                            "./"
+                            "/./"))))
+              (access? dir F_OK)))))
 
     (define (file-regular-p filename)
       ;; GNU Emacs's `file-regular-p' (fileio.c:3359): "Return t if

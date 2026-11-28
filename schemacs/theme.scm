@@ -104,6 +104,7 @@
     ;; share `custom.el' and nothing else. There is no cycle: this
     ;; library imports `custom', and `custom' imports no theme.
     (only (schemacs custom)
+          define-custom
           custom--bound? custom--getter custom--setter
           custom--standard-value custom--standard-value-p)
     ;; `get' and `put' are `fns.c`'s symbol properties - the theme
@@ -247,13 +248,33 @@
     ;; tree's convention for a process-global registry (`AGENTS.md':
     ;; "process-global registries ... are a plain define").
 
-    (define *custom-enabled-themes* (make-parameter '()))
+    (define-custom *custom-enabled-themes* '()
+      "List of enabled Custom Themes, highest precedence first.
+This list does not include the `user' theme, which is set by
+Customize and always takes precedence over other Custom Themes.
+
+This variable cannot be defined inside a Custom theme; there, it
+is simply ignored.
+
+Setting this variable through Customize calls `enable-theme' or
+`load-theme' for each theme in the list."
+      :type '(repeat symbol) :group 'customize)
     ;; ^ GNU Emacs's `custom-enabled-themes' (`custom.el:1630'). The
     ;; `:set' function there - which disables the themes dropped from
     ;; the list and enables the ones added - is what
     ;; `custom-enabled-themes-set' below is.
 
-    (define *custom-safe-themes* (make-parameter '(default)))
+    (define-custom *custom-safe-themes* '(default)
+      "Themes that are considered safe to load.
+If the value is a list, each element should be either the SHA-256
+hash of a safe theme file, or the symbol `default', which stands
+for any theme in the built-in Emacs theme directory (a directory
+named \"themes\" in `data-directory').
+
+If the value is t, Emacs treats all themes as safe.
+
+This variable cannot be set in a Custom theme."
+      :type '(choice (repeat :tag "List of safe themes" (choice string (const :tag "Built-in themes" default))) (const :tag "All themes" t)) :group 'customize :version "24.1")
     ;; ^ GNU Emacs's `custom-safe-themes' (`custom.el:1582'): the SHA-256
     ;; hashes of theme files the user has pronounced safe. `t' means
     ;; every theme is safe; the symbol `default' means every theme in the
@@ -266,7 +287,12 @@
     ;; `custom-theme-load-confirm', which is a `y-or-n-p' question - and
     ;; that prompt is ported below.
 
-    (define *custom-theme-directory* (make-parameter #f))
+    (define-custom *custom-theme-directory* #f
+      "Default user directory for storing custom theme files.
+The command `customize-create-theme' writes theme files into this
+directory.  By default, Emacs searches for custom themes in this
+directory first---see `custom-theme-load-path'."
+      :type 'directory :group 'customize :version "22.1")
     ;; ^ GNU Emacs's `custom-theme-directory' (`custom.el:1204'):
     ;; "Default user directory for storing custom theme files."
     ;; `#f' here means "unset", and `custom-theme--load-path' falls back

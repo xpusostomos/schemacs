@@ -19,7 +19,7 @@
     ;; the `logand' `key-parse' already folds control characters with, and
     ;; `filter' orders a symbol event's modifiers.
     (only (guile) delete filter string-contains format catch string-index hashv-ref
-          caddr cdddr)
+          caddr cdddr make-hash-table hash-ref hash-set! parameter?)
     ;; a condition that is not an error object is read through these
     (only (ice-9 exceptions) exception-message)
     ;; `char-downcase' is `event-basic-type''s.
@@ -30,7 +30,7 @@
     ;; cycle.
     (only (schemacs fns)
           compare-strings concat copy-sequence nreverse nconc
-          plist-get plist-put nthcdr nth delete)
+          plist-get plist-put nthcdr nth delete string-search)
     ;; The key event model and `kbd' live in `character.sld', the lowest
     ;; editor library - see its export note. They are re-exported from
     ;; here so that a library importing `(schemacs subr) kbd' still
@@ -109,13 +109,14 @@
           ;; list). `subr.el` is where `add-hook` lives and it reaches
           ;; the buffer here, one library up - the same edge
           ;; `*run-hooks-function*` comes down.
-          buffer-local-value local-variable-p set-buffer-local-value!)
+          buffer-local-value local-variable-p set-buffer-local-value!
+          hook-value)
     )
 
   (export
    user-error
    assoc-delete-all assq-delete-all delq remq remove copy-tree last
-   butlast car-safe cdr-safe
+   delete-dups butlast car-safe cdr-safe
    add-to-history add-to-list
    ;; string/list helpers `subr.el`'s, for the external packages and
    ;; anything else written in Emacs's idiom
@@ -144,12 +145,12 @@
    regexp-unmatchable
    string-prefix-p
    make-syntax-table
-   string-to-list
+   string-to-list drop-while all member-if any number-sequence
    minusp forward-symbol
    string-suffix-p string-equal-ignore-case member-ignore-case
    menu-bar-separator
    assoc-default
-   string-replace
+   string-replace string-lines ensure-list
    ctl-x-4-map
    ;; The key event model. `char-alt' and the five beside it are the C's
    ;; `CHAR_*'; the rest are `subr.el''s two decomposition functions,
@@ -160,6 +161,8 @@
    parse-modifiers-uncached event-symbol-elements
    event-modifiers event-basic-type apply-modifiers event-convert-list
    run-hook-with-args
+   *temp-buffer-setup-hook* *temp-buffer-show-hook*
+   temp-buffer-show-function
    run-hook-with-args-until-success
    run-hook-with-args-until-failure
    *after-change-major-mode-hook*
@@ -303,6 +306,65 @@
               (if (test (if (pair? elt) (car elt) elt) key)
                   (if (pair? elt) (cdr elt) default)
                   (loop (cdr tail)))))))))
+
+    (define (ensure-list object)
+      ;; GNU Emacs's `ensure-list' (`subr.el:7853'): "Return OBJECT as a
+      ;; list.  If OBJECT is already a list, return OBJECT itself.  If
+      ;; it's not a list, return a one-element list containing OBJECT."
+      ;;
+      ;; `listp' is true for any cons, dotted or not - Emacs's own
+      ;; answer, so the test is `pair?' or the empty list, not Scheme's
+      ;; `list?'.
+      ;;--------------------------------------------------------------
+      (cond ((pair? object) object)
+            ((null? object) object)
+            ;; Elisp's nil is two objects here; `#f` is one of them, and
+            ;; `(ensure-list nil)` is nil - the empty list, which
+            ;; `for-each` can walk.
+            ((not object) '())
+            (else (list object))))
+
+    (define (string-lines string . rest)
+      ;; GNU Emacs's `string-lines' (`subr.el:7940'): "Split STRING into
+      ;; a list of lines.  If OMIT-EMPTY, empty lines will be removed
+      ;; from the results.  If KEEP-NEWLINES, don't strip trailing
+      ;; newlines from the result lines."
+      ;;
+      ;; The two empty answers are the C's: "" is `("")`, or nil with
+      ;; OMIT-EMPTY.  `push`/`nreverse` are `cons`/`reverse` here.
+      ;;--------------------------------------------------------------
+      (let ((omit-empty (and (pair? rest) (car rest)))
+            (keep-newlines (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+        (if (string=? string "")
+            (if omit-empty '() (list ""))
+            (let ((lines '())
+                  (start 0))
+              (let loop ()
+                (when (< start (string-length string))
+                  (let ((newline (string-search "\n" string start)))
+                    (if newline
+                        (begin
+                          (when (or (not omit-empty) (not (= start newline)))
+                            (let ((line (substring
+                                         string start
+                                         (if keep-newlines
+                                             (+ newline 1)
+                                             newline))))
+                              (unless (and keep-newlines omit-empty
+                                           (string=? line "\n"))
+                                (set! lines (cons line lines)))))
+                          (set! start (+ newline 1)))
+                        (begin
+                          ;; No newline in the remaining part.
+                          (if (= start 0)
+                              ;; Avoid a string copy if there are no
+                              ;; newlines at all.
+                              (set! lines (cons string lines))
+                              (set! lines (cons (substring string start)
+                                                lines)))
+                          (set! start (string-length string))))
+                    (loop))))
+              (reverse lines)))))
 
     (define (string-replace from-string to-string in-string)
       ;; GNU Emacs's `string-replace' (subr.el:6157): "Replace FROM-STRING
@@ -748,6 +810,31 @@
     ;; default, which `map-y-or-n-p` reads as the default history
     ;; (`(or y-or-n-p-history-variable t)`).
 
+    (define *temp-buffer-setup-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `temp-buffer-setup-hook' (`subr.el:4550'): "Normal
+    ;; hook run by `with-output-to-temp-buffer' at the start. When the
+    ;; hook runs, the temporary buffer is current. This hook is normally
+    ;; set up with a function to put the buffer in Help mode." A
+    ;; parameter, because `checkdoc.el` `let`-binds it and
+    ;; `with-output-to-temp-buffer` runs it.
+
+    (define *temp-buffer-show-hook* (make-parameter '()))
+    ;; ^ GNU Emacs's `temp-buffer-show-hook' (`subr.el:4545'): "Normal
+    ;; hook run by `with-output-to-temp-buffer' after displaying the
+    ;; buffer. When the hook runs, the temporary buffer is current, and
+    ;; the window it was displayed in is selected." `help.el` adds
+    ;; `help-mode-finish` to it as it loads.
+
+    (define temp-buffer-show-function #f)
+    (set! temp-buffer-show-function temp-buffer-show-function)
+    ;; ^ GNU Emacs's `temp-buffer-show-function' (`subr.el:...`): "If
+    ;; this function is non-nil, it is called instead of the usual way
+    ;; of displaying a buffer when `with-output-to-temp-buffer' is
+    ;; used." A plain variable: Emacs `setq`s it and no ported code
+    ;; `let`-binds it. The self-assignment keeps the compiler from
+    ;; folding its reads (the `*enable-disabled-menus-and-buttons*`
+    ;; rule).
+
     ;;------------------------------------------------------------------
     ;; Minor modes
     ;;------------------------------------------------------------------
@@ -886,11 +973,20 @@
       ;; `make-parameter' holding a list - so the list is what is passed.
       ;; An argument that is a procedure rather than a list is a single
       ;; function, which is what `run-hooks' does with a non-list value.
+      ;;
+      ;; **A *parameter* is dereferenced first**, through `hook-value',
+      ;; which also merges a buffer-local half. This is how Emacs's
+      ;; `run-hooks' reads the hook's value from its variable: the
+      ;; identifier a mode hands `run-mode-hooks` is the parameter
+      ;; object, and what is to be run is what it holds. Without this a
+      ;; parameter hook was "a single function" that got called with no
+      ;; arguments and whose answer was thrown away.
       ;;--------------------------------------------------------------
       (for-each (lambda (hook)
-                  (cond ((not hook) #f)
-                        ((procedure? hook) (hook))
-                        (else (for-each (lambda (f) (f)) hook))))
+                  (let ((value (if (parameter? hook) (hook-value hook) hook)))
+                    (cond ((not value) #f)
+                          ((procedure? value) (value))
+                          (else (for-each (lambda (f) (f)) value)))))
                 hooks))
 
     (define (add-hook hook function . rest)
@@ -993,15 +1089,17 @@
       ;; (`:2921') - the same walk as the `-until-success' form below,
       ;; with a handler that always answers nil, so every function runs
       ;; and no answer is used. HOOK is the list of procedures rather than
-      ;; a symbol naming one, for `run-hooks'' reason.
+      ;; a symbol naming one, for `run-hooks'' reason. A parameter is
+      ;; dereferenced first, as `run-hooks' does.
       ;;--------------------------------------------------------------
-      (let loop ((rest (cond ((not hook) '())
-                             ((procedure? hook) (list hook))
-                             (else hook))))
-        (cond ((null? rest) #f)
-              (else
-               (apply (car rest) args)
-               (loop (cdr rest))))))
+      (let ((hook (if (parameter? hook) (hook-value hook) hook)))
+        (let loop ((rest (cond ((not hook) '())
+                               ((procedure? hook) (list hook))
+                               (else hook))))
+          (cond ((null? rest) #f)
+                (else
+                 (apply (car rest) args)
+                 (loop (cdr rest)))))))
 
     (define (run-hook-with-args-until-failure hook . args)
       ;; GNU Emacs's `run-hook-with-args-until-failure' (`eval.c:2908' -
@@ -1009,14 +1107,16 @@
       ;; function in order with arguments ARGS, stopping at the first one
       ;; that returns nil, and return nil.  Otherwise (if all functions
       ;; return non-nil, or if there are no functions to call), return
-      ;; t." HOOK is the list of procedures, as its two siblings take it.
+      ;; t." HOOK is the list of procedures, as its two siblings take it;
+      ;; a parameter is dereferenced first.
       ;;--------------------------------------------------------------
-      (let loop ((rest (cond ((not hook) '())
-                             ((procedure? hook) (list hook))
-                             (else hook))))
-        (cond ((null? rest) #t)
-              ((apply (car rest) args) (loop (cdr rest)))
-              (else #f))))
+      (let ((hook (if (parameter? hook) (hook-value hook) hook)))
+        (let loop ((rest (cond ((not hook) '())
+                               ((procedure? hook) (list hook))
+                               (else hook))))
+          (cond ((null? rest) #t)
+                ((apply (car rest) args) (loop (cdr rest)))
+                (else #f)))))
 
     (define (run-hook-with-args-until-success hook . args)
       ;; GNU Emacs's `run-hook-with-args-until-success' (`eval.c:2927'):
@@ -1031,17 +1131,18 @@
       ;; a parameter here, so its value is what is to hand.
       ;;
       ;; The C's `t' marker in a hook's value - "this hook has a local
-      ;; binding; it means to run the global binding too" - is not here.
-      ;; A buffer-local half of a hook is not ported, so a hook's value is
-      ;; the whole value.
+      ;; binding; it means to run the global binding too" - is handled by
+      ;; `hook-value', which merges a parameter's buffer-local half. A
+      ;; parameter hook is dereferenced through it first.
       ;;--------------------------------------------------------------
-      (let loop ((rest (cond ((not hook) '())
-                             ((procedure? hook) (list hook))
-                             (else hook))))
-        (cond ((null? rest) #f)
-              (else
-               (let ((value (apply (car rest) args)))
-                 (if value value (loop (cdr rest))))))))
+      (let ((hook (if (parameter? hook) (hook-value hook) hook)))
+        (let loop ((rest (cond ((not hook) '())
+                               ((procedure? hook) (list hook))
+                               (else hook))))
+          (cond ((null? rest) #f)
+                (else
+                 (let ((value (apply (car rest) args)))
+                   (if value value (loop (cdr rest)))))))))
 
     (define *change-major-mode-after-body-hook* (make-parameter '()))
     ;; ^ GNU Emacs's `change-major-mode-after-body-hook' (`subr.el'):
@@ -1610,6 +1711,33 @@
       ;;--------------------------------------------------------------
       (< number 0))
 
+    (define (delete-dups list)
+      "Destructively remove `equal' duplicates from LIST.
+Store the result in LIST and return it.  LIST must be a proper list.
+Of several `equal' occurrences of an element in LIST, the first
+one is kept."
+      ;; `subr.el:921'.
+      ;;--------------------------------------------------------------
+      (let ((l (length list)))
+        (if (> l 100)
+            (let ((hash (make-hash-table))
+                  (tail list))
+              (hash-set! hash (car list) #t)
+              (let loop ()
+                (let ((retail (cdr tail)))
+                  (when (pair? retail)
+                    (let ((elt (car retail)))
+                      (if (hash-ref hash elt)
+                          (set-cdr! tail (cdr retail))
+                          (begin (hash-set! hash elt #t)
+                                 (set! tail retail))))
+                    (loop)))))
+            (let loop ((tail list))
+              (when (pair? tail)
+                (set-cdr! tail (delete (car tail) (cdr tail)))
+                (loop (cdr tail))))))
+      list)
+
     (define (last list . n-args)
       ;; GNU Emacs's `last' (`subr.el:886'): "Return the last link of
       ;; LIST. Its car is the last element. If LIST is nil, return nil.
@@ -1938,6 +2066,77 @@
       ;;--------------------------------------------------------------
       (string->list string))
 
+    ;; ---------------------------------------------------------------
+    ;; `drop-while' (`subr.el:1190'), `all' (`:1212'), `member-if'
+    ;; (`:1223') and its alias `any' (`:1251'), `number-sequence'
+    ;; (`:962').
+    ;;
+    ;; They are `rx.el`'s helpers: `rx--translate` tests membership with
+    ;; `any`, `rx--all-string-branches-p` is `all`, `rx--human-readable`
+    ;; drops arguments with `take`, and the `rx` pcase pattern builds its
+    ;; submatches with `number-sequence`. None is a command.
+    ;; ---------------------------------------------------------------
+    (define (drop-while pred list)
+      ;; GNU Emacs's `drop-while' (`subr.el:1190'): "Skip initial
+      ;; elements of LIST satisfying PRED and return the rest."
+      ;;--------------------------------------------------------------
+      (let loop ()
+        (if (and (pair? list) (pred (car list)))
+            (begin (set! list (cdr list)) (loop))
+            list)))
+
+    (define (all pred list)
+      ;; GNU Emacs's `all' (`subr.el:1212'): "Non-nil if PRED is true
+      ;; for all elements in LIST." The C is `(not (drop-while pred
+      ;; list))' - a *suffix or nil*, not a boolean; callers test it.
+      ;;--------------------------------------------------------------
+      ;; The C is `(not (drop-while pred list))', and `'()` is *true*
+      ;; here: a `not` of it would answer #f for a list that dropped
+      ;; clean, which is Emacs's t.
+      (null? (drop-while pred list)))
+
+    (define (member-if pred list)
+      ;; GNU Emacs's `member-if' (`subr.el:1223'): "Non-nil if PRED is
+      ;; true for at least one element in LIST. Returns the suffix of
+      ;; LIST starting with the first element that satisfies PRED, or
+      ;; nil if none do."
+      ;;
+      ;; **"or nil" is `#f' and not `()'**, which is what
+      ;; `(drop-while ...)' answers when every element is dropped -
+      ;; and `()' is TRUE in Scheme, so an `(any ...)' used as a
+      ;; boolean (rx's `rx--generate-alt' and `all-string-branches-p',
+      ;; font-lock, files) took the empty list for a match.  The suffix
+      ;; is never empty when something matches, so a pair test is the
+      ;; exact translation.
+      ;;--------------------------------------------------------------
+      (let ((suffix (drop-while (lambda (x) (not (pred x))) list)))
+        (and (pair? suffix) suffix)))
+
+    (define any member-if)
+    ;; ^ `(defalias 'any #'member-if)' (`subr.el:1251'). A plain alias,
+    ;; not a `define-alias`: `any` is not a command and the command
+    ;; table has no use for it.
+    (set! any any)
+
+    (define (number-sequence from . args)
+      ;; GNU Emacs's `number-sequence' (`subr.el:962'): "Return a
+      ;; sequence of numbers from FROM to TO (both inclusive) as a
+      ;; list. INC is the increment used between numbers in the
+      ;; sequence and defaults to 1." The C's three type checks and its
+      ;; zero-increment error are carried.
+      ;;--------------------------------------------------------------
+      (let ((to (if (pair? args) (car args) #f))
+            (inc (if (and (pair? args) (pair? (cdr args)))
+                     (cadr args)
+                     #f)))
+        (if (or (not to) (equal? from to) (= from to))
+            (list from)
+            (let ((inc (if inc inc 1)))
+              (if (= inc 0) (error "The increment can not be zero"))
+              (let loop ((n 0) (next from) (seq '()))
+                (if (if (> inc 0) (<= next to) (>= next to))
+                    (loop (+ n 1) (+ from (* (+ n 1) inc)) (cons next seq))
+                    (reverse seq)))))))
 
     (define-command (forward-symbol arg)
       ;; GNU Emacs's `forward-symbol' (`subr.el:6641'): "Move point to

@@ -10,6 +10,7 @@
  (only (schemacs editfns)
        buffer-substring goto-char insert point-max point-min)
  (only (schemacs frame) *current-buffer* *current-frame* new-frame)
+ (only (schemacs custom) custom-variable-p)
  (only (schemacs startup) *after-init-hook* *before-init-hook*
        *initial-scratch-message* get-scratch-buffer-create init-path
        load-init splash-file display-startup-screen
@@ -124,13 +125,19 @@
 ;; `inhibit-startup-screen' is the setting an init file writes - Emacs's
 ;; own name for it, and its own default
 (test-equal "the startup screen is on until something inhibits it"
-  #f inhibit-startup-screen)
+  #f (inhibit-startup-screen))
 
 (test-equal "and inhibited, `display-startup-screen' makes no buffer"
   #f
-  (begin (set! inhibit-startup-screen #t)
+  (begin (inhibit-startup-screen #t)
          (display-startup-screen #f)
          (get-buffer "*Schemacs*")))
+
+;; The setting is a `define-custom' (`startup.el:68', a defcustom): a
+;; parameter with the documentation and type recorded, set by calling it.
+(test-assert "inhibit-startup-screen is a define-custom parameter"
+             (and (custom-variable-p 'inhibit-startup-screen)
+                  (procedure? inhibit-startup-screen)))
 
 (test-end "schemacs_editor_startup")
 

@@ -214,7 +214,11 @@
     (set! *menu-bar-final-items* '(help-menu))
 
 
-    (define *menu-bar-close-window* (make-parameter #f))
+    (define-custom *menu-bar-close-window* #f
+      "Whether or not to close the current window from the menu bar.
+If non-nil, selecting Close from the File menu or clicking Close
+in the tool bar will close the current window where possible."
+      :type 'boolean :group 'menu :version "30.1")
     ;; ^ GNU Emacs's `menu-bar-close-window' (`menu-bar.el:83'), a
     ;; defcustom: "Whether or not to close the current window from the
     ;; menu bar." A parameter, because `kill-this-buffer` reads it. Its
@@ -522,23 +526,46 @@ to invoke a similar command with `M-x', use `kill-current-buffer'."
     ;; **What is not here**: the "Frames" sub-menu, which needs frame
     ;; parameters (and `raise-frame`) to name and select a frame.
 
-    (define *buffers-menu-max-size* (make-parameter 15))
+    (define-custom *buffers-menu-max-size* 15
+      "Maximum number of entries which may appear on the Buffers menu.
+If this is a number, only that many most-recently-selected
+buffers are shown.
+If this is nil, all buffers are shown."
+      :type '(choice natnum (const :tag "All" nil)) :group 'menu :version "30.1")
     ;; ^ GNU Emacs's `buffers-menu-max-size` (`menu-bar.el:2357`):
     ;; "Maximum number of entries which may appear on the Buffers menu."
     ;; A number or nil for all.
 
-    (define *buffers-menu-buffer-name-length* (make-parameter 30))
+    (define-custom *buffers-menu-buffer-name-length* 30
+      "Maximum length of the buffer name on the Buffers menu.
+If this is a number, then buffer names are truncated to this length.
+If this is nil, then buffer names are shown in full.
+A large number or nil makes the menu too wide."
+      :type '(choice integer (const :tag "Full length" nil)) :group 'menu)
     ;; ^ GNU Emacs's `buffers-menu-buffer-name-length` (`:2367`): "Maximum
     ;; length of the buffer name on the Buffers menu." A number or nil.
 
-    (define *buffers-menu-show-directories* (make-parameter 'unless-uniquify))
+    (define-custom *buffers-menu-show-directories* 'unless-uniquify
+      "If non-nil, show directories in the Buffers menu for buffers that have them.
+The special value `unless-uniquify' means that directories will be shown
+unless `uniquify-buffer-name-style' is non-nil (in which case, buffer
+names should include enough of a buffer's directory to distinguish it
+from other buffers).
+
+Setting this variable directly does not take effect until next time the
+Buffers menu is regenerated."
+      :type '(choice (const :tag "Never" nil) (const :tag "Unless uniquify is enabled" unless-uniquify) (const :tag "Always" t)) :group 'menu)
     ;; ^ GNU Emacs's `buffers-menu-show-directories` (`:2376`): whether a
     ;; buffer's directory is shown. `unless-uniquify` means "show it
     ;; unless `uniquify-buffer-name-style` is set" - and that variable is
     ;; not ported, so the answer is always "show it", which is what the C
     ;; answers when the variable is unbound (`(boundp ...)` is nil).
 
-    (define *buffers-menu-show-status* (make-parameter #t))
+    (define-custom *buffers-menu-show-status* #t
+      "If non-nil, show modified/read-only status of buffers in the Buffers menu.
+Setting this variable directly does not take effect until next time the
+Buffers menu is regenerated."
+      :type 'boolean :group 'menu)
     ;; ^ GNU Emacs's `buffers-menu-show-status` (`:2394`): "show
     ;; modified/read-only status of buffers in the Buffers menu".
 
@@ -1325,7 +1352,7 @@ menu-bar menu to be dropped down."
          ((and display (window-system-display? display)
                (*menu-bar-open-function*))
           ((*menu-bar-open-function*) frame))
-         ((or *tty-menu-open-use-tmm*
+         ((or (*tty-menu-open-use-tmm*)
               (not (> (%frame-menu-bar-lines frame) 0)))
           (error "tmm-menubar is not ported"))
          (else

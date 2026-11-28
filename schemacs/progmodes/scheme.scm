@@ -335,7 +335,10 @@
        (point) end)
       )
 
-    (define *scheme-mit-dialect* (make-parameter #t))
+    (define-custom *scheme-mit-dialect* #t
+      "If non-nil, scheme mode is specialized for MIT Scheme.
+Set this to nil if you normally use another dialect."
+      :type 'boolean)
     ;; ^ GNU Emacs's `scheme-mit-dialect' (`scheme.el:262'), "If non-nil,
     ;; scheme mode is specialized for MIT Scheme" - the default is `t',
     ;; and the table below is what that gates.
@@ -572,7 +575,10 @@
       ;;--------------------------------------------------------------
       (km:keymap '*scheme-mode-map*))
 
-    (define scheme-mode-hook '())
+    (define-custom scheme-mode-hook '()
+      "Normal hook run when entering `scheme-mode'.
+See `run-hooks'."
+      :type 'hook)
 
     (define-derived-mode (scheme-mode prog-mode "Scheme" scheme-mode-map
                                       scheme-mode-hook

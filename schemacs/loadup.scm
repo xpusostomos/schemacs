@@ -146,8 +146,10 @@
         (schemacs buff-menu)
         (schemacs buffer)
         (schemacs buffer-text)
+        (schemacs button)
         (schemacs core byte-run)
         (schemacs callproc)
+        (schemacs process)
         (schemacs casefiddle)
         (schemacs casetab)
         (schemacs category)
@@ -165,15 +167,22 @@
         (schemacs progmodes cc-vars)
         (schemacs progmodes cc-styles)
         (schemacs progmodes cmacexp)
+        (schemacs progmodes compile)
+        (schemacs print)
         (schemacs character)
         (schemacs international characters)
         (schemacs charset)
         (schemacs chartab)
         (schemacs core cl-indent)
         (schemacs cmds)
+        (schemacs auth-source)
+        (schemacs comint)
         (schemacs coding)
+        (schemacs international mule-conf)
+        (schemacs version)
         (schemacs command)
         (schemacs custom)
+        (schemacs cus-edit)
         (schemacs core easymenu)
         (schemacs data)
         (schemacs core derived)
@@ -188,7 +197,9 @@
         (schemacs elec-pair)
         (schemacs electric)
         (schemacs paren)
+        (schemacs password-cache)
         (schemacs progmodes elisp-mode)
+        (schemacs net rfc2104)
         (schemacs newcomment)
         (schemacs novice)
         (schemacs face-remap)
@@ -196,6 +207,8 @@
         (schemacs env)
         (schemacs faces)
         (schemacs fileio)
+        (schemacs find-cmd)
+        (schemacs json)
         (schemacs filevercmp)
         (schemacs files)
         (schemacs fns)
@@ -251,6 +264,7 @@
         (schemacs simple)
         (schemacs startup)
         (schemacs subr)
+        (schemacs core subr-x)
         (schemacs syntax)
         (schemacs tab-line)
         (schemacs tab-bar)
@@ -272,7 +286,10 @@
         (schemacs core map-ynp)
         (schemacs core pcase)
         (schemacs core regexp-opt)
-        (schemacs core syntax-macros)))
+        (schemacs core ring)
+        (schemacs core rx)
+        (schemacs core syntax-macros)
+        (schemacs core text-property-search)))
 
     (define (editor-libraries)
       ;; What the back door's session is given, and - with
@@ -315,7 +332,7 @@
       ;;
       ;; **No guard.** A library that will not load is a broken list, and
       ;; a session that quietly has no `find-file' - or an init file whose
-      ;; `(set! inhibit-startup-screen #t)' is an unbound variable - is
+      ;; `(inhibit-startup-screen #t)' is an unbound variable - is
       ;; the bug this exists to fix; better a backtrace at startup than
       ;; something that looks fine and is not.
       ;;--------------------------------------------------------------

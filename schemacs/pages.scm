@@ -35,10 +35,12 @@
     ;; `page-delimiter` is `paragraphs.el:213`'s defcustom; page.el only
     ;; reads it. It lives in `paragraphs.scm` and is re-exported here, so
     ;; this library's readers do not move.
-    (only (schemacs textmodes paragraphs) *page-delimiter*)
+    (only (schemacs textmodes paragraphs) *page-delimiter*
+          page-delimiter set!page-delimiter)
     (only (schemacs intervals) put))
 
-  (export *page-delimiter* backward-page forward-page narrow-to-page)
+  (export *page-delimiter* page-delimiter set!page-delimiter
+          backward-page forward-page narrow-to-page)
 
   (begin
 
@@ -52,7 +54,7 @@
         ;; "while (and (> count 0) (not (eobp)))"
         (let loop ((count count))
           (when (and (> count 0) (not (eobp)))
-            (if (and (looking-at (*page-delimiter*))
+            (if (and (looking-at (page-delimiter))
                      (> (match-end 0) (point)))
                 ;; "If we're standing at the page delimiter, then just
                 ;; skip to the end of it. (But only if it's not a
@@ -63,7 +65,7 @@
                 ;; don't find a match without moving."
                 (begin
                   (when (bolp) (forward-char 1))
-                  (unless (re-search-forward (*page-delimiter*) #f #t)
+                  (unless (re-search-forward (page-delimiter) #f #t)
                     (goto-char (point-max)))))
             (loop (- count 1))))
         ;; "while (and (< count 0) (not (bobp)))"
@@ -74,12 +76,12 @@
             ;; of the C: `save-excursion' keeps point but *not* the match
             ;; data, which is what the `match-end' here reads.
             (let ((found (save-excursion
-                           (re-search-backward (*page-delimiter*) #f #t))))
+                           (re-search-backward (page-delimiter) #f #t))))
               (when (and found (= (match-end 0) (point)))
                 (goto-char (match-beginning 0))))
             (unless (bobp)
               (forward-char -1)
-              (if (re-search-backward (*page-delimiter*) #f #t)
+              (if (re-search-backward (page-delimiter) #f #t)
                   ;; "We found one--move to the end of it."
                   (goto-char (match-end 0))
                   ;; "We found nothing--go to beg of buffer."
@@ -123,7 +125,7 @@ thus showing a page other than the one point was originally in."
                     ;; page."
                     (save-excursion
                       (beginning-of-line)
-                      (unless (and (looking-at (*page-delimiter*))
+                      (unless (and (looking-at (page-delimiter))
                                    (eqv? (match-end 0) opoint))
                         (set! adjust 1)))
                     (forward-page (- arg adjust)))))
@@ -138,7 +140,7 @@ thus showing a page other than the one point was originally in."
           (if (and (match-beginning 0)
                    (save-excursion
                      (goto-char (match-beginning 0))
-                     (looking-at (*page-delimiter*))))
+                     (looking-at (page-delimiter))))
               (goto-char (match-beginning 0)))
           ;; **`(point)` is read before the `begin`, as Emacs's argument
           ;; order does**: this is `(narrow-to-region (point) (progn ...))'

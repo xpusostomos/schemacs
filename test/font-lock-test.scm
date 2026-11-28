@@ -289,3 +289,26 @@
                       font-lock-default-fontify-region))
     (test-equal "and a buffer-local entry does not leak" '((1 4)) called)))
 (test-end "font_lock_region_function")
+
+;;----------------------------------------------------------------------
+;; `font-lock-remove-keywords` in a buffer with NO defaults.  The
+;; keyword list there is #f, not '(), and Emacs's `dolist` over nil
+;; runs zero times where `(car #f)` raises.  The first
+;; `compilation-shell-minor-mode` in a plain buffer found this:
+;; `font-lock-add-keywords` calls the remover to avoid duplicates.
+(test-begin "schemacs_font_lock_no_defaults")
+(let ((b (allocate-buffer)))
+  (set-buffer b)
+  (insert "aaa foo")
+  (set!font-lock-defaults! #f)
+  (test-equal "add-keywords in a buffer with no defaults does not raise"
+              #t
+              (begin (font-lock-add-keywords
+                      #f (list (list "foo" (list 0 'bold))))
+                     #t))
+  (font-lock-mode #t)
+  (font-lock-ensure)
+  (test-equal "and the keyword highlights the text"
+              '(bold)
+              (list (face-at b 5))))
+(test-end "schemacs_font_lock_no_defaults")

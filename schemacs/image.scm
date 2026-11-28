@@ -20,6 +20,7 @@
   ;; names, not in `load-path' as well.
 
   (import
+   (only (schemacs custom) define-custom)
    (scheme base)
    (only (guile) %load-path string-rindex
          make-hash-table hash-ref hash-set!)
@@ -71,7 +72,7 @@
             (list (substring found 0 (+ 1 (string-rindex found #\/))))
             '())))
 
-    (define *image-load-path*
+    (define-custom *image-load-path*
       ;; GNU Emacs's `image-load-path` (a defcustom, and `let`-bound by
       ;; `image-load-path-for-library`, so a parameter here).
       ;;
@@ -80,7 +81,19 @@
       ;; not carried - nothing here writes one, and a Scheme variable
       ;; is not a symbol with a value.
       ;;--------------------------------------------------------------
-      (make-parameter (%initial-image-load-path)))
+       (%initial-image-load-path)
+      "List of locations in which to search for image files.
+The images for icons shown in the tool bar are also looked up
+in these locations.
+
+If an element is a string, it defines a directory to search.
+If an element is a variable symbol whose value is a string, that
+value defines a directory to search.
+If an element is a variable symbol whose value is a list, the
+value is used as a list of directories to search.
+
+Subdirectories are not automatically included in the search."
+      :type '(repeat (choice directory variable)))
 
     (define (image-search-load-path file . args)
       ;; GNU Emacs's `image-search-load-path` (`image.el:786`): "Search

@@ -160,7 +160,8 @@
           set!font-lock-defaults! set!font-lock-fontify-region-function!
           set!font-lock-extend-after-change-region-function!
           font-lock-extend-region-wholelines
-          *font-lock-extend-region-functions*
+          font-lock-extend-region-functions
+          set!font-lock-extend-region-functions!
           *font-lock-support-mode*
           *font-lock-fontify-region-function*)
     (only (schemacs font-core) font-lock-mode font-lock-mode-hook)
@@ -2714,11 +2715,12 @@ This function is called from `c-common-init', once per mode initialization."
       ;; it will fontify to whole lines by removing
       ;; `font-lock-extend-region-wholelines' from
       ;; `font-lock-extend-region-functions'. (Emacs only). This fixes
-      ;; Emacs bug #19669." Emacs's `delq' is over *symbols* and the list
-      ;; is global; here the list holds the procedures themselves.
-      (*font-lock-extend-region-functions*
+      ;; Emacs bug #19669." The variable is `defvar-local` in Emacs, so
+      ;; the `delq` is this buffer's alone; here it is the buffer-local
+      ;; accessor pair, not the global parameter.
+      (set!font-lock-extend-region-functions!
        (delq font-lock-extend-region-wholelines
-             (*font-lock-extend-region-functions*)))
+             (font-lock-extend-region-functions)))
 
       (set!font-lock-fontify-region-function! c-font-lock-fontify-region)
 
@@ -2966,7 +2968,9 @@ this option helps you limit that time.  nil means no limit."
     ;; Emacs's `;;;###autoload' does.
     (define-key c-mode-map (kbd "C-c C-e") 'c-macro-expand)
 
-    (define c-mode-hook '())
+    (define-custom c-mode-hook '()
+      "Hook called by `c-mode'."
+      :type 'hook :group 'c)
     ;; ^ `c-mode-hook', made by `define-derived-mode' in Emacs.
 
     (define-derived-mode (c-mode prog-mode "C" c-mode-map c-mode-hook
@@ -3073,7 +3077,9 @@ the code is C or C++ and based on that chooses whether to enable
     (easy-menu-define c-c++-menu c++-mode-map "C++ Mode Commands."
                       (cons "C++" (c-lang-const c-mode-menu c++)))
 
-    (define c++-mode-hook '())
+    (define-custom c++-mode-hook '()
+      "Hook called by `c++-mode'."
+      :type 'hook :group 'c)
     ;; ^ `c++-mode-hook', made by `define-derived-mode' in Emacs.
 
     (define-derived-mode (c++-mode prog-mode "C++" c++-mode-map c++-mode-hook
@@ -3120,7 +3126,9 @@ Key bindings:
     (easy-menu-define c-objc-menu objc-mode-map "ObjC Mode Commands."
                       (cons "ObjC" (c-lang-const c-mode-menu objc)))
 
-    (define objc-mode-hook '())
+    (define-custom objc-mode-hook '()
+      "Hook called by `objc-mode'."
+      :type 'hook :group 'c)
     ;; ^ `objc-mode-hook', made by `define-derived-mode' in Emacs.
 
     (define-derived-mode (objc-mode prog-mode "ObjC" objc-mode-map
@@ -3178,7 +3186,9 @@ Key bindings:
     (easy-menu-define c-java-menu java-mode-map "Java Mode Commands."
                       (cons "Java" (c-lang-const c-mode-menu java)))
 
-    (define java-mode-hook '())
+    (define-custom java-mode-hook '()
+      "Hook called by `java-mode'."
+      :type 'hook :group 'c)
     ;; ^ `java-mode-hook', made by `define-derived-mode' in Emacs.
 
     (define-derived-mode (java-mode prog-mode "Java" java-mode-map
@@ -3221,7 +3231,9 @@ Key bindings:
     (easy-menu-define c-idl-menu idl-mode-map "IDL Mode Commands."
                       (cons "IDL" (c-lang-const c-mode-menu idl)))
 
-    (define idl-mode-hook '())
+    (define-custom idl-mode-hook '()
+      "Hook called by `idl-mode'."
+      :type 'hook :group 'c)
     ;; ^ `idl-mode-hook', made by `define-derived-mode' in Emacs.
 
     (define-derived-mode (idl-mode prog-mode "IDL" idl-mode-map
@@ -3265,7 +3277,9 @@ Key bindings:
     (easy-menu-define c-pike-menu pike-mode-map "Pike Mode Commands."
                       (cons "Pike" (c-lang-const c-mode-menu pike)))
 
-    (define pike-mode-hook '())
+    (define-custom pike-mode-hook '()
+      "Hook called by `pike-mode'."
+      :type 'hook :group 'c)
     ;; ^ `pike-mode-hook', made by `define-derived-mode' in Emacs.
 
     (define-derived-mode (pike-mode prog-mode "Pike" pike-mode-map
@@ -3318,7 +3332,9 @@ Key bindings:
     (easy-menu-define c-awk-menu awk-mode-map "AWK Mode Commands."
                       (cons "AWK" (c-lang-const c-mode-menu awk)))
 
-    (define awk-mode-hook '())
+    (define-custom awk-mode-hook '()
+      "Hook called by `awk-mode'."
+      :type 'hook :group 'c)
     ;; ^ `awk-mode-hook', made by `define-derived-mode' in Emacs.
 
     (define-derived-mode (awk-mode prog-mode "AWK" awk-mode-map

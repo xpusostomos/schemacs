@@ -797,7 +797,14 @@ If CONTINUE is non-nil, use the `comment-continue' markers if any."
     ;; defined *below*, so they start as #f and are `set!' where Emacs
     ;; would have written the quoted name - the same shape
     ;; `normal-auto-fill-function' takes in `fill.scm'.
-    (define *comment-padding* (make-parameter " "))
+    (define-custom *comment-padding* " "
+      "Padding string that `comment-region' puts between comment chars and text.
+Can also be an integer which will be automatically turned into a string
+of the corresponding number of spaces.
+
+Extra spacing between the comment characters and the comment text
+makes the comment easier to read.  Default is 1.  nil means 0."
+      :type '(choice string integer (const nil)) :group 'comment)
     ;; ^ `comment-padding' (`:299'): "String inserted by commenting
     ;; commands after `comment-start' and before `comment-end'."
     ;; `comment-normalize-vars' turns a number into that many spaces.
@@ -818,7 +825,12 @@ If CONTINUE is non-nil, use the `comment-continue' markers if any."
     ;; ^ `uncomment-region-function' (`:190'), whose default is
     ;; `uncomment-region-default' - `set!' below it.
 
-    (define *comment-empty-lines* (make-parameter #f))
+    (define-custom *comment-empty-lines* #f
+      "If nil, `comment-region' does not comment out empty lines.
+If t, it always comments out empty lines.
+If `eol', it only comments out empty lines if comments are
+terminated by the end of line (i.e., `comment-end' is empty)."
+      :type '(choice (const :tag "Never" nil) (const :tag "Always" t) (const :tag "EOL-terminated" eol)) :group 'comment)
     ;; ^ `comment-empty-lines' (`:335'): "If non-nil, `comment-region'
     ;; uses comment delimiters on empty lines as well."
 

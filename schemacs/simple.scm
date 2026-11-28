@@ -54,6 +54,7 @@
     (only (schemacs timefns) time-equal-p)
     (only (schemacs frame)
          *current-frame* *echo-area-buffer* display-selections-p
+         window-live-p
          ;; `make-separator-line` asks `(display-graphic-p)`, and its
          ;; terminal branch pads to `(window-width)` - which here is
          ;; `window-body-width`, the frame's *function*; the record's
@@ -86,10 +87,11 @@
     ;; showing the buffer, which is `set-window-hscroll''s
     ;; `quit-window' is what `special-mode-map''s `q' is.
     (only (schemacs window) quit-window set-window-hscroll!
-         get-buffer-window)
+         get-buffer-window save-selected-window quit-restore-window
+         *display-buffer-overriding-action*)
     (only (schemacs subr) suppress-keymap ignore)
     (only (schemacs command)
-         current-prefix-arg uarg->integer
+         current-prefix-arg uarg->integer prefix-numeric-value
          define-command *last-command-event*
          ;; `keyboard-quit` signals `quit` and clears the flag the SIGINT
          ;; handler set - both of them live down there for this reason.
@@ -102,10 +104,12 @@
     ;; `add-to-history' is `subr.el''s.
     (only (schemacs buffer) buffer-overwrite-mode set!buffer-overwrite-mode
           barf-if-buffer-read-only
-          get-buffer get-buffer-create
+          get-buffer get-buffer-create buffer-list buffer-name set-buffer
           with-current-buffer set-buffer-modified-p
           *show-trailing-whitespace*
           buffer-local-value buffer-truncate-lines current-buffer mark-active
+          next-overlay-change previous-overlay-change
+          local-variable-p
           set!buffer-truncate-lines set!mark-active
           set-buffer-local-value! transient-mark-mode kill-local-variable
           kill-all-local-variables
@@ -129,7 +133,13 @@
           ;; they carry are defined.
           *check-mark-function* *region-beginning-function*
           *region-end-function* *use-region-p-function*)
+    (only (schemacs callproc)
+          ;; `call-process-shell-command` is `subr.el`'s, placed in
+          ;; `callproc.scm` because that is where `call-process` is;
+          ;; its two settings are simple.el's and are re-exported below.
+          call-process-shell-command shell-file-name shell-command-switch)
     (only (schemacs editfns)
+          with-output-to-string *standard-output*
           bobp bolp buffer-size buffer-substring delete-and-extract-region delete-region eobp
           ;; `make-separator-line` builds its string with `propertize`
           ;; and pads with `insert-char`.
@@ -137,6 +147,7 @@
           eolp following-char forward-line insert insert-and-inherit
           line-beginning-position
           line-end-position goto-char mark-marker message point point-max
+          point-marker
           preceding-char region-beginning region-end save-excursion
           ;; `backward-delete-char-untabify`'s hungry/all branch bounds
           ;; its skip with it (`editfns.c`'s `constrain-to-field`).
@@ -168,7 +179,7 @@
     ;; library - `count-lines` asks it at `point-max`; `%assq` is the
     ;; same file's, under the `%` because Guile's core `assq` cannot be
     ;; shadowed and the two differ on a non-cons element (see `fns.scm`).
-    (only (schemacs fns) line-number-at-pos %assq)
+    (only (schemacs fns) line-number-at-pos %assq delete)
     (only (schemacs syntax) skip-chars-forward skip-chars-backward
           skip-syntax-forward backward-prefix-chars
           forward-word word-char? forward-word-position backward-word-position
@@ -201,7 +212,10 @@
     ;; `count-lines`' ignore-invisible-lines branch asks about the
     ;; newline it just matched (`textprop.c:681`).
     (only (schemacs textprop)
-          get-char-property get-text-property put-text-property)
+          get-char-property get-text-property text-prop-means-invisible
+          invisible-p next-single-property-change
+          previous-single-property-change
+          put-text-property)
     ;; `casify-region` is `casefiddle.c`'s, and `upcase-region` and
     ;; `downcase-region` - which read the region and so cannot live in
     ;; `casefiddle.scm` - are defined in this file and call it.
@@ -224,7 +238,7 @@
     ;; what the code it generates calls, and `undo-more`'s and
     ;; `cancel-change-group`'s `last`
     (only (schemacs subr) add-minor-mode run-hooks run-mode-hooks
-          user-error last)
+          user-error last delete-dups delq)
     ;; `kbd' is how the bindings below name their keys, as
     ;; `(define-key global-map (kbd "C-/") ...)' would in Emacs.
     (only (schemacs subr)
@@ -266,6 +280,7 @@
    beginning-of-buffer beginning-of-line clear-prefix! delete-char
    end-of-buffer end-of-line exchange-point-and-mark forward-char
    forward-word forward-word-position keyboard-quit kill-line
+   kill-whole-line forward-visible-line end-of-visible-line
    copy-region-as-kill current-kill kill-append
    kill-new kill-range kill-region kill-ring-save kill-word next-line
    pending-uarg yank-pop
@@ -277,8 +292,9 @@
    ;; The three options `newline' reads. `*paragraphs.el*`'s two are
    ;; here because this file's `newline' is their lowest reader;
    ;; `paragraphs.scm` and `fill.scm` import and re-export them.
-   *inhibit-auto-fill* *page-delimiter* *use-hard-newlines*
-   back-to-indentation
+   *inhibit-auto-fill* *page-delimiter* page-delimiter set!page-delimiter
+   *use-hard-newlines*
+   back-to-indentation forward-to-indentation
    place-undo-boundary! previous-line read-only-mode
    ;; `bindings.el`'s arrow-key commands (there is no `bindings.sld`
    ;; here; the arrows are bound in this file).
@@ -302,6 +318,14 @@
    scroll-down-command scroll-up-command *next-screen-context-lines*
    self-insert-command
    self-insert-layer self-insert-tab
+   ;; The shell-command section: the string collector and the settings
+   ;; `shell-command` (in the minibuffer library, which is what can
+   ;; prompt) reads; `shell-command-switch` is re-exported from
+   ;; `callproc.scm`, where its only reader lives.
+   shell-command-to-string shell-command-buffer-name
+   shell-command-buffer-name-async *shell-command-default-error-buffer*
+   *shell-command-prompt-show-cwd* shell-command-switch
+   *shell-command-function*
    overwrite-mode binary-overwrite-mode
    ;; the hooks `define-minor-mode' made for them, under the names it
    ;; derives from the mode names - Emacs's `MODE-hook' variables
@@ -316,7 +340,7 @@
    *activate-mark-hook* *deactivate-mark-hook*
    *exchange-point-and-mark-highlight-region*
    *mark-ring-max* *use-empty-active-region*
-   activate-mark deactivate-mark digit-argument
+   activate-mark deactivate-mark universal-argument digit-argument
    mark mark-ring mark-whole-buffer negative-argument
    pop-mark pop-to-mark-command push-mark push-mark-command
    region-active-p set-mark set-mark-command
@@ -331,7 +355,19 @@
    *next-error-highlight* *next-error-highlight-no-select*
    *next-error-recenter* *next-error-message-highlight*
    *next-error-hook* *next-error-found-function*
+   *next-error-find-buffer-function* *next-error-verbose*
    next-error-found next-error-message-highlight
+   next-error-function set!next-error-function
+   next-error-move-function set!next-error-move-function
+   next-error-buffer-p next-error-buffer-on-selected-frame
+   next-error-buffer-unnavigated-current next-error-find-buffer
+   next-error next-error-internal next-error-no-select
+   next-error-this-buffer-no-select previous-error first-error
+   previous-error-no-select previous-error-this-buffer-no-select
+   next-error-select-buffer next-error-quit-window
+   recenter-current-error recenter-top-bottom *recenter-positions*
+   add-to-invisibility-spec remove-from-invisibility-spec
+   next-error-select-buffer-read-function
    next-error-highlight-timer next-error-overlay-arrow-position
    next-error-last-buffer
 prefix-argument-description
@@ -388,10 +424,16 @@ Other major modes are defined by comparison with this one."
     ;; check must not expect the read-only error, since the letter never
     ;; reaches the buffer.
 
-    (define special-mode-hook '())
+    (define special-mode-hook (make-parameter '()))
     ;; ^ GNU Emacs's `special-mode-hook', made by `define-derived-mode'.
     ;; Emacs's macro invents both names from the mode's; this one is
     ;; handed them, for the reason `(schemacs core derived)' gives.
+    ;;
+    ;; **A parameter, not a plain list**: every hook here is one, because
+    ;; `add-hook` takes the hook object and `run-hooks` dereferences it
+    ;; (merging the buffer-local half). Emacs makes this hook a `defvar`
+    ;; and not a defcustom (`custom-variable-p` is nil for it there too),
+    ;; so it is not a `define-custom`.
 
     (define-derived-mode (special-mode #f "Special" special-mode-map
                                        special-mode-hook)
@@ -412,9 +454,11 @@ rather than files.  These modes usually use read-only buffers."
       ;;--------------------------------------------------------------
       (km:keymap '*messages-buffer-mode-map*))
 
-    (define messages-buffer-mode-hook '())
+    (define messages-buffer-mode-hook (make-parameter '()))
     ;; ^ `messages-buffer-mode-hook', invented by `define-derived-mode'
-    ;; there and handed in here, as `special-mode-hook' is.
+    ;; there and handed in here, as `special-mode-hook' is - and a
+    ;; parameter for the same reason (Emacs `defvar`s it, not a
+    ;; defcustom).
 
     (define-derived-mode (messages-buffer-mode special-mode "Messages"
                                                messages-buffer-mode-map
@@ -895,6 +939,152 @@ Delete ARG chars, and kill (save in kill ring) if KILLP is non-nil."
                                  (goto-char end)))))
                      (point))))
 
+    (define (forward-visible-line arg)
+      "Move forward by ARG lines, ignoring currently invisible newlines only.
+If ARG is negative, move backward -ARG lines.
+If ARG is zero, move to the beginning of the current line."
+      ;; `simple.el:6887', clause for clause.  **The bounds conditions
+      ;; are caught by message**: Emacs's handler names the error
+      ;; symbols `beginning-of-buffer`/`end-of-buffer`, this tree has
+      ;; one error type, and its bounds errors are the ones
+      ;; `cmds.scm`'s `%move-point` makes with the messages Emacs's
+      ;; symbols carry ("Beginning of buffer"/"End of buffer") - a
+      ;; named departure.
+      ;;--------------------------------------------------------------
+      (define (bounds-error? e)
+        (and (error-object? e)
+             (let ((m (error-object-message e)))
+               (or (string=? m "End of buffer")
+                   (string=? m "Beginning of buffer")))))
+      (guard (e ((bounds-error? e) #f))
+        (if (> arg 0)
+            (begin
+              (let loop ((left arg))
+                (when (> left 0)
+                  (if (not (zero? (forward-line 1)))
+                      (error "End of buffer"))
+                  ;; If the newline we just skipped is invisible,
+                  ;; don't count it.
+                  (if (invisible-p (- (point) 1))
+                      (set! left (+ left 1)))
+                  (loop (- left 1))))
+              ;; If invisible text follows, and it is a number of
+              ;; complete lines, skip it.
+              (let ((opoint (point)))
+                (let loop ()
+                  (when (and (not (eobp)) (invisible-p (point)))
+                    (goto-char
+                     (if (get-text-property (point) 'invisible)
+                         (or (next-single-property-change (point) 'invisible)
+                             (point-max))
+                         (next-overlay-change (point))))
+                    (loop)))
+                (unless (bolp) (goto-char opoint))))
+            (begin
+              (let loop ((first #t))
+                (when (or first (<= arg 0))
+                  (if first
+                      (beginning-of-line)
+                      (if (not (zero? (forward-line -1)))
+                          (error "Beginning of buffer")))
+                  ;; If the newline we just moved to is invisible,
+                  ;; don't count it.
+                  (unless (bobp)
+                    (unless (invisible-p (- (point) 1))
+                      (set! arg (+ arg 1))))
+                  (loop #f)))
+              (let ((opoint (point)))
+                (let loop ()
+                  (when (and (not (bobp)) (invisible-p (- (point) 1)))
+                    (goto-char
+                     (if (get-text-property (- (point) 1) 'invisible)
+                         (or (previous-single-property-change
+                              (point) 'invisible)
+                             (point-min))
+                         (previous-overlay-change (point))))
+                    (loop)))
+                (unless (bolp) (goto-char opoint)))))))
+
+    (define (end-of-visible-line)
+      "Move to end of current visible line."
+      ;; `simple.el:6941', clause for clause.
+      ;;--------------------------------------------------------------
+      (end-of-line)
+      ;; If the following character is currently invisible,
+      ;; skip all characters with that same `invisible' property value,
+      ;; then find the next newline.
+      (let loop ()
+        (when (and (not (eobp))
+                   (save-excursion
+                     (skip-chars-forward "^\n")
+                     (invisible-p (point))))
+          (skip-chars-forward "^\n")
+          (if (get-text-property (point) 'invisible)
+              (goto-char (or (next-single-property-change (point) 'invisible)
+                             (point-max)))
+              (goto-char (next-overlay-change (point))))
+          (end-of-line)
+          (loop))))
+
+    (define-command (kill-whole-line . args)
+      "Kill current line.
+With prefix ARG, kill that many lines starting from the current line.
+If ARG is negative, kill backward.  Also kill the preceding newline.
+\\(This is meant to make \\[repeat] work well with negative arguments.)
+If ARG is zero, kill current line but exclude the trailing newline."
+      ;; `simple.el:6824', step for step - including the two kill-region
+      ;; calls that make one ring entry out of the pieces before and
+      ;; after point, and the `parameterize` of `kill-read-only-ok`
+      ;; where Emacs `let`-binds it.
+      ;;--------------------------------------------------------------
+      (interactive "p")
+      (let ((arg (if (pair? args) (car args) #f)))
+        (if (not arg) (set! arg 1))
+        (if (and (> arg 0) (eobp)
+                 (save-excursion (forward-visible-line 0) (eobp)))
+            (error "End of buffer"))
+        (if (and (< arg 0) (bobp)
+                 (save-excursion (end-of-visible-line) (bobp)))
+            (error "Beginning of buffer"))
+        (unless (eq? (*last-command*) kill-region)
+          (kill-new "")
+          (*last-command* kill-region))
+        ;; - We need to kill in two steps, because the previous command
+        ;;   could have been a kill command, in which case the text
+        ;;   before point needs to be prepended to the current kill
+        ;;   ring entry and the text after point appended.
+        (let ((regions-begin (point-marker))
+              (region1-end
+               (cond ((= arg 0)
+                      (let ((m (save-excursion
+                                 (forward-visible-line 0)
+                                 (point-marker))))
+                        (end-of-visible-line)
+                        m))
+                     ((< arg 0)
+                      (let ((m (save-excursion
+                                 (end-of-visible-line)
+                                 (point-marker))))
+                        (forward-visible-line (+ arg 1))
+                        (unless (bobp) (backward-char))
+                        m))
+                     (else
+                      (let ((m (save-excursion
+                                 (forward-visible-line 0)
+                                 (point-marker))))
+                        (forward-visible-line arg)
+                        m)))))
+          (parameterize ((*kill-read-only-ok*
+                          (or (*kill-read-only-ok*)
+                              (not (= (marker-position regions-begin)
+                                      (point))))))
+            (kill-region (marker-position regions-begin)
+                         (marker-position region1-end)))
+          (kill-region (marker-position regions-begin)
+                       (point))
+          (set-marker regions-begin #f)
+          (set-marker region1-end #f))))
+
     ;; ---------------------------------------------------------------
     ;; The options `newline' reads, and why they live in this file.
     ;; ---------------------------------------------------------------
@@ -908,10 +1098,12 @@ Delete ARG chars, and kill (save in kill ring) if KILLP is non-nil."
     ;; `fill.scm` imports it: the move `*minor-mode-alist*` made into
     ;; `subr.scm`.
 
-    (define *page-delimiter* (make-parameter "^\f"))
-    ;; ^ GNU Emacs's `page-delimiter' (`paragraphs.el:213'): "Regexp
-    ;; describing line-beginnings that separate pages." Emacs spells it
-    ;; `"^\014"' and `\f' is Guile's form feed.
+    (define-custom *page-delimiter* "^\f"
+      "Regexp describing line-beginnings that separate pages."
+      :type 'regexp
+      :group 'paragraphs)
+    ;; ^ GNU Emacs's `page-delimiter' (`paragraphs.el:213'). Emacs
+    ;; spells it `"^\014"' and `\f' is Guile's form feed.
     ;;
     ;; **`paragraphs.el`'s, and it lives here** because `newline` is the
     ;; lowest reader of it (its "did we add the newline at the beginning
@@ -922,6 +1114,16 @@ Delete ARG chars, and kill (save in kill ring) if KILLP is non-nil."
     ;; same string in octal. **It is not**: *neither* reader has an octal
     ;; escape, so `\014' is a NUL followed by the two characters `1' and
     ;; `4'. Measured both ways.
+    ;;
+    ;; **It is a defcustom whose value modes set buffer-locally**
+    ;; (`compilation-mode` does, to `compilation-page-delimiter`), so it
+    ;; is a parameter plus the tree's buffer-local accessor pair - the
+    ;; `paragraph-start` shape, not `use-hard-newlines`'.
+    (define (page-delimiter)
+      (buffer-local-value (current-buffer) 'page-delimiter
+                          (*page-delimiter*)))
+    (define (set!page-delimiter value)
+      (set-buffer-local-value! (current-buffer) 'page-delimiter value))
 
     (define-custom *use-hard-newlines* #f
       "Non-nil means to distinguish hard and soft newlines.
@@ -995,7 +1197,7 @@ A non-nil INTERACTIVE argument means to run the `post-self-insert-hook'."
         ;; "Wrong type to apply". `letrec` is for `postproc`, which
         ;; removes *itself* from the hook and so names the binding being
         ;; created.
-        (letrec ((was-page-start (and (bolp) (looking-at (*page-delimiter*))))
+        (letrec ((was-page-start (and (bolp) (looking-at (page-delimiter))))
                (beforepos (point))
                (n (uarg->integer 1 arg))
                (postproc
@@ -1141,13 +1343,23 @@ just inserts a newline without doing any indentation."
              "Read-Only mode enabled in current buffer"
              "Read-Only mode disabled in current buffer"))))
 
-    (define *exchange-point-and-mark-highlight-region*
+    (define-custom *exchange-point-and-mark-highlight-region*
       ;; GNU Emacs's `exchange-point-and-mark-highlight-region':
       ;; whether exchanging the point and the mark also activates the
       ;; region. Setting it to #f swaps the meanings of C-x C-x with and
       ;; without a prefix argument.
       ;;--------------------------------------------------------------
-      (make-parameter #t))
+       #t
+      "Activate region when exchanging point and mark.
+
+When set to nil, this modifies `exchange-point-and-mark' so that it
+doesn't activate the mark if it is not already active, except when there
+is a prefix argument.  Setting this variable to nil effectively swaps
+the meanings of the presence and absence of a prefix argument to
+`exchange-point-and-mark'.
+
+This variable has no effect when Transient Mark mode is off."
+      :type 'boolean :group 'editing-basics :version "31.1")
 
     (define-command (exchange-point-and-mark . rest)
       ;; GNU Emacs's `exchange-point-and-mark' (C-x C-x): put the mark
@@ -1518,20 +1730,25 @@ node `(elisp) Word Motion' for details."
       ;;--------------------------------------------------------------
       (make-parameter '()))
 
-    (define *kill-ring-max*
+    (define-custom *kill-ring-max*
       ;; GNU Emacs's `kill-ring-max': how many kills are kept. 120 on
       ;; Emacs 31, which is where this number comes from.
       ;;--------------------------------------------------------------
-      (make-parameter 120))
+       120
+      "Maximum length of kill ring before oldest elements are thrown away."
+      :type 'natnum :group 'killing :version "29.1")
 
-    (define *kill-do-not-save-duplicates*
+    (define-custom *kill-do-not-save-duplicates*
       ;; GNU Emacs's `kill-do-not-save-duplicates', off by default: when
       ;; it is on, killing text that is already the front of the ring
       ;; does not add it again.
       ;;--------------------------------------------------------------
-      (make-parameter #f))
+       #f
+      "If non-nil, don't add a string to `kill-ring' if it duplicates the last one.
+The comparison is done using `equal-including-properties'."
+      :type 'boolean :group 'killing :version "23.2")
 
-    (define *kill-whole-line*
+    (define-custom *kill-whole-line*
       ;; GNU Emacs's `kill-whole-line' (simple.el:6762, a defcustom):
       ;; "If non-nil, `kill-line' with no arg at start of line kills
       ;; the whole line. This variable also affects `kill-visual-line'
@@ -1539,14 +1756,20 @@ node `(elisp) Word Motion' for details."
       ;; default is; `defcustom' is spelled a parameter here, the
       ;; customize machinery behind it not being ported.
       ;;--------------------------------------------------------------
-      (make-parameter #f))
+       #f
+      "If non-nil, `kill-line' with no arg at start of line kills the whole line.
+This variable also affects `kill-visual-line' in the same way as
+it does `kill-line'."
+      :type 'boolean :group 'killing)
 
-    (define *kill-read-only-ok*
+    (define-custom *kill-read-only-ok*
       ;; GNU Emacs's `kill-read-only-ok', off by default: when it is on,
       ;; a kill from a read-only buffer puts the text in the ring and
       ;; says so instead of signalling.
       ;;--------------------------------------------------------------
-      (make-parameter #f))
+       #f
+      "Non-nil means don't signal an error for killing read-only text."
+      :type 'boolean :group 'killing)
 
     ;; The window-system cut and paste hooks, simple.el:5666 and :5677 -
     ;; "Function to call to make a killed region available to other
@@ -1570,12 +1793,17 @@ node `(elisp) Word Motion' for details."
       ;;--------------------------------------------------------------
       (make-parameter #t))
 
-    (define *yank-pop-change-selection*
+    (define-custom *yank-pop-change-selection*
       ;; GNU Emacs's `yank-pop-change-selection', off by default:
       ;; whether rotating the kill ring - usually with `yank-pop' - also
       ;; copies the new kill to the window system selection.
       ;;--------------------------------------------------------------
-      (make-parameter #f))
+       #f
+      "Whether rotating the kill ring changes the window system selection.
+If non-nil, whenever the kill ring is rotated (usually via the
+`yank-pop' command), Emacs also calls `interprogram-cut-function'
+to copy the new kill to the window system selection."
+      :type 'boolean :group 'killing :version "23.1")
 
     (define (kill-new string . args)
       ;; GNU Emacs's `kill-new': make STRING the latest kill, and point
@@ -2586,6 +2814,36 @@ No argument or nil as argument means do this for the current buffer."
           (when description
             (set!frame-message (*current-frame*) description)))))
 
+    (define-command (universal-argument)
+      "Begin a numeric argument for the following command.
+Digits or minus sign following \\[universal-argument] make up the numeric argument.
+\\[universal-argument] following the digits or minus sign ends the argument.
+\\[universal-argument] without digits or minus sign provides 4 as argument.
+Repeating \\[universal-argument] without digits or minus sign
+ multiplies the argument by 4 each time.
+For some commands, just \\[universal-argument] by itself serves as a flag
+that is different in effect from any particular numeric argument.
+These commands include \\[set-mark-command] and \\[start-kbd-macro]."
+      ;; GNU Emacs's `universal-argument` (`simple.el:5559`). Its body is
+      ;; `(setq prefix-arg (list 4))` plus `universal-argument--mode`,
+      ;; which installs `universal-argument-map` as a transient map so
+      ;; that further C-u's and digits build the argument. This tree's
+      ;; operator is a *counter* (`*prefix-cu*`), read by `pending-uarg`
+      ;; to make the same `(list 4^N)` value; the digits after it are
+      ;; consumed by `update-prefix!`, which is the rest of the mode.
+      ;;
+      ;; **The key path does not reach this command's body**: when C-u's
+      ;; binding in the active maps *is* this command, `keyboard.scm`
+      ;; consumes the event through `update-prefix!` exactly as Emacs
+      ;; consumes it through this command. The distinguishing rule is
+      ;; Emacs's own - *the binding decides* - which is what lets a
+      ;; buffer or a minor mode bind C-u to something else (the
+      ;; password prompt's `read-passwd-map` does: bug#12570).
+      ;;------------------------------------------------------------
+      (interactive)
+      (*prefix-cu* (+ 1 (or (*prefix-cu*) 0)))
+      (request-prefix-echo!))
+
     (define-command (digit-argument uarg)
       ;; GNU Emacs's `digit-argument' (`simple.el:5596'): a digit typed
       ;; with Meta adds itself to the numeric argument for the next
@@ -2659,13 +2917,22 @@ No argument or nil as argument means do this for the current buffer."
     ;; `(schemacs editfns)', and `add-to-history' is `subr.el''s
     ;; and lives in `(schemacs subr)'.
 
-    (define *use-empty-active-region*
+    (define-custom *use-empty-active-region*
       ;; GNU Emacs's `use-empty-active-region': whether an *empty*
       ;; active region is worth acting on. Off, as in Emacs, so a
       ;; command that would act on the region does not when point and
       ;; mark are in the same place.
       ;;--------------------------------------------------------------
-      (make-parameter #f))
+       #f
+      "Whether \"region-aware\" commands should act on empty regions.
+If nil, region-aware commands treat the empty region as inactive.
+If non-nil, region-aware commands treat the region as active as
+long as the mark is active, even if the region is empty.
+
+Region-aware commands are those that act on the region if it is
+active and Transient Mark mode is enabled, and on the text near
+point otherwise."
+      :type 'boolean :group 'editing-basics :version "23.1")
 
     (define (mark . args)
       ;; GNU Emacs's `(mark)': where this buffer's mark is, or #f when it
@@ -3008,7 +3275,9 @@ No argument or nil as argument means do this for the current buffer."
     ;; buffer displayed in that window." The default value is the region
     ;; updater, as Emacs's is.
 
-    (define *mark-ring-max* (make-parameter 16))
+    (define-custom *mark-ring-max* 16
+      "Maximum size of mark ring.  Start discarding off end if gets this big."
+      :type 'natnum :group 'editing-basics)
     ;; ^ GNU Emacs's `mark-ring-max': "Maximum size of mark ring."
 
     (define (mark-ring)
@@ -3185,6 +3454,11 @@ No argument or nil as argument means do this for the current buffer."
     ;; bytes together.
     (define-key *default-keymap* (kbd "DEL") backward-delete-char)
     (define-key *default-keymap* (kbd "C-k") kill-line)
+    ;; `bindings.el:1409`: the event is the symbol
+    ;; `C-S-backspace` - `(kbd "C-S-backspace")` is an error in
+    ;; Emacs too ("C-S- must prefix a single character").
+    (define-key *default-keymap* (vector 'C-S-backspace)
+      kill-whole-line)
     (define-key *default-keymap* (kbd "C-m") insert-newline)
     (define-key *default-keymap* (kbd "C-j") insert-newline)
     (define-key *default-keymap* (kbd "C-g") keyboard-quit)
@@ -3322,9 +3596,10 @@ If N is omitted or nil, move point 1 character to the left."
     ;; The numeric argument, on every key GNU Emacs binds it to:
     ;; `bindings.el' puts `digit-argument' on M-0 to M-9, on C-0 to C-9
     ;; and on C-M-0 to C-M-9, and `negative-argument' on M--, C-- and
-    ;; C-M--. C-u is not bound because it never reaches the keymap -
-    ;; `UPDATE-PREFIX!' consumes it first, as Emacs's
-    ;; `universal-argument-map' does.
+    ;; C-M--. C-u is `universal-argument` (`simple.el:5568`), which
+    ;; `UPDATE-PREFIX!` consumes when the binding says so, as Emacs's
+    ;; `universal-argument-map` does after the command has run.
+    (define-key *default-keymap* (kbd "C-u") universal-argument)
     ;; **The digit is *interpolated*** - `(kbd "M-digit")' is the literal
     ;; word `digit', so the loop bound the *one* key `M-digit' ten times
     ;; over and no digit ever reached `digit-argument'. The loop was
@@ -3577,6 +3852,15 @@ If N is omitted or nil, move point 1 character to the left."
       "Delete all spaces and tabs after point."
       (interactive)
       (delete-space--internal " \t" #f))
+
+    (define-command (forward-to-indentation arg)
+      "Move forward ARG lines and position at first nonblank character."
+      (interactive "^p")
+      ;; `simple.el:...': one line of the C's `forward-line` followed by
+      ;; the horizontal skip.
+      ;;--------------------------------------------------------------
+      (forward-line (if arg arg 1))
+      (skip-chars-forward " \t"))
 
     (define-command (just-one-space n)
       ;; GNU Emacs's `just-one-space' (simple.el:1162): "Delete all
@@ -3878,14 +4162,12 @@ If N is omitted or nil, move point 1 character to the left."
       ;; `%count-lines` (`fns.scm`) carries the same omission for its own
       ;; C walk, with the same reason.
       ;;
-      ;; **The invisible-lines branch is carried whole, and its answer is
-      ;; about the buffer rather than the screen.** The property dired
-      ;; writes is real here, so the count is Emacs's own; the renderer
-      ;; does not yet hide `invisible' text, so what the screen shows and
-      ;; what this counts can differ until that lands. `buffer-invisibility-spec`
-      ;; is `buffer.c`'s buffer-local with no definition site here, so it
-      ;; is read from the buffer table with Emacs's default, `t' - "any
-      ;; non-nil `invisible' property hides the text".
+      ;; **The invisible-lines branch is carried whole.** The property
+      ;; dired writes is real here and the renderer hides it
+      ;; (`line-display-texts`), so the count and the screen agree.
+      ;; `buffer-invisibility-spec` is read from the buffer table with
+      ;; Emacs's default, `t' - "any non-nil `invisible' property hides
+      ;; the text".
       ;;--------------------------------------------------------------
       (let ((ignore-invisible-lines (and (pair? rest) (car rest))))
         (save-excursion
@@ -3907,20 +4189,16 @@ If N is omitted or nil, move point 1 character to the left."
                        (when (re-search-forward "\n\\|\r[^\n]" #f #t)
                          (let* ((prop (get-char-property (- (point) 1)
                                                          'invisible))
-                                (spec (buffer-local-value
-                                       (current-buffer)
-                                       'buffer-invisibility-spec #t))
-                                ;; Elisp's nil, either spelling: "nothing
-                                ;; is hidden".
-                                (spec (if (eq? spec #f) '() spec))
-                                ;; Emacs's `(if (eq buffer-invisibility-spec t)
-                                ;; prop (or (memq prop ...) (assq prop ...)))'.
-                                (hidden (if (eq? spec #t)
-                                            prop
-                                            (or (memq prop spec)
-                                                (%assq prop spec)))))
-                           (when hidden
-                             (set! invisible-count (+ invisible-count 1))))
+                                ;; The C's `TEXT_PROP_MEANS_INVISIBLE`: t
+                                ;; when the spec is t, else the element
+                                ;; and cons rules. The renderer now hides
+                                ;; these runs too (`line-display-texts`),
+                                ;; so this counts what the screen shows.
+                                (hidden (text-prop-means-invisible
+                                         prop (current-buffer))))
+                           (when (not (= hidden 0))
+                             (set! invisible-count
+                                   (+ invisible-count 1))))
                          (loop)))
                      invisible-count))))
              (else
@@ -4534,13 +4812,432 @@ from which `next-error' navigated, and a target buffer TO-BUFFER."
                                      'next-error-buffer from-buffer)))
         (when (*next-error-recenter*)
           (recenter (*next-error-recenter*)))
-        (*next-error-found-function* from-buffer to-buffer)
+        ((*next-error-found-function*) from-buffer to-buffer)
         (next-error-message-highlight from-buffer)
         (run-hooks (*next-error-hook*))))
+
+
+    ;;------------------------------------------------------------------
+    ;; The `next-error' command cluster (`simple.el:193'-`:508').  The
+    ;; variables and `next-error-found' are above; this is the search
+    ;; for the error buffer and the commands that use it.
+    ;;------------------------------------------------------------------
+
+    ;; `next-error-function' is a `defvar-local' (`simple.el:193'): the
+    ;; function a buffer in compilation-like mode offers to `next-error'.
+    (define (next-error-function)
+      (let ((b (current-buffer)))
+        (and b (buffer-local-value b 'next-error-function #f))))
+    (define (set!next-error-function v)
+      (set-buffer-local-value! (current-buffer) 'next-error-function v))
+
+    ;; `next-error-move-function' is a `defvar-local' (`simple.el:203'):
+    ;; "Function to use to move to an error locus."
+    (define (next-error-move-function)
+      (let ((b (current-buffer)))
+        (and b (buffer-local-value b 'next-error-move-function #f))))
+    (define (set!next-error-move-function v)
+      (set-buffer-local-value! (current-buffer)
+                               'next-error-move-function v))
+
+    (define-custom *next-error-verbose* #t
+      "When non-nil, `next-error' messages the location it visited."
+      :type 'boolean
+      :group 'next-error)
+
+    (define-custom *next-error-find-buffer-function* ignore
+      "Function called to find a `next-error' capable buffer.
+This function takes the same three arguments as the function
+`next-error-find-buffer', and should return the buffer to be
+used by the subsequent invocation of the command `next-error'
+and `previous-error'."
+      :type '(choice (const :tag "No default" ignore)
+                     (const :tag "Single next-error capable buffer on selected frame"
+                            next-error-buffer-on-selected-frame)
+                     (const :tag "Current buffer if next-error capable and outside navigation"
+                            next-error-buffer-unnavigated-current)
+                     (function :tag "Other function"))
+      :group 'next-error
+      :version "28.1")
+
+    ;; A seam, because `read-buffer' is `minibuf.c`'s and that library is
+    ;; above this one: the command's interactive spec needs a reader the
+    ;; minibuffer library installs.
+    (define *next-error-select-buffer-read-function* (make-parameter #f))
+
+    (define (next-error-buffer-p buffer . rest)
+      "Return non-nil if BUFFER is a `next-error' capable buffer."
+      ;; `simple.el:210'.
+      ;;--------------------------------------------------------------
+      (let ((avoid-current (and (pair? rest) (car rest)))
+            (extra-test-inclusive (and (pair? rest) (pair? (cdr rest))
+                                       (cadr rest)))
+            (extra-test-exclusive (and (pair? rest) (pair? (cdr rest))
+                                       (pair? (cddr rest)) (caddr rest))))
+        (and (buffer-name buffer)
+             (not (and avoid-current (eq? buffer (current-buffer))))
+             (with-current-buffer buffer
+               (if (next-error-function)
+                   (if extra-test-exclusive
+                       (extra-test-exclusive)
+                       #t)
+                   (and extra-test-inclusive
+                        (extra-test-inclusive)))))))
+
+    (define (next-error-buffer-on-selected-frame . rest)
+      "Return a single visible `next-error' buffer on the selected frame."
+      ;; `simple.el:256'.
+      ;;--------------------------------------------------------------
+      (let ((avoid-current (and (pair? rest) (car rest)))
+            (extra-test-inclusive (and (pair? rest) (pair? (cdr rest))
+                                       (cadr rest)))
+            (extra-test-exclusive (and (pair? rest) (pair? (cdr rest))
+                                       (pair? (cddr rest)) (caddr rest))))
+        (let ((window-buffers
+               (delete-dups
+                (delq #f (map (lambda (w)
+                                (if (next-error-buffer-p
+                                     (window-buffer w) #t
+                                     extra-test-inclusive extra-test-exclusive)
+                                    (window-buffer w)
+                                    #f))
+                              (window-list))))))
+          (if (eq? (length window-buffers) 1)
+              (car window-buffers)
+              #f))))
+
+    (define (next-error-buffer-unnavigated-current . rest)
+      "Try the current buffer when outside navigation."
+      ;; `simple.el:272'.
+      ;;--------------------------------------------------------------
+      (let ((avoid-current (and (pair? rest) (car rest)))
+            (extra-test-inclusive (and (pair? rest) (pair? (cdr rest))
+                                       (cadr rest)))
+            (extra-test-exclusive (and (pair? rest) (pair? (cdr rest))
+                                       (pair? (cddr rest)) (caddr rest))))
+        (if (and (not (local-variable-p 'next-error-buffer
+                                        (current-buffer)))
+                 (next-error-buffer-p (current-buffer) avoid-current
+                                      extra-test-inclusive
+                                      extra-test-exclusive))
+            (current-buffer)
+            #f)))
+
+    (define (next-error-find-buffer . rest)
+      "Return a `next-error' capable buffer."
+      ;; `simple.el:287'.
+      ;;--------------------------------------------------------------
+      (let ((avoid-current (and (pair? rest) (car rest)))
+            (extra-test-inclusive (and (pair? rest) (pair? (cdr rest))
+                                       (cadr rest)))
+            (extra-test-exclusive (and (pair? rest) (pair? (cdr rest))
+                                       (pair? (cddr rest)) (caddr rest))))
+        (or
+         ;; 1. If a customizable function returns a buffer, use it.
+         ((*next-error-find-buffer-function*) avoid-current
+                                              extra-test-inclusive
+                                              extra-test-exclusive)
+         ;; 2. If next-error-last-buffer is an acceptable buffer, use it.
+         (if (and next-error-last-buffer
+                  (next-error-buffer-p next-error-last-buffer avoid-current
+                                       extra-test-inclusive
+                                       extra-test-exclusive))
+             next-error-last-buffer
+             #f)
+         ;; 3. If the current buffer is acceptable, choose it.
+         (if (next-error-buffer-p (current-buffer) avoid-current
+                                  extra-test-inclusive extra-test-exclusive)
+             (current-buffer)
+             #f)
+         ;; 4. Look for any acceptable buffer.
+         (let loop ((buffers (buffer-list)))
+           (cond ((null? buffers) #f)
+                 ((next-error-buffer-p (car buffers) avoid-current
+                                       extra-test-inclusive
+                                       extra-test-exclusive)
+                  (car buffers))
+                 (else (loop (cdr buffers)))))
+         ;; 5. Use the current buffer as a last resort if it qualifies,
+         ;; even despite AVOID-CURRENT.
+         (and avoid-current
+              (next-error-buffer-p (current-buffer) #f
+                                   extra-test-inclusive extra-test-exclusive)
+              (begin
+                (message "This is the only buffer with error message locations")
+                (current-buffer)))
+         ;; 6. Give up.
+         (error "No buffers contain error message locations"))))
+
+    (define-command (next-error . rest)
+      "Visit next `next-error' message and corresponding source code."
+      (interactive (list (current-prefix-arg)))
+      ;; `simple.el:335'.  ARG and RESET are `&optional'; a rest
+      ;; parameter is how this tree spells that where callers pass one.
+      ;;--------------------------------------------------------------
+      (let ((arg (and (pair? rest) (car rest)))
+            (reset (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+        (when (pair? arg) (set! reset #t) (set! arg #f))
+        (let ((buffer (next-error-find-buffer)))
+        (when buffer
+          (with-current-buffer buffer
+            ((next-error-function) (prefix-numeric-value arg) reset)
+            (let ((prev next-error-last-buffer))
+              (next-error-found buffer (current-buffer))
+              (when (or (*next-error-verbose*)
+                        (not (eq? prev next-error-last-buffer)))
+                (message "%s locus from %s"
+                         (cond (reset "First")
+                               ((eqv? (prefix-numeric-value arg) 0) "Current")
+                               ((< (prefix-numeric-value arg) 0) "Previous")
+                               (else "Next"))
+                         next-error-last-buffer))))))))
+
+    (define (next-error-internal)
+      "Visit the source code corresponding to the `next-error' message at point."
+      ;; `simple.el:387'.
+      ;;--------------------------------------------------------------
+      (let ((buffer (current-buffer)))
+        ((next-error-function) 0 #f)
+        (let ((prev next-error-last-buffer))
+          (next-error-found buffer (current-buffer))
+          (when (or (*next-error-verbose*)
+                    (not (eq? prev next-error-last-buffer)))
+            (message "Current locus from %s" next-error-last-buffer)))))
+
+    (define-command (next-error-quit-window from-buffer to-buffer)
+      "Quit window of FROM-BUFFER when the prefix arg is 0."
+      (interactive (list (current-buffer) (current-buffer)))
+      ;; `simple.el:398'.
+      ;;--------------------------------------------------------------
+      (when (and (eqv? (current-prefix-arg) 0) from-buffer
+                 (not (eq? from-buffer to-buffer)))
+        (let ((window (get-buffer-window from-buffer)))
+          (when (window-live-p window)
+            (quit-restore-window window 'kill)))))
+
+    (define-command (previous-error n)
+      "Visit previous `next-error' message and corresponding source code."
+      (interactive (list (current-prefix-arg)))
+      ;; `simple.el:447'.
+      ;;--------------------------------------------------------------
+      (next-error (- (if n (uarg->integer 1 n) 1))))
+
+    (define-command (first-error n)
+      "Restart at the first error.  Visit corresponding source code."
+      (interactive (list (current-prefix-arg)))
+      ;; `simple.el:459'.
+      ;;--------------------------------------------------------------
+      (next-error n #t))
+
+    (define-command (next-error-no-select n)
+      "Move point to the next error in the `next-error' buffer and highlight match."
+      (interactive (list (current-prefix-arg)))
+      ;; `simple.el:467'.
+      ;;--------------------------------------------------------------
+      (save-selected-window
+        (parameterize ((*next-error-highlight* (*next-error-highlight-no-select*))
+                       (*display-buffer-overriding-action*
+                        '(#f (inhibit-same-window . #t))))
+          (next-error n))))
+
+    (define-command (next-error-this-buffer-no-select n)
+      "Move point to the next error in the current buffer and highlight match."
+      (interactive (list (current-prefix-arg)))
+      ;; `simple.el:480'.
+      ;;--------------------------------------------------------------
+      (next-error-select-buffer (current-buffer))
+      (next-error-no-select n))
+
+    (define-command (previous-error-no-select n)
+      "Move point to the previous error in the `next-error' buffer and highlight match."
+      (interactive (list (current-prefix-arg)))
+      ;; `simple.el:490'.
+      ;;--------------------------------------------------------------
+      (next-error-no-select (- (if n (uarg->integer 1 n) 1))))
+
+    (define-command (previous-error-this-buffer-no-select n)
+      "Move point to the previous error in the current buffer and highlight match."
+      (interactive (list (current-prefix-arg)))
+      ;; `simple.el:499'.
+      ;;--------------------------------------------------------------
+      (next-error-select-buffer (current-buffer))
+      (previous-error-no-select n))
+
+    (define-command (next-error-select-buffer buffer)
+      "Select a `next-error' capable BUFFER and set it as the last used."
+      (interactive
+       (list (if (*next-error-select-buffer-read-function*)
+                 ((*next-error-select-buffer-read-function*))
+                 (error "next-error-select-buffer: no buffer reader installed"))))
+      ;; `simple.el:432'.
+      ;;--------------------------------------------------------------
+      (set! next-error-last-buffer buffer))
+
+    ;; `recenter-top-bottom' is `window.el`'s, and it reads `this-command'
+    ;; and `last-command', which live here - a named placement departure.
+    (define-custom *recenter-positions* '(middle top bottom)
+      "Positions that consecutive `recenter-top-bottom' calls use."
+      :type '(repeat (choice (const :tag "middle" middle)
+                             (const :tag "top" top)
+                             (const :tag "bottom" bottom)
+                             integer))
+      :group 'windows)
+
+    (define recenter-last-op #f)
+    ;; ^ GNU Emacs's `recenter-last-op' (`window.el:10862').
+
+    (define (add-to-invisibility-spec element)
+      ;; GNU Emacs's `add-to-invisibility-spec' (`subr.el:6509'): "Add
+      ;; ELEMENT to `buffer-invisibility-spec'. ... If
+      ;; `buffer-invisibility-spec' isn't a list before calling this
+      ;; function, `buffer-invisibility-spec' will afterwards be a list
+      ;; with the value `(t ELEMENT)'."
+      ;;
+      ;; `subr.el`'s, placed here because it writes a buffer-local slot
+      ;; and `buffer.scm` is below this library - the same placement
+      ;; `buffer-narrowed-p` takes.
+      ;;--------------------------------------------------------------
+      (let ((spec (buffer-local-value (current-buffer)
+                                      'buffer-invisibility-spec #t)))
+        (when (eq? spec #t)
+          (set! spec (list #t)))
+        (set-buffer-local-value! (current-buffer) 'buffer-invisibility-spec
+                                 (cons element spec))))
+
+    (define (remove-from-invisibility-spec element)
+      ;; GNU Emacs's `remove-from-invisibility-spec' (`subr.el:6524'):
+      ;; "Remove ELEMENT from `buffer-invisibility-spec'.  If
+      ;; `buffer-invisibility-spec' isn't a list before calling this
+      ;; function, it will be made into a list containing just t as the
+      ;; only list member."
+      ;;--------------------------------------------------------------
+      (let ((spec (buffer-local-value (current-buffer)
+                                      'buffer-invisibility-spec #t)))
+        (set-buffer-local-value!
+         (current-buffer) 'buffer-invisibility-spec
+         (if (pair? spec)
+             (delete element spec)
+             (list #t)))))
+
+    (define-command (recenter-top-bottom arg)
+      "Scroll the window so that current line is in the middle of the window.
+Successive invocations scroll the window in a cyclical order to put
+the current line at certain places within the window, as determined by
+`recenter-positions'."
+      (interactive (list (current-prefix-arg)))
+      ;; `window.el:10868'.  Emacs passes REDISPLAY=t to `recenter'; this
+      ;; tree's `recenter' takes one argument (it redraws every command
+      ;; anyway), so that argument is not passed. `scroll-margin' has no
+      ;; counterpart here, so the margin is 0 (as `recenter''s own note
+      ;; says).
+      ;;--------------------------------------------------------------
+      (if arg
+          (recenter arg)
+          (begin
+            (set! recenter-last-op
+                  (if (eq? (*this-command*) (*last-command*))
+                      (car (or (cdr (member recenter-last-op
+                                            (*recenter-positions*)))
+                               (*recenter-positions*)))
+                      (car (*recenter-positions*))))
+            (let ((this-scroll-margin
+                   (min (max 0 0)
+                        (truncate (/ (window-body-height (selected-window)) 4.0)))))
+              (cond ((eq? recenter-last-op 'middle)
+                     (recenter #f))
+                    ((eq? recenter-last-op 'top)
+                     (recenter this-scroll-margin))
+                    ((eq? recenter-last-op 'bottom)
+                     (recenter (- -1 this-scroll-margin)))
+                    ((integer? recenter-last-op)
+                     (recenter recenter-last-op)))))))
+
+    (define-command (recenter-current-error arg)
+      "Recenter the current displayed error in the `next-error' buffer."
+      (interactive (list (current-prefix-arg)))
+      ;; `simple.el:549'.
+      ;;--------------------------------------------------------------
+      (save-selected-window
+        (parameterize ((*next-error-highlight* (*next-error-highlight-no-select*))
+                       (*display-buffer-overriding-action*
+                        '(#f (inhibit-same-window . #t))))
+          (next-error 0)
+          (set-buffer (window-buffer (selected-window)))
+          (recenter-top-bottom arg))))
+
+    ;;------------------------------------------------------------------
+    ;; The keys `bindings.el' and `window.el' give these commands.
+    ;; They are here, after the definitions, because a binding is a
+    ;; value.  `C-l' is window.el:10902's, overriding the `recenter'
+    ;; binding `frame.scm' makes for window.c's own command (Emacs
+    ;; binds that one to no key); the `next-error' keys are
+    ;; bindings.el:1351 and the `goto-map' half of bindings.el:1365
+    ;; (`M-g' is flat here - the lookup does not descend into a
+    ;; submap).
+    ;;------------------------------------------------------------------
+    (define-key *default-keymap* (kbd "C-l") recenter-top-bottom)
+    (define-key *default-keymap* (kbd "C-x `") next-error)
+    (define-key *default-keymap* (kbd "M-g n") next-error)
+    (define-key *default-keymap* (kbd "M-g M-n") next-error)
+    (define-key *default-keymap* (kbd "M-g p") previous-error)
+    (define-key *default-keymap* (kbd "M-g M-p") previous-error)
 
     ;; The seam `indent.scm` reaches `delete-horizontal-space` through -
     ;; see the note at the top of this file's imports.
     (*delete-horizontal-space-function* delete-horizontal-space)
+
+    ;;------------------------------------------------------------------
+    ;; "Executing external commands" (`simple.el`'s shell-command
+    ;; section).  **The synchronous output-to-current-buffer path is
+    ;; ported whole** - it is what `shell-command-to-string` runs - and
+    ;; the two other arms are named gaps with a clear error: the
+    ;; separate-buffer path is `shell-command-on-region`, and the
+    ;; asynchronous one is built on `start-process` (process.c), which
+    ;; this tree does not have yet.
+    ;;------------------------------------------------------------------
+
+    (define shell-command-buffer-name "*Shell Command Output*"
+      ;; "Name of the output buffer for `shell-command` (`simple.el:4331`)."
+      )
+
+    (define shell-command-buffer-name-async "*Async Shell Command*"
+      ;; "Name of the output buffer for async shell commands."
+      )
+
+    (define-custom *shell-command-default-error-buffer* #f
+      "Buffer name for `shell-command` and `shell-command-on-region` error output."
+      :type '(choice (const :tag "Same as stdout" nil) string)
+      :group 'shell)
+
+    (define-custom *shell-command-prompt-show-cwd* #f
+      "If non-nil, show the current directory in the `shell-command` prompt."
+      :type 'boolean
+      :group 'shell)
+
+    (define *shell-command-function* (make-parameter #f))
+    ;; `shell-command` is simple.el's, but its interactive spec prompts,
+    ;; and a command that prompts lives in `minibuffer.sld` here (the
+    ;; `goto-line` rule) - which is *above* this library.  The seam is
+    ;; how the call gets there, as `*read-buffer-to-switch*` does; the
+    ;; minibuffer library installs it as it loads.
+
+    (define (shell-command-to-string command)
+      ;; GNU Emacs's `shell-command-to-string` (`simple.el:5214`):
+      ;; "Execute shell command COMMAND and return its output as a
+      ;; string."
+      ;;
+      ;; The body is Emacs's exactly: `with-output-to-string` makes the
+      ;; hidden buffer, and `shell-command` with OUTPUT-BUFFER `t`
+      ;; inserts into the current buffer - which `with-current-buffer`
+      ;; has made the hidden one; `call-process` writes there without
+      ;; consulting `*standard-output*`.
+      ;;--------------------------------------------------------------
+      (with-output-to-string
+        (with-current-buffer (*standard-output*)
+          (if (*shell-command-function*)
+              ((*shell-command-function*) command #t)
+              (error "shell-command is not available (schemacs minibuffer is not loaded)")))))
+
 
 
     ))

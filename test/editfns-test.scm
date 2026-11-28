@@ -222,6 +222,13 @@
         (format "%s" (list 'a "b"))
         (format "%S" (list 'a "b"))))
 
+;; `%s` of a buffer is its *name* - `princ`'s answer (`print.c:1895`,
+;; "else print_string (BVAR (XBUFFER (obj), name), ...)") - and `%S`
+;; keeps `prin1`'s `#<buffer NAME>`. Measured on Emacs 31.1.
+(test-equal '("fmt-buffer-name" "#<buffer fmt-buffer-name>")
+  (let ((b (get-buffer-create "fmt-buffer-name")))
+    (list (format "%s" b) (format "%S" b))))
+
 (test-equal "format: the flags and widths C gives"
   '("[   42][42   ][00042][+42][ 42]")
   (list (format "[%5d][%-5d][%05d][%+d][% d]" 42 42 42 42 42)))

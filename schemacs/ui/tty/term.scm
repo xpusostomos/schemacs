@@ -58,6 +58,9 @@
           tty-pushed-bytes? set-read-timeout! tty-read-byte)
     ;; The display interface this implements.
     (schemacs dispnew)
+    ;; The renderer's own measure of a string in screen cells, which is
+    ;; what a terminal's `face-text-width' is.
+    (only (schemacs disp-table) display-text-width)
     (only (schemacs faces) *undefined-face-attribute*)
     (only (schemacs xfaces)
           attribute-value realize-tty-face merge-face-vectors
@@ -84,6 +87,7 @@
     ;; `Vinhibit_redisplay`, bound while a menu is up.
     (only (schemacs xdisp)
           display-tty-menu-item menu-item-width render! *inhibit-redisplay*
+          redisplay-frames!
           ;; What the menu wrote over, so the redisplay can rewrite just
           ;; those rows - the terminal's stand-in for Emacs's saved
           ;; current matrix (`restore_desired_matrix`).
@@ -95,11 +99,16 @@
     ;; Opening a terminal runs `startup.el`'s color and face
     ;; initialization against it.
     (only (schemacs term tty-colors) tty-register-default-colors)
+    ;; Asynchronous subprocesses: their descriptors are part of this
+    ;; loop's wait, as Emacs's `compute_input_wait_mask` puts them in
+    ;; `pselect`'s set.
+    (only (schemacs process)
+          process-wait-descriptors process-service-ready! process-service!)
     (only (schemacs ui tty xterm)
           *input-decode-map* terminal-init-xterm
           *xterm--set-selection*
           xterm--tty-set-selection xterm--tty-get-selection)
-    (only (schemacs frame) *tty-select-active-regions*
+    (only (schemacs frame) *tty-select-active-regions* *current-frame*
           *frame-list* frame-output change-frame-size
           do-pending-window-change
           ;; the frame the menu is laid out in, and the flag that makes
@@ -892,9 +901,10 @@
       ;;--------------------------------------------------------------
       (let loop ()
         (let* ((left (and deadline (- deadline (tty-now-ms))))
-               (watched (if %repl-wake-rd
-                            (list %keyboard-fd %repl-wake-rd)
-                            (list %keyboard-fd)))
+               (watched (append (process-wait-descriptors)
+                                (if %repl-wake-rd
+                                    (list %keyboard-fd %repl-wake-rd)
+                                    (list %keyboard-fd))))
                (ready (car (select watched '() '()
                                    (if left
                                        (max 0.001 (/ left 1000.0))
@@ -905,10 +915,29 @@
           ;; Emptying the pipe is what lets the next wait block again.
           (when (and %repl-wake-rd (memq %repl-wake-rd ready))
             (%drain-repl-wake!))
+          ;; **Process output is read here, and a paint follows it.**
+          ;; Emacs's `wait_reading_process_output` runs the filters and
+          ;; then redisplays (`redisplay_preserve_echo_area`); a key is
+          ;; not what wakes this loop for it, so without the paint a
+          ;; REPL's output would sit unseen until the next keystroke.
+          (when (> (process-service-ready! ready) 0)
+            (redisplay-frames!))
           ;; **"If we woke up due to SIGWINCH, actually change size now"**,
           ;; `wait_reading_process_output`'s own line (`process.c:5862`):
           ;; the size is read and applied *before* the bytes are looked
           ;; at, so a key and a resize in the same moment both count.
+          (when (null? ready)
+            ;; A signal woke the wait.  SIGWINCH is handled below;
+            ;; SIGCHLD is reaped here - the handler itself only runs at
+            ;; the VM's safe point and has nothing to reap - and any
+            ;; sentinel it owes runs before the loop waits again.  **Its
+            ;; output is drawn too**: a child that writes and exits can
+            ;; have its SIGCHLD delivered first, and the drain then
+            ;; happens here, where `status_notify` reads "any output
+            ;; that remains" - measured, the text sat undrawn until the
+            ;; next key without the paint.
+            (when (> (process-service!) 0)
+              (redisplay-frames!)))
           (handle-window-change-signal)
           (when (do-pending-window-change #f)
             (set! %size-change-pending? #t))
@@ -1555,6 +1584,13 @@
       ;; A terminal has one height for every face.
       ;;--------------------------------------------------------------
       (cons 0 (max 1 (line-height d))))
+
+    (define-method (face-text-width (d <tty-display>) face-attrs text)
+      ;; TEXT's advance in the terminal's one-pixel cells: the renderer's
+      ;; own cell count (`display-text-width`, which expands a tab from
+      ;; the column it starts at) times the column width.
+      ;;--------------------------------------------------------------
+      (* (display-text-width text 0) (column-width d)))
 
     (define-method (display-set-size! (d <tty-display>) width height)
       ;; A terminal cannot be asked for a size - `set_window_size_hook'

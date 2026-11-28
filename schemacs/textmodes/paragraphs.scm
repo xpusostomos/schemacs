@@ -63,7 +63,8 @@
     ;; re-exported.
     (only (schemacs simple)
           kill-region mark set-mark push-mark
-          *page-delimiter* *use-hard-newlines*)
+          *page-delimiter* page-delimiter set!page-delimiter
+          *use-hard-newlines*)
     ;; the mark-active and transient-mark-mode of the extend branch are
     ;; `buffer.c''s variables, beside `*last-command*' which is
     ;; simple.sld's (the command loop binds it there)
@@ -83,7 +84,7 @@
    paragraph-start set!paragraph-start
    paragraph-separate set!paragraph-separate
    paragraph-ignore-fill-prefix set!paragraph-ignore-fill-prefix
-   *use-hard-newlines* *page-delimiter*
+   *use-hard-newlines* *page-delimiter* page-delimiter set!page-delimiter
    *sentence-end* *sentence-end-base* *sentence-end-double-space*
    *sentence-end-without-period* *sentence-end-without-space*
    sentence-end

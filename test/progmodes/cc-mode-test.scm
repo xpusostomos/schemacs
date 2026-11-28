@@ -77,6 +77,8 @@
        c-beginning-of-objc-method-header)
  (only (schemacs font-lock) set!font-lock-mode! font-lock-defaults
        set!font-lock-defaults! font-lock-ensure
+       font-lock-extend-region-functions
+       font-lock-extend-region-wholelines font-lock-fontify-region
        font-lock-extend-after-change-region-function)
  (only (schemacs font-core) font-lock-mode)
  (only (schemacs keymap) lookup-key keymapp)
@@ -121,7 +123,9 @@
        c-awk-beyond-logical-line c-awk-beginning-of-defun
        c-awk-end-of-defun c-awk-at-statement-end-p)
  (only (schemacs progmodes cc-fonts)
-       c-force-redisplay *c-font-lock-fontify-region-function*))
+       c-force-redisplay *c-font-lock-fontify-region-function*)
+ ;; the Groovy package, for the cross-mode regression below
+ (only (schemacs external groovy-modes groovy-mode) groovy-mode))
 
 (test-begin "schemacs_editor_cc_mode")
 
@@ -1623,3 +1627,54 @@ $1 ~ /x/ &&
               (abbrev-expansion "else" tbl))))))
 
 (test-end "schemacs_editor_cc_mode_abbrevs")
+
+;;------------------------------------------------------------------
+;; `font-lock-extend-region-functions' is `defvar-local' in Emacs
+;; (`font-lock.el:1141'), so `c-font-lock-init`'s `delq` of
+;; `font-lock-extend-region-wholelines` (`cc-mode.el:2809') applies to
+;; the C buffer alone.  It was one global parameter here, so entering C
+;; mode removed whole-line extension from *every* buffer in the
+;; session; a later Groovy buffer fontified with a mid-line region end,
+;; its declaration matcher searched to `line-end-position` past that
+;; end, and the next search raised "Invalid search bound (wrong side of
+;; point)" - the crash reported from the Gtk editor.
+(test-begin "schemacs_cc_mode_extend_region_local")
+
+(test-equal "entering C mode drops whole-line extension for its buffer"
+  #f
+  (let ((b (mode-buffer "extend-local-1.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode)
+      (if (memq font-lock-extend-region-wholelines
+                (font-lock-extend-region-functions))
+          #t #f))))
+
+(test-equal "and leaves it in every other buffer"
+  #t
+  (let ((b (mode-buffer "extend-local-1.c" "int x;\n")))
+    (with-current-buffer b
+      (c-mode))
+    (with-current-buffer (get-buffer-create " *extend-local-fresh*")
+      (erase-buffer)
+      (if (memq font-lock-extend-region-wholelines
+                (font-lock-extend-region-functions))
+          #t #f))))
+
+;; The crash this bug produced: the editor had visited C-family buffers,
+;; so `font-lock-extend-region-wholelines` was gone from every buffer's
+;; list; a Groovy buffer then fontified a mid-line region and its
+;; declaration matcher searched to `line-end-position` past the bound.
+(test-equal "a Groovy buffer fontifies a mid-line region after C mode has run"
+  #t
+  (let ((c (mode-buffer "extend-local-2.c" "int x;\n")))
+    (with-current-buffer c
+      (c-mode))
+    (with-current-buffer (get-buffer-create " *extend-local.groovy*")
+      (erase-buffer)
+      (insert "class X {\n    String aaaa, bbbb = null\n}\n")
+      (groovy-mode)
+      (guard (e (#t #f))
+        (font-lock-mode 1)
+        (font-lock-fontify-region 1 22)
+        #t))))
+(test-end "schemacs_cc_mode_extend_region_local")

@@ -509,6 +509,13 @@
       (dispatch-key-event frame (key-event->key (current-display) #\a))
       (pending-uarg))))
 
+;; `C-x C-u` is `upcase-region` (`simple.scm`'s binding of it): a C-u
+;; that is the *second* event of a chord belongs to the chord's prefix
+;; map, not to the numeric-argument reader. It used to be taken for a
+;; second C-u of a prefix, so the chord never completed.
+(test-equal '("ABC" . 4)
+  (run-keys "abc" (list #\nul (integer->char 5) (integer->char 24) C-u)))
+
 ;; An undefined key ends the chord and discards the prefix with it.
 (test-equal #f
   (let* ((ed (allocate-buffer))
